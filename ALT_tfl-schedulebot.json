@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "tfl-schedulebot",
+  "private_key_id": "29aff323dab9ea4483f0bd37516953c345547dcf",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDAn0hZSFnft/Sn\nuRKKcgkShWXqXdcBrVh3emfUjBZ4vZ8k1GkkEi2gc1X4ceSlOi1M1IJ+d6Ld5V7O\n6u+kDvPcXkjTEcIJ+njViXL2tHOhk6blZH5ZkS5plWU2JmOmzx4AVwPiB0ao6Edj\nAP4rBKnkIRdvc9XMiDpj0moXtBtKZ8BuhgAzhpa2sbrPuIgVDJPJWzRBtdcBzqn3\nz95Bt9Y8j5Ds/HlH+/jfFwMtxNpzRMhCAHl+UTKmdouyb1JPjJQBax3eR8C21T5+\nBl7Ff4qjgKI6wiXZRvixpZwMIMRXgzjNxwSeftbtR+HpxzIf54o1dvfvKocMO9sa\nL7zzsy4/AgMBAAECggEADDfOQgOJ19v2Q9FEcM2s76TQgx4yriONsf5sqZm9Lylv\n98kVZjlU9ZF7SYgH5ccb6nysTlNOXF7ZNazHSJO+OiMs4V6F/VYK5hiS1z04/G2+\nL1zBevLvi7jzM40Z0xHeKE1crLCjdcFODeSZOqdQE21Z7DLfw9p8QaquGhTNilmP\n/2/PxVYEN8BtLUgil4wYmh5s4+s5Ai1AyzPKjkDxt41mgWQUJYxZbM3U6rE8U5TU\nx2udPSmmQJXEbKLh1Mg0yva/vfcA/6DLrHQmOzCEkByAeCdQJW8Q0a1nc/8XWjzA\nzch1LqpdS0Y5laJ5hj8aBnteD0fsU0XF2QZ+jyLhkQKBgQD8VSUOWSnTuT0pf6sO\ntUkUpftw3niQXKo91ep/MyI0a3WJg1oLjBLNm7G7mmOamPRRjJyjUmmxRf440WiT\nQVEVNwyZUatWCT8zyTXOK/GBADEDozonSUKCam48hVFakjvwSag8LHzzG8zYggAj\n/IW14qN8V6u4zNxK9U9jg9OjtwKBgQDDa/kabU/rGEQLcxL2d+xg40O+EgEs8L/7\nh+ccTGIHB0mRP3nP+0+FeQS8HqvDd3bOwa6uR4/Y7uj1T01qJ0tZJyQnwvFXfKPw\n40JT63m7BPo62VCsrEVa0/sjFtGrlR04OaaDhsnp4Cq9yk53VsPqBr9AEBNeJ5ik\nmhvs82MZuQKBgQDWjdtlWOFc2rwrxhd/+Rt7yCqFbVUcgv5qd7Ldl2/1HI4jcCGn\ngeIXG9TDTOJ2eKn9kU86+/9MsdQZIc4Gr9ou7ND0qOHD1Tb9ZJAwj2LZKn2Ct07i\nSsOXusGjCkUDeyYmCatYBwfzeubyDY/rCXP0FRKnzrAAAYkq320yk8vn/wKBgERV\nzFzOXsThzmGGktn244SZ1AVx/FE/upJ1Wn6NwzWb+cC9xpXQ1mThBaPWwc9vRe9U\n0QWGZqnAGVw2p+Z36SQ6yKzSwVwLbLR+c6Iu1HluayYK+ef3saTqPYZuo1Dxqq8P\nkceqaY7L4YZOaRPYFlgOlfAL7wncpMbiUOOR1FSZAoGBAMe931ITZKkpzOgr8qyS\nQYQyzYwZFpdj3UVH2ljiFSlXJyITEpsPB/gja3ggdtkl3WwLPOd0GszYaIqxST0b\nLsZf58lmJRNzZr0HMRVTtHlgN6zHckDbYmal0wpJ7yChJoUBbITlcpOF7FJfuG1/\nQU2e77qRduPLRwyh1ycetvH9\n-----END PRIVATE KEY-----\n",
+  "client_email": "tflschedulebot@tfl-schedulebot.iam.gserviceaccount.com",
+  "client_id": "108651991454419827634",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/tflschedulebot%40tfl-schedulebot.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
