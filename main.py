@@ -77,7 +77,7 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
     spieler2 = discord.ui.TextInput(label="Spieler 2", placeholder="Name wie in Liste", required=True)
     modus = discord.ui.TextInput(label="Modus", placeholder="z. B. Casual Boots", required=True)
 
-        async def on_submit(self, interaction: discord.Interaction):
+    async def on_submit(self, interaction: discord.Interaction):
         try:
             parts = self.datetime_str.value.strip().split()
             if len(parts) < 2:
@@ -103,13 +103,13 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             multistream_url = f"https://multistre.am/{twitch1}/{twitch2}/layout4"
 
             await interaction.guild.create_scheduled_event(
-                name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
-                description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
-                start_time=start_dt,
-                end_time=start_dt + datetime.timedelta(hours=1),
-                entity_type=discord.EntityType.external,
-                location=multistream_url,
-                privacy_level=discord.PrivacyLevel.guild_only
+                  name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
+                  description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
+                  start_time=start_dt,
+                  end_time=start_dt + datetime.timedelta(hours=1),
+                  entity_type=discord.EntityType.external,
+                  location=multistream_url,
+                  privacy_level=discord.PrivacyLevel.guild_only
             )
 
             row = [
