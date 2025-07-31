@@ -85,7 +85,8 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 return
 
             datum_str, uhrzeit_str = parts[0], parts[1]
-            start_dt = datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M")
+            start_dt = datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M").replace(tzinfo=datetime.timezone.utc)
+
             # Keine Zeitzone mehr setzen – Discord verwendet UTC intern
             end_dt = start_dt + datetime.timedelta(hours=1)
 
