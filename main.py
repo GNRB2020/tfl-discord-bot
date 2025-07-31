@@ -102,15 +102,16 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             twitch2 = TWITCH_MAP[s2]
             multistream_url = f"https://multistre.am/{twitch1}/{twitch2}/layout4"
 
-            await interaction.guild.create_scheduled_event(
-                name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
-                description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
-                start_time=start_dt,
-                end_time=start_dt + datetime.timedelta(hours=1),
-                entity_type=discord.EntityType.external,
-                entity_metadata=discord.EntityMetadata(location=multistream_url),
-                privacy_level=discord.PrivacyLevel.guild_only
-            )
+           await interaction.guild.create_scheduled_event(
+    name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
+    description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
+    start_time=start_dt,
+    end_time=start_dt + datetime.timedelta(hours=1),
+    entity_type=discord.EntityType.external,
+    location=multistream_url,  # direktes Argument, nicht mehr in EntityMetadata
+    privacy_level=discord.PrivacyLevel.guild_only
+)
+
 
             row = [
                 self.division.value.strip(), datum_str, uhrzeit_str,
