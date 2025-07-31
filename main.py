@@ -86,7 +86,8 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
 
             datum_str, uhrzeit_str = parts[0], parts[1]
             start_dt = datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M")
-            start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
+            # Keine Zeitzone mehr setzen – Discord verwendet UTC intern
+            end_dt = start_dt + datetime.timedelta(hours=1)
 
             s1 = self.spieler1.value.strip().lower()
             s2 = self.spieler2.value.strip().lower()
@@ -103,13 +104,13 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             multistream_url = f"https://multistre.am/{twitch1}/{twitch2}/layout4"
 
             await interaction.guild.create_scheduled_event(
-                  name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
-                  description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
-                  start_time=start_dt,
-                  end_time=start_dt + datetime.timedelta(hours=1),
-                  entity_type=discord.EntityType.external,
-                  location=multistream_url,
-                  privacy_level=discord.PrivacyLevel.guild_only
+                name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
+                description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
+                start_time=start_dt,
+                end_time=end_dt,
+                entity_type=discord.EntityType.external,
+                location=multistream_url,
+                privacy_level=discord.PrivacyLevel.guild_only
             )
 
             row = [
@@ -118,9 +119,8 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 uhrzeit_str,
                 self.spieler1.value.strip(),
                 self.spieler2.value.strip(),
-                "", "", "", "",  # leere Platzhalter für F–I
-                self.modus.value.strip(),
-                multistream_url
+                self.modus.value.strip(),      # Spalte F
+                multistream_url                # Spalte G
             ]
             SHEET.append_row(row)
 
@@ -128,6 +128,7 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
 
         except Exception as e:
             await interaction.response.send_message(f"❌ Fehler beim Eintragen: {e}", ephemeral=True)
+
 
 
 
