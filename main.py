@@ -1,4 +1,5 @@
 import discord
+import pytz
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -85,9 +86,8 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 return
 
             datum_str, uhrzeit_str = parts[0], parts[1]
-            import pytz
-                local = pytz.timezone("Europe/Berlin")
-                start_dt = local.localize(datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"))
+            local = pytz.timezone("Europe/Berlin")
+            start_dt = local.localize(datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"))
 
 
             # Keine Zeitzone mehr setzen – Discord verwendet UTC intern
