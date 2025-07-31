@@ -118,14 +118,15 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             )
 
             row = [
-                self.division.value.strip(),
-                datum_str,
-                uhrzeit_str,
-                self.spieler1.value.strip(),
-                self.spieler2.value.strip(),
-                self.modus.value.strip(),      # Spalte F
-                multistream_url                # Spalte G
+                  self.division.value.strip(),     # A
+                  datum_str,                       # B
+                  uhrzeit_str,                     # C
+                  self.spieler1.value.strip(),     # D
+                  self.spieler2.value.strip(),     # E
+                  self.modus.value.strip(),        # F
+                  multistream_url                  # G
             ]
+
             SHEET.append_row(row)
 
             await interaction.response.send_message("✅ Match wurde eingetragen und Event erstellt!", ephemeral=True)
