@@ -80,12 +80,13 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             parts = self.datetime_str.value.strip().split()
-            if len(parts) < 2:
+            if len(parts) != 2:
                 await interaction.response.send_message("❌ Formatfehler: Nutze `DD.MM.YYYY HH:MM`.", ephemeral=True)
                 return
 
-            datum_str, uhrzeit_str = parts[0], parts[1]
-            start_dt = datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M").astimezone()
+            datum_str, uhrzeit_str = parts
+            start_dt_naive = datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M")
+            start_dt = start_dt_naive.replace(tzinfo=datetime.timezone.utc)  # Nur UTC markieren, keine Umrechnung
 
             s1 = self.spieler1.value.strip().lower()
             s2 = self.spieler2.value.strip().lower()
@@ -101,17 +102,14 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             twitch2 = TWITCH_MAP[s2]
             multistream_url = f"https://multistre.am/{twitch1}/{twitch2}/layout4"
 
-            start_dt = datetime.datetime.strptime(f"{datum} {uhrzeit}", "%d.%m.%Y %H:%M")
-start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
-
-await interaction.guild.create_scheduled_event(
-    name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
-    description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
-    start_time=start_dt,
-    end_time=start_dt + datetime.timedelta(hours=1),
-    entity_type=discord.EntityType.external,
-    entity_metadata=discord.EntityMetadata(location=multistream_url),
-    privacy_level=discord.PrivacyLevel.guild_only
+            await interaction.guild.create_scheduled_event(
+                name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
+                description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
+                start_time=start_dt,
+                end_time=start_dt + datetime.timedelta(hours=1),
+                entity_type=discord.EntityType.external,
+                entity_metadata=discord.EntityMetadata(location=multistream_url),
+                privacy_level=discord.PrivacyLevel.guild_only
             )
 
             row = [
@@ -125,6 +123,7 @@ await interaction.guild.create_scheduled_event(
 
         except Exception as e:
             await interaction.response.send_message(f"❌ Fehler beim Eintragen: {e}", ephemeral=True)
+
 
 @tree.command(name="termin", description="Erstelle einen neuen Termin + Event + Sheet-Eintrag")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
