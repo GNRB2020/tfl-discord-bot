@@ -86,7 +86,7 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
 
             datum_str, uhrzeit_str = parts[0], parts[1]
             import pytz
-                   local = pytz.timezone("Europe/Berlin")
+                local = pytz.timezone("Europe/Berlin")
                 start_dt = local.localize(datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"))
 
 
