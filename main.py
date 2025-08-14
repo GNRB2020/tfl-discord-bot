@@ -15,9 +15,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 # EVENT_CHANNEL_ID ist aktuell ungenutzt – ggf. später verwenden oder entfernen
 EVENT_CHANNEL_ID = int(os.getenv("DISCORD_EVENT_CHANNEL_ID")) if os.getenv("DISCORD_EVENT_CHANNEL_ID") else 0
-RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID"))
-# Zielkanal für die tägliche 04:30-Showrestreams-Liste
-SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
+RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID"))  # Kanal für 04:00-Post (ohne Restream-Ziel)
+SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))  # Kanal für 04:30-Post
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
 # Discord-Client
@@ -25,7 +24,7 @@ intents = discord.Intents.default()
 client = commands.Bot(command_prefix="/", intents=intents)
 tree = client.tree
 
-# Hilfsfunktionen
+# Hilfsfunktionen / Konstanten
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 def today_berlin_date() -> datetime.date:
@@ -280,6 +279,7 @@ async def viewall(interaction: discord.Interaction):
     try:
         daten = SHEET.get_all_values()
         today_d = today_berlin_date()
+
         def valid_row(row):
             try:
                 return len(row) >= 8 and parse_date(row[1].strip()) >= today_d and row[7].strip() == ""
@@ -344,13 +344,18 @@ async def showrestreams(interaction: discord.Interaction):
             com = r[8].strip() if len(r) >= 9 else ""
             co = r[9].strip() if len(r) >= 10 else ""
             track = r[10].strip() if len(r) >= 11 else ""
-            lines.append(f"{datum} {uhr} | {kanal} | {s1} vs. {s2} | {modus} | {com} | {co} | {track}")
+            lines.append(
+                f"{datum} {uhr} | {kanal} | {s1} vs. {s2} | {modus} | "
+                f"Com: {com or '—'} | Co: {co or '—'} | Track: {track or '—'}"
+            )
 
         msg = "🎥 **Geplante Restreams ab heute:**\n" + "\n".join(lines)
         await send_long_message_interaction(interaction, msg, ephemeral=False)
 
     except Exception as e:
         await interaction.response.send_message(f"❌ Fehler bei /showrestreams: {e}", ephemeral=True)
+
+# ---------- Auto-Posts ----------
 
 @client.event
 async def on_ready():
@@ -430,7 +435,10 @@ async def sende_showrestreams_liste():
             com = r[8].strip() if len(r) >= 9 else ""
             co = r[9].strip() if len(r) >= 10 else ""
             track = r[10].strip() if len(r) >= 11 else ""
-            lines.append(f"{datum} {uhr} | {kanal} | {s1} vs. {s2} | {modus} | {com} | {co} | {track}")
+            lines.append(
+                f"{datum} {uhr} | {kanal} | {s1} vs. {s2} | {modus} | "
+                f"Com: {com or '—'} | Co: {co or '—'} | Track: {track or '—'}"
+            )
 
         channel = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
         if channel:
@@ -440,7 +448,7 @@ async def sende_showrestreams_liste():
     except Exception as e:
         print(f"❌ Fehler bei täglicher Restreams-Ausgabe (04:30): {e}")
 
-# ---------- Restream-Workflow (jetzt /pick) ----------
+# ---------- Restream-Workflow (/pick + Modal) ----------
 
 class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
     restream_input = discord.ui.TextInput(
@@ -473,6 +481,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         self.selected_row = selected_row  # [division, date, time, spieler1, spieler2, modus]
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Sofort deferren, damit kein Unknown Interaction entsteht
         await interaction.response.defer(ephemeral=True)
 
         code = self.restream_input.value.strip().upper()
@@ -495,14 +504,17 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         original_title = f"{self.selected_row[0]} | {self.selected_row[3]} vs. {self.selected_row[4]} | {self.selected_row[5]}"
         new_title = f"{title_prefix} {original_title}"
 
+        # Events vom Server holen (nicht nur Cache)
         try:
             events = await interaction.guild.fetch_scheduled_events()
         except Exception as e:
             await interaction.followup.send(f"❌ Konnte Events nicht abrufen: {e}", ephemeral=True)
             return
 
+        # Exakt nach Titel suchen
         event = discord.utils.get(events, name=original_title)
 
+        # Fallback: anhand Startzeit (±90 Min) + Spielernamen
         if not event:
             try:
                 dt = datetime.datetime.strptime(self.selected_row[1].strip() + " " + self.selected_row[2].strip(), "%d.%m.%Y %H:%M")
@@ -512,9 +524,10 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
                     try:
                         ev_start = ev.start_time.astimezone(BERLIN_TZ)
                         within = abs((ev_start - start_target).total_seconds()) <= 90 * 60
-                        s1 = self.selected_row[3].strip()
-                        s2 = self.selected_row[4].strip()
-                        names_ok = (s1.lower() in ev.name.lower()) and (s2.lower() in ev.name.lower())
+                        s1 = self.selected_row[3].strip().lower()
+                        s2 = self.selected_row[4].strip().lower()
+                        name_l = ev.name.lower()
+                        names_ok = (s1 in name_l) and (s2 in name_l)
                         return within and names_ok
                     except Exception:
                         return False
@@ -533,8 +546,10 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             return
 
         try:
+            # Event updaten
             await event.edit(name=new_title, location=location_url)
 
+            # Sheet updaten: H (Restream), I (Com), J (Co), K (Track)
             daten = SHEET.get_all_values()
             sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
             for idx, row in enumerate(daten):
@@ -562,7 +577,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         except Exception as e:
             await interaction.followup.send(f"❌ Fehler beim Aktualisieren: {e}", ephemeral=True)
 
-# NEU: /pick (vormals /restreams)
+# /pick – Spiel wählen & Restream setzen
 @tree.command(name="pick", description="Wähle ein Spiel und setze Restream-Ziel + optional Com/Co/Track")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def pick(interaction: discord.Interaction):
@@ -608,6 +623,17 @@ async def pick(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Fehler bei /pick: {e}", ephemeral=True)
 
+# Alias: /restreams → /pick (für Gewohnheit)
+@tree.command(name="restreams", description="Alias zu /pick (Restream-Ziel setzen)")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def restreams_alias(interaction: discord.Interaction):
+    await pick.callback(interaction)
+
+@tree.command(name="showrestreams_syncinfo", description="(Admin) Info: Auto-Posts 04:00 & 04:30 laufen")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def showrestreams_syncinfo(interaction: discord.Interaction):
+    await interaction.response.send_message("⏱️ Auto-Posts aktiv: 04:00 (ohne Restream) & 04:30 (mit Restream).", ephemeral=True)
+
 @tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def help(interaction: discord.Interaction):
@@ -629,6 +655,17 @@ async def help(interaction: discord.Interaction):
     embed.add_field(name="🔁 Auto-Posts", value="➤ 04:00: restreambare Spiele • 04:30: geplante Restreams", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# Admin: Commands forcieren (falls /pick nicht auftaucht)
+@tree.command(name="sync", description="(Admin) Slash-Commands für diese Guild synchronisieren")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def sync_cmd(interaction: discord.Interaction):
+    try:
+        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+        names = ", ".join(sorted(c.name for c in synced))
+        await interaction.response.send_message(f"✅ Synced {len(synced)} Commands: {names}", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Sync-Fehler: {e}", ephemeral=True)
 
 @client.event
 async def on_ready():
