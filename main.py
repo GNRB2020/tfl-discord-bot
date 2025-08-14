@@ -476,71 +476,104 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         self.selected_row = selected_row  # [division, date, time, spieler1, spieler2, modus]
 
     async def on_submit(self, interaction: discord.Interaction):
-        code = self.restream_input.value.strip().upper()
-        allowed = {"ZSR", "SG1", "SG2"}
+    # 1) Sofort deferren, damit der Token nicht abläuft
+    await interaction.response.defer(ephemeral=True)
 
-        if code not in allowed:
-            await interaction.response.send_message("❌ Ungültiger Code. Erlaubt: ZSR, SG1, SG2", ephemeral=True)
-            return
+    code = self.restream_input.value.strip().upper()
+    allowed = {"ZSR", "SG1", "SG2"}
+    if code not in allowed:
+        await interaction.followup.send("❌ Ungültiger Code. Erlaubt: ZSR, SG1, SG2", ephemeral=True)
+        return
 
-        title_prefix = {
-            "ZSR": "RESTREAM ZSR |",
-            "SG1": "RESTREAM SGD1 |",
-            "SG2": "RESTREAM SGD2 |"
-        }[code]
+    title_prefix = {"ZSR": "RESTREAM ZSR |", "SG1": "RESTREAM SGD1 |", "SG2": "RESTREAM SGD2 |"}[code]
+    location_url = {
+        "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
+        "SG1": "https://www.twitch.tv/speedgamingdeutsch",
+        "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
+    }[code]
 
-        location_url = {
-            "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
-            "SG1": "https://www.twitch.tv/speedgamingdeutsch",
-            "SG2": "https://www.twitch.tv/speedgamingdeutsch2"
-        }[code]
+    com_val = (self.com_input.value or "").strip()
+    co_val = (self.co_input.value or "").strip()
+    track_val = (self.track_input.value or "").strip()
 
-        # Optionale Felder (können leer sein)
-        com_val = (self.com_input.value or "").strip()
-        co_val = (self.co_input.value or "").strip()
-        track_val = (self.track_input.value or "").strip()
+    original_title = f"{self.selected_row[0]} | {self.selected_row[3]} vs. {self.selected_row[4]} | {self.selected_row[5]}"
+    new_title = f"{title_prefix} {original_title}"
 
-        # Eventtitel wie bei Termin-Erstellung zusammensetzen
-        original_title = f"{self.selected_row[0]} | {self.selected_row[3]} vs. {self.selected_row[4]} | {self.selected_row[5]}"
-        new_title = f"{title_prefix} {original_title}"
-
-        # Event sicher fetchen (nicht nur Cache)
+    # 2) Event sicher fetchen (nicht Cache)
+    try:
         events = await interaction.guild.fetch_scheduled_events()
-        event = discord.utils.get(events, name=original_title)
-        if not event:
-            await interaction.response.send_message("❌ Kein passendes Event gefunden.", ephemeral=True)
-            return
+    except Exception as e:
+        await interaction.followup.send(f"❌ Konnte Events nicht abrufen: {e}", ephemeral=True)
+        return
 
+    # 3) Exakt nach Titel suchen
+    event = discord.utils.get(events, name=original_title)
+
+    # 4) Fallback: nach Startzeit & Spielern suchen (±90min)
+    if not event:
         try:
-            await event.edit(name=new_title, location=location_url)
+            # Datum/Uhrzeit aus der Zeile parsen
+            dt = datetime.datetime.strptime(self.selected_row[1].strip() + " " + self.selected_row[2].strip(), "%d.%m.%Y %H:%M")
+            start_target = BERLIN_TZ.localize(dt)
 
-            # Update Spalten H (Restream-Ziel), I (Com), J (Co), K (Track)
-            daten = SHEET.get_all_values()
-            sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
-            for idx, row in enumerate(daten):
-                if (len(row) >= 6 and
-                    row[0].strip() == self.selected_row[0] and
-                    row[1].strip() == self.selected_row[1] and
-                    row[2].strip() == self.selected_row[2] and
-                    row[3].strip() == self.selected_row[3] and
-                    row[4].strip() == self.selected_row[4] and
-                    row[5].strip() == self.selected_row[5]):
-                    # H=8, I=9, J=10, K=11
-                    SHEET.update_cell(idx + 1, 8, sheet_value)
-                    SHEET.update_cell(idx + 1, 9, com_val)
-                    SHEET.update_cell(idx + 1, 10, co_val)
-                    SHEET.update_cell(idx + 1, 11, track_val)
-                    break
+            def plausible(ev: discord.ScheduledEvent) -> bool:
+                try:
+                    ev_start = ev.start_time.astimezone(BERLIN_TZ)
+                    within = abs((ev_start - start_target).total_seconds()) <= 90 * 60
+                    # ganz grober Check auf Spielernamen im Titel
+                    s1 = self.selected_row[3].strip()
+                    s2 = self.selected_row[4].strip()
+                    names_ok = (s1.lower() in ev.name.lower()) and (s2.lower() in ev.name.lower())
+                    return within and names_ok
+                except Exception:
+                    return False
 
-            await interaction.response.send_message(
-                f"✅ Event & Sheet aktualisiert: `{sheet_value}` gesetzt"
-                + (f", Com: `{com_val}`" if com_val else "")
-                + (f", Co: `{co_val}`" if co_val else "")
-                + (f", Track: `{track_val}`" if track_val else ""),
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Fehler beim Aktualisieren: {e}", ephemeral=True)
+            candidates = [ev for ev in events if plausible(ev)]
+            if candidates:
+                # nimm den mit der kleinsten Zeitdifferenz
+                event = min(
+                    candidates,
+                    key=lambda ev: abs((ev.start_time.astimezone(BERLIN_TZ) - start_target).total_seconds())
+                )
+        except Exception:
+            pass
+
+    if not event:
+        await interaction.followup.send("❌ Kein passendes Event gefunden.", ephemeral=True)
+        return
+
+    try:
+        # 5) Event editieren
+        await event.edit(name=new_title, location=location_url)
+
+        # 6) Sheet updaten (H/I/J/K)
+        daten = SHEET.get_all_values()
+        sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
+        for idx, row in enumerate(daten):
+            if (len(row) >= 6 and
+                row[0].strip() == self.selected_row[0] and
+                row[1].strip() == self.selected_row[1] and
+                row[2].strip() == self.selected_row[2] and
+                row[3].strip() == self.selected_row[3] and
+                row[4].strip() == self.selected_row[4] and
+                row[5].strip() == self.selected_row[5]):
+                # H=8, I=9, J=10, K=11
+                SHEET.update_cell(idx + 1, 8, sheet_value)
+                SHEET.update_cell(idx + 1, 9, com_val)
+                SHEET.update_cell(idx + 1, 10, co_val)
+                SHEET.update_cell(idx + 1, 11, track_val)
+                break
+
+        extra = []
+        if com_val: extra.append(f"Com: `{com_val}`")
+        if co_val: extra.append(f"Co: `{co_val}`")
+        if track_val: extra.append(f"Track: `{track_val}`")
+        suffix = (", " + ", ".join(extra)) if extra else ""
+        await interaction.followup.send(f"✅ Event & Sheet aktualisiert: `{sheet_value}` gesetzt{suffix}.", ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Fehler beim Aktualisieren: {e}", ephemeral=True)
+
 
 @tree.command(name="restreams", description="Setzt Restream-Ziel + optional Com/Co/Track für ein Spiel")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
