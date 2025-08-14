@@ -16,7 +16,7 @@ GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 # EVENT_CHANNEL_ID ist aktuell ungenutzt – ggf. später verwenden oder entfernen
 EVENT_CHANNEL_ID = int(os.getenv("DISCORD_EVENT_CHANNEL_ID")) if os.getenv("DISCORD_EVENT_CHANNEL_ID") else 0
 RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID"))
-# Zielkanal für die tägliche 04:30-Showrestreams-Liste: Env mit Fallback auf vom Nutzer gewünschten Kanal
+# Zielkanal für die tägliche 04:30-Showrestreams-Liste
 SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
@@ -49,10 +49,11 @@ def chunk_text(text: str, limit: int = 1900):
 
 async def send_long_message_interaction(interaction: discord.Interaction, content: str, ephemeral: bool = False):
     # Sende entweder direkt (kurz) oder deferred + followups (lang)
-    if len(content) <= 1900:
+    if len(content) <= 1900 and not interaction.response.is_done():
         await interaction.response.send_message(content, ephemeral=ephemeral)
     else:
-        await interaction.response.defer(ephemeral=ephemeral)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=ephemeral)
         for part in chunk_text(content):
             await interaction.followup.send(part, ephemeral=ephemeral)
 
@@ -310,7 +311,7 @@ async def add(interaction: discord.Interaction, name: str, twitch: str):
     TWITCH_MAP[name] = twitch
     await interaction.response.send_message(f"✅ `{name}` wurde mit Twitch `{twitch}` hinzugefügt.", ephemeral=True)
 
-# ---------- NEU: /showrestreams ----------
+# ---------- /showrestreams ----------
 
 @tree.command(name="showrestreams", description="Zeigt alle geplanten Restreams ab heute (mit Com/Co/Track)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -321,7 +322,6 @@ async def showrestreams(interaction: discord.Interaction):
 
         def valid_row(row):
             try:
-                # len >= 11, da wir bis Spalte K (Index 10) lesen wollen; falls Spalten fehlen, wird es toleriert
                 has_date = len(row) >= 2 and parse_date(row[1].strip()) >= today_d
                 has_restream = len(row) >= 8 and row[7].strip() != ""
                 return has_date and has_restream
@@ -333,7 +333,6 @@ async def showrestreams(interaction: discord.Interaction):
             await interaction.response.send_message("📭 Keine geplanten Restreams ab heute gefunden.", ephemeral=True)
             return
 
-        # Sortierung nach Datum+Uhrzeit
         rows.sort(key=lambda r: datetime.datetime.strptime(r[1].strip() + " " + r[2].strip(), "%d.%m.%Y %H:%M"))
 
         lines = []
@@ -365,7 +364,7 @@ async def on_ready():
         sende_showrestreams_liste.start()
     print("✅ Slash-Befehle synchronisiert & tägliche Tasks aktiv")
 
-# 04:00 – restreamable Spiele (H leer)
+# 04:00 – restreambare Spiele (H leer)
 @tasks.loop(minutes=1)
 async def sende_restream_liste():
     try:
@@ -476,104 +475,102 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         self.selected_row = selected_row  # [division, date, time, spieler1, spieler2, modus]
 
     async def on_submit(self, interaction: discord.Interaction):
-    # 1) Sofort deferren, damit der Token nicht abläuft
-    await interaction.response.defer(ephemeral=True)
+        # Sofort deferren, damit der Token nicht abläuft
+        await interaction.response.defer(ephemeral=True)
 
-    code = self.restream_input.value.strip().upper()
-    allowed = {"ZSR", "SG1", "SG2"}
-    if code not in allowed:
-        await interaction.followup.send("❌ Ungültiger Code. Erlaubt: ZSR, SG1, SG2", ephemeral=True)
-        return
+        code = self.restream_input.value.strip().upper()
+        allowed = {"ZSR", "SG1", "SG2"}
+        if code not in allowed:
+            await interaction.followup.send("❌ Ungültiger Code. Erlaubt: ZSR, SG1, SG2", ephemeral=True)
+            return
 
-    title_prefix = {"ZSR": "RESTREAM ZSR |", "SG1": "RESTREAM SGD1 |", "SG2": "RESTREAM SGD2 |"}[code]
-    location_url = {
-        "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
-        "SG1": "https://www.twitch.tv/speedgamingdeutsch",
-        "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
-    }[code]
+        title_prefix = {"ZSR": "RESTREAM ZSR |", "SG1": "RESTREAM SGD1 |", "SG2": "RESTREAM SGD2 |"}[code]
+        location_url = {
+            "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
+            "SG1": "https://www.twitch.tv/speedgamingdeutsch",
+            "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
+        }[code]
 
-    com_val = (self.com_input.value or "").strip()
-    co_val = (self.co_input.value or "").strip()
-    track_val = (self.track_input.value or "").strip()
+        # Optionale Felder (können leer sein)
+        com_val = (self.com_input.value or "").strip()
+        co_val = (self.co_input.value or "").strip()
+        track_val = (self.track_input.value or "").strip()
 
-    original_title = f"{self.selected_row[0]} | {self.selected_row[3]} vs. {self.selected_row[4]} | {self.selected_row[5]}"
-    new_title = f"{title_prefix} {original_title}"
+        # Eventtitel wie bei Termin-Erstellung zusammensetzen
+        original_title = f"{self.selected_row[0]} | {self.selected_row[3]} vs. {self.selected_row[4]} | {self.selected_row[5]}"
+        new_title = f"{title_prefix} {original_title}"
 
-    # 2) Event sicher fetchen (nicht Cache)
-    try:
-        events = await interaction.guild.fetch_scheduled_events()
-    except Exception as e:
-        await interaction.followup.send(f"❌ Konnte Events nicht abrufen: {e}", ephemeral=True)
-        return
-
-    # 3) Exakt nach Titel suchen
-    event = discord.utils.get(events, name=original_title)
-
-    # 4) Fallback: nach Startzeit & Spielern suchen (±90min)
-    if not event:
+        # Event sicher fetchen (nicht nur Cache)
         try:
-            # Datum/Uhrzeit aus der Zeile parsen
-            dt = datetime.datetime.strptime(self.selected_row[1].strip() + " " + self.selected_row[2].strip(), "%d.%m.%Y %H:%M")
-            start_target = BERLIN_TZ.localize(dt)
+            events = await interaction.guild.fetch_scheduled_events()
+        except Exception as e:
+            await interaction.followup.send(f"❌ Konnte Events nicht abrufen: {e}", ephemeral=True)
+            return
 
-            def plausible(ev: discord.ScheduledEvent) -> bool:
-                try:
-                    ev_start = ev.start_time.astimezone(BERLIN_TZ)
-                    within = abs((ev_start - start_target).total_seconds()) <= 90 * 60
-                    # ganz grober Check auf Spielernamen im Titel
-                    s1 = self.selected_row[3].strip()
-                    s2 = self.selected_row[4].strip()
-                    names_ok = (s1.lower() in ev.name.lower()) and (s2.lower() in ev.name.lower())
-                    return within and names_ok
-                except Exception:
-                    return False
+        # Exakt nach Titel suchen
+        event = discord.utils.get(events, name=original_title)
 
-            candidates = [ev for ev in events if plausible(ev)]
-            if candidates:
-                # nimm den mit der kleinsten Zeitdifferenz
-                event = min(
-                    candidates,
-                    key=lambda ev: abs((ev.start_time.astimezone(BERLIN_TZ) - start_target).total_seconds())
-                )
-        except Exception:
-            pass
+        # Fallback: nach Startzeit & Spielern suchen (±90min)
+        if not event:
+            try:
+                dt = datetime.datetime.strptime(self.selected_row[1].strip() + " " + self.selected_row[2].strip(), "%d.%m.%Y %H:%M")
+                start_target = BERLIN_TZ.localize(dt)
 
-    if not event:
-        await interaction.followup.send("❌ Kein passendes Event gefunden.", ephemeral=True)
-        return
+                def plausible(ev: discord.ScheduledEvent) -> bool:
+                    try:
+                        ev_start = ev.start_time.astimezone(BERLIN_TZ)
+                        within = abs((ev_start - start_target).total_seconds()) <= 90 * 60
+                        s1 = self.selected_row[3].strip()
+                        s2 = self.selected_row[4].strip()
+                        names_ok = (s1.lower() in ev.name.lower()) and (s2.lower() in ev.name.lower())
+                        return within and names_ok
+                    except Exception:
+                        return False
 
-    try:
-        # 5) Event editieren
-        await event.edit(name=new_title, location=location_url)
+                candidates = [ev for ev in events if plausible(ev)]
+                if candidates:
+                    event = min(
+                        candidates,
+                        key=lambda ev: abs((ev.start_time.astimezone(BERLIN_TZ) - start_target).total_seconds())
+                    )
+            except Exception:
+                pass
 
-        # 6) Sheet updaten (H/I/J/K)
-        daten = SHEET.get_all_values()
-        sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
-        for idx, row in enumerate(daten):
-            if (len(row) >= 6 and
-                row[0].strip() == self.selected_row[0] and
-                row[1].strip() == self.selected_row[1] and
-                row[2].strip() == self.selected_row[2] and
-                row[3].strip() == self.selected_row[3] and
-                row[4].strip() == self.selected_row[4] and
-                row[5].strip() == self.selected_row[5]):
-                # H=8, I=9, J=10, K=11
-                SHEET.update_cell(idx + 1, 8, sheet_value)
-                SHEET.update_cell(idx + 1, 9, com_val)
-                SHEET.update_cell(idx + 1, 10, co_val)
-                SHEET.update_cell(idx + 1, 11, track_val)
-                break
+        if not event:
+            await interaction.followup.send("❌ Kein passendes Event gefunden.", ephemeral=True)
+            return
 
-        extra = []
-        if com_val: extra.append(f"Com: `{com_val}`")
-        if co_val: extra.append(f"Co: `{co_val}`")
-        if track_val: extra.append(f"Track: `{track_val}`")
-        suffix = (", " + ", ".join(extra)) if extra else ""
-        await interaction.followup.send(f"✅ Event & Sheet aktualisiert: `{sheet_value}` gesetzt{suffix}.", ephemeral=True)
+        try:
+            # Event editieren
+            await event.edit(name=new_title, location=location_url)
 
-    except Exception as e:
-        await interaction.followup.send(f"❌ Fehler beim Aktualisieren: {e}", ephemeral=True)
+            # Update Spalten H (Restream-Ziel), I (Com), J (Co), K (Track)
+            daten = SHEET.get_all_values()
+            sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
+            for idx, row in enumerate(daten):
+                if (len(row) >= 6 and
+                    row[0].strip() == self.selected_row[0] and
+                    row[1].strip() == self.selected_row[1] and
+                    row[2].strip() == self.selected_row[2] and
+                    row[3].strip() == self.selected_row[3] and
+                    row[4].strip() == self.selected_row[4] and
+                    row[5].strip() == self.selected_row[5]):
+                    # H=8, I=9, J=10, K=11
+                    SHEET.update_cell(idx + 1, 8, sheet_value)
+                    SHEET.update_cell(idx + 1, 9, com_val)
+                    SHEET.update_cell(idx + 1, 10, co_val)
+                    SHEET.update_cell(idx + 1, 11, track_val)
+                    break
 
+            extra = []
+            if com_val: extra.append(f"Com: `{com_val}`")
+            if co_val: extra.append(f"Co: `{co_val}`")
+            if track_val: extra.append(f"Track: `{track_val}`")
+            suffix = (", " + ", ".join(extra)) if extra else ""
+            await interaction.followup.send(f"✅ Event & Sheet aktualisiert: `{sheet_value}` gesetzt{suffix}.", ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(f"❌ Fehler beim Aktualisieren: {e}", ephemeral=True)
 
 @tree.command(name="restreams", description="Setzt Restream-Ziel + optional Com/Co/Track für ein Spiel")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -630,56 +627,16 @@ async def help(interaction: discord.Interaction):
         color=0x00ffcc
     )
 
-    embed.add_field(
-        name="/termin",
-        value="➤ Neues Match eintragen, Event erstellen und ins Sheet schreiben",
-        inline=False
-    )
-    embed.add_field(
-        name="/today",
-        value="➤ Zeigt alle heutigen Spiele (Embed mit Link & Modus)",
-        inline=False
-    )
-    embed.add_field(
-        name="/div1 – /div5",
-        value="➤ Zeigt alle geplanten Spiele einer bestimmten Division",
-        inline=False
-    )
-    embed.add_field(
-        name="/cup",
-        value="➤ Zeigt alle geplanten Cup-Spiele",
-        inline=False
-    )
-    embed.add_field(
-        name="/alle",
-        value="➤ Zeigt alle geplanten Spiele ab heute (alle Divisionen & Cup)",
-        inline=False
-    )
-    embed.add_field(
-        name="/viewall",
-        value="➤ Zeigt alle Spiele **ohne gesetztes Restream-Ziel** im Listenformat",
-        inline=False
-    )
-    embed.add_field(
-        name="/restreams",
-        value="➤ Wähle ein Spiel, setze Restream-Ziel (ZSR, SG1, SG2) + optional Com/Co/Track. Aktualisiert Event & Sheet.",
-        inline=False
-    )
-    embed.add_field(
-        name="/showrestreams",
-        value="➤ Zeigt alle geplanten Restreams ab heute (Kanal, Com, Co, Track).",
-        inline=False
-    )
-    embed.add_field(
-        name="/add",
-        value="➤ Fügt zur Laufzeit einen neuen Spieler zur TWITCH_MAP hinzu (nicht persistent)",
-        inline=False
-    )
-    embed.add_field(
-        name="🔁 Auto-Posts",
-        value="➤ 04:00: restreambare Spiele • 04:30: geplante Restreams",
-        inline=False
-    )
+    embed.add_field(name="/termin", value="➤ Neues Match eintragen, Event erstellen und ins Sheet schreiben", inline=False)
+    embed.add_field(name="/today", value="➤ Zeigt alle heutigen Spiele (Embed mit Link & Modus)", inline=False)
+    embed.add_field(name="/div1 – /div5", value="➤ Zeigt alle geplanten Spiele einer bestimmten Division", inline=False)
+    embed.add_field(name="/cup", value="➤ Zeigt alle geplanten Cup-Spiele", inline=False)
+    embed.add_field(name="/alle", value="➤ Zeigt alle geplanten Spiele ab heute (alle Divisionen & Cup)", inline=False)
+    embed.add_field(name="/viewall", value="➤ Zeigt alle Spiele **ohne gesetztes Restream-Ziel** im Listenformat", inline=False)
+    embed.add_field(name="/restreams", value="➤ Wähle ein Spiel, setze Restream-Ziel (ZSR, SG1, SG2) + optional Com/Co/Track. Aktualisiert Event & Sheet.", inline=False)
+    embed.add_field(name="/showrestreams", value="➤ Zeigt alle geplanten Restreams ab heute (Kanal, Com, Co, Track).", inline=False)
+    embed.add_field(name="/add", value="➤ Fügt zur Laufzeit einen neuen Spieler zur TWITCH_MAP hinzu (nicht persistent)", inline=False)
+    embed.add_field(name="🔁 Auto-Posts", value="➤ 04:00: restreambare Spiele • 04:30: geplante Restreams", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
