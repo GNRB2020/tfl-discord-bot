@@ -48,7 +48,6 @@ def chunk_text(text: str, limit: int = 1900):
     return out
 
 async def send_long_message_interaction(interaction: discord.Interaction, content: str, ephemeral: bool = False):
-    # Sende entweder direkt (kurz) oder deferred + followups (lang)
     if len(content) <= 1900 and not interaction.response.is_done():
         await interaction.response.send_message(content, ephemeral=ephemeral)
     else:
@@ -65,7 +64,6 @@ async def send_long_message_channel(channel: discord.abc.Messageable, content: s
             await channel.send(part)
 
 def map_sheet_channel_to_label(val: str) -> str:
-    # Sheet nutzt H: "ZSR", "SGD1", "SGD2" – für Anzeige wollen wir "ZSR", "SG1", "SG2"
     v = (val or "").strip().upper()
     if v == "SGD1":
         return "SG1"
@@ -442,7 +440,7 @@ async def sende_showrestreams_liste():
     except Exception as e:
         print(f"❌ Fehler bei täglicher Restreams-Ausgabe (04:30): {e}")
 
-# ---------- Restream-Workflow mit optionalen Feldern ----------
+# ---------- Restream-Workflow (jetzt /pick) ----------
 
 class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
     restream_input = discord.ui.TextInput(
@@ -475,7 +473,6 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         self.selected_row = selected_row  # [division, date, time, spieler1, spieler2, modus]
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Sofort deferren, damit der Token nicht abläuft
         await interaction.response.defer(ephemeral=True)
 
         code = self.restream_input.value.strip().upper()
@@ -491,26 +488,21 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
         }[code]
 
-        # Optionale Felder (können leer sein)
         com_val = (self.com_input.value or "").strip()
         co_val = (self.co_input.value or "").strip()
         track_val = (self.track_input.value or "").strip()
 
-        # Eventtitel wie bei Termin-Erstellung zusammensetzen
         original_title = f"{self.selected_row[0]} | {self.selected_row[3]} vs. {self.selected_row[4]} | {self.selected_row[5]}"
         new_title = f"{title_prefix} {original_title}"
 
-        # Event sicher fetchen (nicht nur Cache)
         try:
             events = await interaction.guild.fetch_scheduled_events()
         except Exception as e:
             await interaction.followup.send(f"❌ Konnte Events nicht abrufen: {e}", ephemeral=True)
             return
 
-        # Exakt nach Titel suchen
         event = discord.utils.get(events, name=original_title)
 
-        # Fallback: nach Startzeit & Spielern suchen (±90min)
         if not event:
             try:
                 dt = datetime.datetime.strptime(self.selected_row[1].strip() + " " + self.selected_row[2].strip(), "%d.%m.%Y %H:%M")
@@ -541,10 +533,8 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             return
 
         try:
-            # Event editieren
             await event.edit(name=new_title, location=location_url)
 
-            # Update Spalten H (Restream-Ziel), I (Com), J (Co), K (Track)
             daten = SHEET.get_all_values()
             sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
             for idx, row in enumerate(daten):
@@ -572,9 +562,10 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         except Exception as e:
             await interaction.followup.send(f"❌ Fehler beim Aktualisieren: {e}", ephemeral=True)
 
-@tree.command(name="restreams", description="Setzt Restream-Ziel + optional Com/Co/Track für ein Spiel")
+# NEU: /pick (vormals /restreams)
+@tree.command(name="pick", description="Wähle ein Spiel und setze Restream-Ziel + optional Com/Co/Track")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-async def restreams(interaction: discord.Interaction):
+async def pick(interaction: discord.Interaction):
     try:
         daten = SHEET.get_all_values()
         today_d = today_berlin_date()
@@ -591,7 +582,6 @@ async def restreams(interaction: discord.Interaction):
             await interaction.response.send_message("📭 Keine zukünftigen Spiele ohne Restream-Ziel gefunden.", ephemeral=True)
             return
 
-        # Baue Auswahlmenü
         class SpielAuswahl(discord.ui.View):
             def __init__(self, spiele):
                 super().__init__(timeout=60)
@@ -616,7 +606,7 @@ async def restreams(interaction: discord.Interaction):
         await interaction.response.send_message("🎮 Bitte wähle ein Spiel zur Bearbeitung:", view=SpielAuswahl(matches), ephemeral=True)
 
     except Exception as e:
-        await interaction.response.send_message(f"❌ Fehler bei /restreams: {e}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Fehler bei /pick: {e}", ephemeral=True)
 
 @tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -633,7 +623,7 @@ async def help(interaction: discord.Interaction):
     embed.add_field(name="/cup", value="➤ Zeigt alle geplanten Cup-Spiele", inline=False)
     embed.add_field(name="/alle", value="➤ Zeigt alle geplanten Spiele ab heute (alle Divisionen & Cup)", inline=False)
     embed.add_field(name="/viewall", value="➤ Zeigt alle Spiele **ohne gesetztes Restream-Ziel** im Listenformat", inline=False)
-    embed.add_field(name="/restreams", value="➤ Wähle ein Spiel, setze Restream-Ziel (ZSR, SG1, SG2) + optional Com/Co/Track. Aktualisiert Event & Sheet.", inline=False)
+    embed.add_field(name="/pick", value="➤ Wähle ein Spiel, setze Restream-Ziel (ZSR, SG1, SG2) + optional Com/Co/Track. Aktualisiert Event & Sheet.", inline=False)
     embed.add_field(name="/showrestreams", value="➤ Zeigt alle geplanten Restreams ab heute (Kanal, Com, Co, Track).", inline=False)
     embed.add_field(name="/add", value="➤ Fügt zur Laufzeit einen neuen Spieler zur TWITCH_MAP hinzu (nicht persistent)", inline=False)
     embed.add_field(name="🔁 Auto-Posts", value="➤ 04:00: restreambare Spiele • 04:30: geplante Restreams", inline=False)
