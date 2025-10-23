@@ -111,10 +111,56 @@ TWITCH_MAP = {
     "hideonbush": "hideonbush1909"
 }
 
-# Google Sheets Verbindung
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-SHEET = gspread.authorize(CREDS).open("Season #3 - Spielbetrieb").worksheet("League & Cup Schedule")
+GC = gspread.authorize(CREDS)
+
+# Gesamte Arbeitsmappe öffnen (wir brauchen zusätzlich die DIV-Tabs)
+WB = GC.open("Season #3 - Spielbetrieb")
+
+# Bestehend: das Schedule-Blatt weiter benutzen wie gehabt
+SHEET = WB.worksheet("League & Cup Schedule")
+
+def _cell(row, idx0):
+    return (row[idx0].strip() if 0 <= idx0 < len(row) else "")
+
+def load_open_from_div_tab(div: str, player_query: str = ""):
+    """
+    Liest Tab '{div}.DIV' (z. B. '1.DIV') und liefert offene Paarungen anhand des Markers:
+      linker Block: B (P1), C (Marker), D (P2)
+      rechter Block: F (P1), G (Marker), H (P2)
+    Offen = Marker == 'vs' (case-insensitive).
+    Optionaler Spielerfilter (Substring in P1 oder P2).
+    Rückgabe: Liste[Tuple[int, str, str, str]] = (zeile, block, p1, p2)
+              block ∈ {'L','R'} (links/rechts)
+    """
+    ws_name = f"{div}.DIV"
+    ws = WB.worksheet(ws_name)
+    rows = ws.get_all_values()
+    out = []
+    q = player_query.strip().lower()
+
+    # 0-basierte Spaltenindexe
+    B, C, D = 1, 2, 3
+    F, G, H = 5, 6, 7
+
+    for r_idx in range(1, len(rows)):  # ab Zeile 2 (Zeile 1 ist Überschrift)
+        row = rows[r_idx]
+
+        # linker Block
+        p1 = _cell(row, B); marker = _cell(row, C); p2 = _cell(row, D)
+        if (p1 or p2) and marker.lower() == "vs":
+            if not q or (q in p1.lower() or q in p2.lower()):
+                out.append((r_idx + 1, "L", p1, p2))
+
+        # rechter Block
+        p1r = _cell(row, F); markr = _cell(row, G); p2r = _cell(row, H)
+        if (p1r or p2r) and markr.lower() == "vs":
+            if not q or (q in p1r.lower() or q in p2r.lower()):
+                out.append((r_idx + 1, "R", p1r, p2r))
+
+    return out
+
 
 # Division-Normalisierung für Vergleich
 def normalize_div(name):
@@ -272,6 +318,48 @@ async def cup(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def alle(interaction: discord.Interaction):
     await zeige_geplante_spiele(interaction)
+
+DIV_CHOICES = [
+    app_commands.Choice(name="Division 1", value="1"),
+    app_commands.Choice(name="Division 2", value="2"),
+    app_commands.Choice(name="Division 3", value="3"),
+    app_commands.Choice(name="Division 4", value="4"),
+    app_commands.Choice(name="Division 5", value="5"),
+]
+
+@tree.command(name="restprogramm", description="Offene Spiele aus den DIV-Tabellen (Marker: 'vs').")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(division="Division wählen", spieler="Optional: filtert auf Beteiligung des Spielers")
+@app_commands.choices(division=DIV_CHOICES)
+async def restprogramm(interaction: discord.Interaction, division: app_commands.Choice[str], spieler: str = ""):
+    try:
+        div = division.value  # "1".."5"
+        matches = load_open_from_div_tab(div, player_query=spieler)
+
+        if not matches:
+            msg = f"📭 Keine offenen Spiele in **Division {div}**."
+            if spieler.strip():
+                msg += f" (Filter: *{spieler}*)"
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        lines = [f"**Division {div} – offene Spiele ({len(matches)})**"]
+        if spieler.strip():
+            lines.append(f"_Filter: {spieler}_")
+
+        # • Zeile X (links/rechts): Spieler1 vs Spieler2
+        for (row_nr, block, p1, p2) in matches[:80]:
+            side = "links" if block == "L" else "rechts"
+            lines.append(f"• Zeile {row_nr} ({side}): **{p1}** vs **{p2}**")
+
+        if len(matches) > 80:
+            lines.append(f"… und {len(matches) - 80} weitere.")
+
+        await send_long_message_interaction(interaction, "\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+
 
 @tree.command(name="viewall", description="Zeigt alle kommenden Matches im Listenformat")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
