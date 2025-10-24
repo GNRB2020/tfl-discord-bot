@@ -914,20 +914,29 @@ async def sync_cmd(interaction: discord.Interaction):
 @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def restprogramm(interaction: discord.Interaction):
-    # Spielernamen je Division holen
-    players_by_div = get_players_by_divisions()
+    try:
+        # Sofort defer – verhindert Unknown Interaction bei Latenz
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
-    # View erzeugen mit Default Division "1"
-    view = RestprogrammView(players_by_div=players_by_div, start_div="1")
+        # Spielernamen je Division holen
+        players_by_div = get_players_by_divisions()
 
-    # Erst defer, dann followup (sonst Unknown interaction bei Latenz)
-    await interaction.response.defer(ephemeral=True)
+        # View erzeugen mit Default Division "1"
+        view = RestprogrammView(players_by_div=players_by_div, start_div="1")
 
-    await interaction.followup.send(
-        "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
-        view=view,
-        ephemeral=True
-    )
+        # Follow-up senden
+        await interaction.followup.send(
+            "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
+            view=view,
+            ephemeral=True
+        )
+
+    except Exception as e:
+        try:
+            await interaction.followup.send(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+        except Exception:
+            print(f"Fehler in /restprogramm: {e}")
+
 
 
 # ---------- Auto-Posts ----------
