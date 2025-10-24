@@ -333,21 +333,7 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _rp_show(interaction, self.division_value, self.player_filter)
 
-    @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
-    @app_commands.guilds(discord.Object(id=GUILD_ID))
-    async def restprogramm(interaction: discord.Interaction):
-        # Wir bereiten alle Spielernamen pro Division vor
-        players_by_div = get_players_by_divisions()
-
-        # View erzeugen mit Default Division "1"
-        view = RestprogrammView(players_by_div=players_by_div, start_div="1")
-
-    await interaction.response.send_message(
-        "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
-        view=view,
-        ephemeral=True
-    )
-
+   
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
@@ -948,6 +934,23 @@ async def sync_cmd(interaction: discord.Interaction):
         await interaction.response.send_message(f"✅ Synced {len(synced)} Commands: {names}", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ Sync-Fehler: {e}", ephemeral=True)
+
+ @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def restprogramm(interaction: discord.Interaction):
+        # Wir bereiten alle Spielernamen pro Division vor
+        players_by_div = get_players_by_divisions()
+
+        # View erzeugen mit Default Division "1"
+        view = RestprogrammView(players_by_div=players_by_div, start_div="1")
+
+    await interaction.response.send_message(
+        "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
+        view=view,
+        ephemeral=True
+    )
+
+
 
 @client.event
 async def on_ready():
