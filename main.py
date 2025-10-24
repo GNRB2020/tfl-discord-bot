@@ -221,7 +221,7 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
 
 
     class RestprogrammView(discord.ui.View):
-    def __init__(self, players_by_div: dict, start_div: str = "1"):
+        def __init__(self, players_by_div: dict, start_div: str = "1"):
         super().__init__(timeout=180)
 
         # Zustand / Memory
