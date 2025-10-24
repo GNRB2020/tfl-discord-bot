@@ -124,6 +124,43 @@ SHEET = WB.worksheet("League & Cup Schedule")
 def _cell(row, idx0):
     return (row[idx0].strip() if 0 <= idx0 < len(row) else "")
 
+def get_players_for_div(div: str):
+    """
+    Liest aus dem Sheet '<div>.DIV' die Spielernamen aus Spalte L (ab Zeile 2).
+    Gibt eine sortierte eindeutige Liste zurück.
+    """
+    ws_name = f"{div}.DIV"
+    ws = WB.worksheet(ws_name)
+    values = ws.col_values(12)  # Spalte L = 12 (1-basiert)
+    # values[0] ist Zeile 1 (Header), wir wollen ab Zeile 2
+    raw_players = [v.strip() for v in values[1:] if v and v.strip() != ""]
+    # doppelte entfernen, Reihenfolge stabil halten
+    seen = set()
+    players_unique = []
+    for p in raw_players:
+        low = p.lower()
+        if low not in seen:
+            seen.add(low)
+            players_unique.append(p)
+    return players_unique
+
+
+def get_players_by_divisions():
+    """
+    Baut ein Dict:
+      { "1": ["Komplett", "SpielerA", "SpielerB", ...], "2": [...], ... }
+    Falls ein Tab mal fehlt oder leer ist, liefern wir nur ["Komplett"].
+    """
+    result = {}
+    for div in ["1", "2", "3", "4", "5"]:
+        try:
+            players = get_players_for_div(div)
+        except Exception:
+            players = []
+        result[div] = ["Komplett"] + players
+    return result
+
+
 # ===== Restprogramm – UI (Modal + Anzeige) =====
 
 class SpielerFilterModal(discord.ui.Modal, title="Spieler-Filter (optional)"):
@@ -147,21 +184,30 @@ class SpielerFilterModal(discord.ui.Modal, title="Spieler-Filter (optional)"):
 
 
 async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
-    """Lädt die offenen Spiele aus dem jeweiligen DIV-Tab"""
+    """
+    Baut die Ausgabe und schickt sie ephemer.
+    player_filter == "" oder "Komplett" => alle offenen Spiele der Division
+    sonst nur Spiele, an denen der Spieler beteiligt ist
+    """
     try:
-        matches = load_open_from_div_tab(division_value, player_query=player_filter or "")
+        effective_filter = "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
+        matches = load_open_from_div_tab(division_value, player_query=effective_filter)
+
         if not matches:
             txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
-            if player_filter:
-                txt += f" (Filter: *{player_filter}*)"
+            if effective_filter:
+                txt += f" (Filter: *{effective_filter}*)"
             await send_long_message_interaction(interaction, txt, ephemeral=True)
             return
 
         lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
-        if player_filter:
-            lines.append(f"_Filter: {player_filter}_")
+        if effective_filter:
+            lines.append(f"_Filter: {effective_filter}_")
+        else:
+            lines.append("_Filter: Komplett_")
 
         for (row_nr, block, p1, p2) in matches[:80]:
+            # block ist aktuell immer "L", aber wir lassen es stehen falls du mal wieder 2 Blöcke hast
             side = "links" if block == "L" else "rechts"
             lines.append(f"• Zeile {row_nr} ({side}): **{p1}** vs **{p2}**")
 
@@ -173,12 +219,91 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
     except Exception as e:
         await interaction.response.send_message(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
 
-class RestprogrammView(discord.ui.View):
-    def __init__(self):
+
+    class RestprogrammView(discord.ui.View):
+    def __init__(self, players_by_div: dict, start_div: str = "1"):
         super().__init__(timeout=180)
-        self.division_value = "1"      # Standard
-        self.player_filter = ""        # Optional
-        self.add_item(self.DivSelect(self))
+
+        # Zustand / Memory
+        self.players_by_div = players_by_div  # dict wie {"1": [...], "2": [...], ...}
+        self.division_value = start_div       # aktuell gewählte Division
+        self.player_value = "Komplett"        # aktuell gewählter Spieler/Filter
+
+        # Wir fügen beide Dropdowns und den Button hinzu
+        self.div_select = self.DivSelect(self)
+        self.player_select = self.PlayerSelect(self)
+        self.add_item(self.div_select)
+        self.add_item(self.player_select)
+
+    class DivSelect(discord.ui.Select):
+        def __init__(self, parent_view: "RestprogrammView"):
+            self.parent_view = parent_view
+
+            options = [
+                discord.SelectOption(label="Division 1", value="1"),
+                discord.SelectOption(label="Division 2", value="2"),
+                discord.SelectOption(label="Division 3", value="3"),
+                discord.SelectOption(label="Division 4", value="4"),
+                discord.SelectOption(label="Division 5", value="5"),
+            ]
+
+            super().__init__(
+                placeholder="Division wählen …",
+                min_values=1,
+                max_values=1,
+                options=options
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            # Division merken
+            self.parent_view.division_value = self.values[0]
+
+            # Spieler-Dropdown neu mit passenden Spielern bestücken:
+            new_view = RestprogrammView(
+                players_by_div=self.parent_view.players_by_div,
+                start_div=self.parent_view.division_value
+            )
+            # Wir übernehmen den aktuell gewählten Spieler NICHT automatisch,
+            # weil bei Div-Wechsel eh meist "Komplett" sinnvoll ist.
+
+            await interaction.response.edit_message(
+                content=f"📋 Restprogramm – Division {new_view.division_value} gewählt.\nSpieler auswählen oder direkt 'Anzeigen' drücken.",
+                view=new_view
+            )
+
+    class PlayerSelect(discord.ui.Select):
+        def __init__(self, parent_view: "RestprogrammView"):
+            self.parent_view = parent_view
+
+            # Spielerliste passend zur aktuellen Division holen
+            current_div = parent_view.division_value
+            players = parent_view.players_by_div.get(current_div, ["Komplett"])
+            # Baue Optionsliste
+            opts = [discord.SelectOption(label=p, value=p) for p in players]
+
+            super().__init__(
+                placeholder="Spieler filtern … (optional)",
+                min_values=1,
+                max_values=1,
+                options=opts
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            # Spieler merken
+            self.parent_view.player_value = self.values[0]
+            await interaction.response.send_message(
+                f"🎯 Spieler-Filter gesetzt: **{self.parent_view.player_value}**",
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _rp_show(
+            interaction,
+            self.division_value,
+            self.player_value
+        )
+
 
     class DivSelect(discord.ui.Select):
         def __init__(self, parent: "RestprogrammView"):
@@ -410,16 +535,21 @@ DIV_CHOICES = [
     app_commands.Choice(name="Division 5", value="5"),
 ]
 
-@tree.command(name="restprogramm", description="Zeigt offene Spiele (Division wählen, optional Spielername).")
+@tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def restprogramm(interaction: discord.Interaction):
-    """Popup-Formular für das Restprogramm"""
-    view = RestprogrammView()
+    # Wir bereiten alle Spielernamen pro Division vor
+    players_by_div = get_players_by_divisions()
+
+    # View erzeugen mit Default Division "1"
+    view = RestprogrammView(players_by_div=players_by_div, start_div="1")
+
     await interaction.response.send_message(
-        "📋 **Restprogramm** – Wähle die Division und (optional) setze einen Spieler-Filter:",
+        "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
         view=view,
         ephemeral=True
     )
+
 
 
 @tree.command(name="viewall", description="Zeigt alle kommenden Matches im Listenformat")
