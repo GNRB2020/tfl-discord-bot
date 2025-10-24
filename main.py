@@ -336,11 +336,11 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
     @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def restprogramm(interaction: discord.Interaction):
-    # Wir bereiten alle Spielernamen pro Division vor
-    players_by_div = get_players_by_divisions()
+        # Wir bereiten alle Spielernamen pro Division vor
+        players_by_div = get_players_by_divisions()
 
-    # View erzeugen mit Default Division "1"
-    view = RestprogrammView(players_by_div=players_by_div, start_div="1")
+        # View erzeugen mit Default Division "1"
+        view = RestprogrammView(players_by_div=players_by_div, start_div="1")
 
     await interaction.response.send_message(
         "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
