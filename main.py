@@ -920,11 +920,15 @@ async def restprogramm(interaction: discord.Interaction):
     # View erzeugen mit Default Division "1"
     view = RestprogrammView(players_by_div=players_by_div, start_div="1")
 
-    await interaction.response.send_message(
+    # Erst defer, dann followup (sonst Unknown interaction bei Latenz)
+    await interaction.response.defer(ephemeral=True)
+
+    await interaction.followup.send(
         "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
         view=view,
         ephemeral=True
     )
+
 
 # ---------- Auto-Posts ----------
 
