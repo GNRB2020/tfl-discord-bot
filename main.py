@@ -124,6 +124,91 @@ SHEET = WB.worksheet("League & Cup Schedule")
 def _cell(row, idx0):
     return (row[idx0].strip() if 0 <= idx0 < len(row) else "")
 
+# ===== Restprogramm – UI (Modal + Anzeige) =====
+
+class SpielerFilterModal(discord.ui.Modal, title="Spieler-Filter (optional)"):
+    name = discord.ui.TextInput(
+        label="Spielername (optional)",
+        placeholder="z. B. Steinchen89",
+        required=False,
+        max_length=80
+    )
+
+    def __init__(self, parent_view: "RestprogrammView"):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.parent_view.player_filter = self.name.value.strip()
+        await interaction.response.send_message(
+            f"✅ Filter gesetzt: `{self.parent_view.player_filter or '—'}`",
+            ephemeral=True
+        )
+
+
+async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
+    """Lädt die offenen Spiele aus dem jeweiligen DIV-Tab"""
+    try:
+        matches = load_open_from_div_tab(division_value, player_query=player_filter or "")
+        if not matches:
+            txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
+            if player_filter:
+                txt += f" (Filter: *{player_filter}*)"
+            await send_long_message_interaction(interaction, txt, ephemeral=True)
+            return
+
+        lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
+        if player_filter:
+            lines.append(f"_Filter: {player_filter}_")
+
+        for (row_nr, block, p1, p2) in matches[:80]:
+            side = "links" if block == "L" else "rechts"
+            lines.append(f"• Zeile {row_nr} ({side}): **{p1}** vs **{p2}**")
+
+        if len(matches) > 80:
+            lines.append(f"… und {len(matches) - 80} weitere.")
+
+        await send_long_message_interaction(interaction, "\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+
+class RestprogrammView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.division_value = "1"      # Standard
+        self.player_filter = ""        # Optional
+        self.add_item(self.DivSelect(self))
+
+    class DivSelect(discord.ui.Select):
+        def __init__(self, parent: "RestprogrammView"):
+            self.parent = parent
+            options = [
+                discord.SelectOption(label="Division 1", value="1"),
+                discord.SelectOption(label="Division 2", value="2"),
+                discord.SelectOption(label="Division 3", value="3"),
+                discord.SelectOption(label="Division 4", value="4"),
+                discord.SelectOption(label="Division 5", value="5"),
+            ]
+            super().__init__(placeholder="Division wählen …", min_values=1, max_values=1, options=options)
+
+        async def callback(self, interaction: discord.Interaction):
+            self.parent.division_value = self.values[0]
+            await interaction.response.send_message(
+                f"📌 Division gesetzt: **{self.parent.division_value}**",
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Spieler filtern", style=discord.ButtonStyle.secondary)
+    async def filter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SpielerFilterModal(self))
+
+    @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _rp_show(interaction, self.division_value, self.player_filter)
+
+
+
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
     NEU (Stand Tabelle):
@@ -325,38 +410,16 @@ DIV_CHOICES = [
     app_commands.Choice(name="Division 5", value="5"),
 ]
 
-@tree.command(name="restprogramm", description="Offene Spiele aus den DIV-Tabellen (Marker: 'vs').")
+@tree.command(name="restprogramm", description="Zeigt offene Spiele (Division wählen, optional Spielername).")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(division="Division wählen", spieler="Optional: filtert auf Beteiligung des Spielers")
-@app_commands.choices(division=DIV_CHOICES)
-async def restprogramm(interaction: discord.Interaction, division: app_commands.Choice[str], spieler: str = ""):
-    try:
-        div = division.value  # "1".."5"
-        matches = load_open_from_div_tab(div, player_query=spieler)
-
-        if not matches:
-            msg = f"📭 Keine offenen Spiele in **Division {div}**."
-            if spieler.strip():
-                msg += f" (Filter: *{spieler}*)"
-            await interaction.response.send_message(msg, ephemeral=True)
-            return
-
-        lines = [f"**Division {div} – offene Spiele ({len(matches)})**"]
-        if spieler.strip():
-            lines.append(f"_Filter: {spieler}_")
-
-        # • Zeile X (links/rechts): Spieler1 vs Spieler2
-        for (row_nr, block, p1, p2) in matches[:80]:
-            side = "links" if block == "L" else "rechts"
-            lines.append(f"• Zeile {row_nr} ({side}): **{p1}** vs **{p2}**")
-
-        if len(matches) > 80:
-            lines.append(f"… und {len(matches) - 80} weitere.")
-
-        await send_long_message_interaction(interaction, "\n".join(lines), ephemeral=True)
-
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+async def restprogramm(interaction: discord.Interaction):
+    """Popup-Formular für das Restprogramm"""
+    view = RestprogrammView()
+    await interaction.response.send_message(
+        "📋 **Restprogramm** – Wähle die Division und (optional) setze einen Spieler-Filter:",
+        view=view,
+        ephemeral=True
+    )
 
 
 @tree.command(name="viewall", description="Zeigt alle kommenden Matches im Listenformat")
