@@ -126,38 +126,36 @@ def _cell(row, idx0):
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
-    Liest Tab '{div}.DIV' (z. B. '1.DIV') und liefert offene Paarungen anhand des Markers:
-      linker Block: B (P1), C (Marker), D (P2)
-      rechter Block: F (P1), G (Marker), H (P2)
-    Offen = Marker == 'vs' (case-insensitive).
-    Optionaler Spielerfilter (Substring in P1 oder P2).
+    NEU (Stand Tabelle):
+      D = Spieler 1
+      E = Marker  ("vs" = offen, alles andere = gespielt)
+      F = Spieler 2
+
+    Liest Tab '{div}.DIV' (z. B. '1.DIV') und gibt offene Paarungen zurück.
+    Optionaler Spielerfilter (Substring in P1 oder P2, case-insensitive).
     Rückgabe: Liste[Tuple[int, str, str, str]] = (zeile, block, p1, p2)
-              block ∈ {'L','R'} (links/rechts)
+              block ist immer 'L' (nur Info für Ausgabe).
     """
     ws_name = f"{div}.DIV"
-    ws = WB.worksheet(ws_name)
+    ws = WB.worksheet(ws_name)          # WB kommt aus Patch A (Workbook-Handle)
     rows = ws.get_all_values()
     out = []
     q = player_query.strip().lower()
 
-    # 0-basierte Spaltenindexe
-    B, C, D = 1, 2, 3
-    F, G, H = 5, 6, 7
+    # 0-basierte Spalten
+    D, E, F = 3, 4, 5   # D/E/F wie im neuen Aufbau
 
-    for r_idx in range(1, len(rows)):  # ab Zeile 2 (Zeile 1 ist Überschrift)
+    # ab Datenzeile (Überschrift in Zeile 1)
+    for r_idx in range(1, len(rows)):
         row = rows[r_idx]
+        p1 = _cell(row, D)
+        marker = _cell(row, E).lower()
+        p2 = _cell(row, F)
 
-        # linker Block
-        p1 = _cell(row, B); marker = _cell(row, C); p2 = _cell(row, D)
-        if (p1 or p2) and marker.lower() == "vs":
+        # Offen: Marker exakt "vs" (whitespace/Case safe)
+        if (p1 or p2) and marker == "vs":
             if not q or (q in p1.lower() or q in p2.lower()):
                 out.append((r_idx + 1, "L", p1, p2))
-
-        # rechter Block
-        p1r = _cell(row, F); markr = _cell(row, G); p2r = _cell(row, H)
-        if (p1r or p2r) and markr.lower() == "vs":
-            if not q or (q in p1r.lower() or q in p2r.lower()):
-                out.append((r_idx + 1, "R", p1r, p2r))
 
     return out
 
