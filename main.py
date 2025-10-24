@@ -238,9 +238,9 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
     
         class DivSelect(discord.ui.Select):
             def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
+                self.parent_view = parent_view
 
-            options = [
+                options = [
                 discord.SelectOption(label="Division 1", value="1"),
                 discord.SelectOption(label="Division 2", value="2"),
                 discord.SelectOption(label="Division 3", value="3"),
