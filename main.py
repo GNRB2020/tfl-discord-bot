@@ -935,16 +935,16 @@ async def sync_cmd(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Sync-Fehler: {e}", ephemeral=True)
 
- @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
-    @app_commands.guilds(discord.Object(id=GUILD_ID))
-    async def restprogramm(interaction: discord.Interaction):
+@tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def restprogramm(interaction: discord.Interaction):
         # Wir bereiten alle Spielernamen pro Division vor
         players_by_div = get_players_by_divisions()
 
         # View erzeugen mit Default Division "1"
         view = RestprogrammView(players_by_div=players_by_div, start_div="1")
 
-    await interaction.response.send_message(
+        await interaction.response.send_message(
         "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
         view=view,
         ephemeral=True
