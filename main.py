@@ -920,17 +920,27 @@ async def help(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def sync_cmd(interaction: discord.Interaction):
     try:
+        # Sofort defer, weil sync() bei Rate Limit dauern kann
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
         names = ", ".join(sorted(c.name for c in synced))
-        await interaction.response.send_message(
+
+        await interaction.followup.send(
             f"✅ Synced {len(synced)} Commands: {names}",
             ephemeral=True
         )
+
     except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Sync-Fehler: {e}",
-            ephemeral=True
-        )
+        # Falls sync knallt, versuch trotzdem per followup zu antworten
+        try:
+            await interaction.followup.send(
+                f"❌ Sync-Fehler: {e}",
+                ephemeral=True
+            )
+        except Exception as inner:
+            print(f"Fehler in /sync: {e} / {inner}")
+
 
 @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
