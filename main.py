@@ -165,10 +165,16 @@ def get_players_by_divisions():
 async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
     """
     Baut die Ausgabe und schickt sie ephemer.
+
     player_filter == "" oder "Komplett" => alle offenen Spiele der Division
-    sonst nur Spiele, an denen der Spieler beteiligt ist
+    sonst nur Spiele, an denen der Spieler beteiligt ist.
     """
+
     try:
+        # zuerst Interaction sichern, damit der Button-Callback nicht abläuft
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=False)
+
         effective_filter = "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
         matches = load_open_from_div_tab(division_value, player_query=effective_filter)
 
@@ -176,7 +182,11 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
             txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
             if effective_filter:
                 txt += f" (Filter: *{effective_filter}*)"
-            await send_long_message_interaction(interaction, txt, ephemeral=True)
+
+            await interaction.followup.send(
+                txt,
+                ephemeral=True
+            )
             return
 
         lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
@@ -192,10 +202,21 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
         if len(matches) > 80:
             lines.append(f"… und {len(matches) - 80} weitere.")
 
-        await send_long_message_interaction(interaction, "\n".join(lines), ephemeral=True)
+        await interaction.followup.send(
+            "\n".join(lines),
+            ephemeral=True
+        )
 
     except Exception as e:
-        await interaction.response.send_message(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+        # Fallback bei Fehlern
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+            else:
+                await interaction.response.defer(ephemeral=True, thinking=False)
+                await interaction.followup.send(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+        except Exception as inner:
+            print(f"Fehler in _rp_show: {e} / {inner}")
 
 class RestprogrammView(discord.ui.View):
     def __init__(self, players_by_div: dict, start_div: str = "1"):
