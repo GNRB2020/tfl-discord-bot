@@ -915,30 +915,28 @@ async def sync_cmd(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def restprogramm(interaction: discord.Interaction):
     try:
-        # Spielernamen je Division holen
+        # GANZ WICHTIG: sofort deferren, noch bevor wir Sheets anfassen
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # Spielernamen je Division holen (Google Sheets, kann langsam sein)
         players_by_div = get_players_by_divisions()
 
         # View erzeugen mit Default Division "1"
         view = RestprogrammView(players_by_div=players_by_div, start_div="1")
 
-        # Eine direkte Antwort an die Interaction (ephemeral)
-        await interaction.response.send_message(
+        # Followup senden (erste sichtbare Nachricht für den User)
+        await interaction.followup.send(
             "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
             view=view,
             ephemeral=True
         )
 
     except Exception as e:
-        # Falls bei der allerersten Antwort was crasht, sauber fallbacken:
-        if interaction.response.is_done():
-            # Wir haben schon geantwortet oder Discord denkt das zumindest.
-            # Dann followup, ephemer.
+        # Falls irgendwas crasht: versuch über followup zu antworten
+        try:
             await interaction.followup.send(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
-        else:
-            # Wir sind noch in der ersten Antwortphase.
-            await interaction.response.send_message(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
-
-
+        except Exception:
+            print(f"Fehler in /restprogramm: {e}")
 
 
 # ---------- Auto-Posts ----------
