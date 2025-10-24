@@ -235,7 +235,8 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
             self.add_item(self.div_select)
             self.add_item(self.player_select)
 
-    class DivSelect(discord.ui.Select):
+    
+        class DivSelect(discord.ui.Select):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
@@ -331,6 +332,21 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _rp_show(interaction, self.division_value, self.player_filter)
+
+    @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def restprogramm(interaction: discord.Interaction):
+    # Wir bereiten alle Spielernamen pro Division vor
+    players_by_div = get_players_by_divisions()
+
+    # View erzeugen mit Default Division "1"
+    view = RestprogrammView(players_by_div=players_by_div, start_div="1")
+
+    await interaction.response.send_message(
+        "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
+        view=view,
+        ephemeral=True
+    )
 
 
 
@@ -535,20 +551,7 @@ DIV_CHOICES = [
     app_commands.Choice(name="Division 5", value="5"),
 ]
 
-@tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def restprogramm(interaction: discord.Interaction):
-    # Wir bereiten alle Spielernamen pro Division vor
-    players_by_div = get_players_by_divisions()
 
-    # View erzeugen mit Default Division "1"
-    view = RestprogrammView(players_by_div=players_by_div, start_div="1")
-
-    await interaction.response.send_message(
-        "📋 Restprogramm – Division wählen, optional Spieler auswählen, dann 'Anzeigen' drücken.",
-        view=view,
-        ephemeral=True
-    )
 
 
 
