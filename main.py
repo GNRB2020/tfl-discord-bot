@@ -222,18 +222,18 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
 
     class RestprogrammView(discord.ui.View):
         def __init__(self, players_by_div: dict, start_div: str = "1"):
-        super().__init__(timeout=180)
+            super().__init__(timeout=180)
 
-        # Zustand / Memory
-        self.players_by_div = players_by_div  # dict wie {"1": [...], "2": [...], ...}
-        self.division_value = start_div       # aktuell gewählte Division
-        self.player_value = "Komplett"        # aktuell gewählter Spieler/Filter
+            # Zustand / Memory
+            self.players_by_div = players_by_div  # dict wie {"1": [...], "2": [...], ...}
+            self.division_value = start_div       # aktuell gewählte Division
+            self.player_value = "Komplett"        # aktuell gewählter Spieler/Filter
 
-        # Wir fügen beide Dropdowns und den Button hinzu
-        self.div_select = self.DivSelect(self)
-        self.player_select = self.PlayerSelect(self)
-        self.add_item(self.div_select)
-        self.add_item(self.player_select)
+            # Wir fügen beide Dropdowns und den Button hinzu
+            self.div_select = self.DivSelect(self)
+            self.player_select = self.PlayerSelect(self)
+            self.add_item(self.div_select)
+            self.add_item(self.player_select)
 
     class DivSelect(discord.ui.Select):
         def __init__(self, parent_view: "RestprogrammView"):
