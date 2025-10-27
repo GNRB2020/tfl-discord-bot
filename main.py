@@ -593,22 +593,26 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
         self.auswaerts = auswaerts
         self.requester = requester
 
+        # Spieler-Namen für Placeholder einkürzen, damit Discord nicht meckert
+        short_heim = (heim[:12] + "…") if len(heim) > 12 else heim
+        short_aus = (auswaerts[:12] + "…") if len(auswaerts) > 12 else auswaerts
+
         self.winner_input = discord.ui.TextInput(
-            label=f"Wer hat gewonnen? 1={heim}, 2={auswaerts}, X=Unentschieden",
+            label="Wer hat gewonnen?",
             style=discord.TextStyle.short,
             required=True,
             max_length=1,
-            placeholder="1 / 2 / X"
+            placeholder=f"1 = {short_heim}, 2 = {short_aus}, X = Unentschieden"
         )
         self.mode_input = discord.ui.TextInput(
-            label="Welcher Modus wurde gespielt?",
+            label="Modus",
             style=discord.TextStyle.short,
             required=True,
             placeholder="z. B. League, Cup, Bo3...",
             max_length=50
         )
         self.raceroom_input = discord.ui.TextInput(
-            label="Bitte Raceroom-Link angeben",
+            label="Raceroom-Link",
             style=discord.TextStyle.short,
             required=True,
             placeholder="https://raceroom.xyz/..."
@@ -667,6 +671,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 content=f"❌ Konnte nicht ins Sheet schreiben: {e}",
                 ephemeral=True
             )
+
 
 # ----------------------
 # Slash Commands
