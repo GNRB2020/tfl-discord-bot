@@ -122,17 +122,18 @@ SHEET = WB.worksheet("League & Cup Schedule")
 def _cell(row, idx0):
     return (row[idx0].strip() if 0 <= idx0 < len(row) else "")
 
-# -------------------------------------------------
-# RESTPROGRAMM / VIEWALL / GET_PLAYERS / DIV-TOOLS
-# -------------------------------------------------
+# =========================
+# RESTPROGRAMM / VIEWALL / etc.
+# =========================
 
 def get_players_for_div(div: str):
     """
-    Holt Spielernamen aus Spalte L im Tab '<div>.DIV' (ab Zeile 2).
+    Liest aus dem Sheet '<div>.DIV' die Spielernamen aus Spalte L (1-basiert 12),
+    ab Zeile 2. Liefert eindeutige Liste.
     """
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
-    values = ws.col_values(12)  # Spalte L = 12 (1-basiert)
+    values = ws.col_values(12)  # L = 12
     raw_players = [v.strip() for v in values[1:] if v and v.strip() != ""]
     seen = set()
     players_unique = []
@@ -144,6 +145,10 @@ def get_players_for_div(div: str):
     return players_unique
 
 def get_players_by_divisions():
+    """
+    { "1": ["Komplett", "..."], "2": [...], ... }
+    Tabs 1..5, wenn leer dann nur ["Komplett"]
+    """
     result = {}
     for div in ["1", "2", "3", "4", "5"]:
         try:
@@ -155,34 +160,43 @@ def get_players_by_divisions():
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
-    Liest offene Paarungen aus '{div}.DIV'.
-    In deinem Sheet:
-    D = Heim (links)
-    E = Status ("vs" wenn offen)
-    F = Auswärts (rechts)
+    Liest offene Spiele aus {div}.DIV.
+    Deine Tabelle (Division-Tab) sieht in echt so aus:
+
+    B: Datum/Uhrzeit Report (leer bei offen)
+    C: Modus
+    D: Spieler links
+    E: 'vs' wenn offen, sonst Ergebnis wie '2:0'
+    F: Spieler rechts
+    G: Link
+    H: Boteingabe (Reporter)
+
+    => Offen = Spalte E == "vs"
+
+    Rückgabe: Liste[(zeile, "L", p1, p2)]
     """
-    ws_name = f"{div}.DIV"
-    ws = WB.worksheet(ws_name)
+    ws = WB.worksheet(f"{div}.DIV")
     rows = ws.get_all_values()
     out = []
-    q = player_query.strip().lower()
+    q = (player_query or "").strip().lower()
 
-    # D/E/F sind Spalte 4/5/6 in Sheets -> 0-basiert 3/4/5
-    D, E, F = 3, 4, 5
+    # ab Zeile 2, Zeile 1 ist Header
+    for ridx in range(1, len(rows)):
+        row = rows[ridx]
+        p1 = _cell(row, 3)  # D
+        status = _cell(row, 4).lower()  # E
+        p2 = _cell(row, 5)  # F
 
-    for r_idx in range(1, len(rows)):  # ab Zeile 2
-        row = rows[r_idx]
-        p1 = _cell(row, D)  # Heim
-        marker = _cell(row, E).lower()  # "vs"?
-        p2 = _cell(row, F)  # Gast
-
-        if (p1 or p2) and marker == "vs":
+        if (p1 or p2) and status == "vs":
             if not q or (q in p1.lower() or q in p2.lower()):
-                out.append((r_idx + 1, "L", p1, p2))
+                out.append((ridx + 1, "L", p1, p2))
 
     return out
 
 async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
+    """
+    Baut die Ausgabe fürs Restprogramm.
+    """
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=False)
@@ -225,7 +239,6 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
 class RestprogrammView(discord.ui.View):
     def __init__(self, players_by_div: dict, start_div: str = "1"):
         super().__init__(timeout=180)
-
         self.players_by_div = players_by_div
         self.division_value = start_div
         self.player_value = "Komplett"
@@ -236,7 +249,6 @@ class RestprogrammView(discord.ui.View):
     class DivSelect(discord.ui.Select):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
-
             options = [
                 discord.SelectOption(label="Division 1", value="1"),
                 discord.SelectOption(label="Division 2", value="2"),
@@ -244,7 +256,6 @@ class RestprogrammView(discord.ui.View):
                 discord.SelectOption(label="Division 4", value="4"),
                 discord.SelectOption(label="Division 5", value="5"),
             ]
-
             super().__init__(
                 placeholder="Division wählen …",
                 min_values=1,
@@ -254,12 +265,10 @@ class RestprogrammView(discord.ui.View):
 
         async def callback(self, interaction: discord.Interaction):
             self.parent_view.division_value = self.values[0]
-
             new_view = RestprogrammView(
                 players_by_div=self.parent_view.players_by_div,
                 start_div=self.parent_view.division_value
             )
-
             await interaction.response.edit_message(
                 content=f"📋 Restprogramm – Division {new_view.division_value} gewählt.\nSpieler auswählen oder direkt 'Anzeigen' drücken.",
                 view=new_view
@@ -268,7 +277,6 @@ class RestprogrammView(discord.ui.View):
     class PlayerSelect(discord.ui.Select):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
-
             current_div = parent_view.division_value
             players = parent_view.players_by_div.get(current_div, ["Komplett"])
             opts = [discord.SelectOption(label=p, value=p) for p in players]
@@ -289,18 +297,14 @@ class RestprogrammView(discord.ui.View):
 
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _rp_show(
-            interaction,
-            self.division_value,
-            self.player_value
-        )
+        await _rp_show(interaction, self.division_value, self.player_value)
 
 def normalize_div(name):
     return name.lower().replace(" ", "").replace("-", "").replace(".", "")
 
-# -------------------------------------------------
-# TERMIN MODAL
-# -------------------------------------------------
+# =========================
+# /termin Modal
+# =========================
 
 class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
     division = discord.ui.TextInput(label="Division", placeholder="z. B. 2. Division", required=True)
@@ -313,11 +317,19 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
         try:
             parts = self.datetime_str.value.strip().split()
             if len(parts) < 2:
-                await interaction.response.send_message("❌ Formatfehler: Nutze `DD.MM.YYYY HH:MM`.", ephemeral=True)
+                await interaction.response.send_message(
+                    "❌ Formatfehler: Nutze `DD.MM.YYYY HH:MM`.",
+                    ephemeral=True
+                )
                 return
 
             datum_str, uhrzeit_str = parts[0], parts[1]
-            start_dt = BERLIN_TZ.localize(datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"))
+            start_dt = BERLIN_TZ.localize(
+                datetime.datetime.strptime(
+                    f"{datum_str} {uhrzeit_str}",
+                    "%d.%m.%Y %H:%M"
+                )
+            )
             end_dt = start_dt + datetime.timedelta(hours=1)
 
             s1 = self.spieler1.value.strip().lower()
@@ -356,51 +368,61 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 multistream_url
             ]
             SHEET.append_row(row)
-            await interaction.response.send_message("✅ Match wurde eingetragen und Event erstellt!", ephemeral=True)
+            await interaction.response.send_message(
+                "✅ Match wurde eingetragen und Event erstellt!",
+                ephemeral=True
+            )
 
         except Exception as e:
-            await interaction.response.send_message(f"❌ Fehler beim Eintragen: {e}", ephemeral=True)
+            await interaction.response.send_message(
+                f"❌ Fehler beim Eintragen: {e}",
+                ephemeral=True
+            )
 
-# -------------------------------------------------
-# RESULT / SPIELERGEBNIS EINTRAGEN
-# -------------------------------------------------
+# =========================
+# /result – Hilfsfunktionen
+# =========================
 
 def load_open_games_for_result(div_number: str):
     """
-    Lädt offene Spiele aus {div}.DIV basierend auf dem echten Layout.
-    Spalten (1-basiert):
-      B = Datum/Zeit
-      C = Modus
-      D = Heim
-      E = 'vs' oder Ergebnis
-      F = Auswärts
-      G = Link
-      H = Boteingabe
+    Lädt alle offenen Spiele aus {div}.DIV.
 
-    Offen = E == "vs"
+    Layout laut Screenshot:
+    B: Timestamp/Datum (leer bei offen)
+    C: Modus
+    D: Spieler links
+    E: 'vs' wenn offen, sonst '2:0', '1:1', etc.
+    F: Spieler rechts
+    G: Link
+    H: Boteingabe/Reporter
+
+    Offen = Spalte E == "vs"
     """
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
 
-    games = []
+    out = []
     for idx, row in enumerate(rows, start=1):
         if idx == 1:
-            continue  # Header
+            continue  # Header überspringen
 
-        heim = _cell(row, 3)        # D (0b=3)
-        status = _cell(row, 4)      # E (0b=4)
-        gast = _cell(row, 5)        # F (0b=5)
+        heim = _cell(row, 3)      # D
+        marker = _cell(row, 4)    # E
+        ausw = _cell(row, 5)      # F
 
-        if (heim or gast) and status.lower() == "vs":
-            games.append({
+        if (heim or ausw) and marker.lower() == "vs":
+            out.append({
                 "row_index": idx,
                 "heim": heim,
-                "auswaerts": gast
+                "auswaerts": ausw
             })
 
-    return games
+    return out
 
 def get_unique_heimspieler(div_number: str):
+    """
+    Alle Heimspieler (Spalte D) aus offenen Spielen.
+    """
     games = load_open_games_for_result(div_number)
     heim_set = {g["heim"] for g in games if g["heim"]}
     return sorted(list(heim_set))
@@ -506,6 +528,7 @@ class ResultGameSelect(discord.ui.Select):
 
         options = []
         for idx, g in enumerate(games):
+            # Label darf max 100 Zeichen, safe.
             label = f"{g['heim']} vs {g['auswaerts']} | Zeile {g['row_index']}"
             options.append(
                 discord.SelectOption(
@@ -542,9 +565,9 @@ class ResultGameSelectView(discord.ui.View):
 class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
     """
     Gewinner-Codierung:
-    1 = Heim gewinnt -> 2:0
-    2 = Auswärts gewinnt -> 0:2
-    X = Unentschieden -> 1:1
+    1 = Spieler links gewinnt  -> 2:0
+    2 = Spieler rechts gewinnt -> 0:2
+    X = Unentschieden          -> 1:1
     """
     def __init__(self, division: str, row_index: int, heim: str, auswaerts: str, requester: discord.Member):
         super().__init__(timeout=None)
@@ -607,11 +630,11 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             now_str = now.strftime("%d.%m.%Y %H:%M")
 
             # Spalten laut Screenshot:
-            # B (2) = Timestamp
-            # C (3) = Modus
-            # E (5) = Ergebnis
-            # G (7) = Raceroom-Link
-            # H (8) = Boteingabe / Reporter
+            # B (2): Timestamp jetzt
+            # C (3): Modus
+            # E (5): Ergebnis (ersetzt 'vs')
+            # G (7): Raceroom-Link
+            # H (8): Reporter
             ws.update_cell(self.row_index, 2, now_str)             # B
             ws.update_cell(self.row_index, 3, mode_val)            # C
             ws.update_cell(self.row_index, 5, ergebnis)            # E
@@ -632,14 +655,14 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 ephemeral=True
             )
 
-# -------------------------------------------------
-# PLAYEREXIT / SPIELER STEIGT AUS
-# -------------------------------------------------
+# =========================
+# /playerexit – Hilfslogik
+# =========================
 
 def get_all_players_from_div(div_number: str):
     """
-    Für /playerexit: wir sammeln alle Namen aus Spalte D (Heim) und F (Auswärts),
-    deduplizieren, sortieren.
+    Holt ALLE Spieler aus Spalte D (links) und F (rechts),
+    dedupliziert, sortiert.
     """
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
@@ -647,71 +670,92 @@ def get_all_players_from_div(div_number: str):
     for idx, row in enumerate(rows, start=1):
         if idx == 1:
             continue
-        heim = _cell(row, 3)  # D
-        ausw = _cell(row, 5)  # F
-        if heim:
-            s.add(heim.strip())
-        if ausw:
-            s.add(ausw.strip())
+        left_p = _cell(row, 3)  # D
+        right_p = _cell(row, 5) # F
+        if left_p:
+            s.add(left_p.strip())
+        if right_p:
+            s.add(right_p.strip())
     return sorted(list(s), key=lambda x: x.lower())
 
 def playerexit_apply(div_number: str, kick_player: str, admin_name: str):
     """
-    Wertet alle noch offenen Spiele dieses Spielers.
-    - Offenes Spiel = Spalte E == "vs"
-    - Spieler Heim (Spalte D matcht Player)  -> Ergebnis 2:0
-    - Spieler Auswärts (Spalte F matcht)     -> Ergebnis 0:2
-    Es wird eingetragen:
-      B = Timestamp jetzt
-      C = "FFW"
-      E = Ergebnis (2:0 / 0:2)
-      H = admin_name
-    Raceroom (G) lassen wir leer.
-    Danach markieren wir den Spieler überall durchgestrichen via "~~Name~~".
+    Wertet alle offenen Spiele dieses Spielers in div_number
+    und markiert ihn als AUSGETRETEN.
+
+    Layout:
+    B (2): Timestamp
+    C (3): Modus
+    D (4): Spieler links
+    E (5): 'vs' oder Ergebnis
+    F (6): Spieler rechts
+    G (7): Link
+    H (8): Reporter
+
+    Offenes Spiel: E == "vs"
+
+    Wenn Spieler links -> Ergebnis 2:0
+    Wenn Spieler rechts -> Ergebnis 0:2
+
+    Modus = "FFW"
+    Reporter = admin_name
+
+    Danach: Spieler in Spalte D/F mit Note "(AUSGETRETEN)" kennzeichnen.
     """
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
 
     now_str = datetime.datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
-    target_lower = kick_player.strip().lower()
+    pl_lower = kick_player.strip().lower()
 
-    # 1. Spiele werten
+    # 1) Offene Spiele auto werten
     for idx, row in enumerate(rows, start=1):
         if idx == 1:
             continue
 
-        heim = _cell(row, 3)     # D
-        status = _cell(row, 4)   # E
-        ausw = _cell(row, 5)     # F
+        left_player  = _cell(row, 3)  # D
+        marker       = _cell(row, 4)  # E
+        right_player = _cell(row, 5)  # F
 
-        if status.lower() == "vs":
-            if heim.strip().lower() == target_lower:
-                # Heim gibt auf -> Gegner kriegt 2:0
-                ws.update_cell(idx, 2, now_str)        # B
-                ws.update_cell(idx, 3, "FFW")          # C
-                ws.update_cell(idx, 5, "2:0")          # E
-                ws.update_cell(idx, 8, admin_name)     # H
-            elif ausw.strip().lower() == target_lower:
-                # Auswärts gibt auf -> Heim kriegt 2:0 -> also 0:2 aus Sicht Auswärts
-                ws.update_cell(idx, 2, now_str)        # B
-                ws.update_cell(idx, 3, "FFW")          # C
-                ws.update_cell(idx, 5, "0:2")          # E
-                ws.update_cell(idx, 8, admin_name)     # H
+        if marker.lower() != "vs":
+            continue  # schon gewertet, skip
 
-    # 2. Spieler überall visuell markieren
-    # Wir überschreiben D/F, wo exakt dieser Spieler steht, mit ~~Name~~
-    # (sofort sichtbar als "gestrichen")
-    updated_rows = ws.get_all_values()  # Reload nach den Wertungen
-    for idx, row in enumerate(updated_rows, start=1):
+        if left_player.strip().lower() == pl_lower:
+            # Spieler ist links -> Ergebnis 2:0
+            ws.update_cell(idx, 2, now_str)     # B Timestamp
+            ws.update_cell(idx, 3, "FFW")       # C Modus
+            ws.update_cell(idx, 5, "2:0")       # E Ergebnis
+            ws.update_cell(idx, 8, admin_name)  # H Reporter
+
+        elif right_player.strip().lower() == pl_lower:
+            # Spieler ist rechts -> Ergebnis 0:2
+            ws.update_cell(idx, 2, now_str)     # B
+            ws.update_cell(idx, 3, "FFW")       # C
+            ws.update_cell(idx, 5, "0:2")       # E
+            ws.update_cell(idx, 8, admin_name)  # H
+
+    # 2) Spieler im Plan als AUSGETRETEN markieren (Note anhängen)
+    # gspread update_note(row, col, note)
+    # D = col 4, F = col 6
+    for idx, row in enumerate(rows, start=1):
         if idx == 1:
             continue
-        heim = _cell(row, 3)  # D
-        ausw = _cell(row, 5)  # F
+        left_player  = _cell(row, 3)  # D
+        right_player = _cell(row, 5)  # F
 
-        if heim.strip().lower() == target_lower and not heim.startswith("~~"):
-            ws.update_cell(idx, 4, f"~~{heim}~~")  # Spalte D = col 4
-        if ausw.strip().lower() == target_lower and not ausw.startswith("~~"):
-            ws.update_cell(idx, 6, f"~~{ausw}~~")  # Spalte F = col 6
+        if left_player.strip().lower() == pl_lower:
+            try:
+                ws.update_note(idx, 4, f"{left_player} (AUSGETRETEN)")
+            except Exception:
+                pass
+
+        if right_player.strip().lower() == pl_lower:
+            try:
+                ws.update_note(idx, 6, f"{right_player} (AUSGETRETEN)")
+            except Exception:
+                pass
+
+# ----- UI für /playerexit
 
 class PlayerExitDivisionSelect(discord.ui.Select):
     def __init__(self, admin_member: discord.Member):
@@ -725,31 +769,31 @@ class PlayerExitDivisionSelect(discord.ui.Select):
             discord.SelectOption(label="Division 6", value="6"),
         ]
         super().__init__(
-            placeholder="Division wählen …",
+            placeholder="Welche Division?",
             min_values=1,
             max_values=1,
             options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        div = self.values[0]
-        alle_spieler = get_all_players_from_div(div)
+        div_val = self.values[0]
+        all_players = get_all_players_from_div(div_val)
 
-        if not alle_spieler:
+        if not all_players:
             await interaction.response.edit_message(
-                content=f"Keine Spieler in Division {div} gefunden.",
+                content=f"Keine Spieler gefunden in Division {div_val}.",
                 view=None
             )
             return
 
         view = PlayerExitPlayerSelectView(
-            division=div,
-            players=alle_spieler,
+            division=div_val,
+            players=all_players,
             admin_member=self.admin_member
         )
 
         await interaction.response.edit_message(
-            content=f"Division {div} gewählt. Wer steigt aus?",
+            content=f"Division {div_val} gewählt.\nWelcher Spieler steigt aus?",
             view=view
         )
 
@@ -762,30 +806,33 @@ class PlayerExitPlayerSelect(discord.ui.Select):
     def __init__(self, division: str, players, admin_member: discord.Member):
         self.division = division
         self.admin_member = admin_member
-
-        opts = [
+        options = [
             discord.SelectOption(label=p, value=p)
-            for p in players[:25]
+            for p in players[:25]  # Discord max 25 options
         ]
-
         super().__init__(
-            placeholder="Spieler auswählen …",
+            placeholder="Spieler wählen",
             min_values=1,
             max_values=1,
-            options=opts
+            options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        player = self.values[0]
+        chosen_player = self.values[0]
 
         view = PlayerExitConfirmView(
             division=self.division,
-            player=player,
+            player=chosen_player,
             admin_member=self.admin_member
         )
 
         await interaction.response.edit_message(
-            content=f"⚠️ {player} wirklich als ausgestiegen markieren und alle verbleibenden Spiele werten?",
+            content=(
+                f"⚠ `{chosen_player}` wird aus Division {self.division} entfernt.\n"
+                f"Alle offenen Heimspiele werden 2:0, Auswärtsspiele 0:2 gewertet.\n"
+                f"Spieler wird im Plan markiert.\n"
+                f"Sicher?"
+            ),
             view=view
         )
 
@@ -795,36 +842,44 @@ class PlayerExitPlayerSelectView(discord.ui.View):
         self.add_item(PlayerExitPlayerSelect(division, players, admin_member))
 
 class PlayerExitConfirmView(discord.ui.View):
-    def __init__(self, division: str, player: str, admin_member: discord.Member, timeout=120):
+    def __init__(self, division: str, player: str, admin_member: discord.Member, timeout=180):
         super().__init__(timeout=timeout)
         self.division = division
         self.player = player
         self.admin_member = admin_member
 
-    @discord.ui.button(label="Ja, Spieler entfernt", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Ja, entfernen", style=discord.ButtonStyle.danger)
     async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Sicherheit: Nur derselbe Admin darf bestätigen
+        if interaction.user.id != self.admin_member.id:
+            await interaction.response.send_message(
+                "⛔ Das darf nur der Admin, der den Prozess gestartet hat.",
+                ephemeral=True
+            )
+            return
+
         try:
             playerexit_apply(self.division, self.player, str(self.admin_member))
             await interaction.response.edit_message(
-                content=f"✅ {self.player} in Division {self.division} entfernt / Spiele gewertet.",
+                content=f"✅ `{self.player}` wurde in Division {self.division} ausgetragen und alle offenen Spiele gewertet.",
                 view=None
             )
         except Exception as e:
             await interaction.response.edit_message(
-                content=f"❌ Fehler bei /playerexit: {e}",
+                content=f"❌ Fehler bei playerexit_apply: {e}",
                 view=None
             )
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="Aktion abgebrochen.",
+            content="Abgebrochen.",
             view=None
         )
 
-# -------------------------------------------------
-# SLASH COMMANDS
-# -------------------------------------------------
+# =========================
+# Slash Commands
+# =========================
 
 @tree.command(name="termin", description="Erstelle einen neuen Termin + Event + Sheet-Eintrag")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -941,7 +996,11 @@ async def viewall(interaction: discord.Interaction):
 
         def valid_row(row):
             try:
-                return len(row) >= 8 and parse_date(row[1].strip()) >= today_d and row[7].strip() == ""
+                return (
+                    len(row) >= 8 and
+                    parse_date(row[1].strip()) >= today_d and
+                    row[7].strip() == ""
+                )
             except Exception:
                 return False
 
@@ -954,7 +1013,12 @@ async def viewall(interaction: discord.Interaction):
             )
             return
 
-        matches.sort(key=lambda x: datetime.datetime.strptime(x[1] + " " + x[2], "%d.%m.%Y %H:%M"))
+        matches.sort(
+            key=lambda x: datetime.datetime.strptime(
+                x[1] + " " + x[2],
+                "%d.%m.%Y %H:%M"
+            )
+        )
         lines = [
             f"{row[1]} {row[2]} | {row[0]} | {row[3]} vs. {row[4]} | {row[5]}"
             for row in matches
@@ -1074,14 +1138,14 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             return
 
         title_prefix = {
-                "ZSR": "RESTREAM ZSR |",
-                "SG1": "RESTREAM SGD1 |",
-                "SG2": "RESTREAM SGD2 |"
+            "ZSR": "RESTREAM ZSR |",
+            "SG1": "RESTREAM SGD1 |",
+            "SG2": "RESTREAM SGD2 |"
         }[code]
         location_url = {
-                "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
-                "SG1": "https://www.twitch.tv/speedgamingdeutsch",
-                "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
+            "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
+            "SG1": "https://www.twitch.tv/speedgamingdeutsch",
+            "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
         }[code]
 
         com_val = (self.com_input.value or "").strip()
@@ -1095,7 +1159,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         )
         new_title = f"{title_prefix} {original_title}"
 
-        # Events holen
+        # Events live abrufen
         try:
             events = await interaction.guild.fetch_scheduled_events()
         except Exception as e:
@@ -1105,8 +1169,10 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             )
             return
 
+        # Matching nach Titel
         event = discord.utils.get(events, name=original_title)
 
+        # Fallback mit Zeit/Spielernamen
         if not event:
             try:
                 dt = datetime.datetime.strptime(
@@ -1132,7 +1198,10 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
                     event = min(
                         candidates,
                         key=lambda ev: abs(
-                            (ev.start_time.astimezone(BERLIN_TZ) - start_target).total_seconds()
+                            (
+                                ev.start_time.astimezone(BERLIN_TZ)
+                                - start_target
+                            ).total_seconds()
                         )
                     )
             except Exception:
@@ -1146,10 +1215,8 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             return
 
         try:
-            # Event-Titel + Location updaten
             await event.edit(name=new_title, location=location_url)
 
-            # Sheet anpassen (League & Cup Schedule)
             daten = SHEET.get_all_values()
             sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
             for idx, row in enumerate(daten):
@@ -1162,7 +1229,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
                     row[4].strip() == self.selected_row[4] and
                     row[5].strip() == self.selected_row[5]
                 ):
-                    # H=8, I=9, J=10, K=11
+                    # H=8, I=9, J=10, K=11 in deinem Schedule-Sheet
                     SHEET.update_cell(idx + 1, 8, sheet_value)
                     SHEET.update_cell(idx + 1, 9, com_val)
                     SHEET.update_cell(idx + 1, 10, co_val)
@@ -1267,7 +1334,8 @@ async def showrestreams_syncinfo(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# --- /result Command (mit Rollen-Check) ---
+# ---------- /result Command (nur Try Force League) ----------
+
 @tree.command(name="result", description="Ergebnis melden (nur Orga / Try Force League Rolle)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
@@ -1294,8 +1362,9 @@ async def result(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# --- /playerexit Command (nur Admin) ---
-@tree.command(name="playerexit", description="Spieler steigt aus: alle Restspiele werten & markieren (nur Admin)")
+# ---------- /playerexit Command (nur Admin) ----------
+
+@tree.command(name="playerexit", description="Spieler austragen + alle offenen Spiele werten (nur Admin)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def playerexit(interaction: discord.Interaction):
     member = interaction.user
@@ -1306,10 +1375,10 @@ async def playerexit(interaction: discord.Interaction):
         )
         return
 
-    is_admin = any(r.name == "Admin" for r in member.roles)
-    if not is_admin:
+    has_admin_role = any(r.name == "Admin" for r in member.roles)
+    if not has_admin_role:
         await interaction.response.send_message(
-            "⛔ Nur Admin darf das.",
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
             ephemeral=True
         )
         return
@@ -1320,6 +1389,8 @@ async def playerexit(interaction: discord.Interaction):
         view=view,
         ephemeral=True
     )
+
+# ---------- /help Command ----------
 
 @tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -1372,17 +1443,17 @@ async def help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/restprogramm",
-        value="➤ Zeigt alle noch offenen Spiele in einer Division. Dropdown: Division wählen, dann optional Spieler filtern, dann 'Anzeigen'. Ausgabe ephemer nur für dich.",
+        value="➤ Zeigt alle noch offenen Spiele in einer Division. Dropdown: Division wählen, optional Spieler filtern, dann 'Anzeigen'. Ausgabe ephemer nur für dich.",
         inline=False
     )
     embed.add_field(
         name="/result",
-        value="➤ Ergebnis melden: Division → Heim → Match. Dann Gewinner (1/2/X), Modus ('Ambrosia, Crosskeys o.Ä.'), Raceroom-Link. Bot schreibt Zeit, Modus, Ergebnis (2:0 / 0:2 / 1:1), Link und deinen Namen in die richtige Divisionstabelle.",
+        value="➤ Ergebnis melden: Division → Heim → Match. Dann Gewinner (1/2/X), Modus, Raceroom eingeben. Bot schreibt Timestamp, Modus, Ergebnis (2:0 / 0:2 / 1:1), Raceroom und deinen Namen in die passende Divisionstabelle.",
         inline=False
     )
     embed.add_field(
         name="/playerexit",
-        value="➤ (Admin) Spieler steigt aus. Bot wertet alle offenen Spiele: Heimspiele 2:0 gegen ihn, Auswärtsspiele 0:2 gegen ihn. Markiert den Spieler im Plan.",
+        value="➤ (Admin) Spieler aus Division austragen: wertet alle offenen Spiele (2:0 / 0:2 FFW), setzt Timestamp/FFW/Reporter, markiert den Spieler als AUSGETRETEN.",
         inline=False
     )
     embed.add_field(
@@ -1397,6 +1468,8 @@ async def help(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ---------- /sync Command ----------
 
 @tree.command(name="sync", description="(Admin) Slash-Commands für diese Guild synchronisieren")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -1421,6 +1494,8 @@ async def sync_cmd(interaction: discord.Interaction):
         except Exception as inner:
             print(f"Fehler in /sync: {e} / {inner}")
 
+# ---------- /restprogramm ----------
+
 @tree.command(name="restprogramm", description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def restprogramm(interaction: discord.Interaction):
@@ -1433,14 +1508,16 @@ async def restprogramm(interaction: discord.Interaction):
             view=view,
             ephemeral=True
         )
-
     except Exception as e:
         try:
-            await interaction.followup.send(f"❌ Fehler bei /restprogramm: {e}", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Fehler bei /restprogramm: {e}",
+                ephemeral=True
+            )
         except Exception:
             print(f"Fehler in /restprogramm: {e}")
 
-# ---------- Auto-Posts ----------
+# ---------- Auto-Posts (Cron-ähnlich) ----------
 
 @client.event
 async def on_ready():
@@ -1542,4 +1619,15 @@ async def sende_showrestreams_liste():
             track = r[10].strip() if len(r) >= 11 else ""
             lines.append(
                 f"{datum} {uhr} | {kanal} | {s1} vs. {s2} | {modus} | "
-                f"Com: {com or '—'} | Co: {co or '—'} | Track: {track or '
+                f"Com: {com or '—'} | Co: {co or '—'} | Track: {track or '—'}"
+            )
+
+        channel = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
+        if channel:
+            msg = "🎥 **Geplante Restreams ab heute:**\n" + "\n".join(lines)
+            await send_long_message_channel(channel, msg)
+
+    except Exception as e:
+        print(f"❌ Fehler bei täglicher Restreams-Ausgabe (04:30): {e}")
+
+client.run(TOKEN)
