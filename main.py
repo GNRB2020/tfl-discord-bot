@@ -9,21 +9,28 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
 
-# .env laden
+# =========================================================
+# .env laden / Konfiguration
+# =========================================================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
-EVENT_CHANNEL_ID = int(os.getenv("DISCORD_EVENT_CHANNEL_ID")) if os.getenv("DISCORD_EVENT_CHANNEL_ID") else 0
-RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID"))
+EVENT_CHANNEL_ID = int(os.getenv("DISCORD_EVENT_CHANNEL_ID", "0"))
+RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID", "0"))
 SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
-# Discord-Client
+# optionale Role-IDs (string/int aus ENV), fallback auf Namen
+ADMIN_ROLE_ID = os.getenv("ADMIN_ROLE_ID")
+TFL_ROLE_ID = os.getenv("TFL_ROLE_ID")
+
+# Discord-Client + Intents
 intents = discord.Intents.default()
+intents.members = True  # wir brauchen Rolleninfos stabil
 client = commands.Bot(command_prefix="/", intents=intents)
 tree = client.tree
 
-# Hilfsfunktionen / Konstanten
+# Zeitzone
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 def today_berlin_date() -> datetime.date:
@@ -69,7 +76,9 @@ def map_sheet_channel_to_label(val: str) -> str:
         return "SG2"
     return v  # ZSR oder leer/sonstiges
 
-# Twitch-Namen Mapping
+# =========================================================
+# Twitch-Namen Mapping (Laufzeit erweiterbar via /add)
+# =========================================================
 TWITCH_MAP = {
     "gnrb": "gamenrockbuddys",
     "steinchen89": "Steinchen89",
@@ -110,30 +119,78 @@ TWITCH_MAP = {
     "hideonbush": "hideonbush1909"
 }
 
+# =========================================================
 # Google Sheets Verbindung
+# =========================================================
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
 GC = gspread.authorize(CREDS)
 
-# Haupt-Workbook
 WB = GC.open("Season #3 - Spielbetrieb")
 SHEET = WB.worksheet("League & Cup Schedule")
 
 def _cell(row, idx0):
     return (row[idx0].strip() if 0 <= idx0 < len(row) else "")
 
-# ---------------------------
-# RESTPROGRAMM / UTILS
-# ---------------------------
+# =========================================================
+# Spaltenkonstanten (1-basiert fürs Sheet, 0-basiert für row[])
+# Für "League & Cup Schedule"
+# =========================================================
+COL_DIVISION = 1        # A
+COL_DATUM = 2           # B
+COL_UHRZEIT = 3         # C
+COL_SPIELER1 = 4        # D
+COL_SPIELER2 = 5        # E
+COL_MODUS = 6           # F
+COL_MULTISTREAM = 7     # G
+COL_RESTREAM = 8        # H
+COL_COM = 9             # I
+COL_CO = 10             # J
+COL_TRACK = 11          # K
+COL_EVENT_ID = 12       # L (neu: Discord Scheduled Event ID)
 
+# Für "<div>.DIV"
+DIV_COL_TIMESTAMP = 2   # Spalte B
+DIV_COL_MODE = 3        # Spalte C
+DIV_COL_RESULT = 5      # Spalte E
+DIV_COL_LINK = 7        # Spalte G
+DIV_COL_REPORTER = 8    # Spalte H
+DIV_COL_LEFT = 4        # Spalte D (1-basiert)
+DIV_COL_MARKER = 5      # Spalte E (1-basiert)
+DIV_COL_RIGHT = 6       # Spalte F (1-basiert)
+DIV_COL_PLAYERS = 12    # Spalte L (1-basiert)
+
+# =========================================================
+# Rollen-Checks
+# =========================================================
+def has_admin_role(member: discord.Member) -> bool:
+    # erst ID prüfen, falls gesetzt
+    if ADMIN_ROLE_ID:
+        admin_id_int = int(ADMIN_ROLE_ID)
+        return any(r.id == admin_id_int for r in member.roles)
+
+    # fallback: Rollenname "Admin"
+    return any(r.name == "Admin" for r in member.roles)
+
+def has_tfl_role(member: discord.Member) -> bool:
+    if TFL_ROLE_ID:
+        tfl_id_int = int(TFL_ROLE_ID)
+        return any(r.id == tfl_id_int for r in member.roles)
+
+    # fallback: Rollenname "Try Force League"
+    return any(r.name == "Try Force League" for r in member.roles)
+
+# =========================================================
+# Hilfsfunktionen Divisionstabellen / Restprogramm
+# =========================================================
 def get_players_for_div(div: str):
     """
     Liest aus dem Sheet '<div>.DIV' die Spielernamen aus Spalte L (ab Zeile 2).
-    Gibt eine eindeutige Liste zurück.
+    Gibt eindeutige Liste zurück.
     """
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
-    values = ws.col_values(12)  # Spalte L = 12 (1-basiert)
+    values = ws.col_values(DIV_COL_PLAYERS)  # Spalte L
     raw_players = [v.strip() for v in values[1:] if v and v.strip() != ""]
     seen = set()
     players_unique = []
@@ -146,10 +203,8 @@ def get_players_for_div(div: str):
 
 def get_players_by_divisions():
     """
-    {
-      "1": ["Komplett", "SpielerA", ...],
-      ...
-    }
+    Struktur { "1": ["Komplett", "SpielerA", ...], ... }
+    Division 6 ist drin, falls du sie brauchst.
     """
     result = {}
     for div in ["1", "2", "3", "4", "5", "6"]:
@@ -166,20 +221,25 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     D = Spieler 1
     E = Marker ("vs" = offen)
     F = Spieler 2
+    Wir geben (row_nr, "L", p1, p2) zurück.
     """
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
     rows = ws.get_all_values()
+
     out = []
     q = player_query.strip().lower()
 
-    D, E, F = 3, 4, 5   # 0-basierte Indizes für Spalten D/E/F
+    # 0-basierte Indizes im rows-Array:
+    D_idx0 = DIV_COL_LEFT - 1    # D -> index 3
+    E_idx0 = DIV_COL_MARKER - 1  # E -> index 4
+    F_idx0 = DIV_COL_RIGHT - 1   # F -> index 5
 
     for r_idx in range(1, len(rows)):  # ab Zeile 2
         row = rows[r_idx]
-        p1 = _cell(row, D)
-        marker = _cell(row, E).lower()
-        p2 = _cell(row, F)
+        p1 = _cell(row, D_idx0)
+        marker = _cell(row, E_idx0).lower()
+        p2 = _cell(row, F_idx0)
 
         if (p1 or p2) and marker == "vs":
             if not q or (q in p1.lower() or q in p2.lower()):
@@ -188,9 +248,6 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     return out
 
 async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
-    """
-    Baut die Ausgabe und schickt sie ephemer.
-    """
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=False)
@@ -302,12 +359,104 @@ class RestprogrammView(discord.ui.View):
             self.player_value
         )
 
-# ---------------------------
-# /termin Modal
-# ---------------------------
+# =========================================================
+# Hilfs-Layer für League-&-Cup-Schedule
+# =========================================================
+
+def sheet_get_rows():
+    """
+    Holt alle Zeilen aus 'League & Cup Schedule' als Liste von Listen.
+    NICHT jedes Mal neu aus der API holen, wenn schon vorhanden:
+    -> hier einfach direkte Abfrage, Aufrufer puffern selber wenn sie mehrfach brauchen.
+    """
+    return SHEET.get_all_values()
+
+def parse_future_matches(rows, today_date: datetime.date, require_restream=None):
+    """
+    rows: Output von sheet_get_rows()
+    today_date: cutoff (nur >= heute)
+    require_restream:
+        True  -> nur Zeilen mit Restream (Spalte H nicht leer)
+        False -> nur Zeilen ohne Restream (Spalte H leer)
+        None  -> egal
+    Rückgabe: Liste Tupel (datum, uhrzeit, division, s1, s2, modus, multistream, restream_code, com, co, track, row_index, event_id)
+    row_index ist 1-basiert fürs Sheet.
+    """
+    out = []
+    for i, row in enumerate(rows[1:], start=2):  # ab Zeile 2
+        # Guard auf Länge
+        if len(row) < COL_MULTISTREAM:
+            continue
+
+        datum = row[COL_DATUM - 1].strip() if len(row) >= COL_DATUM else ""
+        uhrzeit = row[COL_UHRZEIT - 1].strip() if len(row) >= COL_UHRZEIT else ""
+        division = row[COL_DIVISION - 1].strip() if len(row) >= COL_DIVISION else ""
+        s1 = row[COL_SPIELER1 - 1].strip() if len(row) >= COL_SPIELER1 else ""
+        s2 = row[COL_SPIELER2 - 1].strip() if len(row) >= COL_SPIELER2 else ""
+        modus = row[COL_MODUS - 1].strip() if len(row) >= COL_MODUS else ""
+        multistream = row[COL_MULTISTREAM - 1].strip() if len(row) >= COL_MULTISTREAM else ""
+        restream_code = row[COL_RESTREAM - 1].strip() if len(row) >= COL_RESTREAM else ""
+        com_val = row[COL_COM - 1].strip() if len(row) >= COL_COM else ""
+        co_val = row[COL_CO - 1].strip() if len(row) >= COL_CO else ""
+        track_val = row[COL_TRACK - 1].strip() if len(row) >= COL_TRACK else ""
+        event_id = row[COL_EVENT_ID - 1].strip() if len(row) >= COL_EVENT_ID else ""
+
+        # Datum prüfen
+        try:
+            match_date = parse_date(datum)
+        except Exception:
+            continue
+        if match_date < today_date:
+            continue
+
+        # Restream-Filter
+        if require_restream is True and restream_code == "":
+            continue
+        if require_restream is False and restream_code != "":
+            continue
+
+        out.append((
+            datum, uhrzeit, division, s1, s2, modus, multistream,
+            restream_code, com_val, co_val, track_val, i, event_id
+        ))
+
+    # Sort
+    def sort_key(m):
+        return datetime.datetime.strptime(m[0] + " " + m[1], "%d.%m.%Y %H:%M")
+    out.sort(key=sort_key)
+    return out
 
 def normalize_div(name):
     return name.lower().replace(" ", "").replace("-", "").replace(".", "")
+
+def filter_by_division(matches, div_query: str | None):
+    if not div_query:
+        return matches
+    target_norm = normalize_div(div_query)
+    return [
+        m for m in matches
+        if normalize_div(m[2]) == target_norm
+    ]
+
+def matches_today(rows, today_str: str):
+    """
+    Für /today
+    rows: SHEET.get_all_values()
+    today_str: "dd.mm.yyyy"
+    Rückgabe: list[row]
+    """
+    result = []
+    for row in rows[1:]:
+        if len(row) >= COL_MULTISTREAM:
+            if row[COL_DATUM - 1].strip() == today_str:
+                result.append(row)
+    # Sort nach Uhrzeit, dann Division
+    result.sort(key=lambda x: (x[COL_UHRZEIT - 1], x[COL_DIVISION - 1]))
+    return result
+
+# =========================================================
+# /termin Modal
+# =========================================================
 
 class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
     division = discord.ui.TextInput(label="Division", placeholder="z. B. 2. Division", required=True)
@@ -327,23 +476,24 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             start_dt = BERLIN_TZ.localize(datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"))
             end_dt = start_dt + datetime.timedelta(hours=1)
 
-            s1 = self.spieler1.value.strip().lower()
-            s2 = self.spieler2.value.strip().lower()
+            s1_key = self.spieler1.value.strip().lower()
+            s2_key = self.spieler2.value.strip().lower()
 
-            if s1 not in TWITCH_MAP or s2 not in TWITCH_MAP:
+            if s1_key not in TWITCH_MAP or s2_key not in TWITCH_MAP:
                 msg = "❌ Fehlerhafte Spielernamen:"
-                if s1 not in TWITCH_MAP:
+                if s1_key not in TWITCH_MAP:
                     msg += f"\nSpieler 1: `{self.spieler1.value}` nicht erkannt"
-                if s2 not in TWITCH_MAP:
+                if s2_key not in TWITCH_MAP:
                     msg += f"\nSpieler 2: `{self.spieler2.value}` nicht erkannt"
                 await interaction.response.send_message(msg, ephemeral=True)
                 return
 
-            twitch1 = TWITCH_MAP[s1]
-            twitch2 = TWITCH_MAP[s2]
+            twitch1 = TWITCH_MAP[s1_key]
+            twitch2 = TWITCH_MAP[s2_key]
             multistream_url = f"https://multistre.am/{twitch1}/{twitch2}/layout4"
 
-            await interaction.guild.create_scheduled_event(
+            # Event erstellen
+            event = await interaction.guild.create_scheduled_event(
                 name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
                 description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
                 start_time=start_dt,
@@ -353,24 +503,31 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 privacy_level=discord.PrivacyLevel.guild_only
             )
 
+            # Sheet schreiben (inkl. Event-ID in Spalte L)
             row = [
-                self.division.value.strip(),
-                datum_str,
-                uhrzeit_str,
-                self.spieler1.value.strip(),
-                self.spieler2.value.strip(),
-                self.modus.value.strip(),
-                multistream_url
+                self.division.value.strip(),  # A
+                datum_str,                    # B
+                uhrzeit_str,                  # C
+                self.spieler1.value.strip(),  # D
+                self.spieler2.value.strip(),  # E
+                self.modus.value.strip(),     # F
+                multistream_url,              # G
+                "",                           # H (Restream-Kanal noch leer)
+                "",                           # I Com
+                "",                           # J Co
+                "",                           # K Track
+                event.id                      # L Event-ID
             ]
             SHEET.append_row(row)
+
             await interaction.response.send_message("✅ Match wurde eingetragen und Event erstellt!", ephemeral=True)
 
         except Exception as e:
             await interaction.response.send_message(f"❌ Fehler beim Eintragen: {e}", ephemeral=True)
 
-# ---------------------------
+# =========================================================
 # /result Workflow
-# ---------------------------
+# =========================================================
 
 def load_open_games_for_result(div_number: str):
     """
@@ -387,9 +544,9 @@ def load_open_games_for_result(div_number: str):
         if idx == 1:
             continue  # Header
 
-        heim = _cell(row, 3)      # D
-        marker = _cell(row, 4)    # E
-        gast = _cell(row, 5)      # F
+        heim = _cell(row, DIV_COL_LEFT - 1)   # D
+        marker = _cell(row, DIV_COL_MARKER - 1)  # E
+        gast = _cell(row, DIV_COL_RIGHT - 1)  # F
 
         if (heim or gast) and marker.lower() == "vs":
             out.append({
@@ -404,6 +561,33 @@ def get_unique_heimspieler(div_number: str):
     games = load_open_games_for_result(div_number)
     heim_set = {g["heim"] for g in games if g["heim"]}
     return sorted(list(heim_set))
+
+async def batch_update_result(ws, row_index, now_str, mode_val, ergebnis, raceroom_val, reporter_name):
+    """
+    Statt 5x update_cell einzeln wird hier ein Range-Update gemacht.
+    B..H = Timestamp, Mode, [leer für D/E-abhängig], Ergebnis, Link, Reporter
+    Wir schreiben die Zellen B, C, E, G, H (und lassen D/F unverändert).
+    Das Range B..H hat 6 Felder: B,C,D,E,F,G,H -> wir füllen passend.
+    Spalte-Index (1-basiert):
+      B = 2 Timestamp
+      C = 3 Modus
+      D = 4 (lassen wir leer, damit alter Wert bleiben soll? Achtung: Range-Update überschreibt ALLES!)
+    
+    Wir müssen also gezielt einzelne Zellen updaten, um nicht Heim/Gast zu killen.
+    Kompromiss: 2 Batch Updates statt 5 Einzelupdates,
+    via worksheet.batch_update().
+    """
+    reqs = [
+        {
+            "range": f"B{row_index}:C{row_index}",
+            "values": [[now_str, mode_val]]
+        },
+        {
+            "range": f"E{row_index}:H{row_index}",
+            "values": [[ergebnis, "", raceroom_val, reporter_name]]
+        }
+    ]
+    ws.batch_update(reqs)
 
 class ResultDivisionSelect(discord.ui.Select):
     def __init__(self, requester: discord.Member):
@@ -500,12 +684,11 @@ class ResultGameSelect(discord.ui.Select):
     def __init__(self, division: str, heim: str, games, requester: discord.Member):
         self.division = division
         self.heim = heim
-        the_games = games
-        self.games = the_games
+        self.games = games
         self.requester = requester
 
         options = []
-        for idx, g in enumerate(the_games):
+        for idx, g in enumerate(games):
             label = f"{g['heim']} vs {g['auswaerts']} | Zeile {g['row_index']}"
             options.append(
                 discord.SelectOption(
@@ -583,7 +766,6 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
         self.add_item(self.raceroom_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # direkt deferren um 3s-Timeout zu vermeiden
         await interaction.response.defer(ephemeral=True, thinking=False)
 
         winner_val = self.winner_input.value.strip().upper()
@@ -609,17 +791,18 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             now = datetime.datetime.now(BERLIN_TZ)
             now_str = now.strftime("%d.%m.%Y %H:%M")
 
-            # Schreiben:
-            # B (2): Timestamp
-            # C (3): Modus
-            # E (5): Ergebnis
-            # G (7): Raceroom
-            # H (8): Reporter
-            ws.update_cell(self.row_index, 2, now_str)             # B
-            ws.update_cell(self.row_index, 3, mode_val)            # C
-            ws.update_cell(self.row_index, 5, ergebnis)            # E
-            ws.update_cell(self.row_index, 7, raceroom_val)        # G
-            ws.update_cell(self.row_index, 8, str(self.requester)) # H
+            # Batch-Update (Timestamp, Modus, Ergebnis, Raceroom, Reporter)
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                batch_update_result,
+                ws,
+                self.row_index,
+                now_str,
+                mode_val,
+                ergebnis,
+                raceroom_val,
+                str(self.requester)
+            )
 
             msg = (
                 f"✅ Ergebnis gespeichert für Division {self.division}:\n"
@@ -635,15 +818,11 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 ephemeral=True
             )
 
-# ---------------------------
-# /playerexit Workflow
-# ---------------------------
+# =========================================================
+# /playerexit Workflow (Admin)
+# =========================================================
 
 def list_div_players(div_number: str):
-    """
-    Liefert alle Spielernamen aus Spalte L des jeweiligen {div}.DIV Tabs.
-    (das ist dieselbe Quelle wie get_players_for_div)
-    """
     try:
         return get_players_for_div(div_number)
     except Exception:
@@ -652,30 +831,22 @@ def list_div_players(div_number: str):
 def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
     """
     Hard-Drop eines Spielers:
-    - ALLE seine Spiele in der Division werden als Forfeit gegen ihn gewertet,
-      auch bereits eingetragene Ergebnisse.
+    - ALLE seine Spiele in der Division werden als Forfeit gegen ihn gewertet.
     - Links (Spalte D) => Ergebnis 0:2
     - Rechts (Spalte F) => Ergebnis 2:0
-    Es wird überschrieben:
-      B (2): Timestamp jetzt
-      C (3): "FF"
-      E (5): Ergebnis (0:2 / 2:0)
-      G (7): "FF"
-      H (8): Reporter
-    Zusätzlich wird der Name des Spielers in D/F durchgestrichen.
+    Wir nutzen batch_update() um Requests zu verringern.
+    Namen werden durchgestrichen.
     """
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
 
-    now = datetime.datetime.now(BERLIN_TZ)
-    now_str = now.strftime("%d.%m.%Y %H:%M")
-
+    now = datetime.datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+    updates = []
     strike_cells = []
 
-    # durch alle Datenzeilen laufen (ab Zeile 2)
-    for idx, row in enumerate(rows[1:], start=2):
-        left_player  = _cell(row, 3)  # D
-        right_player = _cell(row, 5)  # F
+    for idx, row in enumerate(rows[1:], start=2):  # ab Zeile 2
+        left_player = _cell(row, DIV_COL_LEFT - 1)
+        right_player = _cell(row, DIV_COL_RIGHT - 1)
 
         lp_match = (left_player.lower() == quitting_player.lower()) if left_player else False
         rp_match = (right_player.lower() == quitting_player.lower()) if right_player else False
@@ -683,7 +854,6 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
         if not (lp_match or rp_match):
             continue
 
-        # Ergebnis festlegen
         if lp_match:
             result_val = "0:2"   # quitter links verliert
             strike_cells.append(f"D{idx}")
@@ -691,12 +861,15 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
             result_val = "2:0"   # quitter rechts verliert
             strike_cells.append(f"F{idx}")
 
-        # Sheet überschreiben
-        ws.update_cell(idx, 2, now_str)     # B Timestamp
-        ws.update_cell(idx, 3, "FF")        # C Modus "FF"
-        ws.update_cell(idx, 5, result_val)  # E Ergebnis
-        ws.update_cell(idx, 7, "FF")        # G Raceroom/FF
-        ws.update_cell(idx, 8, reporter)    # H Reporter
+        # Batch Range Updates:
+        # B (Timestamp), C ("FF"), E (Ergebnis), G ("FF"), H (Reporter)
+        updates.append({
+            "range": f"B{idx}:H{idx}",
+            "values": [[now, "FF", "", result_val, "FF", reporter]]
+        })
+
+    if updates:
+        ws.batch_update(updates)
 
     # Namen durchstreichen
     if strike_cells:
@@ -785,7 +958,6 @@ class PlayerExitPlayerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         quitting_player = self.values[0]
 
-        # wir defer'n sofort, weil jetzt viel Sheet-Kram kommt
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=False)
 
@@ -816,24 +988,21 @@ class PlayerExitPlayerSelectView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.add_item(PlayerExitPlayerSelect(division, players, requester))
 
-# ---------------------------
-# /spielplan Workflow (ADMIN ONLY)
-# ---------------------------
+# =========================================================
+# Spielplan / Round Robin
+# =========================================================
 
 def _get_div_ws(div_number: str):
-    """
-    Holt das Worksheet-Objekt für z.B. "1" -> "1.DIV".
-    """
     ws_name = f"{div_number}.DIV"
     return WB.worksheet(ws_name)
 
 def spielplan_read_players(div_number: str):
     """
-    Liest die Spielernamen aus Spalte L (12) ab Zeile 2 des Tabs {div}.DIV.
-    Entfernt Leerzeilen und Duplikate. Reihenfolge bleibt wie im Sheet.
+    Liest Spielernamen aus Spalte L (ab Zeile 2) des Tabs {div}.DIV.
+    Entfernt Duplikate, Reihenfolge wie im Sheet.
     """
     ws = _get_div_ws(div_number)
-    values = ws.col_values(12)  # Spalte L
+    values = ws.col_values(DIV_COL_PLAYERS)
     raw_players = [v.strip() for v in values[1:] if v and v.strip() != ""]
     seen = set()
     result = []
@@ -846,18 +1015,17 @@ def spielplan_read_players(div_number: str):
 
 def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
     """
-    Round-Robin (Circle Method).
-    Gibt eine Liste von Spieltagen zurück.
+    Classic Circle Method.
     Jeder Spieltag ist Liste von (home, away).
-    Jede Person taucht pro Spieltag nur einmal auf.
+    Jeder Spieler max 1x pro Spieltag.
     """
     work = list(players)
     if len(work) % 2 == 1:
-        work.append("BYE")  # BYE = spielfrei, wird nicht eingetragen
+        work.append("BYE")
 
     n = len(work)
     half = n // 2
-    rotation = work[:]  # wir rotieren alle außer das erste Element
+    rotation = work[:]
 
     rounds = []
 
@@ -872,11 +1040,10 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
             p2 = right_rev[i]
             if p1 == "BYE" or p2 == "BYE":
                 continue
-            day_pairs.append((p1, p2))  # p1 Heim, p2 Gast
+            day_pairs.append((p1, p2))
 
         rounds.append(day_pairs)
 
-        # Rotation (klassische Circle-Methode):
         fixed = rotation[0]
         tail = rotation[1:]
         tail = [tail[-1]] + tail[:-1]
@@ -886,8 +1053,8 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
 
 def spielplan_build_matches(players: list[str]) -> list[list[tuple[str, str]]]:
     """
-    Liefert Spieltage mit Hin- und Rückrunde.
-    Rückrunde = Heim/Auswärts getauscht.
+    Hin- und Rückrunde erzeugen.
+    Rückrunde = Heim/Auswärts gedreht.
     """
     hinrunde = spielplan_build_rounds(players)
 
@@ -901,42 +1068,24 @@ def spielplan_find_next_free_row(ws):
     """
     Findet die erste freie Zeile anhand Spalte D (Heimspieler).
     Zeile 1 = Header.
-    Nimmt die erste Zeile ab 2, wo D leer ist.
-    Wenn nix leer ist, hängt unten dran.
     """
     col_d = ws.col_values(4)  # Spalte D
     for idx_1based, val in enumerate(col_d, start=1):
         if idx_1based == 1:
-            continue  # Header überspringen
+            continue
         if val.strip() == "":
             return idx_1based
-    # col_values() endet an der letzten nicht-leeren Stelle.
-    # -> nächste freie Zeile ist len(col_d)+1
-    return len(col_d) + 1
 
-def spielplan_get_last_number(ws):
-    """
-    Alte Logik (wird nicht mehr verwendet für Nummerierung).
-    Ich lasse sie drin, falls du sie woanders brauchst.
-    """
-    col_a = ws.col_values(1)  # Spalte A
-    last_num = 0
-    for v in col_a[1:]:
-        v2 = v.strip()
-        if v2.isdigit():
-            num = int(v2)
-            if num > last_num:
-                last_num = num
-    return last_num
+    return len(col_d) + 1
 
 def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     """
-    Schreibt ALLE Spieltage (Hin+Rück) direkt untereinander.
-    KEINE Leerzeilen zwischen Spieltagen.
-    Spalte A wird pro Block neu ab 1 gezählt.
+    Schreibt ALLE Begegnungen (Hin+Rück) untereinander ohne Leerzeilen.
+    Spalte A beginnt bei 1 und zählt einfach hoch, durchgängig.
+    (Wir resetten NICHT pro "Spieltag", das entspricht deinem aktuellen tatsächlichen Verhalten.)
 
-    Spalten:
-      A = Laufende Nummer (1,2,3,... innerhalb dieses Blocks)
+    Spalten A..I:
+      A = Laufende Nummer (1,2,3,... fortlaufend)
       B = Datum (leer)
       C = Modus (leer)
       D = Heim
@@ -954,10 +1103,10 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     for matches_in_round in rounds:
         for (home, away) in matches_in_round:
             row_data = [""] * 9  # A..I
-            row_data[0] = str(laufende_nummer)  # Nummer
-            row_data[3] = home                  # Heim in D
-            row_data[4] = "vs"                  # "vs" in E
-            row_data[5] = away                  # Gast in F
+            row_data[0] = str(laufende_nummer)
+            row_data[3] = home
+            row_data[4] = "vs"
+            row_data[5] = away
             rows_to_write.append(row_data)
             laufende_nummer += 1
 
@@ -969,79 +1118,9 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     ws.update(cell_range, rows_to_write)
     return len(rows_to_write)
 
-@tree.command(
-    name="spielplan",
-    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden, Spieltage) und schreibt alles ins Sheet"
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(division="Welche Division?")
-@app_commands.choices(
-    division=[
-        app_commands.Choice(name="Division 1", value="1"),
-        app_commands.Choice(name="Division 2", value="2"),
-        app_commands.Choice(name="Division 3", value="3"),
-        app_commands.Choice(name="Division 4", value="4"),
-        app_commands.Choice(name="Division 5", value="5"),
-        app_commands.Choice(name="Division 6", value="6"),
-    ]
-)
-async def spielplan(interaction: discord.Interaction, division: app_commands.Choice[str]):
-    # Admin-Check
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True
-        )
-        return
-
-    is_admin = any(r.name == "Admin" for r in member.roles)
-    if not is_admin:
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True
-        )
-        return
-
-    try:
-        # Spieler holen aus Spalte L
-        players = spielplan_read_players(division.value)
-        if len(players) < 2:
-            await interaction.response.send_message(
-                f"❌ Zu wenig Spieler in Division {division.value} gefunden (Spalte L leer oder nur eine Person).",
-                ephemeral=True
-            )
-            return
-
-        # Spieltage (Hin+Rück)
-        rounds = spielplan_build_matches(players)
-
-        # Schreiben
-        ws = _get_div_ws(division.value)
-        written = spielplan_write(ws, rounds)
-
-        # Preview für den ersten Spieltag
-        preview_round = rounds[0] if rounds else []
-        preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
-        preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
-
-        msg = (
-            f"✅ Spielplan für Division {division.value} erstellt.\n"
-            f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
-            f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
-        )
-
-        await interaction.response.send_message(msg, ephemeral=True)
-
-    except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Fehler bei /spielplan: {e}",
-            ephemeral=True
-        )
-
-# ----------------------
+# =========================================================
 # Slash Commands
-# ----------------------
+# =========================================================
 
 @tree.command(name="termin", description="Erstelle einen neuen Termin + Event + Sheet-Eintrag")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -1052,20 +1131,26 @@ async def termin(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def today(interaction: discord.Interaction):
     try:
-        daten = SHEET.get_all_values()
+        rows = sheet_get_rows()
         heute_str = datetime.datetime.now().strftime("%d.%m.%Y")
-        matches = [row for row in daten[1:] if len(row) >= 7 and row[1].strip() == heute_str]
+        matches = matches_today(rows, heute_str)
 
         if not matches:
             await interaction.response.send_message("📭 Heute sind keine Spiele geplant.", ephemeral=True)
             return
 
-        matches.sort(key=lambda x: (x[2], x[0]))
         embed = discord.Embed(title=f"TFL-Matches am {heute_str}", color=0x00ffcc)
         for row in matches:
+            division = row[COL_DIVISION - 1]
+            uhrzeit = row[COL_UHRZEIT - 1]
+            s1 = row[COL_SPIELER1 - 1]
+            s2 = row[COL_SPIELER2 - 1]
+            modus = row[COL_MODUS - 1]
+            link = row[COL_MULTISTREAM - 1]
+
             embed.add_field(
-                name=f"{row[0]} – {row[2]}",
-                value=f"**{row[3]} vs {row[4]}**\nModus: {row[5]}\n[Multistream]({row[6]})",
+                name=f"{division} – {uhrzeit}",
+                value=f"**{s1} vs {s2}**\nModus: {modus}\n[Multistream]({link})",
                 inline=False
             )
         await interaction.response.send_message(embed=embed)
@@ -1074,32 +1159,23 @@ async def today(interaction: discord.Interaction):
 
 async def zeige_geplante_spiele(interaction: discord.Interaction, filter_division=None):
     try:
-        daten = SHEET.get_all_values()
-        today_d = today_berlin_date()
-        matches = []
-        for row in daten[1:]:
-            if len(row) < 7:
-                continue
-            datum, uhrzeit, division = row[1].strip(), row[2].strip(), row[0].strip()
-            try:
-                if parse_date(datum) < today_d:
-                    continue
-            except Exception:
-                continue
-            if filter_division and normalize_div(division) != normalize_div(filter_division):
-                continue
-            matches.append((datum, uhrzeit, division, row[3], row[4], row[5], row[6]))
+        rows = sheet_get_rows()
+        future_all = parse_future_matches(rows, today_berlin_date(), require_restream=None)
+        matches = filter_by_division(future_all, filter_division)
 
         if not matches:
             await interaction.response.send_message("📭 Keine Spiele gefunden.", ephemeral=True)
             return
 
-        matches.sort(key=lambda x: datetime.datetime.strptime(x[0] + " " + x[1], "%d.%m.%Y %H:%M"))
-        embed = discord.Embed(title=f"{filter_division or 'Alle'} – Geplante Matches", color=0x00ffcc)
+        embed = discord.Embed(
+            title=f"{filter_division or 'Alle'} – Geplante Matches",
+            color=0x00ffcc
+        )
         for m in matches:
+            datum, uhrzeit, division, s1, s2, modus, multistream, *_rest = m
             embed.add_field(
-                name=f"{m[2]} – {m[0]} {m[1]}",
-                value=f"**{m[3]} vs {m[4]}**\nModus: {m[5]}\n[Multistream]({m[6]})",
+                name=f"{division} – {datum} {uhrzeit}",
+                value=f"**{s1} vs {s2}**\nModus: {modus}\n[Multistream]({multistream})",
                 inline=False
             )
         await interaction.response.send_message(embed=embed)
@@ -1146,28 +1222,17 @@ async def cup(interaction: discord.Interaction):
 async def alle(interaction: discord.Interaction):
     await zeige_geplante_spiele(interaction)
 
-DIV_CHOICES = [
-    app_commands.Choice(name="Division 1", value="1"),
-    app_commands.Choice(name="Division 2", value="2"),
-    app_commands.Choice(name="Division 3", value="3"),
-    app_commands.Choice(name="Division 4", value="4"),
-    app_commands.Choice(name="Division 5", value="5"),
-]
-
+# viewall: nur Spiele ohne Restream-Ziel
 @tree.command(name="viewall", description="Zeigt alle kommenden Matches im Listenformat")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def viewall(interaction: discord.Interaction):
     try:
-        daten = SHEET.get_all_values()
-        today_d = today_berlin_date()
-
-        def valid_row(row):
-            try:
-                return len(row) >= 8 and parse_date(row[1].strip()) >= today_d and row[7].strip() == ""
-            except Exception:
-                return False
-
-        matches = [row for row in daten[1:] if valid_row(row)]
+        rows = sheet_get_rows()
+        matches = parse_future_matches(
+            rows,
+            today_berlin_date(),
+            require_restream=False  # H leer
+        )
 
         if not matches:
             await interaction.response.send_message(
@@ -1176,10 +1241,9 @@ async def viewall(interaction: discord.Interaction):
             )
             return
 
-        matches.sort(key=lambda x: datetime.datetime.strptime(x[1] + " " + x[2], "%d.%m.%Y %H:%M"))
         lines = [
-            f"{row[1]} {row[2]} | {row[0]} | {row[3]} vs. {row[4]} | {row[5]}"
-            for row in matches
+            f"{m[0]} {m[1]} | {m[2]} | {m[3]} vs. {m[4]} | {m[5]}"
+            for m in matches
         ]
         msg = "📋 **Geplante Matches ab heute (ohne Restream-Ziel):**\n" + "\n".join(lines)
         await send_long_message_interaction(interaction, msg, ephemeral=False)
@@ -1187,62 +1251,44 @@ async def viewall(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Fehler bei /viewall: {e}", ephemeral=True)
 
+# add: erweitert TWITCH_MAP zur Laufzeit
 @tree.command(name="add", description="Fügt einen neuen Spieler zur Liste hinzu")
 @app_commands.describe(name="Name", twitch="Twitch-Username")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def add(interaction: discord.Interaction, name: str, twitch: str):
-    name = name.strip().lower()
-    twitch = twitch.strip()
-    TWITCH_MAP[name] = twitch
+    key = name.strip().lower()
+    TWITCH_MAP[key] = twitch.strip()
     await interaction.response.send_message(
-        f"✅ `{name}` wurde mit Twitch `{twitch}` hinzugefügt.",
+        f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.",
         ephemeral=True
     )
 
+# showrestreams: nur Spiele MIT Restream-Ziel
 @tree.command(name="showrestreams", description="Zeigt alle geplanten Restreams ab heute (mit Com/Co/Track)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def showrestreams(interaction: discord.Interaction):
     try:
-        daten = SHEET.get_all_values()
-        today_d = today_berlin_date()
+        rows = sheet_get_rows()
+        rows_w_restream = parse_future_matches(
+            rows,
+            today_berlin_date(),
+            require_restream=True  # H NICHT leer
+        )
 
-        def valid_row(row):
-            try:
-                has_date = len(row) >= 2 and parse_date(row[1].strip()) >= today_d
-                has_restream = len(row) >= 8 and row[7].strip() != ""
-                return has_date and has_restream
-            except Exception:
-                return False
-
-        rows = [row for row in daten[1:] if valid_row(row)]
-        if not rows:
+        if not rows_w_restream:
             await interaction.response.send_message(
                 "📭 Keine geplanten Restreams ab heute gefunden.",
                 ephemeral=True
             )
             return
 
-        rows.sort(
-            key=lambda r: datetime.datetime.strptime(
-                r[1].strip() + " " + r[2].strip(),
-                "%d.%m.%Y %H:%M"
-            )
-        )
-
         lines = []
-        for r in rows:
-            datum = r[1].strip()
-            uhr = r[2].strip()
-            kanal = map_sheet_channel_to_label(r[7].strip() if len(r) >= 8 else "")
-            s1 = r[3].strip() if len(r) >= 4 else ""
-            s2 = r[4].strip() if len(r) >= 5 else ""
-            modus = r[5].strip() if len(r) >= 6 else ""
-            com = r[8].strip() if len(r) >= 9 else ""
-            co = r[9].strip() if len(r) >= 10 else ""
-            track = r[10].strip() if len(r) >= 11 else ""
+        for r in rows_w_restream:
+            datum, uhr, _div, s1, s2, modus, _ms, restream_code, com_val, co_val, track_val, _row_idx, _eid = r
+            kanal = map_sheet_channel_to_label(restream_code)
             lines.append(
                 f"{datum} {uhr} | {kanal} | {s1} vs. {s2} | {modus} | "
-                f"Com: {com or '—'} | Co: {co or '—'} | Track: {track or '—'}"
+                f"Com: {com_val or '—'} | Co: {co_val or '—'} | Track: {track_val or '—'}"
             )
 
         msg = "🎥 **Geplante Restreams ab heute:**\n" + "\n".join(lines)
@@ -1252,6 +1298,95 @@ async def showrestreams(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Fehler bei /showrestreams: {e}", ephemeral=True)
 
 # ---------- Restream-Workflow (/pick + Modal) ----------
+
+async def update_sheet_and_event_for_restream(interaction: discord.Interaction, selected_row, code, com_val, co_val, track_val):
+    """
+    selected_row: (wie wir sie aus parse_future_matches bekommen)
+        (datum, uhrzeit, division, s1, s2, modus, multistream, restream_code, com, co, track, row_index, event_id)
+
+    code: "ZSR", "SG1", "SG2"
+    """
+    title_prefix = {
+        "ZSR": "RESTREAM ZSR |",
+        "SG1": "RESTREAM SGD1 |",
+        "SG2": "RESTREAM SGD2 |"
+    }[code]
+    location_url = {
+        "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
+        "SG1": "https://www.twitch.tv/speedgamingdeutsch",
+        "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
+    }[code]
+
+    (datum, uhrzeit, division, s1, s2, modus, multistream, _oldrest, _oc, _oco, _ot, row_index, event_id) = selected_row
+
+    original_title = f"{division} | {s1} vs. {s2} | {modus}"
+    new_title = f"{title_prefix} {original_title}"
+
+    # Event finden:
+    event = None
+    events = await interaction.guild.fetch_scheduled_events()
+
+    # 1) Versuche direkt per event_id (neu)
+    if event_id:
+        try:
+            event_id_int = int(event_id)
+            for ev in events:
+                if ev.id == event_id_int:
+                    event = ev
+                    break
+        except Exception:
+            event = None
+
+    # 2) Fallback auf "alten" Matching-Ansatz, falls kein event gefunden
+    if not event:
+        # exakter Titel?
+        event = discord.utils.get(events, name=original_title)
+
+    # 3) fuzzy fallback: zeitnah + beide Spielernamen im Titel
+    if not event:
+        try:
+            dt = datetime.datetime.strptime(datum + " " + uhrzeit, "%d.%m.%Y %H:%M")
+            start_target = BERLIN_TZ.localize(dt)
+
+            def plausible(ev: discord.ScheduledEvent) -> bool:
+                try:
+                    ev_start = ev.start_time.astimezone(BERLIN_TZ)
+                    within = abs((ev_start - start_target).total_seconds()) <= 90 * 60
+                    s1_l = s1.lower()
+                    s2_l = s2.lower()
+                    name_l = ev.name.lower()
+                    names_ok = (s1_l in name_l) and (s2_l in name_l)
+                    return within and names_ok
+                except Exception:
+                    return False
+
+            candidates = [ev for ev in events if plausible(ev)]
+            if candidates:
+                event = min(
+                    candidates,
+                    key=lambda ev: abs(
+                        (ev.start_time.astimezone(BERLIN_TZ) - start_target).total_seconds()
+                    )
+                )
+        except Exception:
+            pass
+
+    if not event:
+        raise RuntimeError("Kein passendes Event gefunden.")
+
+    # Event updaten
+    await event.edit(name=new_title, location=location_url)
+
+    # Sheet updaten: Spalten H..K (Restream, Com, Co, Track)
+    # sheet_update_range = f"H{row_index}:K{row_index}"
+    # Werte: H=sheet_value, I=com_val, J=co_val, K=track_val
+    sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
+    SHEET.update(
+        f"H{row_index}:K{row_index}",
+        [[sheet_value, com_val, co_val, track_val]]
+    )
+
+    return sheet_value
 
 class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
     restream_input = discord.ui.TextInput(
@@ -1281,7 +1416,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
 
     def __init__(self, selected_row):
         super().__init__()
-        self.selected_row = selected_row  # [division, date, time, spieler1, spieler2, modus]
+        self.selected_row = selected_row  # kompletter Datensatz inkl. row_index & event_id
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=False)
@@ -1295,106 +1430,14 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             )
             return
 
-        title_prefix = {
-            "ZSR": "RESTREAM ZSR |",
-            "SG1": "RESTREAM SGD1 |",
-            "SG2": "RESTREAM SGD2 |"
-        }[code]
-        location_url = {
-            "ZSR": "https://www.twitch.tv/zeldaspeedrunsde",
-            "SG1": "https://www.twitch.tv/speedgamingdeutsch",
-            "SG2": "https://www.twitch.tv/speedgamingdeutsch2",
-        }[code]
-
         com_val = (self.com_input.value or "").strip()
         co_val = (self.co_input.value or "").strip()
         track_val = (self.track_input.value or "").strip()
 
-        original_title = (
-            f"{self.selected_row[0]} | "
-            f"{self.selected_row[3]} vs. {self.selected_row[4]} | "
-            f"{self.selected_row[5]}"
-        )
-        new_title = f"{title_prefix} {original_title}"
-
-        # Events holen
         try:
-            events = await interaction.guild.fetch_scheduled_events()
-        except Exception as e:
-            await interaction.followup.send(
-                f"❌ Konnte Events nicht abrufen: {e}",
-                ephemeral=True
+            sheet_code = await update_sheet_and_event_for_restream(
+                interaction, self.selected_row, code, com_val, co_val, track_val
             )
-            return
-
-        event = discord.utils.get(events, name=original_title)
-
-        if not event:
-            try:
-                dt = datetime.datetime.strptime(
-                    self.selected_row[1].strip() + " " + self.selected_row[2].strip(),
-                    "%d.%m.%Y %H:%M"
-                )
-                start_target = BERLIN_TZ.localize(dt)
-
-                def plausible(ev: discord.ScheduledEvent) -> bool:
-                    try:
-                        ev_start = ev.start_time.astimezone(BERLIN_TZ)
-                        within = abs(
-                            (ev_start - start_target).total_seconds()
-                        ) <= 90 * 60
-                        s1 = self.selected_row[3].strip().lower()
-                        s2 = self.selected_row[4].strip().lower()
-                        name_l = ev.name.lower()
-                        names_ok = (s1 in name_l) and (s2 in name_l)
-                        return within and names_ok
-                    except Exception:
-                        return False
-
-                candidates = [ev for ev in events if plausible(ev)]
-                if candidates:
-                    event = min(
-                        candidates,
-                        key=lambda ev: abs(
-                            (
-                                ev.start_time.astimezone(BERLIN_TZ)
-                                - start_target
-                            ).total_seconds()
-                        )
-                    )
-            except Exception:
-                pass
-
-        if not event:
-            await interaction.followup.send(
-                "❌ Kein passendes Event gefunden.",
-                ephemeral=True
-            )
-            return
-
-        try:
-            # Event updaten
-            await event.edit(name=new_title, location=location_url)
-
-            # Sheet updaten
-            daten = SHEET.get_all_values()
-            sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
-            for idx, row in enumerate(daten):
-                if (
-                    len(row) >= 6 and
-                    row[0].strip() == self.selected_row[0] and
-                    row[1].strip() == self.selected_row[1] and
-                    row[2].strip() == self.selected_row[2] and
-                    row[3].strip() == self.selected_row[3] and
-                    row[4].strip() == self.selected_row[4] and
-                    row[5].strip() == self.selected_row[5]
-                ):
-                    # H (8), I (9), J (10), K (11)
-                    SHEET.update_cell(idx + 1, 8, sheet_value)
-                    SHEET.update_cell(idx + 1, 9, com_val)
-                    SHEET.update_cell(idx + 1, 10, co_val)
-                    SHEET.update_cell(idx + 1, 11, track_val)
-                    break
 
             extra = []
             if com_val:
@@ -1406,7 +1449,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             suffix = (", " + ", ".join(extra)) if extra else ""
 
             await interaction.followup.send(
-                f"✅ Event & Sheet aktualisiert: `{sheet_value}` gesetzt{suffix}.",
+                f"✅ Event & Sheet aktualisiert: `{sheet_code}` gesetzt{suffix}.",
                 ephemeral=True
             )
 
@@ -1420,22 +1463,15 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def pick(interaction: discord.Interaction):
     try:
-        daten = SHEET.get_all_values()
-        today_d = today_berlin_date()
+        rows = sheet_get_rows()
+        # nur Spiele ohne Restream-Ziel, ab heute
+        candidates = parse_future_matches(
+            rows,
+            today_berlin_date(),
+            require_restream=False
+        )
 
-        def valid_row(row):
-            try:
-                return (
-                    len(row) >= 8 and
-                    parse_date(row[1].strip()) >= today_d and
-                    row[7].strip() == ""
-                )
-            except Exception:
-                return False
-
-        matches = [row for row in daten[1:] if valid_row(row)]
-
-        if not matches:
+        if not candidates:
             await interaction.response.send_message(
                 "📭 Keine zukünftigen Spiele ohne Restream-Ziel gefunden.",
                 ephemeral=True
@@ -1447,7 +1483,7 @@ async def pick(interaction: discord.Interaction):
                 super().__init__(timeout=60)
                 options = [
                     discord.SelectOption(
-                        label=f"{r[1]} {r[2]} | {r[0]} | {r[3]} vs {r[4]}",
+                        label=f"{r[0]} {r[1]} | {r[2]} | {r[3]} vs {r[4]}",
                         value=str(i)
                     )
                     for i, r in enumerate(spiele[:25])
@@ -1471,7 +1507,7 @@ async def pick(interaction: discord.Interaction):
 
         await interaction.response.send_message(
             "🎮 Bitte wähle ein Spiel zur Bearbeitung:",
-            view=SpielAuswahl(matches),
+            view=SpielAuswahl(candidates),
             ephemeral=True
         )
 
@@ -1495,7 +1531,6 @@ async def showrestreams_syncinfo(interaction: discord.Interaction):
     )
 
 # --- /result Command (mit Rollen-Check) ---
-
 @tree.command(name="result", description="Ergebnis melden (nur Orga / Try Force League Rolle)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
@@ -1507,8 +1542,7 @@ async def result(interaction: discord.Interaction):
         )
         return
 
-    has_role = any(r.name == "Try Force League" for r in member.roles)
-    if not has_role:
+    if not has_tfl_role(member):
         await interaction.response.send_message(
             "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
             ephemeral=True
@@ -1523,7 +1557,6 @@ async def result(interaction: discord.Interaction):
     )
 
 # --- /playerexit Command (nur Admin) ---
-
 @tree.command(name="playerexit", description="Spieler aus Division austragen und alle Spiele als FF gegen ihn werten (nur Admin)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def playerexit(interaction: discord.Interaction):
@@ -1535,8 +1568,7 @@ async def playerexit(interaction: discord.Interaction):
         )
         return
 
-    is_admin = any(r.name == "Admin" for r in member.roles)
-    if not is_admin:
+    if not has_admin_role(member):
         await interaction.response.send_message(
             "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
             ephemeral=True
@@ -1616,7 +1648,7 @@ async def help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/spielplan",
-        value="➤ Admin: Baut Hin- & Rückrunde (Round Robin, Spieltage). Schreibt alles untereinander ins DIV-Sheet. Spalte A startet bei 1.",
+        value="➤ Admin: Baut Hin- & Rückrunde (Round Robin). Schreibt alles untereinander ins DIV-Sheet. Spalte A startet bei 1.",
         inline=False
     )
     embed.add_field(
@@ -1632,12 +1664,86 @@ async def help(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# /spielplan (Admin only)
+@tree.command(
+    name="spielplan",
+    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden) und schreibt alles ins Sheet"
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(division="Welche Division?")
+@app_commands.choices(
+    division=[
+        app_commands.Choice(name="Division 1", value="1"),
+        app_commands.Choice(name="Division 2", value="2"),
+        app_commands.Choice(name="Division 3", value="3"),
+        app_commands.Choice(name="Division 4", value="4"),
+        app_commands.Choice(name="Division 5", value="5"),
+        app_commands.Choice(name="Division 6", value="6"),
+    ]
+)
+async def spielplan(interaction: discord.Interaction, division: app_commands.Choice[str]):
+    # Admin-Check
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True
+        )
+        return
+
+    if not has_admin_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        players = spielplan_read_players(division.value)
+        if len(players) < 2:
+            await interaction.response.send_message(
+                f"❌ Zu wenig Spieler in Division {division.value} gefunden (Spalte L leer oder nur eine Person).",
+                ephemeral=True
+            )
+            return
+
+        rounds = spielplan_build_matches(players)
+        ws = _get_div_ws(division.value)
+        written = spielplan_write(ws, rounds)
+
+        # Preview erster Spieltag (erster Round-Eintrag aus rounds)
+        preview_round = rounds[0] if rounds else []
+        preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
+        preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
+
+        msg = (
+            f"✅ Spielplan für Division {division.value} erstellt.\n"
+            f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
+            f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
+        )
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Fehler bei /spielplan: {e}",
+            ephemeral=True
+        )
+
+# /sync (Admin)
 @tree.command(name="sync", description="(Admin) Slash-Commands für diese Guild synchronisieren")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def sync_cmd(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or not has_admin_role(member):
+        await interaction.response.send_message(
+            "⛔ Keine Berechtigung.",
+            ephemeral=True
+        )
+        return
+
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
-
         synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
         names = ", ".join(sorted(c.name for c in synced))
 
@@ -1674,54 +1780,30 @@ async def restprogramm(interaction: discord.Interaction):
         except Exception:
             print(f"Fehler in /restprogramm: {e}")
 
-# ---------- Auto-Posts ----------
+# =========================================================
+# Auto-Posts (04:00 / 04:30) – jetzt zeitgesteuert statt minütlich pollend
+# =========================================================
 
-@client.event
-async def on_ready():
-    print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    if not sende_restream_liste.is_running():
-        sende_restream_liste.start()
-    if not sende_showrestreams_liste.is_running():
-        sende_showrestreams_liste.start()
-    print("✅ Slash-Befehle synchronisiert & tägliche Tasks aktiv")
-
-# 04:00 – restreambare Spiele (H leer)
-@tasks.loop(minutes=1)
+@tasks.loop(time=datetime.time(hour=4, minute=0, tzinfo=BERLIN_TZ))
 async def sende_restream_liste():
+    """
+    04:00 – restreambare Spiele (H leer / require_restream=False)
+    """
     try:
-        now = datetime.datetime.now(BERLIN_TZ)
-        if now.hour != 4 or now.minute != 0:
-            return
+        rows = sheet_get_rows()
+        matches = parse_future_matches(
+            rows,
+            today_berlin_date(),
+            require_restream=False
+        )
 
-        daten = SHEET.get_all_values()
-        today_d = now.date()
-
-        def valid_row(row):
-            try:
-                return (
-                    len(row) >= 8 and
-                    parse_date(row[1].strip()) >= today_d and
-                    row[7].strip() == ""
-                )
-            except Exception:
-                return False
-
-        matches = [row for row in daten[1:] if valid_row(row)]
         if not matches:
             return
 
-        matches.sort(
-            key=lambda x: datetime.datetime.strptime(
-                x[1] + " " + x[2],
-                "%d.%m.%Y %H:%M"
-            )
-        )
         lines = [
-            f"{row[1]} {row[2]} | {row[0]} | {row[3]} vs. {row[4]} | {row[5]}"
-            for row in matches
+            f"{m[0]} {m[1]} | {m[2]} | {m[3]} vs. {m[4]} | {m[5]}"
+            for m in matches
         ]
-
         channel = client.get_channel(RESTREAM_CHANNEL_ID)
         if channel:
             msg = (
@@ -1733,50 +1815,29 @@ async def sende_restream_liste():
     except Exception as e:
         print(f"❌ Fehler bei täglicher Ausgabe (04:00): {e}")
 
-# 04:30 – geplante Restreams (H befüllt)
-@tasks.loop(minutes=1)
+@tasks.loop(time=datetime.time(hour=4, minute=30, tzinfo=BERLIN_TZ))
 async def sende_showrestreams_liste():
+    """
+    04:30 – geplante Restreams (H befüllt / require_restream=True)
+    """
     try:
-        now = datetime.datetime.now(BERLIN_TZ)
-        if now.hour != 4 or now.minute != 30:
-            return
-
-        daten = SHEET.get_all_values()
-        today_d = now.date()
-
-        def valid_row(row):
-            try:
-                has_date = len(row) >= 2 and parse_date(row[1].strip()) >= today_d
-                has_restream = len(row) >= 8 and row[7].strip() != ""
-                return has_date and has_restream
-            except Exception:
-                return False
-
-        rows = [row for row in daten[1:] if valid_row(row)]
-        if not rows:
-            return
-
-        rows.sort(
-            key=lambda r: datetime.datetime.strptime(
-                r[1].strip() + " " + r[2].strip(),
-                "%d.%m.%Y %H:%M"
-            )
+        rows = sheet_get_rows()
+        rows_w_restream = parse_future_matches(
+            rows,
+            today_berlin_date(),
+            require_restream=True
         )
 
+        if not rows_w_restream:
+            return
+
         lines = []
-        for r in rows:
-            datum = r[1].strip()
-            uhr = r[2].strip()
-            kanal = map_sheet_channel_to_label(r[7].strip() if len(r) >= 8 else "")
-            s1 = r[3].strip() if len(r) >= 4 else ""
-            s2 = r[4].strip() if len(r) >= 5 else ""
-            modus = r[5].strip() if len(r) >= 6 else ""
-            com = r[8].strip() if len(r) >= 9 else ""
-            co = r[9].strip() if len(r) >= 10 else ""
-            track = r[10].strip() if len(r) >= 11 else ""
+        for r in rows_w_restream:
+            datum, uhr, _div, s1, s2, modus, _multistream, restream_code, com_val, co_val, track_val, _row_idx, _eid = r
+            kanal = map_sheet_channel_to_label(restream_code)
             lines.append(
                 f"{datum} {uhr} | {kanal} | {s1} vs. {s2} | {modus} | "
-                f"Com: {com or '—'} | Co: {co or '—'} | Track: {track or '—'}"
+                f"Com: {com_val or '—'} | Co: {co_val or '—'} | Track: {track_val or '—'}"
             )
 
         channel = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
@@ -1787,4 +1848,29 @@ async def sende_showrestreams_liste():
     except Exception as e:
         print(f"❌ Fehler bei täglicher Restreams-Ausgabe (04:30): {e}")
 
+# =========================================================
+# on_ready
+# =========================================================
+_client_synced_once = False
+
+@client.event
+async def on_ready():
+    global _client_synced_once
+    print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
+
+    if not _client_synced_once:
+        await tree.sync(guild=discord.Object(id=GUILD_ID))
+        _client_synced_once = True
+        print("✅ Slash-Befehle synchronisiert")
+
+    if not sende_restream_liste.is_running():
+        sende_restream_liste.start()
+    if not sende_showrestreams_liste.is_running():
+        sende_showrestreams_liste.start()
+
+    print("✅ tägliche Tasks aktiv")
+
+# =========================================================
+# RUN
+# =========================================================
 client.run(TOKEN)
