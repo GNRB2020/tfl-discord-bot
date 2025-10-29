@@ -1,10 +1,3 @@
-Perfekt. Ich gebe dir jetzt den gesamten Bot-Code inkl. `/spielplan` mit Admin-Check (gleiche Logik wie bei `/playerexit`: Rolle "Admin" muss vorhanden sein).
-
-Ich ändere sonst nichts an deinem bestehenden Verhalten. Nur ergänzt und sauber einsortiert.
-
-Hier ist die komplette Fassung:
-
-````python
 import discord
 import pytz
 from discord import app_commands
@@ -1746,4 +1739,3 @@ async def sende_showrestreams_liste():
         print(f"❌ Fehler bei täglicher Restreams-Ausgabe (04:30): {e}")
 
 client.run(TOKEN)
-````
