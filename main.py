@@ -843,22 +843,70 @@ def spielplan_read_players(div_number: str):
             result.append(p)
     return result
 
-def spielplan_build_matches(players: list[str]) -> list[tuple[str, str]]:
+def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
     """
-    Erstellt Hin- und Rückspiel:
-    A vs B, dann B vs A.
-    Wir halten die Reihenfolge aus der Liste (kein Sort),
-    damit Heim/Auswärts grob der tatsächlichen Division-Listung folgt.
+    Round-Robin (Circle Method).
+    Gibt eine Liste von Spieltagen zurück.
+    Jeder Spieltag ist eine Liste von (home, away).
+    Jede Person taucht pro Spieltag nur einmal auf.
+    Heim/Auswärts ist erstmal p1=Heim, p2=Auswärts.
     """
-    pairs = []
-    n = len(players)
-    for i in range(n):
-        for j in range(i + 1, n):
-            home = players[i]
-            away = players[j]
-            pairs.append((home, away))  # Hinspiel
-            pairs.append((away, home))  # Rückspiel
-    return pairs
+    # Ungerade Anzahl? BYE einfügen.
+    # BYE-Partien kommen nicht ins Sheet.
+    work = list(players)
+    if len(work) % 2 == 1:
+        work.append("BYE")
+
+    n = len(work)
+    half = n // 2
+    rotation = work[:]  # wir rotieren alles außer dem ersten Element
+
+    rounds = []
+
+    for _r in range(n - 1):
+        left_half = rotation[:half]
+        right_half = rotation[half:]
+        right_rev = right_half[::-1]
+
+        day_pairs = []
+        for i in range(half):
+            p1 = left_half[i]
+            p2 = right_rev[i]
+            if p1 == "BYE" or p2 == "BYE":
+                continue
+            day_pairs.append((p1, p2))  # p1 Heim, p2 Gast
+
+        rounds.append(day_pairs)
+
+        # Rotation durchführen:
+        # Fixiere erstes Element, rotiere den Rest nach rechts
+        fixed = rotation[0]
+        tail = rotation[1:]
+        tail = [tail[-1]] + tail[:-1]
+        rotation = [fixed] + tail
+
+    return rounds
+
+def spielplan_build_matches(players: list[str]) -> list[list[tuple[str, str]]]:
+    """
+    Liefert Spieltage mit Hin- und Rückrunde.
+    Rückrunde = gleiche Paarungen, aber Heim/Auswärts getauscht.
+    Rückgabeformat:
+    [
+      [ (H1,A1), (H2,A2), ... ],  # Spieltag 1 Hin
+      [ (H1,A1), ... ],           # Spieltag 2 Hin
+      ...
+      [ (A1,H1), (A2,H2), ... ],  # Spieltag 1 Rück
+      ...
+    ]
+    """
+    hinrunde = spielplan_build_rounds(players)
+
+    rueckrunde = []
+    for day in hinrunde:
+        rueckrunde.append([(away, home) for (home, away) in day])
+
+    return hinrunde + rueckrunde
 
 def spielplan_find_next_free_row(ws):
     """
@@ -887,10 +935,11 @@ def spielplan_get_last_number(ws):
                 last_num = num
     return last_num
 
-def spielplan_write(ws, matches: list[tuple[str, str]]):
+def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     """
-    Schreibt Matches blockweise in das Divisions-Tab.
-    Layout:
+    Schreibt ALLE Spieltage nacheinander untereinander in die Tabelle.
+    Zwischen Spieltagen kommt 1 Leerzeile.
+    Layout pro Zeile:
     A = Nummer
     B = Datum (leer)
     C = Modus (leer)
@@ -905,19 +954,20 @@ def spielplan_write(ws, matches: list[tuple[str, str]]):
     current_num = spielplan_get_last_number(ws)
 
     rows_to_write = []
-    for (home, away) in matches:
-        current_num += 1
-        row_data = [""] * 9  # A..I
-        row_data[0] = str(current_num)  # A Nummer
-        row_data[1] = ""               # B Datum
-        row_data[2] = ""               # C Modus
-        row_data[3] = home             # D Heim
-        row_data[4] = "vs"             # E
-        row_data[5] = away             # F Gast
-        row_data[6] = ""               # G Link
-        row_data[7] = ""               # H Boteingabe
-        row_data[8] = ""               # I Checkbox
-        rows_to_write.append(row_data)
+
+    for round_idx, matches_in_round in enumerate(rounds):
+        for (home, away) in matches_in_round:
+            current_num += 1
+            row_data = [""] * 9  # A..I
+            row_data[0] = str(current_num)  # Nummer
+            row_data[3] = home              # Heim
+            row_data[4] = "vs"
+            row_data[5] = away              # Gast
+            rows_to_write.append(row_data)
+
+        # Leerzeile nach jedem Spieltag außer dem letzten
+        if round_idx != len(rounds) - 1:
+            rows_to_write.append([""] * 9)
 
     if not rows_to_write:
         return 0
@@ -971,20 +1021,22 @@ async def spielplan(interaction: discord.Interaction, division: app_commands.Cho
             )
             return
 
-        # Matches bauen
-        matches = spielplan_build_matches(players)
+        # Matches nach Spieltagen erzeugen (Hin+Rückrunde)
+        rounds = spielplan_build_matches(players)
 
         # Sheet schreiben
         ws = _get_div_ws(division.value)
-        written = spielplan_write(ws, matches)
+        written = spielplan_write(ws, rounds)
 
-        # Vorschau (max. 6 Zeilen)
-        preview_lines = [f"{h} vs {a}" for (h, a) in matches[:6]]
-        preview_txt = "\n".join(preview_lines)
+        # Vorschau (max. 1. Spieltag Hinrunde)
+        preview_round = rounds[0] if rounds else []
+        preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
+        preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
+
         msg = (
             f"✅ Spielplan für Division {division.value} erstellt.\n"
             f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
-            f"Beispiel:\n```{preview_txt}\n...```"
+            f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
         )
 
         await interaction.response.send_message(msg, ephemeral=True)
@@ -1028,7 +1080,7 @@ async def today(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Fehler beim Abrufen: {e}", ephemeral=True)
 
-async def zeige_geplante_spiele(interaction, filter_division=None):
+async def zeige_geplante_spiele(interaction: discord.Interaction, filter_division=None):
     try:
         daten = SHEET.get_all_values()
         today_d = today_berlin_date()
@@ -1086,6 +1138,11 @@ async def div4(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def div5(interaction: discord.Interaction):
     await zeige_geplante_spiele(interaction, "5. Division")
+
+@tree.command(name="div6", description="Alle kommenden Spiele der 6. Division")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def div6(interaction: discord.Interaction):
+    await zeige_geplante_spiele(interaction, "6. Division")
 
 @tree.command(name="cup", description="Alle kommenden Cup-Spiele")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -1562,12 +1619,12 @@ async def help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/playerexit",
-        value="➤ Admin: Spieler aus einer Division entfernen. Alle seine Matches (auch schon gespielte) werden als FF gegen ihn gewertet, Timestamp/Reporter gesetzt und der Name in allen Zeilen durchgestrichen.",
+        value="➤ Admin: Spieler aus einer Division entfernen. Alle seine Matches (auch schon gespielte) werden als FF gegen ihn gewertet, Timestamp/Reporter gesetzt und der Name wird durchgestrichen.",
         inline=False
     )
     embed.add_field(
         name="/spielplan",
-        value="➤ Admin: Baut Hin- & Rückspiel (jeder gg. jeden) aus Spalte L und hängt sie (Heim | vs | Gast) unten an {Div}.DIV.",
+        value="➤ Admin: Baut Hin- & Rückrunde (jeder gg. jeden, Spieltage) aus Spalte L und hängt sie unten in {Div}.DIV.",
         inline=False
     )
     embed.add_field(
