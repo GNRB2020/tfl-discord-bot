@@ -125,12 +125,9 @@ def _cell(row, idx0):
 # --- RESTPROGRAMM / VIEWALL / etc. bestehende Logik ---
 
 def get_players_for_div(div: str):
-    """
-    Holt Spielernamen aus Spalte L eines Tabs '{div}.DIV', ab Zeile 2.
-    """
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
-    values = ws.col_values(12)  # L = 12
+    values = ws.col_values(12)  # Spalte L (1-basiert)
     raw_players = [v.strip() for v in values[1:] if v and v.strip() != ""]
     seen = set()
     players_unique = []
@@ -142,10 +139,6 @@ def get_players_for_div(div: str):
     return players_unique
 
 def get_players_by_divisions():
-    """
-    Für /restprogramm Dropdown:
-    { "1": ["Komplett", "SpielerA", ...], ... }
-    """
     result = {}
     for div in ["1", "2", "3", "4", "5"]:
         try:
@@ -156,15 +149,6 @@ def get_players_by_divisions():
     return result
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
-    """
-    Liest offene Paarungen aus '{div}.DIV'
-
-    Annahme laut Screenshot:
-    Spalte D = Spieler links
-    Spalte E = "vs" oder Ergebnis
-    Spalte F = Spieler rechts
-    Offen = Spalte E == "vs"
-    """
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
     rows = ws.get_all_values()
@@ -186,10 +170,6 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     return out
 
 async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
-    """
-    Antwortet ephemer mit allen offenen Spielen (optional gefiltert auf Spieler).
-    """
-
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=False)
@@ -309,7 +289,6 @@ class RestprogrammView(discord.ui.View):
             self.player_value
         )
 
-# Division-Normalisierung für Vergleich
 def normalize_div(name):
     return name.lower().replace(" ", "").replace("-", "").replace(".", "")
 
@@ -376,10 +355,6 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
 # ---------- /result Hilfsfunktionen ----------
 
 def load_open_games_for_result(div_number: str):
-    """
-    Lädt alle offenen Spiele in {div}.DIV, basierend auf 'vs' in Spalte E.
-    Rückgabe: Liste { row_index, heim, auswaerts }
-    """
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
 
@@ -584,7 +559,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
         self.add_item(self.raceroom_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Sofort defer, damit Discord nicht "Unknown interaction" wirft.
+        # defer direkt, damit wir followup nutzen können (kein Unknown interaction)
         try:
             await interaction.response.defer(ephemeral=True, thinking=False)
         except Exception:
@@ -613,17 +588,17 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             now = datetime.datetime.now(BERLIN_TZ)
             now_str = now.strftime("%d.%m.%Y %H:%M")
 
-            # Schreiben:
-            # B (2): Datum/Timestamp
+            # ### FIX: Eintragen der Werte in die richtigen Spalten
+            # B (2): Datum/Zeit
             # C (3): Modus
-            # E (5): Ergebnis (ersetzt 'vs')
-            # G (7): Link (Raceroom)
-            # H (8): Boteingabe / Reporter
-            ws.update_cell(self.row_index, 2, now_str)             # B
-            ws.update_cell(self.row_index, 3, mode_val)            # C
-            ws.update_cell(self.row_index, 5, ergebnis)            # E
-            ws.update_cell(self.row_index, 7, raceroom_val)        # G
-            ws.update_cell(self.row_index, 8, str(self.requester)) # H
+            # E (5): Ergebnis
+            # G (7): Raceroom-Link
+            # H (8): Reporter (Discord User)
+            ws.update_cell(self.row_index, 2, now_str)              # B
+            ws.update_cell(self.row_index, 3, mode_val)             # C
+            ws.update_cell(self.row_index, 5, ergebnis)             # E
+            ws.update_cell(self.row_index, 7, raceroom_val)         # G
+            ws.update_cell(self.row_index, 8, str(self.requester))  # H
 
             msg = (
                 f"✅ Ergebnis gespeichert für Division {self.division}:\n"
@@ -642,10 +617,6 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
 # ---------- /playerexit Helfer ----------
 
 def list_div_players(div_number: str):
-    """
-    Liest alle Spielernamen aus Spalte L (col 12) des Tabs {div}.DIV,
-    ab Zeile 2. Rückgabe eindeutige Liste sortiert.
-    """
     ws = WB.worksheet(f"{div_number}.DIV")
     colL = ws.col_values(12)
     raw_players = [v.strip() for v in colL[1:] if v and v.strip()]
@@ -654,17 +625,17 @@ def list_div_players(div_number: str):
 
 def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
     """
-    Setzt alle offenen Matches dieses Spielers auf forfeit:
-      - Wenn quitting_player links (Spalte D): Ergebnis "0:2"
-      - Wenn quitting_player rechts (Spalte F): Ergebnis "2:0"
+    Setzt alle offenen Matches des Spielers auf Forfeit:
+      - Spieler ist links (D) -> Ergebnis "0:2"
+      - Spieler ist rechts (F) -> Ergebnis "2:0"
 
     Außerdem:
-      - Timestamp in B
-      - Modus "FF" in C
-      - Raceroom "FF" in G
-      - Reporter in H
-
-    Dann den Spielernamen in D/F im gesamten Sheet durchstreichen (== mit Strikethrough formatieren).
+      - B (2): Timestamp
+      - C (3): "FF"
+      - G (7): "FF"   (Raceroom/Link)
+      - H (8): Reporter
+      - E (5): Ergebnis wie oben
+      - Name in D/F überall durchstreichen
     """
 
     ws = WB.worksheet(f"{div_number}.DIV")
@@ -673,47 +644,42 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
     now = datetime.datetime.now(BERLIN_TZ)
     now_str = now.strftime("%d.%m.%Y %H:%M")
 
-    # Wir brauchen für Formatierung Batch-Updates -> gspread erlaubt format().
-    # Wir sammeln Zellen, die gestrichen werden sollen.
     strike_cells = []
 
-    # Wir iterieren ab Zeile 2 (index 1 in rows / row_number = idx+1)
     for idx, row in enumerate(rows[1:], start=2):
-        left_player = _cell(row, 3)   # D
-        marker      = _cell(row, 4)   # E
-        right_player= _cell(row, 5)   # F
+        left_player  = _cell(row, 3)  # D
+        marker       = _cell(row, 4)  # E
+        right_player = _cell(row, 5)  # F
 
-        # durchstreichen sammeln (wenn dieser Spieler vorkommt, egal ob Spiel offen oder schon entschieden)
+        # fürs Durchstreichen sammeln
         if left_player.lower() == quitting_player.lower():
             strike_cells.append(f"D{idx}")
         if right_player.lower() == quitting_player.lower():
             strike_cells.append(f"F{idx}")
 
-        # nur offene Spiele bearbeiten -> marker == "vs"
+        # nur offene Spiele mit "vs"
         if marker.lower() != "vs":
             continue
 
-        # Ist der Quitter beteiligt?
+        # nur wenn Spieler beteiligt
         if quitting_player.lower() not in (left_player.lower(), right_player.lower()):
             continue
 
-        # Ergebnis bestimmen:
+        # Ergebnis definieren
         if quitting_player.lower() == left_player.lower():
             result_val = "0:2"
         else:
             result_val = "2:0"
 
-        # Sheet schreiben
-        ws.update_cell(idx, 2, now_str)          # B Timestamp
-        ws.update_cell(idx, 3, "FF")             # C Modus
-        ws.update_cell(idx, 5, result_val)       # E Ergebnis
-        ws.update_cell(idx, 7, "FF")             # G Raceroom
-        ws.update_cell(idx, 8, reporter)         # H Reporter
+        # ### FIX: richtige Spaltenzuordnung
+        ws.update_cell(idx, 2, now_str)        # B Timestamp
+        ws.update_cell(idx, 3, "FF")           # C Modus "FF"
+        ws.update_cell(idx, 5, result_val)     # E Ergebnis
+        ws.update_cell(idx, 7, "FF")           # G Link/Raceroom
+        ws.update_cell(idx, 8, reporter)       # H Reporter
 
-    # Namen durchstreichen (Format: textFormat.strikethrough = True)
+    # Namen durchstreichen (textFormat.strikethrough = True)
     if strike_cells:
-        # gruppieren gleicherweise; gspread erlaubt ws.format(range, style)
-        # wir fassen alles in ein Range-Comma-Join geht nicht direkt -> also einzeln
         style = {
             "textFormat": {
                 "strikethrough": True
@@ -723,7 +689,6 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
             try:
                 ws.format(rng, style)
             except Exception:
-                # notfalls ignorieren, wenn Format nicht klappt (z.B. keine Berechtigung)
                 pass
 
 class PlayerExitDivisionSelect(discord.ui.Select):
@@ -800,7 +765,6 @@ class PlayerExitPlayerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         quitting_player = self.values[0]
 
-        # Wir wenden die Änderungen direkt an
         try:
             playerexit_apply(
                 div_number=self.division,
@@ -1028,8 +992,6 @@ async def showrestreams(interaction: discord.Interaction):
 
     except Exception as e:
         await interaction.response.send_message(f"❌ Fehler bei /showrestreams: {e}", ephemeral=True)
-
-# ---------- Restream-Workflow (/pick + Modal) ----------
 
 class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
     restream_input = discord.ui.TextInput(
@@ -1268,8 +1230,6 @@ async def showrestreams_syncinfo(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# --- /result Command (mit Rollen-Check Try Force League) ---
-
 @tree.command(name="result", description="Ergebnis melden (nur Orga / Try Force League Rolle)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
@@ -1295,8 +1255,6 @@ async def result(interaction: discord.Interaction):
         view=view,
         ephemeral=True
     )
-
-# --- /playerexit Command (nur Admin) ---
 
 @tree.command(name="playerexit", description="Spieler aus Liga entfernen (setzt FF-Ergebnisse) [Admin only]")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -1380,12 +1338,12 @@ async def help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/result",
-        value="➤ Ergebnis melden: Division → Heim → Match. Dann Gewinner (1/2/X), Modus, Raceroom eingeben. Bot schreibt Timestamp, Modus, Ergebnis (2:0 / 0:2 / 1:1), Raceroom und deinen Namen in die passende Divisionstabelle.",
+        value="➤ Ergebnis melden: Division → Heim → Match. Dann Gewinner (1/2/X), Modus, Raceroom eingeben. Bot schreibt Timestamp (B), Modus (C), Ergebnis (E), Raceroom-Link (G) und deinen Namen (H) in die Division.",
         inline=False
     )
     embed.add_field(
         name="/playerexit",
-        value="➤ [Admin] Spieler steigt aus. Bot setzt alle offenen Heimspiele des Spielers auf 0:2, alle Auswärtsspiele auf 2:0, trägt Timestamp/FF ein und streicht den Namen im Spielplan durch.",
+        value="➤ [Admin] Spieler steigt aus. Bot setzt alle offenen Spiele dieses Spielers auf FF (0:2 / 2:0), schreibt Timestamp, FF und Reporter in die Zeilen und streicht den Namen durch.",
         inline=False
     )
     embed.add_field(
@@ -1455,7 +1413,6 @@ async def on_ready():
         sende_showrestreams_liste.start()
     print("✅ Slash-Befehle synchronisiert & tägliche Tasks aktiv")
 
-# 04:00 – restreambare Spiele (H leer)
 @tasks.loop(minutes=1)
 async def sende_restream_liste():
     try:
@@ -1502,7 +1459,6 @@ async def sende_restream_liste():
     except Exception as e:
         print(f"❌ Fehler bei täglicher Ausgabe (04:00): {e}")
 
-# 04:30 – geplante Restreams (H befüllt)
 @tasks.loop(minutes=1)
 async def sende_showrestreams_liste():
     try:
