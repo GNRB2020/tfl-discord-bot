@@ -233,7 +233,7 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     F = Spieler 2
     Wir geben (row_nr, "L", p1, p2) zurück.
     """
-    ws_name = f"{div}.DIV}"
+    ws_name = f"{div}.DIV"
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
     rows = ws.get_all_values()
