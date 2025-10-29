@@ -143,8 +143,8 @@ def _cell(row, idx0):
 
 # =========================================================
 # Spaltenkonstanten (1-basiert fürs Sheet, 0-basiert für row[])
-# Für "League & Cup Schedule"
 # =========================================================
+# Für "League & Cup Schedule"
 COL_DIVISION = 1        # A
 COL_DATUM = 2           # B
 COL_UHRZEIT = 3         # C
@@ -233,6 +233,7 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     F = Spieler 2
     Wir geben (row_nr, "L", p1, p2) zurück.
     """
+    ws_name = f"{div}.DIV}"
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
     rows = ws.get_all_values()
@@ -375,24 +376,14 @@ class RestprogrammView(discord.ui.View):
 # Hilfs-Layer für League-&-Cup-Schedule
 # =========================================================
 def sheet_get_rows():
-    """
-    Holt alle Zeilen aus 'League & Cup Schedule' als Liste von Listen.
-    """
     return SHEET.get_all_values()
 
 
 def parse_future_matches(rows, today_date: datetime.date, require_restream=None):
     """
-    rows: Output von sheet_get_rows()
-    today_date: cutoff (nur >= heute)
-    require_restream:
-        True  -> nur Zeilen mit Restream (Spalte H nicht leer)
-        False -> nur Zeilen ohne Restream (Spalte H leer)
-        None  -> egal
     Rückgabe: Liste Tupel:
       (datum, uhrzeit, division, s1, s2, modus, multistream,
        restream_code, com_val, co_val, track_val, row_index, event_id)
-    row_index ist 1-basiert fürs Sheet.
     """
     out = []
     for i, row in enumerate(rows[1:], start=2):  # ab Zeile 2
@@ -446,19 +437,10 @@ def filter_by_division(matches, div_query: str | None):
     if not div_query:
         return matches
     target_norm = normalize_div(div_query)
-    return [
-        m for m in matches
-        if normalize_div(m[2]) == target_norm
-    ]
+    return [m for m in matches if normalize_div(m[2]) == target_norm]
 
 
 def matches_today(rows, today_str: str):
-    """
-    Für /today
-    rows: SHEET.get_all_values()
-    today_str: "dd.mm.yyyy"
-    Rückgabe: list[row]
-    """
     result = []
     for row in rows[1:]:
         if len(row) >= COL_MULTISTREAM:
@@ -577,7 +559,7 @@ def get_unique_heimspieler(div_number: str):
     return sorted(list(heim_set))
 
 
-async def batch_update_result(ws, row_index, now_str, mode_val, ergebnis, raceroom_val, reporter_name):
+def batch_update_result(ws, row_index, now_str, mode_val, ergebnis, raceroom_val, reporter_name):
     """
     Schreibt das Ergebnis ins DIV-Sheet ohne die Spielernamen in D/F zu löschen.
     Setzt:
@@ -587,23 +569,12 @@ async def batch_update_result(ws, row_index, now_str, mode_val, ergebnis, racero
       G = Raceroom-Link
       H = Reporter
     """
+    # gezielte, kleine Updates – D/F bleiben unberührt
     reqs = [
-        {
-            "range": f"B{row_index}:C{row_index}",
-            "values": [[now_str, mode_val]]
-        },
-        {
-            "range": f"E{row_index}:E{row_index}",
-            "values": [[ergebnis]]
-        },
-        {
-            "range": f"G{row_index}:G{row_index}",
-            "values": [[raceroom_val]]
-        },
-        {
-            "range": f"H{row_index}:H{row_index}",
-            "values": [[reporter_name]]
-        }
+        {"range": f"B{row_index}:C{row_index}", "values": [[now_str, mode_val]]},
+        {"range": f"E{row_index}:E{row_index}", "values": [[ergebnis]]},
+        {"range": f"G{row_index}:G{row_index}", "values": [[raceroom_val]]},
+        {"range": f"H{row_index}:H{row_index}", "values": [[reporter_name]]},
     ]
     ws.batch_update(reqs)
 
@@ -673,9 +644,7 @@ class ResultHomeSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         heim = self.values[0]
         alle_spiele = load_open_games_for_result(self.division)
-        spiele_dieses_heims = [
-            g for g in alle_spiele if g["heim"] == heim
-        ]
+        spiele_dieses_heims = [g for g in alle_spiele if g["heim"] == heim]
 
         if not spiele_dieses_heims:
             await interaction.response.edit_message(
@@ -816,8 +785,9 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             now = datetime.datetime.now(BERLIN_TZ)
             now_str = now.strftime("%d.%m.%Y %H:%M")
 
-            # Batch-Update (Timestamp, Modus, Ergebnis, Raceroom, Reporter)
-            await asyncio.get_event_loop().run_in_executor(
+            # Sheets-Updates im Thread ausführen (blockiert nicht die Event-Loop)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
                 None,
                 batch_update_result,
                 ws,
@@ -895,22 +865,10 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
             strike_cells.append(f"F{idx}")
 
         # gezielte Updates
-        batch_reqs.append({
-            "range": f"B{idx}:C{idx}",
-            "values": [[now_str, "FF"]]
-        })
-        batch_reqs.append({
-            "range": f"E{idx}:E{idx}",
-            "values": [[result_val]]
-        })
-        batch_reqs.append({
-            "range": f"G{idx}:G{idx}",
-            "values": [["FF"]]
-        })
-        batch_reqs.append({
-            "range": f"H{idx}:H{idx}",
-            "values": [[reporter]]
-        })
+        batch_reqs.append({"range": f"B{idx}:C{idx}", "values": [[now_str, "FF"]]})
+        batch_reqs.append({"range": f"E{idx}:E{idx}", "values": [[result_val]]})
+        batch_reqs.append({"range": f"G{idx}:G{idx}", "values": [["FF"]]})
+        batch_reqs.append({"range": f"H{idx}:H{idx}", "values": [[reporter]]})
 
     if batch_reqs:
         ws.batch_update(batch_reqs)
@@ -986,10 +944,7 @@ class PlayerExitPlayerSelect(discord.ui.Select):
         self.players = players
         self.requester = requester
 
-        options = [
-            discord.SelectOption(label=p, value=p)
-            for p in players
-        ]
+        options = [discord.SelectOption(label=p, value=p) for p in players]
 
         super().__init__(
             placeholder="Spieler wählen (steigt aus)",
@@ -1653,76 +1608,20 @@ async def help(interaction: discord.Interaction):
         color=0x00ffcc
     )
 
-    embed.add_field(
-        name="/termin",
-        value="➤ Neues Match eintragen, Event erstellen und ins Sheet schreiben",
-        inline=False
-    )
-    embed.add_field(
-        name="/today",
-        value="➤ Zeigt alle heutigen Spiele (Embed mit Link & Modus)",
-        inline=False
-    )
-    embed.add_field(
-        name="/div1 – /div6",
-        value="➤ Zeigt alle geplanten Spiele einer bestimmten Division",
-        inline=False
-    )
-    embed.add_field(
-        name="/cup",
-        value="➤ Zeigt alle geplanten Cup-Spiele",
-        inline=False
-    )
-    embed.add_field(
-        name="/alle",
-        value="➤ Zeigt alle geplanten Spiele ab heute (alle Divisionen & Cup)",
-        inline=False
-    )
-    embed.add_field(
-        name="/viewall",
-        value="➤ Zeigt alle Spiele ohne gesetztes Restream-Ziel im Listenformat",
-        inline=False
-    )
-    embed.add_field(
-        name="/pick /restreams",
-        value="➤ Wähle ein Spiel, setze Restream-Ziel (ZSR, SG1, SG2) + optional Com/Co/Track. Aktualisiert Event & Sheet.",
-        inline=False
-    )
-    embed.add_field(
-        name="/showrestreams",
-        value="➤ Zeigt alle geplanten Restreams ab heute (Kanal, Com, Co, Track).",
-        inline=False
-    )
-    embed.add_field(
-        name="/restprogramm",
-        value="➤ Zeigt alle noch offenen Spiele in einer Division. Dropdown: Division wählen, dann optional Spieler filtern, dann 'Anzeigen'. Ausgabe ephemer nur für dich.",
-        inline=False
-    )
-    embed.add_field(
-        name="/result",
-        value="➤ Ergebnis melden: Division → Heim → Match. Dann Gewinner (1/2/X), Modus, Raceroom eingeben. Bot schreibt Timestamp, Modus, Ergebnis (2:0 / 0:2 / 1:1), Raceroom und deinen Namen in die passende Divisionstabelle.",
-        inline=False
-    )
-    embed.add_field(
-        name="/playerexit",
-        value="➤ Admin: Spieler aus einer Division entfernen. Alle seine Matches (auch schon gespielte) werden als FF gegen ihn gewertet, Timestamp/Reporter gesetzt und der Name wird durchgestrichen.",
-        inline=False
-    )
-    embed.add_field(
-        name="/spielplan",
-        value="➤ Admin: Baut Hin- & Rückrunde (Round Robin). Schreibt alles untereinander ins DIV-Sheet. Spalte A startet bei 1.",
-        inline=False
-    )
-    embed.add_field(
-        name="/add",
-        value="➤ Fügt zur Laufzeit einen neuen Spieler zur TWITCH_MAP hinzu (nicht persistent)",
-        inline=False
-    )
-    embed.add_field(
-        name="🔁 Auto-Posts",
-        value="➤ 04:00: restreambare Spiele • 04:30: geplante Restreams",
-        inline=False
-    )
+    embed.add_field(name="/termin", value="➤ Neues Match eintragen, Event erstellen und ins Sheet schreiben", inline=False)
+    embed.add_field(name="/today", value="➤ Zeigt alle heutigen Spiele (Embed mit Link & Modus)", inline=False)
+    embed.add_field(name="/div1 – /div6", value="➤ Zeigt alle geplanten Spiele einer bestimmten Division", inline=False)
+    embed.add_field(name="/cup", value="➤ Zeigt alle geplanten Cup-Spiele", inline=False)
+    embed.add_field(name="/alle", value="➤ Zeigt alle geplanten Spiele ab heute (alle Divisionen & Cup)", inline=False)
+    embed.add_field(name="/viewall", value="➤ Zeigt alle Spiele ohne gesetztes Restream-Ziel im Listenformat", inline=False)
+    embed.add_field(name="/pick /restreams", value="➤ Setze Restream-Ziel (ZSR, SG1, SG2) + optional Com/Co/Track. Aktualisiert Event & Sheet.", inline=False)
+    embed.add_field(name="/showrestreams", value="➤ Geplante Restreams ab heute (Kanal, Com, Co, Track).", inline=False)
+    embed.add_field(name="/restprogramm", value="➤ Offene Spiele je Division, optional Spieler-Filter.", inline=False)
+    embed.add_field(name="/result", value="➤ Ergebnis melden (Timestamp/Modus/Ergebnis/Raceroom/Reporter ins DIV-Sheet).", inline=False)
+    embed.add_field(name="/playerexit", value="➤ Admin: Spieler austragen (alle Spiele FF gegen ihn, Name durchgestrichen).", inline=False)
+    embed.add_field(name="/spielplan", value="➤ Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet schreiben.", inline=False)
+    embed.add_field(name="/add", value="➤ Spieler → TWITCH_MAP hinzufügen (nicht persistent).", inline=False)
+    embed.add_field(name="🔁 Auto-Posts", value="➤ 04:00: restreambare Spiele • 04:30: geplante Restreams", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
