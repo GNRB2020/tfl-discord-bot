@@ -1,3 +1,10 @@
+Perfekt. Ich gebe dir jetzt den gesamten Bot-Code inkl. `/spielplan` mit Admin-Check (gleiche Logik wie bei `/playerexit`: Rolle "Admin" muss vorhanden sein).
+
+Ich ändere sonst nichts an deinem bestehenden Verhalten. Nur ergänzt und sauber einsortiert.
+
+Hier ist die komplette Fassung:
+
+````python
 import discord
 import pytz
 from discord import app_commands
@@ -660,7 +667,7 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
       C (3): "FF"
       E (5): Ergebnis (0:2 / 2:0)
       G (7): "FF"
-      H (8): Reporter (Discord User)
+      H (8): Reporter
     Zusätzlich wird der Name des Spielers in D/F durchgestrichen.
     """
     ws = WB.worksheet(f"{div_number}.DIV")
@@ -814,6 +821,186 @@ class PlayerExitPlayerSelectView(discord.ui.View):
     def __init__(self, division: str, players, requester: discord.Member, timeout=180):
         super().__init__(timeout=timeout)
         self.add_item(PlayerExitPlayerSelect(division, players, requester))
+
+# ---------------------------
+# /spielplan Workflow (ADMIN ONLY)
+# ---------------------------
+
+def _get_div_ws(div_number: str):
+    """
+    Holt das Worksheet-Objekt für z.B. "1" -> "1.DIV".
+    """
+    ws_name = f"{div_number}.DIV"
+    return WB.worksheet(ws_name)
+
+def spielplan_read_players(div_number: str):
+    """
+    Liest die Spielernamen aus Spalte L (12) ab Zeile 2 des Tabs {div}.DIV.
+    Entfernt Leerzeilen und Duplikate. Reihenfolge bleibt so wie im Sheet.
+    """
+    ws = _get_div_ws(div_number)
+    values = ws.col_values(12)  # Spalte L
+    raw_players = [v.strip() for v in values[1:] if v and v.strip() != ""]
+    seen = set()
+    result = []
+    for p in raw_players:
+        low = p.lower()
+        if low not in seen:
+            seen.add(low)
+            result.append(p)
+    return result
+
+def spielplan_build_matches(players: list[str]) -> list[tuple[str, str]]:
+    """
+    Erstellt Hin- und Rückspiel:
+    A vs B, dann B vs A.
+    Wir halten die Reihenfolge aus der Liste (kein Sort), damit Heim/Auswärts
+    grob der tatsächlichen Division-Listung folgt.
+    """
+    pairs = []
+    n = len(players)
+    for i in range(n):
+        for j in range(i + 1, n):
+            home = players[i]
+            away = players[j]
+            pairs.append((home, away))  # Hinspiel
+            pairs.append((away, home))  # Rückspiel
+    return pairs
+
+def spielplan_find_next_free_row(ws):
+    """
+    Sucht die erste freie Zeile anhand Spalte D (Heimspieler).
+    Start bei Zeile 2 (Zeile 1 = Header).
+    """
+    col_d = ws.col_values(4)  # Spalte D
+    row_idx = 2
+    while row_idx <= len(col_d):
+        if col_d[row_idx - 1].strip() == "":
+            break
+        row_idx += 1
+    return row_idx
+
+def spielplan_get_last_number(ws):
+    """
+    Holt die höchste laufende Nummer aus Spalte A (ab Zeile 2).
+    """
+    col_a = ws.col_values(1)  # Spalte A
+    last_num = 0
+    for v in col_a[1:]:
+        v2 = v.strip()
+        if v2.isdigit():
+            num = int(v2)
+            if num > last_num:
+                last_num = num
+    return last_num
+
+def spielplan_write(ws, matches: list[tuple[str, str]]):
+    """
+    Schreibt Matches blockweise in das Divisions-Tab.
+    Layout:
+    A = Nummer
+    B = Datum (leer)
+    C = Modus (leer)
+    D = Heim
+    E = "vs"
+    F = Gast
+    G = Link (leer)
+    H = Boteingabe (leer)
+    I = Checkbox (leer)
+    """
+    start_row = spielplan_find_next_free_row(ws)
+    current_num = spielplan_get_last_number(ws)
+
+    rows_to_write = []
+    for (home, away) in matches:
+        current_num += 1
+        row_data = [""] * 9  # A..I
+        row_data[0] = str(current_num)  # A Nummer
+        row_data[1] = ""               # B Datum
+        row_data[2] = ""               # C Modus
+        row_data[3] = home             # D Heim
+        row_data[4] = "vs"             # E
+        row_data[5] = away             # F Gast
+        row_data[6] = ""               # G Link
+        row_data[7] = ""               # H Boteingabe
+        row_data[8] = ""               # I Checkbox
+        rows_to_write.append(row_data)
+
+    if not rows_to_write:
+        return 0
+
+    end_row = start_row + len(rows_to_write) - 1
+    cell_range = f"A{start_row}:I{end_row}"
+    ws.update(cell_range, rows_to_write)
+    return len(rows_to_write)
+
+@tree.command(
+    name="spielplan",
+    description="(Admin) Baut Hin- und Rückspielplan 'jeder gegen jeden' und hängt ihn unten an die Divisionstabelle an."
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(division="Welche Division?")
+@app_commands.choices(
+    division=[
+        app_commands.Choice(name="Division 1", value="1"),
+        app_commands.Choice(name="Division 2", value="2"),
+        app_commands.Choice(name="Division 3", value="3"),
+        app_commands.Choice(name="Division 4", value="4"),
+        app_commands.Choice(name="Division 5", value="5"),
+        app_commands.Choice(name="Division 6", value="6"),
+    ]
+)
+async def spielplan(interaction: discord.Interaction, division: app_commands.Choice[str]):
+    # Admin-Check zwingend
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True
+        )
+        return
+
+    is_admin = any(r.name == "Admin" for r in member.roles)
+    if not is_admin:
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        # Spieler lesen
+        players = spielplan_read_players(division.value)
+        if len(players) < 2:
+            await interaction.response.send_message(
+                f"❌ Zu wenig Spieler in Division {division.value} gefunden (Spalte L leer oder nur eine Person).",
+                ephemeral=True
+            )
+            return
+
+        # Matches bauen
+        matches = spielplan_build_matches(players)
+
+        # Sheet schreiben
+        ws = _get_div_ws(division.value)
+        written = spielplan_write(ws, matches)
+
+        # Vorschau (max. 6 Zeilen)
+        preview_lines = [f"{h} vs {a}" for (h, a) in matches[:6]]
+        preview_txt = "\n".join(preview_lines)
+        msg = (
+            f"✅ Spielplan für Division {division.value} erstellt.\n"
+            f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
+            f"Beispiel:\n```{preview_txt}\n...```"
+        )
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Fehler bei /spielplan: {e}",
+            ephemeral=True
+        )
 
 # ----------------------
 # Slash Commands
@@ -1386,6 +1573,11 @@ async def help(interaction: discord.Interaction):
         inline=False
     )
     embed.add_field(
+        name="/spielplan",
+        value="➤ Admin: Baut Hin- & Rückspiel (jeder gegen jeden) aus Spalte L und hängt sie als neue Zeilen (Heim | vs | Gast) unten an {Div}.DIV.",
+        inline=False
+    )
+    embed.add_field(
         name="/add",
         value="➤ Fügt zur Laufzeit einen neuen Spieler zur TWITCH_MAP hinzu (nicht persistent)",
         inline=False
@@ -1554,3 +1746,4 @@ async def sende_showrestreams_liste():
         print(f"❌ Fehler bei täglicher Restreams-Ausgabe (04:30): {e}")
 
 client.run(TOKEN)
+````
