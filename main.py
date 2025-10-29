@@ -122,12 +122,18 @@ SHEET = WB.worksheet("League & Cup Schedule")
 def _cell(row, idx0):
     return (row[idx0].strip() if 0 <= idx0 < len(row) else "")
 
-# --- RESTPROGRAMM / VIEWALL / etc. bestehende Logik ---
+# ---------------------------
+# RESTPROGRAMM / UTILS
+# ---------------------------
 
 def get_players_for_div(div: str):
+    """
+    Liest aus dem Sheet '<div>.DIV' die Spielernamen aus Spalte L (ab Zeile 2).
+    Gibt eine eindeutige Liste zurück.
+    """
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
-    values = ws.col_values(12)  # Spalte L (1-basiert)
+    values = ws.col_values(12)  # Spalte L = 12 (1-basiert)
     raw_players = [v.strip() for v in values[1:] if v and v.strip() != ""]
     seen = set()
     players_unique = []
@@ -139,8 +145,14 @@ def get_players_for_div(div: str):
     return players_unique
 
 def get_players_by_divisions():
+    """
+    {
+      "1": ["Komplett", "SpielerA", ...],
+      ...
+    }
+    """
     result = {}
-    for div in ["1", "2", "3", "4", "5"]:
+    for div in ["1", "2", "3", "4", "5", "6"]:
         try:
             players = get_players_for_div(div)
         except Exception:
@@ -149,27 +161,36 @@ def get_players_by_divisions():
     return result
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
+    """
+    Liest Tab '{div}.DIV' und gibt offene Paarungen zurück.
+    D = Spieler 1
+    E = Marker ("vs" = offen)
+    F = Spieler 2
+    """
     ws_name = f"{div}.DIV"
     ws = WB.worksheet(ws_name)
     rows = ws.get_all_values()
     out = []
     q = player_query.strip().lower()
 
-    D, E, F = 3, 4, 5  # 0-based
+    D, E, F = 3, 4, 5   # 0-basierte Indizes für Spalten D/E/F
 
-    for r_idx in range(1, len(rows)):
+    for r_idx in range(1, len(rows)):  # ab Zeile 2
         row = rows[r_idx]
         p1 = _cell(row, D)
         marker = _cell(row, E).lower()
         p2 = _cell(row, F)
 
         if (p1 or p2) and marker == "vs":
-            if (not q) or (q in p1.lower() or q in p2.lower()):
+            if not q or (q in p1.lower() or q in p2.lower()):
                 out.append((r_idx + 1, "L", p1, p2))
 
     return out
 
 async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
+    """
+    Baut die Ausgabe und schickt sie ephemer.
+    """
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=False)
@@ -181,11 +202,7 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
             txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
             if effective_filter:
                 txt += f" (Filter: *{effective_filter}*)"
-
-            await interaction.followup.send(
-                txt,
-                ephemeral=True
-            )
+            await interaction.followup.send(txt, ephemeral=True)
             return
 
         lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
@@ -201,10 +218,7 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
         if len(matches) > 80:
             lines.append(f"… und {len(matches) - 80} weitere.")
 
-        await interaction.followup.send(
-            "\n".join(lines),
-            ephemeral=True
-        )
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     except Exception as e:
         try:
@@ -230,15 +244,14 @@ class RestprogrammView(discord.ui.View):
     class DivSelect(discord.ui.Select):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
-
             options = [
                 discord.SelectOption(label="Division 1", value="1"),
                 discord.SelectOption(label="Division 2", value="2"),
                 discord.SelectOption(label="Division 3", value="3"),
                 discord.SelectOption(label="Division 4", value="4"),
                 discord.SelectOption(label="Division 5", value="5"),
+                discord.SelectOption(label="Division 6", value="6"),
             ]
-
             super().__init__(
                 placeholder="Division wählen …",
                 min_values=1,
@@ -289,10 +302,13 @@ class RestprogrammView(discord.ui.View):
             self.player_value
         )
 
+# ---------------------------
+# /termin Modal
+# ---------------------------
+
 def normalize_div(name):
     return name.lower().replace(" ", "").replace("-", "").replace(".", "")
 
-# Modal für Termin-Eingabe
 class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
     division = discord.ui.TextInput(label="Division", placeholder="z. B. 2. Division", required=True)
     datetime_str = discord.ui.TextInput(label="Datum & Uhrzeit", placeholder="DD.MM.YYYY HH:MM", required=True)
@@ -352,9 +368,17 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
         except Exception as e:
             await interaction.response.send_message(f"❌ Fehler beim Eintragen: {e}", ephemeral=True)
 
-# ---------- /result Hilfsfunktionen ----------
+# ---------------------------
+# /result Workflow
+# ---------------------------
 
 def load_open_games_for_result(div_number: str):
+    """
+    Lädt offene Spiele aus {div}.DIV nach derselben Logik wie /restprogramm:
+    D: Heim
+    E: Marker ("vs" = offen)
+    F: Auswärts
+    """
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
 
@@ -362,15 +386,18 @@ def load_open_games_for_result(div_number: str):
     for idx, row in enumerate(rows, start=1):
         if idx == 1:
             continue  # Header
+
         heim = _cell(row, 3)      # D
         marker = _cell(row, 4)    # E
         gast = _cell(row, 5)      # F
+
         if (heim or gast) and marker.lower() == "vs":
             out.append({
                 "row_index": idx,
                 "heim": heim,
                 "auswaerts": gast
             })
+
     return out
 
 def get_unique_heimspieler(div_number: str):
@@ -398,7 +425,6 @@ class ResultDivisionSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         division = self.values[0]
-
         heimspieler_liste = get_unique_heimspieler(division)
 
         if not heimspieler_liste:
@@ -428,12 +454,10 @@ class ResultHomeSelect(discord.ui.Select):
     def __init__(self, division: str, heimspieler_list, requester: discord.Member):
         self.division = division
         self.requester = requester
-
         options = [
             discord.SelectOption(label=spieler, value=spieler)
             for spieler in heimspieler_list
         ]
-
         super().__init__(
             placeholder="Wer hat Heimrecht?",
             min_values=1,
@@ -443,7 +467,6 @@ class ResultHomeSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         heim = self.values[0]
-
         alle_spiele = load_open_games_for_result(self.division)
         spiele_dieses_heims = [
             g for g in alle_spiele if g["heim"] == heim
@@ -559,11 +582,8 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
         self.add_item(self.raceroom_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # defer direkt, damit wir followup nutzen können (kein Unknown interaction)
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=False)
-        except Exception:
-            pass
+        # direkt deferren um 3s-Timeout zu vermeiden
+        await interaction.response.defer(ephemeral=True, thinking=False)
 
         winner_val = self.winner_input.value.strip().upper()
         mode_val = self.mode_input.value.strip()
@@ -588,17 +608,17 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             now = datetime.datetime.now(BERLIN_TZ)
             now_str = now.strftime("%d.%m.%Y %H:%M")
 
-            # ### FIX: Eintragen der Werte in die richtigen Spalten
-            # B (2): Datum/Zeit
+            # Schreiben:
+            # B (2): Timestamp
             # C (3): Modus
             # E (5): Ergebnis
-            # G (7): Raceroom-Link
-            # H (8): Reporter (Discord User)
-            ws.update_cell(self.row_index, 2, now_str)              # B
-            ws.update_cell(self.row_index, 3, mode_val)             # C
-            ws.update_cell(self.row_index, 5, ergebnis)             # E
-            ws.update_cell(self.row_index, 7, raceroom_val)         # G
-            ws.update_cell(self.row_index, 8, str(self.requester))  # H
+            # G (7): Raceroom
+            # H (8): Reporter
+            ws.update_cell(self.row_index, 2, now_str)             # B
+            ws.update_cell(self.row_index, 3, mode_val)            # C
+            ws.update_cell(self.row_index, 5, ergebnis)            # E
+            ws.update_cell(self.row_index, 7, raceroom_val)        # G
+            ws.update_cell(self.row_index, 8, str(self.requester)) # H
 
             msg = (
                 f"✅ Ergebnis gespeichert für Division {self.division}:\n"
@@ -614,30 +634,35 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 ephemeral=True
             )
 
-# ---------- /playerexit Helfer ----------
+# ---------------------------
+# /playerexit Workflow
+# ---------------------------
 
 def list_div_players(div_number: str):
-    ws = WB.worksheet(f"{div_number}.DIV")
-    colL = ws.col_values(12)
-    raw_players = [v.strip() for v in colL[1:] if v and v.strip()]
-    uniq = sorted({p for p in raw_players})
-    return uniq
+    """
+    Liefert alle Spielernamen aus Spalte L des jeweiligen {div}.DIV Tabs.
+    (das ist dieselbe Quelle wie get_players_for_div)
+    """
+    try:
+        return get_players_for_div(div_number)
+    except Exception:
+        return []
 
 def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
     """
-    Setzt alle offenen Matches des Spielers auf Forfeit:
-      - Spieler ist links (D) -> Ergebnis "0:2"
-      - Spieler ist rechts (F) -> Ergebnis "2:0"
-
-    Außerdem:
-      - B (2): Timestamp
-      - C (3): "FF"
-      - G (7): "FF"   (Raceroom/Link)
-      - H (8): Reporter
-      - E (5): Ergebnis wie oben
-      - Name in D/F überall durchstreichen
+    Hard-Drop eines Spielers:
+    - ALLE seine Spiele in der Division werden als Forfeit gegen ihn gewertet,
+      auch bereits eingetragene Ergebnisse.
+    - Links (Spalte D) => Ergebnis 0:2
+    - Rechts (Spalte F) => Ergebnis 2:0
+    Es wird überschrieben:
+      B (2): Timestamp jetzt
+      C (3): "FF"
+      E (5): Ergebnis (0:2 / 2:0)
+      G (7): "FF"
+      H (8): Reporter (Discord User)
+    Zusätzlich wird der Name des Spielers in D/F durchgestrichen.
     """
-
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
 
@@ -646,39 +671,33 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
 
     strike_cells = []
 
+    # durch alle Datenzeilen laufen (ab Zeile 2)
     for idx, row in enumerate(rows[1:], start=2):
         left_player  = _cell(row, 3)  # D
-        marker       = _cell(row, 4)  # E
         right_player = _cell(row, 5)  # F
 
-        # fürs Durchstreichen sammeln
-        if left_player.lower() == quitting_player.lower():
+        lp_match = (left_player.lower() == quitting_player.lower()) if left_player else False
+        rp_match = (right_player.lower() == quitting_player.lower()) if right_player else False
+
+        if not (lp_match or rp_match):
+            continue
+
+        # Ergebnis festlegen
+        if lp_match:
+            result_val = "0:2"   # quitter links verliert
             strike_cells.append(f"D{idx}")
-        if right_player.lower() == quitting_player.lower():
+        else:
+            result_val = "2:0"   # quitter rechts verliert
             strike_cells.append(f"F{idx}")
 
-        # nur offene Spiele mit "vs"
-        if marker.lower() != "vs":
-            continue
+        # Sheet überschreiben
+        ws.update_cell(idx, 2, now_str)     # B Timestamp
+        ws.update_cell(idx, 3, "FF")        # C Modus "FF"
+        ws.update_cell(idx, 5, result_val)  # E Ergebnis
+        ws.update_cell(idx, 7, "FF")        # G Raceroom/FF
+        ws.update_cell(idx, 8, reporter)    # H Reporter
 
-        # nur wenn Spieler beteiligt
-        if quitting_player.lower() not in (left_player.lower(), right_player.lower()):
-            continue
-
-        # Ergebnis definieren
-        if quitting_player.lower() == left_player.lower():
-            result_val = "0:2"
-        else:
-            result_val = "2:0"
-
-        # ### FIX: richtige Spaltenzuordnung
-        ws.update_cell(idx, 2, now_str)        # B Timestamp
-        ws.update_cell(idx, 3, "FF")           # C Modus "FF"
-        ws.update_cell(idx, 5, result_val)     # E Ergebnis
-        ws.update_cell(idx, 7, "FF")           # G Link/Raceroom
-        ws.update_cell(idx, 8, reporter)       # H Reporter
-
-    # Namen durchstreichen (textFormat.strikethrough = True)
+    # Namen durchstreichen
     if strike_cells:
         style = {
             "textFormat": {
@@ -765,20 +784,30 @@ class PlayerExitPlayerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         quitting_player = self.values[0]
 
+        # wir defer'n sofort, weil jetzt viel Sheet-Kram kommt
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=False)
+
         try:
             playerexit_apply(
                 div_number=self.division,
                 quitting_player=quitting_player,
                 reporter=str(self.requester)
             )
-            await interaction.response.edit_message(
-                content=f"✅ `{quitting_player}` in Division {self.division} ausgetragen.\nAlle offenen Spiele gewertet (FF) und Name durchgestrichen.",
-                view=None
+
+            await interaction.followup.send(
+                content=(
+                    f"✅ `{quitting_player}` in Division {self.division} ausgetragen.\n"
+                    f"Alle Spiele (auch bereits gespielte) wurden als FF gegen ihn gewertet "
+                    f"und der Name wurde durchgestrichen."
+                ),
+                ephemeral=True
             )
+
         except Exception as e:
-            await interaction.response.edit_message(
+            await interaction.followup.send(
                 content=f"❌ Fehler beim Austragen: {e}",
-                view=None
+                ephemeral=True
             )
 
 class PlayerExitPlayerSelectView(discord.ui.View):
@@ -993,6 +1022,8 @@ async def showrestreams(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Fehler bei /showrestreams: {e}", ephemeral=True)
 
+# ---------- Restream-Workflow (/pick + Modal) ----------
+
 class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
     restream_input = discord.ui.TextInput(
         label="Restream Ziel (ZSR, SG1 oder SG2)",
@@ -1024,7 +1055,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         self.selected_row = selected_row  # [division, date, time, spieler1, spieler2, modus]
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=False)
 
         code = self.restream_input.value.strip().upper()
         allowed = {"ZSR", "SG1", "SG2"}
@@ -1057,6 +1088,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
         )
         new_title = f"{title_prefix} {original_title}"
 
+        # Events holen
         try:
             events = await interaction.guild.fetch_scheduled_events()
         except Exception as e:
@@ -1112,8 +1144,10 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
             return
 
         try:
+            # Event updaten
             await event.edit(name=new_title, location=location_url)
 
+            # Sheet updaten
             daten = SHEET.get_all_values()
             sheet_value = {"ZSR": "ZSR", "SG1": "SGD1", "SG2": "SGD2"}[code]
             for idx, row in enumerate(daten):
@@ -1126,6 +1160,7 @@ class RestreamModal(discord.ui.Modal, title="Restream-Optionen festlegen"):
                     row[4].strip() == self.selected_row[4] and
                     row[5].strip() == self.selected_row[5]
                 ):
+                    # H (8), I (9), J (10), K (11)
                     SHEET.update_cell(idx + 1, 8, sheet_value)
                     SHEET.update_cell(idx + 1, 9, com_val)
                     SHEET.update_cell(idx + 1, 10, co_val)
@@ -1230,6 +1265,8 @@ async def showrestreams_syncinfo(interaction: discord.Interaction):
         ephemeral=True
     )
 
+# --- /result Command (mit Rollen-Check) ---
+
 @tree.command(name="result", description="Ergebnis melden (nur Orga / Try Force League Rolle)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
@@ -1256,7 +1293,9 @@ async def result(interaction: discord.Interaction):
         ephemeral=True
     )
 
-@tree.command(name="playerexit", description="Spieler aus Liga entfernen (setzt FF-Ergebnisse) [Admin only]")
+# --- /playerexit Command (nur Admin) ---
+
+@tree.command(name="playerexit", description="Spieler aus Division austragen und alle Spiele als FF gegen ihn werten (nur Admin)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def playerexit(interaction: discord.Interaction):
     member = interaction.user
@@ -1267,8 +1306,8 @@ async def playerexit(interaction: discord.Interaction):
         )
         return
 
-    has_role = any(r.name == "Admin" for r in member.roles)
-    if not has_role:
+    is_admin = any(r.name == "Admin" for r in member.roles)
+    if not is_admin:
         await interaction.response.send_message(
             "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
             ephemeral=True
@@ -1277,7 +1316,7 @@ async def playerexit(interaction: discord.Interaction):
 
     view = PlayerExitDivisionSelectView(requester=member)
     await interaction.response.send_message(
-        "Division wählen, dann Spieler wählen. Alle offenen Spiele werden als FF gewertet.",
+        "📤 Spieler-Exit starten:\nBitte Division auswählen.",
         view=view,
         ephemeral=True
     )
@@ -1302,7 +1341,7 @@ async def help(interaction: discord.Interaction):
         inline=False
     )
     embed.add_field(
-        name="/div1 – /div5",
+        name="/div1 – /div6",
         value="➤ Zeigt alle geplanten Spiele einer bestimmten Division",
         inline=False
     )
@@ -1338,12 +1377,12 @@ async def help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/result",
-        value="➤ Ergebnis melden: Division → Heim → Match. Dann Gewinner (1/2/X), Modus, Raceroom eingeben. Bot schreibt Timestamp (B), Modus (C), Ergebnis (E), Raceroom-Link (G) und deinen Namen (H) in die Division.",
+        value="➤ Ergebnis melden: Division → Heim → Match. Dann Gewinner (1/2/X), Modus, Raceroom eingeben. Bot schreibt Timestamp, Modus, Ergebnis (2:0 / 0:2 / 1:1), Raceroom und deinen Namen in die passende Divisionstabelle.",
         inline=False
     )
     embed.add_field(
         name="/playerexit",
-        value="➤ [Admin] Spieler steigt aus. Bot setzt alle offenen Spiele dieses Spielers auf FF (0:2 / 2:0), schreibt Timestamp, FF und Reporter in die Zeilen und streicht den Namen durch.",
+        value="➤ Admin: Spieler aus einer Division entfernen. Alle seine Matches (auch schon gespielte) werden als FF gegen ihn gewertet, Timestamp/Reporter gesetzt und der Name in allen Zeilen durchgestrichen.",
         inline=False
     )
     embed.add_field(
@@ -1413,6 +1452,7 @@ async def on_ready():
         sende_showrestreams_liste.start()
     print("✅ Slash-Befehle synchronisiert & tägliche Tasks aktiv")
 
+# 04:00 – restreambare Spiele (H leer)
 @tasks.loop(minutes=1)
 async def sende_restream_liste():
     try:
@@ -1459,6 +1499,7 @@ async def sende_restream_liste():
     except Exception as e:
         print(f"❌ Fehler bei täglicher Ausgabe (04:00): {e}")
 
+# 04:30 – geplante Restreams (H befüllt)
 @tasks.loop(minutes=1)
 async def sende_showrestreams_liste():
     try:
