@@ -374,7 +374,7 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
 
 def load_open_games_for_result(div_number: str):
     """
-    Lädt offene Spiele aus {div}.DIV nach derselben Logik wie /restprogramm:
+    Lädt offene Spiele aus {div}.DIV:
     D: Heim
     E: Marker ("vs" = offen)
     F: Auswärts
@@ -847,8 +847,8 @@ def spielplan_build_matches(players: list[str]) -> list[tuple[str, str]]:
     """
     Erstellt Hin- und Rückspiel:
     A vs B, dann B vs A.
-    Wir halten die Reihenfolge aus der Liste (kein Sort), damit Heim/Auswärts
-    grob der tatsächlichen Division-Listung folgt.
+    Wir halten die Reihenfolge aus der Liste (kein Sort),
+    damit Heim/Auswärts grob der tatsächlichen Division-Listung folgt.
     """
     pairs = []
     n = len(players)
@@ -929,7 +929,7 @@ def spielplan_write(ws, matches: list[tuple[str, str]]):
 
 @tree.command(
     name="spielplan",
-    description="(Admin) Baut Hin- und Rückspielplan 'jeder gegen jeden' und hängt ihn unten an die Divisionstabelle an."
+    description="(Admin) Generiert Hin-/Rückspielplan für eine Division und schreibt ihn ins Sheet"
 )
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(division="Welche Division?")
@@ -1567,7 +1567,7 @@ async def help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/spielplan",
-        value="➤ Admin: Baut Hin- & Rückspiel (jeder gegen jeden) aus Spalte L und hängt sie als neue Zeilen (Heim | vs | Gast) unten an {Div}.DIV.",
+        value="➤ Admin: Baut Hin- & Rückspiel (jeder gg. jeden) aus Spalte L und hängt sie (Heim | vs | Gast) unten an {Div}.DIV.",
         inline=False
     )
     embed.add_field(
