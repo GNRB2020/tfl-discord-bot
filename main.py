@@ -500,11 +500,12 @@ class ResultGameSelect(discord.ui.Select):
     def __init__(self, division: str, heim: str, games, requester: discord.Member):
         self.division = division
         self.heim = heim
-        self.games = games
+        the_games = games
+        self.games = the_games
         self.requester = requester
 
         options = []
-        for idx, g in enumerate(games):
+        for idx, g in enumerate(the_games):
             label = f"{g['heim']} vs {g['auswaerts']} | Zeile {g['row_index']}"
             options.append(
                 discord.SelectOption(
@@ -829,7 +830,7 @@ def _get_div_ws(div_number: str):
 def spielplan_read_players(div_number: str):
     """
     Liest die Spielernamen aus Spalte L (12) ab Zeile 2 des Tabs {div}.DIV.
-    Entfernt Leerzeilen und Duplikate. Reihenfolge bleibt so wie im Sheet.
+    Entfernt Leerzeilen und Duplikate. Reihenfolge bleibt wie im Sheet.
     """
     ws = _get_div_ws(div_number)
     values = ws.col_values(12)  # Spalte L
@@ -847,19 +848,16 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
     """
     Round-Robin (Circle Method).
     Gibt eine Liste von Spieltagen zurück.
-    Jeder Spieltag ist eine Liste von (home, away).
+    Jeder Spieltag ist Liste von (home, away).
     Jede Person taucht pro Spieltag nur einmal auf.
-    Heim/Auswärts ist erstmal p1=Heim, p2=Auswärts.
     """
-    # Ungerade Anzahl? BYE einfügen.
-    # BYE-Partien kommen nicht ins Sheet.
     work = list(players)
     if len(work) % 2 == 1:
-        work.append("BYE")
+        work.append("BYE")  # BYE = spielfrei, wird nicht eingetragen
 
     n = len(work)
     half = n // 2
-    rotation = work[:]  # wir rotieren alles außer dem ersten Element
+    rotation = work[:]  # wir rotieren alle außer das erste Element
 
     rounds = []
 
@@ -878,8 +876,7 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
 
         rounds.append(day_pairs)
 
-        # Rotation durchführen:
-        # Fixiere erstes Element, rotiere den Rest nach rechts
+        # Rotation (klassische Circle-Methode):
         fixed = rotation[0]
         tail = rotation[1:]
         tail = [tail[-1]] + tail[:-1]
@@ -890,15 +887,7 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
 def spielplan_build_matches(players: list[str]) -> list[list[tuple[str, str]]]:
     """
     Liefert Spieltage mit Hin- und Rückrunde.
-    Rückrunde = gleiche Paarungen, aber Heim/Auswärts getauscht.
-    Rückgabeformat:
-    [
-      [ (H1,A1), (H2,A2), ... ],  # Spieltag 1 Hin
-      [ (H1,A1), ... ],           # Spieltag 2 Hin
-      ...
-      [ (A1,H1), (A2,H2), ... ],  # Spieltag 1 Rück
-      ...
-    ]
+    Rückrunde = Heim/Auswärts getauscht.
     """
     hinrunde = spielplan_build_rounds(players)
 
@@ -910,20 +899,25 @@ def spielplan_build_matches(players: list[str]) -> list[list[tuple[str, str]]]:
 
 def spielplan_find_next_free_row(ws):
     """
-    Sucht die erste freie Zeile anhand Spalte D (Heimspieler).
-    Start bei Zeile 2 (Zeile 1 = Header).
+    Findet die erste freie Zeile anhand Spalte D (Heimspieler).
+    Zeile 1 = Header.
+    Nimmt die erste Zeile ab 2, wo D leer ist.
+    Wenn nix leer ist, hängt unten dran.
     """
     col_d = ws.col_values(4)  # Spalte D
-    row_idx = 2
-    while row_idx <= len(col_d):
-        if col_d[row_idx - 1].strip() == "":
-            break
-        row_idx += 1
-    return row_idx
+    for idx_1based, val in enumerate(col_d, start=1):
+        if idx_1based == 1:
+            continue  # Header überspringen
+        if val.strip() == "":
+            return idx_1based
+    # col_values() endet an der letzten nicht-leeren Stelle.
+    # -> nächste freie Zeile ist len(col_d)+1
+    return len(col_d) + 1
 
 def spielplan_get_last_number(ws):
     """
-    Holt die höchste laufende Nummer aus Spalte A (ab Zeile 2).
+    Alte Logik (wird nicht mehr verwendet für Nummerierung).
+    Ich lasse sie drin, falls du sie woanders brauchst.
     """
     col_a = ws.col_values(1)  # Spalte A
     last_num = 0
@@ -937,37 +931,35 @@ def spielplan_get_last_number(ws):
 
 def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     """
-    Schreibt ALLE Spieltage nacheinander untereinander in die Tabelle.
-    Zwischen Spieltagen kommt 1 Leerzeile.
-    Layout pro Zeile:
-    A = Nummer
-    B = Datum (leer)
-    C = Modus (leer)
-    D = Heim
-    E = "vs"
-    F = Gast
-    G = Link (leer)
-    H = Boteingabe (leer)
-    I = Checkbox (leer)
+    Schreibt ALLE Spieltage (Hin+Rück) direkt untereinander.
+    KEINE Leerzeilen zwischen Spieltagen.
+    Spalte A wird pro Block neu ab 1 gezählt.
+
+    Spalten:
+      A = Laufende Nummer (1,2,3,... innerhalb dieses Blocks)
+      B = Datum (leer)
+      C = Modus (leer)
+      D = Heim
+      E = "vs"
+      F = Gast
+      G = Link (leer)
+      H = Boteingabe (leer)
+      I = Checkbox (leer)
     """
     start_row = spielplan_find_next_free_row(ws)
-    current_num = spielplan_get_last_number(ws)
 
+    laufende_nummer = 1
     rows_to_write = []
 
-    for round_idx, matches_in_round in enumerate(rounds):
+    for matches_in_round in rounds:
         for (home, away) in matches_in_round:
-            current_num += 1
             row_data = [""] * 9  # A..I
-            row_data[0] = str(current_num)  # Nummer
-            row_data[3] = home              # Heim
-            row_data[4] = "vs"
-            row_data[5] = away              # Gast
+            row_data[0] = str(laufende_nummer)  # Nummer
+            row_data[3] = home                  # Heim in D
+            row_data[4] = "vs"                  # "vs" in E
+            row_data[5] = away                  # Gast in F
             rows_to_write.append(row_data)
-
-        # Leerzeile nach jedem Spieltag außer dem letzten
-        if round_idx != len(rounds) - 1:
-            rows_to_write.append([""] * 9)
+            laufende_nummer += 1
 
     if not rows_to_write:
         return 0
@@ -979,7 +971,7 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
 
 @tree.command(
     name="spielplan",
-    description="(Admin) Generiert Hin-/Rückspielplan für eine Division und schreibt ihn ins Sheet"
+    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden, Spieltage) und schreibt alles ins Sheet"
 )
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(division="Welche Division?")
@@ -994,7 +986,7 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     ]
 )
 async def spielplan(interaction: discord.Interaction, division: app_commands.Choice[str]):
-    # Admin-Check zwingend
+    # Admin-Check
     member = interaction.user
     if not isinstance(member, discord.Member):
         await interaction.response.send_message(
@@ -1012,7 +1004,7 @@ async def spielplan(interaction: discord.Interaction, division: app_commands.Cho
         return
 
     try:
-        # Spieler lesen
+        # Spieler holen aus Spalte L
         players = spielplan_read_players(division.value)
         if len(players) < 2:
             await interaction.response.send_message(
@@ -1021,14 +1013,14 @@ async def spielplan(interaction: discord.Interaction, division: app_commands.Cho
             )
             return
 
-        # Matches nach Spieltagen erzeugen (Hin+Rückrunde)
+        # Spieltage (Hin+Rück)
         rounds = spielplan_build_matches(players)
 
-        # Sheet schreiben
+        # Schreiben
         ws = _get_div_ws(division.value)
         written = spielplan_write(ws, rounds)
 
-        # Vorschau (max. 1. Spieltag Hinrunde)
+        # Preview für den ersten Spieltag
         preview_round = rounds[0] if rounds else []
         preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
         preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
@@ -1624,7 +1616,7 @@ async def help(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/spielplan",
-        value="➤ Admin: Baut Hin- & Rückrunde (jeder gg. jeden, Spieltage) aus Spalte L und hängt sie unten in {Div}.DIV.",
+        value="➤ Admin: Baut Hin- & Rückrunde (Round Robin, Spieltage). Schreibt alles untereinander ins DIV-Sheet. Spalte A startet bei 1.",
         inline=False
     )
     embed.add_field(
