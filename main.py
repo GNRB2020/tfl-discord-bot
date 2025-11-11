@@ -15,7 +15,7 @@ import asyncio
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
-EVENT_CHANNEL_ID = int(os.getenv("DISCORD_EVENT_CHANNEL_ID", "0"))
+EVENT_CHANNEL_ID = int(os.getenv("EVENT_CHANNEL_ID", os.getenv("DISCORD_EVENT_CHANNEL_ID", "0")))
 RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID", "0"))
 SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
@@ -23,6 +23,9 @@ CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 # feste Role-IDs aus ENV (müssen gesetzt sein)
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
 TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
+
+# Ergebnis-Channel (neu)
+RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
 
 # Discord-Client + Intents
 intents = discord.Intents.default()
@@ -124,6 +127,23 @@ TWITCH_MAP = {
     "officermiaumiau": "officermiaumiautwitch",
     "papaschland": "Papaschland",
     "hideonbush": "hideonbush1909"
+    "mahony": "mahony19888",
+    "iconic": "iconic22",              # IConIC
+    "krawalltofu": "krawalltofu",
+    "osora": "osora90",
+    "randonorris": "Rando_Norris",
+    "neo-sanji": "neo_sanji",
+    "cfate91": "CFate91",
+    "kalamarino": "Kalamarino",
+    "dekar112": "dekar_112",
+    "drdiabetus": "dr_diabetus",
+    "darknesslink81": "Darknesslink81",
+    "little*vaia": "LittleVaia",
+    "boothisman": "boothisman",
+    "cptnsabo": "CptnSabo",
+    "aleximwunderland": "alex_im_wunderland",
+    "dominik0688": "Dominik0688",
+    "quaschynock": "quaschynock",
 }
 
 # =========================================================
@@ -487,8 +507,8 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             twitch2 = TWITCH_MAP[s2_key]
             multistream_url = f"https://multistre.am/{twitch1}/{twitch2}/layout4"
 
-            # Event erstellen
-            event = await interaction.guild.create_scheduled_event(
+            # Nur Event erstellen (kein Sheet mehr)
+            await interaction.guild.create_scheduled_event(
                 name=f"{self.division.value} | {self.spieler1.value} vs. {self.spieler2.value} | {self.modus.value}",
                 description=f"Match in der {self.division.value} zwischen {self.spieler1.value} und {self.spieler2.value}.",
                 start_time=start_dt,
@@ -498,27 +518,10 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 privacy_level=discord.PrivacyLevel.guild_only
             )
 
-            # Sheet schreiben (inkl. Event-ID in Spalte L)
-            row = [
-                self.division.value.strip(),  # A
-                datum_str,                    # B
-                uhrzeit_str,                  # C
-                self.spieler1.value.strip(),  # D
-                self.spieler2.value.strip(),  # E
-                self.modus.value.strip(),     # F
-                multistream_url,              # G
-                "",                           # H (Restream-Kanal noch leer)
-                "",                           # I Com
-                "",                           # J Co
-                "",                           # K Track
-                event.id                      # L Event-ID
-            ]
-            SHEET.append_row(row)
-
-            await interaction.response.send_message("✅ Match wurde eingetragen und Event erstellt!", ephemeral=True)
+            await interaction.response.send_message("✅ Event wurde erstellt (kein Sheet-Eintrag).", ephemeral=True)
 
         except Exception as e:
-            await interaction.response.send_message(f"❌ Fehler beim Eintragen: {e}", ephemeral=True)
+            await interaction.response.send_message(f"❌ Fehler beim Erstellen des Events: {e}", ephemeral=True)
 
 
 # =========================================================
@@ -780,6 +783,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             return
 
         try:
+            # Sheet-Update (beibehalten)
             ws = WB.worksheet(f"{self.division}.DIV")
 
             now = datetime.datetime.now(BERLIN_TZ)
@@ -799,8 +803,33 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 str(self.requester)
             )
 
+            # Post ins Ergebnis-Channel (neu)
+            channel = client.get_channel(RESULTS_CHANNEL_ID)
+            if channel is not None:
+                out_lines = [
+                    f"**[Division {self.division}]** {now_str}",
+                    f"**{self.heim}** vs **{self.auswaerts}** → **{ergebnis}**",
+                    f"Modus: {mode_val}",
+                    f"Raceroom: {raceroom_val}"
+                ]
+                try:
+                    await channel.send("\n".join(out_lines))
+                except Exception as send_err:
+                    await interaction.followup.send(
+                        content=f"⚠️ Ergebnis gespeichert, aber Channel-Post fehlgeschlagen: {send_err}",
+                        ephemeral=True
+                    )
+                    return
+            else:
+                await interaction.followup.send(
+                    content="⚠️ Ergebnis gespeichert, aber Ergebnischannel nicht gefunden.",
+                    ephemeral=True
+                )
+                return
+
+            # Bestätigung an den Meldenden (ephemeral)
             msg = (
-                f"✅ Ergebnis gespeichert für Division {self.division}:\n"
+                f"✅ Ergebnis gespeichert & gepostet:\n"
                 f"{self.heim} vs {self.auswaerts} => {ergebnis}\n"
                 f"Modus: {mode_val}\n"
                 f"Raceroom: {raceroom_val}"
@@ -809,7 +838,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
 
         except Exception as e:
             await interaction.followup.send(
-                content=f"❌ Konnte nicht ins Sheet schreiben: {e}",
+                content=f"❌ Konnte Ergebnis nicht verarbeiten: {e}",
                 ephemeral=True
             )
 
@@ -1125,7 +1154,7 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
 # =========================================================
 # Slash Commands
 # =========================================================
-@tree.command(name="termin", description="Erstelle einen neuen Termin + Event + Sheet-Eintrag")
+@tree.command(name="termin", description="Erstelle einen neuen Termin (nur Event, kein Sheet)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def termin(interaction: discord.Interaction):
     await interaction.response.send_modal(TerminModal())
@@ -1608,7 +1637,7 @@ async def help(interaction: discord.Interaction):
         color=0x00ffcc
     )
 
-    embed.add_field(name="/termin", value="➤ Neues Match eintragen, Event erstellen und ins Sheet schreiben", inline=False)
+    embed.add_field(name="/termin", value="➤ Neues Match eintragen, Event erstellen (kein Sheet)", inline=False)
     embed.add_field(name="/today", value="➤ Zeigt alle heutigen Spiele (Embed mit Link & Modus)", inline=False)
     embed.add_field(name="/div1 – /div6", value="➤ Zeigt alle geplanten Spiele einer bestimmten Division", inline=False)
     embed.add_field(name="/cup", value="➤ Zeigt alle geplanten Cup-Spiele", inline=False)
@@ -1617,7 +1646,7 @@ async def help(interaction: discord.Interaction):
     embed.add_field(name="/pick /restreams", value="➤ Setze Restream-Ziel (ZSR, SG1, SG2) + optional Com/Co/Track. Aktualisiert Event & Sheet.", inline=False)
     embed.add_field(name="/showrestreams", value="➤ Geplante Restreams ab heute (Kanal, Com, Co, Track).", inline=False)
     embed.add_field(name="/restprogramm", value="➤ Offene Spiele je Division, optional Spieler-Filter.", inline=False)
-    embed.add_field(name="/result", value="➤ Ergebnis melden (Timestamp/Modus/Ergebnis/Raceroom/Reporter ins DIV-Sheet).", inline=False)
+    embed.add_field(name="/result", value="➤ Ergebnis melden (schreibt ins DIV-Sheet & postet in den Ergebnischannel).", inline=False)
     embed.add_field(name="/playerexit", value="➤ Admin: Spieler austragen (alle Spiele FF gegen ihn, Name durchgestrichen).", inline=False)
     embed.add_field(name="/spielplan", value="➤ Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet schreiben.", inline=False)
     embed.add_field(name="/add", value="➤ Spieler → TWITCH_MAP hinzufügen (nicht persistent).", inline=False)
