@@ -128,7 +128,7 @@ TWITCH_MAP = {
     "papaschland": "Papaschland",
     "hideonbush": "hideonbush1909"
     "mahony": "mahony19888",
-    "iconic": "iconic22",              # IConIC
+    "iconic": "iconic22",              
     "krawalltofu": "krawalltofu",
     "osora": "osora90",
     "randonorris": "Rando_Norris",
