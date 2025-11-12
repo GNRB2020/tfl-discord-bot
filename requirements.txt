@@ -4,3 +4,4 @@ gspread
 oauth2client
 flask
 pytz
+aiohttp>=3.9
