@@ -601,7 +601,7 @@ class ResultGameSelect(discord.ui.Select):
     def __init__(self, division: str, heim: str, games, requester: discord.Member):
         self.division = division
         self.heim = heim
-               self.games = games
+        self.games = games
         self.requester = requester
 
         options = []
