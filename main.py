@@ -128,7 +128,7 @@ TWITCH_MAP = {
     "papaschland": "Papaschland",
     "hideonbush": "hideonbush1909",
     "mahony": "mahony19888",
-    "iconic": "iconic22",              
+    "iconic": "iconic22",
     "krawalltofu": "krawalltofu",
     "osora": "osora90",
     "randonorris": "Rando_Norris",
@@ -138,13 +138,14 @@ TWITCH_MAP = {
     "dekar112": "dekar_112",
     "drdiabetus": "dr_diabetus",
     "darknesslink81": "Darknesslink81",
-    "little*vaia": "LittleVaia",
+    "littlevaia": "LittleVaia",
     "boothisman": "boothisman",
     "cptnsabo": "CptnSabo",
     "aleximwunderland": "alex_im_wunderland",
     "dominik0688": "Dominik0688",
-    "quaschynock": "quaschynock",
+    "quaschynock": "quaschynock"
 }
+
 
 # =========================================================
 # Google Sheets Verbindung
