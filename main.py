@@ -214,6 +214,121 @@ intents.message_content = True
 client = commands.Bot(command_prefix="/", intents=intents)
 tree = client.tree
 
+# =========================================================
+# Minimaler Webserver für Joomla/Frontend
+#   - /health
+#   - /api/upcoming?n=5
+#   - /api/results?n=5
+# =========================================================
+
+_webserver_started = False
+_webapp_runner: web.AppRunner | None = None
+
+def _event_location(ev: discord.ScheduledEvent) -> str | None:
+    try:
+        if getattr(ev, "entity_metadata", None) and ev.entity_metadata:
+            if getattr(ev.entity_metadata, "location", None):
+                return ev.entity_metadata.location
+        if getattr(ev, "location", None):
+            return ev.location
+        if getattr(ev, "channel", None) and ev.channel:
+            return getattr(ev.channel, "name", None)
+    except Exception:
+        pass
+    return None
+
+async def _build_web_app(client: discord.Client) -> web.Application:
+    routes = web.RouteTableDef()
+
+    @routes.get("/health")
+    async def health(_request: web.Request):
+        return web.json_response({"status": "ok"})
+
+    @routes.get("/api/upcoming")
+    async def api_upcoming(request: web.Request):
+        try:
+            n = int(request.query.get("n", "5"))
+        except Exception:
+            n = 5
+        n = max(1, min(20, n))
+
+        guild = client.get_guild(GUILD_ID)
+        if guild is None:
+            return web.json_response({"items": []})
+
+        try:
+            events = await guild.fetch_scheduled_events()
+        except Exception:
+            return web.json_response({"items": []})
+
+        data = []
+        for ev in events:
+            if ev.status in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
+                data.append({
+                    "id": ev.id,
+                    "name": ev.name,
+                    "start": ev.start_time.isoformat() if ev.start_time else None,
+                    "end": ev.end_time.isoformat() if ev.end_time else None,
+                    "location": _event_location(ev),
+                    "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
+                })
+
+        data.sort(key=lambda x: (x["start"] is None, x["start"]))
+        return web.json_response({"items": data[:n]})
+
+    @routes.get("/api/results")
+    async def api_results(request: web.Request):
+        try:
+            n = int(request.query.get("n", "5"))
+        except Exception:
+            n = 5
+        n = max(1, min(20, n))
+
+        ch = client.get_channel(RESULTS_CHANNEL_ID)
+        if ch is None or not isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
+            return web.json_response({"items": []})
+
+        items = []
+        try:
+            async for m in ch.history(limit=200):
+                ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
+                items.append({
+                    "id": m.id,
+                    "author": str(m.author),
+                    "time": ts,
+                    "content": m.content,
+                    "jump_url": m.jump_url,
+                })
+                if len(items) >= n:
+                    break
+        except Exception:
+            return web.json_response({"items": []})
+
+        return web.json_response({"items": items})
+
+    app = web.Application()
+    app.add_routes(routes)
+    return app
+
+async def start_webserver(client: discord.Client):
+    global _webserver_started, _webapp_runner
+    if _webserver_started:
+        return
+    _webserver_started = True
+
+    app = await _build_web_app(client)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    _webapp_runner = runner
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[WEB] running on 0.0.0.0:{port}   endpoints: /health, /api/upcoming, /api/results")
+
+
 print(f"[INTENTS] members={intents.members}, message_content={intents.message_content}")
 
 # Zeitzone
@@ -1552,6 +1667,7 @@ _client_synced_once = False
 
 @client.event
 async def on_ready():
+    print("Bot ist online")
     global _client_synced_once
     print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
 
@@ -1562,14 +1678,15 @@ async def on_ready():
 
     # Webserver (API) starten – nur einmal
     try:
-        client.loop.create_task(start_webserver())
-        print("🌐 Webserver gestartet (/api/results, /api/upcoming)")
+        asyncio.create_task(start_webserver(client))
+        print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming)")
     except Exception as e:
         print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
 
-    # Auto-Posts sind deaktiviert, da Master-Tab fehlt
-    print("⏸️ Auto-Posts deaktiviert (kein Master-Tab)")
-    print("✅ Bot bereit")
+    # Auto-Posts deaktiviert (kein Master-Tab)
+    print("🧩 Auto-Posts deaktiviert (kein Master-Tab)")
+    print("🤖 Bot bereit")
+
 
 
 
