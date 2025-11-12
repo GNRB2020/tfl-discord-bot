@@ -210,8 +210,11 @@ async def start_webserver():
 # Discord-Client + Intents
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 client = commands.Bot(command_prefix="/", intents=intents)
 tree = client.tree
+
+print(f"[INTENTS] members={intents.members}, message_content={intents.message_content}")
 
 # Zeitzone
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
