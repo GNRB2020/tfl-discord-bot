@@ -8,6 +8,8 @@ import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
+import re
+from aiohttp import web
 
 # =========================================================
 # .env laden / Konfiguration
@@ -26,6 +28,184 @@ TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
 
 # Ergebnis-Channel
 RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
+
+# =========================================================
+# Web-API (AIOHTTP) + Parser + Caching
+# =========================================================
+
+# --- Ergebnis-Parser ---
+SCORE_RE = re.compile(
+    r"""^\s*
+        (?P<pl>.+?)                    # Spieler links
+        \s+(?P<sl>\d+)\s*[:\-]\s*(?P<sr>\d+)\s+  # Score X:Y oder X-Y
+        (?P<pr>.+?)                    # Spieler rechts
+        (?:\s*\|\s*(?P<meta>.*))?      # optionale Meta "key: value | key: value"
+        \s*$""",
+    re.IGNORECASE | re.VERBOSE
+)
+
+def parse_result_message(text: str):
+    """Erwartete Formate:
+    'Alice 2:1 Bob | Modus: Standard | Venue: ZSR'
+    'Alice 0-2 Bob (Cup)'
+    '12.11.2025 - Alice 1:1 Bob | Ort: Link'
+    """
+    text = text.strip()
+    # optionales führendes Datum entfernen
+    text = re.sub(r"^\s*\d{1,2}\.\d{1,2}\.\d{2,4}\s*[-–]\s*", "", text)
+
+    m = SCORE_RE.match(text)
+    if not m:
+        return None
+
+    pl = m.group("pl").strip()
+    pr = m.group("pr").strip()
+    sl = m.group("sl").strip()
+    sr = m.group("sr").strip()
+    meta = (m.group("meta") or "").strip()
+
+    out = {"pl": pl, "pr": pr, "sl": sl, "sr": sr, "mode": "", "venue": ""}
+
+    if meta:
+        for seg in [s.strip() for s in meta.split("|") if s.strip()]:
+            if ":" in seg:
+                key, val = seg.split(":", 1)
+                key = key.strip().lower()
+                val = val.strip()
+                if key in ("modus", "mode"):
+                    out["mode"] = val
+                elif key in ("venue", "ort", "location"):
+                    out["venue"] = val
+            else:
+                # Freitext/Klammer als Modus fallback
+                seg_clean = seg.strip("() ")
+                if seg_clean and not out["mode"]:
+                    out["mode"] = seg_clean
+
+    return out
+
+
+# --- einfacher Cache (schont Rate Limits) ---
+from datetime import datetime, timezone, timedelta
+_CACHE = {
+    "results": {"ts": datetime.min.replace(tzinfo=timezone.utc), "data": []},
+    "upcoming": {"ts": datetime.min.replace(tzinfo=timezone.utc), "data": []},
+}
+CACHE_TTL = timedelta(seconds=60)
+
+async def fetch_last_results(channel_id: int, want=5):
+    ch = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+    out = []
+    async for msg in ch.history(limit=50):
+        if not msg.content:
+            continue
+        parsed = parse_result_message(msg.content)
+        if parsed:
+            # Datum in Europe/Berlin
+            dt = msg.created_at.astimezone(BERLIN_TZ)
+            parsed["date"] = dt.strftime("%d.%m.%Y")
+            out.append(parsed)
+        if len(out) >= want:
+            break
+    return out
+
+async def get_cached_results(want=5):
+    now = datetime.now(timezone.utc)
+    if (now - _CACHE["results"]["ts"]) < CACHE_TTL and _CACHE["results"]["data"]:
+        return _CACHE["results"]["data"][:want]
+    data = await fetch_last_results(RESULTS_CHANNEL_ID, want)
+    _CACHE["results"] = {"ts": now, "data": data}
+    return data
+
+async def fetch_upcoming_events(guild_id: int, want=5):
+    """Liest Guild-Events via discord.py (kein eigener REST-Call nötig)."""
+    guild = client.get_guild(guild_id) or await client.fetch_guild(guild_id)
+    events = await guild.fetch_scheduled_events()
+    # status: scheduled/active/completed/canceled
+    filtered = [
+        ev for ev in events
+        if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active)
+    ]
+    # sort: active zuerst, dann Startzeit
+    def sort_key(ev):
+        return (0 if ev.status == discord.EventStatus.active else 1, ev.start_time or datetime.max.replace(tzinfo=timezone.utc))
+    filtered.sort(key=sort_key)
+
+    site_tz = BERLIN_TZ
+    out = []
+    for ev in filtered[:want]:
+        # Location für EXTERNAL-Events steht in ev.location (discord.py 2.3+)
+        # Fallback auf entity_metadata.location, falls None
+        loc = getattr(ev, "location", None) or (getattr(ev, "entity_metadata", None).location if getattr(ev, "entity_metadata", None) else "")
+        start_dt = ev.start_time.astimezone(site_tz) if ev.start_time else None
+        start_local = start_dt.strftime("%d.%m.%Y %H:%M") if start_dt else ""
+        status_str = "ACTIVE" if ev.status == discord.EventStatus.active else "SCHEDULED"
+        out.append({
+            "id": str(ev.id),
+            "name": ev.name,
+            "start_local": start_local,
+            "status": status_str,
+            "location": loc or "",
+            "description": ev.description or "",
+        })
+    return out
+
+async def get_cached_upcoming(want=5):
+    now = datetime.now(timezone.utc)
+    if (now - _CACHE["upcoming"]["ts"]) < CACHE_TTL and _CACHE["upcoming"]["data"]:
+        return _CACHE["upcoming"]["data"][:want]
+    data = await fetch_upcoming_events(GUILD_ID, want)
+    _CACHE["upcoming"] = {"ts": now, "data": data}
+    return data
+
+
+# --- AIOHTTP Web-App & Routen ---
+web_app = web.Application()
+
+async def _add_cors(resp):
+    # Nur nötig, wenn du direkt aus dem Browser (Frontend) aufrufst.
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+async def handle_root(request):
+    return await _add_cors(web.Response(text="TFL Bot up"))
+
+async def handle_health(request):
+    return await _add_cors(web.json_response({"status": "ok"}))
+
+async def handle_results(request):
+    try:
+        want = int(request.query.get("limit", "5"))
+        want = max(1, min(20, want))
+    except ValueError:
+        want = 5
+    data = await get_cached_results(want)
+    return await _add_cors(web.json_response(data))
+
+async def handle_upcoming(request):
+    try:
+        want = int(request.query.get("limit", "5"))
+        want = max(1, min(20, want))
+    except ValueError:
+        want = 5
+    data = await get_cached_upcoming(want)
+    return await _add_cors(web.json_response(data))
+
+web_app.add_routes([
+    web.get("/", handle_root),
+    web.get("/health", handle_health),
+    web.get("/api/results", handle_results),
+    web.get("/api/upcoming", handle_upcoming),
+])
+
+async def start_webserver():
+    port = int(os.getenv("PORT", "8080"))
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[web] listening on :{port}")
+
 
 # Discord-Client + Intents
 intents = discord.Intents.default()
@@ -1377,9 +1557,17 @@ async def on_ready():
         _client_synced_once = True
         print("✅ Slash-Befehle synchronisiert")
 
+    # Webserver (API) starten – nur einmal
+    try:
+        client.loop.create_task(start_webserver())
+        print("🌐 Webserver gestartet (/api/results, /api/upcoming)")
+    except Exception as e:
+        print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
+
     # Auto-Posts sind deaktiviert, da Master-Tab fehlt
     print("⏸️ Auto-Posts deaktiviert (kein Master-Tab)")
     print("✅ Bot bereit")
+
 
 
 # =========================================================
