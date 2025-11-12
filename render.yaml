@@ -1,0 +1,34 @@
+# Exported from Render on 2025-11-12T21:01:07Z
+version: "1"
+services:
+- type: web
+  name: tfl-discord-bot
+  runtime: python
+  repo: https://github.com/GNRB2020/tfl-discord-bot
+  plan: starter
+  envVars:
+  - key: SPREADSHEET_TITLE
+    sync: false
+  - key: TFL_ROLE_ID
+    sync: false
+  - key: RESTREAM_CHANNEL_ID
+    sync: false
+  - key: GOOGLE_SERVICE_ACCOUNT_FILE
+    sync: false
+  - key: DISCORD_TOKEN
+    sync: false
+  - key: DISCORD_GUILD_ID
+    sync: false
+  - key: DISCORD_EVENT_CHANNEL_ID
+    sync: false
+  - key: ADMIN_ROLE_ID
+    sync: false
+  - key: credentials.json
+    sync: false
+  - key: PORT
+    value: 10000
+
+  region: frankfurt
+  buildCommand: pip install -r requirements.txt
+  startCommand: python main.py
+  autoDeployTrigger: commit
