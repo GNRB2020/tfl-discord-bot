@@ -262,15 +262,15 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         return add_cors(resp)
 
         @routes.get("/api/upcoming")
-    async def api_upcoming(request: web.Request):
+        async def api_upcoming(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
         except Exception:
             n = 5
-        n = max(1, min(20, n))
+            n = max(1, min(20, n))
 
-        now = datetime.datetime.now(datetime.timezone.utc)
-        cache = _API_CACHE["upcoming"]
+            now = datetime.datetime.now(datetime.timezone.utc)
+            cache = _API_CACHE["upcoming"]
 
         # Cache-Hit?
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
