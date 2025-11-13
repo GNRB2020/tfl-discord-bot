@@ -1340,6 +1340,81 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     ws.update(cell_range, rows_to_write)
     return len(rows_to_write)
 
+# =========================================================
+# Hintergrund-Refresher für API-Cache
+#   - Hält _API_CACHE["upcoming"] und _API_CACHE["results"] warm
+# =========================================================
+async def refresh_api_cache(client: discord.Client):
+    await client.wait_until_ready()
+    # kleinen Delay, damit on_ready sauber durchlaufen kann
+    await asyncio.sleep(5)
+
+    print("[CACHE] Hintergrund-Refresher gestartet")
+    while not client.is_closed():
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        # --- Upcoming Events cachen ---
+        try:
+            guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
+            events = await guild.fetch_scheduled_events()
+
+            data = []
+            for ev in events:
+                if ev.status in (
+                    discord.EventStatus.scheduled,
+                    discord.EventStatus.active,
+                ):
+                    data.append(
+                        {
+                            "id": ev.id,
+                            "name": ev.name,
+                            "start": ev.start_time.isoformat() if ev.start_time else None,
+                            "end": ev.end_time.isoformat() if ev.end_time else None,
+                            "location": _event_location(ev),
+                            "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
+                        }
+                    )
+
+            data.sort(key=lambda x: (x["start"] is None, x["start"]))
+
+            _API_CACHE["upcoming"]["ts"] = now
+            _API_CACHE["upcoming"]["data"] = data
+
+            print(f"[CACHE] Upcoming aktualisiert ({len(data)} Events)")
+        except Exception as e:
+            print(f"[CACHE] Fehler beim Aktualisieren der Upcoming-Events: {e}")
+
+        # --- Results cachen ---
+        try:
+            ch = client.get_channel(RESULTS_CHANNEL_ID)
+            if ch is None or not isinstance(
+                ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)
+            ):
+                raise RuntimeError("Ergebnis-Channel nicht gefunden oder falscher Typ")
+
+            items = []
+            async for m in ch.history(limit=20):
+                ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
+                items.append(
+                    {
+                        "id": m.id,
+                        "author": str(m.author),
+                        "time": ts,
+                        "content": m.content,
+                        "jump_url": m.jump_url,
+                    }
+                )
+
+            _API_CACHE["results"]["ts"] = now
+            _API_CACHE["results"]["data"] = items
+
+            print(f"[CACHE] Results aktualisiert ({len(items)} Einträge)")
+        except Exception as e:
+            print(f"[CACHE] Fehler beim Aktualisieren der Results: {e}")
+
+        # alle 5 Minuten auffrischen (kannst du nach Bedarf anpassen)
+        await asyncio.sleep(300)
+
 
 # =========================================================
 # Slash Commands
