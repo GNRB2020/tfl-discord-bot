@@ -240,9 +240,16 @@ def _event_location(ev: discord.ScheduledEvent) -> str | None:
 async def _build_web_app(client: discord.Client) -> web.Application:
     routes = web.RouteTableDef()
 
+    def add_cors(resp: web.StreamResponse) -> web.StreamResponse:
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "*"
+        return resp
+
     @routes.get("/health")
     async def health(_request: web.Request):
-        return web.json_response({"status": "ok"})
+        resp = web.json_response({"status": "ok"})
+        return add_cors(resp)
 
     @routes.get("/api/upcoming")
     async def api_upcoming(request: web.Request):
@@ -254,12 +261,14 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         guild = client.get_guild(GUILD_ID)
         if guild is None:
-            return web.json_response({"items": []})
+            resp = web.json_response({"items": []})
+            return add_cors(resp)
 
         try:
             events = await guild.fetch_scheduled_events()
         except Exception:
-            return web.json_response({"items": []})
+            resp = web.json_response({"items": []})
+            return add_cors(resp)
 
         data = []
         for ev in events:
@@ -277,7 +286,8 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 })
 
         data.sort(key=lambda x: (x["start"] is None, x["start"]))
-        return web.json_response({"items": data[:n]})
+        resp = web.json_response({"items": data[:n]})
+        return add_cors(resp)
 
     @routes.get("/api/results")
     async def api_results(request: web.Request):
@@ -289,7 +299,8 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         ch = client.get_channel(RESULTS_CHANNEL_ID)
         if ch is None or not isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
-            return web.json_response({"items": []})
+            resp = web.json_response({"items": []})
+            return add_cors(resp)
 
         items = []
         try:
@@ -305,13 +316,16 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 if len(items) >= n:
                     break
         except Exception:
-            return web.json_response({"items": []})
+            resp = web.json_response({"items": []})
+            return add_cors(resp)
 
-        return web.json_response({"items": items})
+        resp = web.json_response({"items": items})
+        return add_cors(resp)
 
     app = web.Application()
     app.add_routes(routes)
     return app
+
 
 async def start_webserver(client: discord.Client):
     global _webserver_started, _webapp_runner
