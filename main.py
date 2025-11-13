@@ -216,6 +216,14 @@ intents.message_content = True
 client = commands.Bot(command_prefix="/", intents=intents)
 tree = client.tree
 
+# --- einfacher API-Cache für /api/upcoming und /api/results ---
+_API_CACHE = {
+    "upcoming": {"ts": None, "data": []},
+    "results": {"ts": None, "data": []},
+}
+API_CACHE_TTL = datetime.timedelta(seconds=30)  # z.B. 30 Sekunden
+
+
 # =========================================================
 # Minimaler Webserver für Joomla/Frontend
 #   - /health
@@ -253,13 +261,22 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp = web.json_response({"status": "ok"})
         return add_cors(resp)
 
-    @routes.get("/api/upcoming")
+        @routes.get("/api/upcoming")
     async def api_upcoming(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
         except Exception:
             n = 5
         n = max(1, min(20, n))
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cache = _API_CACHE["upcoming"]
+
+        # Cache-Hit?
+        if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
+            data = cache["data"][:n]
+            resp = web.json_response({"items": data})
+            return add_cors(resp)
 
         guild = client.get_guild(GUILD_ID)
         if guild is None:
@@ -288,16 +305,31 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 })
 
         data.sort(key=lambda x: (x["start"] is None, x["start"]))
+
+        # Cache aktualisieren (vollständige Liste speichern)
+        cache["ts"] = now
+        cache["data"] = data
+
         resp = web.json_response({"items": data[:n]})
         return add_cors(resp)
 
-    @routes.get("/api/results")
+
+        @routes.get("/api/results")
     async def api_results(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
         except Exception:
             n = 5
         n = max(1, min(20, n))
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cache = _API_CACHE["results"]
+
+        # Cache-Hit?
+        if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
+            data = cache["data"][:n]
+            resp = web.json_response({"items": data})
+            return add_cors(resp)
 
         ch = client.get_channel(RESULTS_CHANNEL_ID)
         if ch is None or not isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
@@ -306,7 +338,8 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         items = []
         try:
-            async for m in ch.history(limit=200):
+            # etwas kleiner als vorher, reicht völlig aus
+            async for m in ch.history(limit=80):
                 ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
                 items.append({
                     "id": m.id,
@@ -321,12 +354,13 @@ async def _build_web_app(client: discord.Client) -> web.Application:
             resp = web.json_response({"items": []})
             return add_cors(resp)
 
-        resp = web.json_response({"items": items})
+        # Cache aktualisieren
+        cache["ts"] = now
+        cache["data"] = items
+
+        resp = web.json_response({"items": items[:n]})
         return add_cors(resp)
 
-    app = web.Application()
-    app.add_routes(routes)
-    return app
 
 
 async def start_webserver(client: discord.Client):
