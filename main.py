@@ -86,10 +86,11 @@ def parse_result_message(text: str):
 
 
 # --- einfacher Cache (schont Rate Limits) ---
-from datetime import datetime, timezone, timedelta
+from datetime import datetime as dt, timezone, timedelta
+
 _CACHE = {
-    "results": {"ts": datetime.min.replace(tzinfo=timezone.utc), "data": []},
-    "upcoming": {"ts": datetime.min.replace(tzinfo=timezone.utc), "data": []},
+    "results": {"ts": dt.min.replace(tzinfo=timezone.utc), "data": []},
+    "upcoming": {"ts": dt.min.replace(tzinfo=timezone.utc), "data": []},
 }
 CACHE_TTL = timedelta(seconds=60)
 
@@ -102,15 +103,15 @@ async def fetch_last_results(channel_id: int, want=5):
         parsed = parse_result_message(msg.content)
         if parsed:
             # Datum in Europe/Berlin
-            dt = msg.created_at.astimezone(BERLIN_TZ)
-            parsed["date"] = dt.strftime("%d.%m.%Y")
+            msg_dt = msg.created_at.astimezone(BERLIN_TZ)
+            parsed["date"] = msg_dt.strftime("%d.%m.%Y")
             out.append(parsed)
         if len(out) >= want:
             break
     return out
 
 async def get_cached_results(want=5):
-    now = datetime.now(timezone.utc)
+    now = dt.now(timezone.utc)
     if (now - _CACHE["results"]["ts"]) < CACHE_TTL and _CACHE["results"]["data"]:
         return _CACHE["results"]["data"][:want]
     data = await fetch_last_results(RESULTS_CHANNEL_ID, want)
@@ -128,7 +129,8 @@ async def fetch_upcoming_events(guild_id: int, want=5):
     ]
     # sort: active zuerst, dann Startzeit
     def sort_key(ev):
-        return (0 if ev.status == discord.EventStatus.active else 1, ev.start_time or datetime.max.replace(tzinfo=timezone.utc))
+        return (0 if ev.status == discord.EventStatus.active else 1,
+                ev.start_time or dt.max.replace(tzinfo=timezone.utc))
     filtered.sort(key=sort_key)
 
     site_tz = BERLIN_TZ
@@ -151,7 +153,7 @@ async def fetch_upcoming_events(guild_id: int, want=5):
     return out
 
 async def get_cached_upcoming(want=5):
-    now = datetime.now(timezone.utc)
+    now = dt.now(timezone.utc)
     if (now - _CACHE["upcoming"]["ts"]) < CACHE_TTL and _CACHE["upcoming"]["data"]:
         return _CACHE["upcoming"]["data"][:want]
     data = await fetch_upcoming_events(GUILD_ID, want)
@@ -198,7 +200,7 @@ web_app.add_routes([
     web.get("/api/upcoming", handle_upcoming),
 ])
 
-async def start_webserver():
+async def start_webserver_legacy():
     port = int(os.getenv("PORT", "8080"))
     runner = web.AppRunner(web_app)
     await runner.setup()
@@ -350,11 +352,11 @@ BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 
 def today_berlin_date() -> datetime.date:
-    return datetime.datetime.now(BERLIN_TZ).date()
+    return dt.now(BERLIN_TZ).date()
 
 
 def parse_date(d: str) -> datetime.date:
-    return datetime.datetime.strptime(d, "%d.%m.%Y").date()
+    return dt.strptime(d, "%d.%m.%Y").date()
 
 
 def chunk_text(text: str, limit: int = 1900):
@@ -386,7 +388,7 @@ async def send_long_message_channel(channel: discord.abc.Messageable, content: s
         await channel.send(content)
     else:
         for part in chunk_text(content, limit=1990):
-            await channel.send(part)
+            await channel.send(content=part)
 
 
 def map_sheet_channel_to_label(val: str) -> str:
@@ -723,8 +725,10 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 return
 
             datum_str, uhrzeit_str = parts[0], parts[1]
-            start_dt = BERLIN_TZ.localize(datetime.datetime.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"))
-            end_dt = start_dt + datetime.timedelta(hours=1)
+            start_dt = BERLIN_TZ.localize(
+                dt.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M")
+            )
+            end_dt = start_dt + timedelta(hours=1)
 
             s1_key = self.spieler1.value.strip().lower()
             s2_key = self.spieler2.value.strip().lower()
@@ -1020,7 +1024,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             sheets_required()
             ws = WB.worksheet(f"{self.division}.DIV")
 
-            now = datetime.datetime.now(BERLIN_TZ)
+            now = dt.now(BERLIN_TZ)
             now_str = now.strftime("%d.%m.%Y %H:%M")
 
             loop = asyncio.get_event_loop()
@@ -1104,7 +1108,7 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
     ws = WB.worksheet(f"{div_number}.DIV")
     rows = ws.get_all_values()
 
-    now_str = datetime.datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+    now_str = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
     batch_reqs = []
     strike_cells = []
 
@@ -1700,8 +1704,6 @@ async def on_ready():
     # Auto-Posts deaktiviert (kein Master-Tab)
     print("🧩 Auto-Posts deaktiviert (kein Master-Tab)")
     print("🤖 Bot bereit")
-
-
 
 
 # =========================================================
