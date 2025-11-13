@@ -244,7 +244,7 @@ _API_CACHE = {
     "upcoming": {"ts": None, "data": []},
     "results": {"ts": None, "data": []},
 }
-API_CACHE_TTL = datetime.timedelta(seconds=30)  # z.B. 30 Sekunden
+API_CACHE_TTL = datetime.timedelta(minutes=10)
 
 # =========================================================
 # Minimaler Webserver für Joomla/Frontend
@@ -366,7 +366,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         items = []
         try:
-            async for m in ch.history(limit=80):
+            async for m in ch.history(limit=20):
                 ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
                 items.append(
                     {
