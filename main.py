@@ -10,6 +10,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
 import re
 from aiohttp import web
+from datetime import datetime as dt, timezone, timedelta
 
 # =========================================================
 # .env laden / Konfiguration
@@ -29,11 +30,13 @@ TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
 # Ergebnis-Channel
 RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
 
+# Zeitzone
+BERLIN_TZ = pytz.timezone("Europe/Berlin")
+
 # =========================================================
-# Web-API (Parser + alter Cache – aktuell ungenutzt, aber behalten)
+# Web-API: Ergebnis-Parser (für evtl. spätere Nutzung)
 # =========================================================
 
-# --- Ergebnis-Parser ---
 SCORE_RE = re.compile(
     r"""^\s*
         (?P<pl>.+?)                    # Spieler links
@@ -86,150 +89,6 @@ def parse_result_message(text: str):
     return out
 
 
-# --- alter einfacher Cache (wird aktuell nicht verwendet) ---
-from datetime import datetime as dt, timezone, timedelta
-
-_CACHE = {
-    "results": {"ts": dt.min.replace(tzinfo=timezone.utc), "data": []},
-    "upcoming": {"ts": dt.min.replace(tzinfo=timezone.utc), "data": []},
-}
-CACHE_TTL = timedelta(seconds=60)
-
-
-async def fetch_last_results(channel_id: int, want=5):
-    ch = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
-    out = []
-    async for msg in ch.history(limit=50):
-        if not msg.content:
-            continue
-        parsed = parse_result_message(msg.content)
-        if parsed:
-            # Datum in Europe/Berlin
-            msg_dt = msg.created_at.astimezone(BERLIN_TZ)
-            parsed["date"] = msg_dt.strftime("%d.%m.%Y")
-            out.append(parsed)
-        if len(out) >= want:
-            break
-    return out
-
-
-async def get_cached_results(want=5):
-    now = dt.now(timezone.utc)
-    if (now - _CACHE["results"]["ts"]) < CACHE_TTL and _CACHE["results"]["data"]:
-        return _CACHE["results"]["data"][:want]
-    data = await fetch_last_results(RESULTS_CHANNEL_ID, want)
-    _CACHE["results"] = {"ts": now, "data": data}
-    return data
-
-
-async def fetch_upcoming_events(guild_id: int, want=5):
-    """Liest Guild-Events via discord.py (kein eigener REST-Call nötig)."""
-    guild = client.get_guild(guild_id) or await client.fetch_guild(guild_id)
-    events = await guild.fetch_scheduled_events()
-    # status: scheduled/active/completed/canceled
-    filtered = [
-        ev for ev in events
-        if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active)
-    ]
-
-    # sort: active zuerst, dann Startzeit
-    def sort_key(ev):
-        return (
-            0 if ev.status == discord.EventStatus.active else 1,
-            ev.start_time or dt.max.replace(tzinfo=timezone.utc),
-        )
-
-    filtered.sort(key=sort_key)
-
-    site_tz = BERLIN_TZ
-    out = []
-    for ev in filtered[:want]:
-        loc = getattr(ev, "location", None) or (
-            getattr(ev, "entity_metadata", None).location
-            if getattr(ev, "entity_metadata", None)
-            else ""
-        )
-        start_dt = ev.start_time.astimezone(site_tz) if ev.start_time else None
-        start_local = start_dt.strftime("%d.%m.%Y %H:%M") if start_dt else ""
-        status_str = "ACTIVE" if ev.status == discord.EventStatus.active else "SCHEDULED"
-        out.append(
-            {
-                "id": str(ev.id),
-                "name": ev.name,
-                "start_local": start_local,
-                "status": status_str,
-                "location": loc or "",
-                "description": ev.description or "",
-            }
-        )
-    return out
-
-
-async def get_cached_upcoming(want=5):
-    now = dt.now(timezone.utc)
-    if (now - _CACHE["upcoming"]["ts"]) < CACHE_TTL and _CACHE["upcoming"]["data"]:
-        return _CACHE["upcoming"]["data"][:want]
-    data = await fetch_upcoming_events(GUILD_ID, want)
-    _CACHE["upcoming"] = {"ts": now, "data": data}
-    return data
-
-
-# --- alter AIOHTTP-Webserver (wird nicht gestartet, aber bleibt im File) ---
-web_app = web.Application()
-
-
-async def _add_cors(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
-
-
-async def handle_root(request):
-    return await _add_cors(web.Response(text="TFL Bot up"))
-
-
-async def handle_health(request):
-    return await _add_cors(web.json_response({"status": "ok"}))
-
-
-async def handle_results(request):
-    try:
-        want = int(request.query.get("limit", "5"))
-        want = max(1, min(20, want))
-    except ValueError:
-        want = 5
-    data = await get_cached_results(want)
-    return await _add_cors(web.json_response(data))
-
-
-async def handle_upcoming(request):
-    try:
-        want = int(request.query.get("limit", "5"))
-        want = max(1, min(20, want))
-    except ValueError:
-        want = 5
-    data = await get_cached_upcoming(want)
-    return await _add_cors(web.json_response(data))
-
-
-web_app.add_routes(
-    [
-        web.get("/", handle_root),
-        web.get("/health", handle_health),
-        web.get("/api/results", handle_results),
-        web.get("/api/upcoming", handle_upcoming),
-    ]
-)
-
-
-async def start_webserver_legacy():
-    port = int(os.getenv("PORT", "8080"))
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"[web] listening on :{port}")
-
-
 # =========================================================
 # Discord-Client + Intents
 # =========================================================
@@ -239,7 +98,9 @@ intents.message_content = True
 client = commands.Bot(command_prefix="/", intents=intents)
 tree = client.tree
 
-# --- einfacher API-Cache für NEUEN /api/upcoming und /api/results ---
+print(f"[INTENTS] members={intents.members}, message_content={intents.message_content}")
+
+# --- API-Cache für /api/upcoming und /api/results ---
 _API_CACHE = {
     "upcoming": {"ts": None, "data": []},
     "results": {"ts": None, "data": []},
@@ -413,12 +274,6 @@ async def start_webserver(client: discord.Client):
     )
 
 
-print(f"[INTENTS] members={intents.members}, message_content={intents.message_content}")
-
-# Zeitzone
-BERLIN_TZ = pytz.timezone("Europe/Berlin")
-
-
 def today_berlin_date() -> datetime.date:
     return dt.now(BERLIN_TZ).date()
 
@@ -448,7 +303,7 @@ async def send_long_message_interaction(
         await interaction.response.send_message(content, ephemeral=ephemeral)
     else:
         if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=ephemeral)
+            await interaction.response.defer(ephemeral=True, thinking=False)
         for part in chunk_text(content):
             await interaction.followup.send(part, ephemeral=ephemeral)
 
@@ -985,7 +840,7 @@ class ResultHomeSelect(discord.ui.Select):
             division=self.division,
             heim=heim,
             games=spiele_dieses_heims,
-            requester=self.requester,
+            requester=self.requester
         )
 
         await interaction.response.edit_message(
@@ -1088,7 +943,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             label="Raceroom-Link",
             style=discord.TextStyle.short,
             required=True,
-            placeholder="https://raceroom.xyz/...",
+            placeholder="https://raceroom.xyz/..."
         )
 
         self.add_item(self.winner_input)
