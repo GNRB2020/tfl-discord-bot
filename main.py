@@ -213,7 +213,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                     }
                 )
 
-        print(f"[API] upcoming: {len(data)} events after filtering (scheduled/active)")
+        print(f"[API] upcoming: {len(data)} events nach Filter (scheduled/active)")
 
         # sortieren nach Startzeit
         data.sort(key=lambda x: (x["start"] is None, x["start"]))
@@ -1371,6 +1371,7 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     ws.update(cell_range, rows_to_write)
     return len(rows_to_write)
 
+
 # =========================================================
 # Hintergrund-Refresher für API-Cache
 #   - Hält _API_CACHE["upcoming"] und _API_CACHE["results"] warm
@@ -1443,7 +1444,7 @@ async def refresh_api_cache(client: discord.Client):
         except Exception as e:
             print(f"[CACHE] Fehler beim Aktualisieren der Results: {e}")
 
-        # alle 5 Minuten auffrischen (kannst du nach Bedarf anpassen)
+        # alle 5 Minuten auffrischen
         await asyncio.sleep(300)
 
 
@@ -1809,12 +1810,13 @@ async def restprogramm(interaction: discord.Interaction):
 # on_ready
 # =========================================================
 _client_synced_once = False
+_cache_task_started = False
 
 
 @client.event
 async def on_ready():
     print("Bot ist online")
-    global _client_synced_once
+    global _client_synced_once, _cache_task_started
     print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
 
     if not _client_synced_once:
@@ -1828,6 +1830,12 @@ async def on_ready():
         print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming)")
     except Exception as e:
         print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
+
+    # Cache-Refresher nur einmal starten
+    if not _cache_task_started:
+        asyncio.create_task(refresh_api_cache(client))
+        _cache_task_started = True
+        print("♻️ Cache-Refresher gestartet (alle 5 Minuten)")
 
     # Auto-Posts deaktiviert (kein Master-Tab)
     print("🧩 Auto-Posts deaktiviert (kein Master-Tab)")
