@@ -157,7 +157,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["upcoming"]
 
-        # Cache-Hit?
+        # 1) Cache-Hit? → sofort liefern
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
             data = cache["data"][:n]
             resp = web.json_response({"items": data})
@@ -165,12 +165,26 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         guild = client.get_guild(GUILD_ID)
         if guild is None:
+            # kein Guild-Objekt → schnell mit leerer Liste raus
             resp = web.json_response({"items": []})
             return add_cors(resp)
 
+        # 2) Discord-Call mit hartem Timeout (z.B. 5 Sekunden)
         try:
-            events = await guild.fetch_scheduled_events()
+            events = await asyncio.wait_for(
+                guild.fetch_scheduled_events(),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            # Timeout → wenn wir alten Cache haben, den nehmen, sonst leer
+            if cache["data"]:
+                data = cache["data"][:n]
+                resp = web.json_response({"items": data})
+            else:
+                resp = web.json_response({"items": []})
+            return add_cors(resp)
         except Exception:
+            # irgendein anderer Fehler → leer und nicht hängen
             resp = web.json_response({"items": []})
             return add_cors(resp)
 
