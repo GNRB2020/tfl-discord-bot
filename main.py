@@ -157,39 +157,47 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["upcoming"]
 
-        # 1) Cache-Hit? → sofort liefern
+        print(f"[API] /api/upcoming called (n={n})")
+
+        # 1) Cache-Hit?
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
+            print(f"[API] upcoming: cache HIT ({len(cache['data'])} cached items)")
             data = cache["data"][:n]
             resp = web.json_response({"items": data})
             return add_cors(resp)
 
         guild = client.get_guild(GUILD_ID)
         if guild is None:
-            # kein Guild-Objekt → schnell mit leerer Liste raus
+            print(f"[API] upcoming: guild with ID {GUILD_ID} not found")
             resp = web.json_response({"items": []})
             return add_cors(resp)
 
-        # 2) Discord-Call mit hartem Timeout (z.B. 5 Sekunden)
+        # 2) Discord-Call mit Timeout
         try:
+            print("[API] upcoming: fetching scheduled events from Discord …")
             events = await asyncio.wait_for(
                 guild.fetch_scheduled_events(),
                 timeout=5.0,
             )
+            print(f"[API] upcoming: fetched {len(events)} events from Discord")
         except asyncio.TimeoutError:
-            # Timeout → wenn wir alten Cache haben, den nehmen, sonst leer
+            print("[API] upcoming: TIMEOUT while fetching events")
             if cache["data"]:
+                print("[API] upcoming: using OLD cache due to timeout")
                 data = cache["data"][:n]
                 resp = web.json_response({"items": data})
             else:
+                print("[API] upcoming: no cache available, returning empty list")
                 resp = web.json_response({"items": []})
             return add_cors(resp)
-        except Exception:
-            # irgendein anderer Fehler → leer und nicht hängen
+        except Exception as e:
+            print(f"[API] upcoming: ERROR while fetching events: {e!r}")
             resp = web.json_response({"items": []})
             return add_cors(resp)
 
         data = []
         for ev in events:
+            print(f"[API] upcoming: event {ev.id} status={ev.status}")
             if ev.status in (
                 discord.EventStatus.scheduled,
                 discord.EventStatus.active,
@@ -204,6 +212,8 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                         "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
                     }
                 )
+
+        print(f"[API] upcoming: {len(data)} events after filtering (scheduled/active)")
 
         # sortieren nach Startzeit
         data.sort(key=lambda x: (x["start"] is None, x["start"]))
@@ -226,8 +236,11 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["results"]
 
+        print(f"[API] /api/results called (n={n})")
+
         # Cache-Hit?
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
+            print(f"[API] results: cache HIT ({len(cache['data'])} cached items)")
             data = cache["data"][:n]
             resp = web.json_response({"items": data})
             return add_cors(resp)
@@ -236,11 +249,13 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         if ch is None or not isinstance(
             ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)
         ):
+            print(f"[API] results: channel {RESULTS_CHANNEL_ID} not found or wrong type")
             resp = web.json_response({"items": []})
             return add_cors(resp)
 
         items = []
         try:
+            print("[API] results: fetching messages …")
             async for m in ch.history(limit=20):
                 ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
                 items.append(
@@ -254,7 +269,9 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 )
                 if len(items) >= n:
                     break
-        except Exception:
+            print(f"[API] results: collected {len(items)} messages")
+        except Exception as e:
+            print(f"[API] results: ERROR while fetching messages: {e!r}")
             resp = web.json_response({"items": []})
             return add_cors(resp)
 
