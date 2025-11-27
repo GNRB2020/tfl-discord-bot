@@ -33,6 +33,13 @@ RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
 # Zeitzone
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
+# Standard-ZSR-Link (kann via ENV überschrieben werden)
+ZSR_RESTREAM_URL = os.getenv("ZSR_RESTREAM_URL", "https://www.twitch.tv/zeldaspeedruns")
+
+# Flags für tägliche Auto-Posts (Datum in Berlin)
+_last_restreamable_post_date: datetime.date | None = None  # 04:00, #restreamable-spiele
+_last_restreams_post_date: datetime.date | None = None     # 04:30, #restreams
+
 # =========================================================
 # Web-API: Ergebnis-Parser (für evtl. spätere Nutzung)
 # =========================================================
@@ -1470,8 +1477,155 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
 
 
 # =========================================================
+# Restream-Helfer (nur Discord-Events, kein Sheet)
+# =========================================================
+def _is_future_event(ev: discord.ScheduledEvent, now_utc: datetime.datetime) -> bool:
+    return (
+        ev.start_time is not None
+        and ev.start_time > now_utc
+        and ev.status in (
+            discord.EventStatus.scheduled,
+            discord.EventStatus.active,
+        )
+    )
+
+
+def _format_event_line(ev: discord.ScheduledEvent) -> str:
+    if ev.start_time is not None:
+        start_local = ev.start_time.astimezone(BERLIN_TZ)
+        start_str = start_local.strftime("%d.%m.%Y %H:%M")
+    else:
+        start_str = "kein Datum"
+
+    loc = _event_location(ev) or "kein Link"
+    url = f"https://discord.com/events/{GUILD_ID}/{ev.id}"
+    return f"{start_str} – {ev.name} – {loc} – {url}"
+
+
+async def apply_restream_to_event(
+    guild: discord.Guild,
+    event_id: int,
+    restream_type: str,
+    private_url: str | None,
+    picker: discord.Member,
+):
+    """
+    restream_type: "ZSR" oder "PRIVAT"
+    """
+    try:
+        event = await guild.fetch_scheduled_event(event_id)
+    except Exception as e:
+        raise RuntimeError(f"Event {event_id} konnte nicht geladen werden: {e}")
+
+    if event is None:
+        raise RuntimeError("Event nicht gefunden.")
+
+    name = event.name or ""
+    if "(Restream)" not in name:
+        name = f"{name} (Restream)"
+
+    desc = (event.description or "").strip()
+    lines = [desc] if desc else []
+
+    if restream_type.upper() == "ZSR":
+        lines.append(f"Restream: ZSR – {ZSR_RESTREAM_URL}")
+    else:
+        url_text = private_url.strip() if private_url else "kein Link angegeben"
+        lines.append(f"Restream: Privat – {url_text}")
+
+    lines.append(f"Ausgewählt von: {picker.display_name}")
+    new_desc = "\n".join(lines)
+
+    await event.edit(name=name, description=new_desc)
+
+
+async def maybe_daily_restreamable_post(
+    now_utc: datetime.datetime,
+    events: list[discord.ScheduledEvent],
+):
+    """
+    04:00 Berlin: alle zukünftigen Events in #restreamable-spiele posten.
+    """
+    global _last_restreamable_post_date
+
+    now_berlin = now_utc.astimezone(BERLIN_TZ)
+    if not (now_berlin.hour == 4 and now_berlin.minute < 10):
+        return
+
+    if _last_restreamable_post_date == now_berlin.date():
+        return
+
+    future_events = [ev for ev in events if _is_future_event(ev, now_utc)]
+    if not future_events:
+        _last_restreamable_post_date = now_berlin.date()
+        return
+
+    ch = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
+    if ch is None or not isinstance(ch, (discord.TextChannel, discord.Thread)):
+        print("[AUTO] SHOWRESTREAMS_CHANNEL_ID nicht gefunden oder falscher Typ")
+        _last_restreamable_post_date = now_berlin.date()
+        return
+
+    lines = ["📺 Restreambare Spiele (zukünftige Events)", ""]
+    for ev in future_events:
+        lines.append("• " + _format_event_line(ev))
+
+    try:
+        await send_long_message_channel(ch, "\n".join(lines))
+        _last_restreamable_post_date = now_berlin.date()
+        print(f"[AUTO] Restreamable-Post für {now_berlin.date()} gesendet")
+    except Exception as e:
+        print(f"[AUTO] Fehler beim Posten der Restreamable-Liste: {e}")
+
+
+async def maybe_daily_restreams_post(
+    now_utc: datetime.datetime,
+    events: list[discord.ScheduledEvent],
+):
+    """
+    04:30 Berlin: alle zukünftigen Events mit "(Restream)" im Titel in #restreams posten.
+    """
+    global _last_restreams_post_date
+
+    now_berlin = now_utc.astimezone(BERLIN_TZ)
+    if not (now_berlin.hour == 4 and 25 <= now_berlin.minute < 40):
+        return
+
+    if _last_restreams_post_date == now_berlin.date():
+        return
+
+    future_restreams = [
+        ev
+        for ev in events
+        if _is_future_event(ev, now_utc) and "(Restream)" in (ev.name or "")
+    ]
+
+    if not future_restreams:
+        _last_restreams_post_date = now_berlin.date()
+        return
+
+    ch = client.get_channel(RESTREAM_CHANNEL_ID)
+    if ch is None or not isinstance(ch, (discord.TextChannel, discord.Thread)):
+        print("[AUTO] RESTREAM_CHANNEL_ID nicht gefunden oder falscher Typ")
+        _last_restreams_post_date = now_berlin.date()
+        return
+
+    lines = ["🎥 Geplante Restreams (zukünftige Events mit '(Restream)')", ""]
+    for ev in future_restreams:
+        lines.append("• " + _format_event_line(ev))
+
+    try:
+        await send_long_message_channel(ch, "\n".join(lines))
+        _last_restreams_post_date = now_berlin.date()
+        print(f"[AUTO] Restreams-Post für {now_berlin.date()} gesendet")
+    except Exception as e:
+        print(f"[AUTO] Fehler beim Posten der Restreams-Liste: {e}")
+
+
+# =========================================================
 # Hintergrund-Refresher für API-Cache
 #   - Hält _API_CACHE["upcoming"] und _API_CACHE["results"] warm
+#   - Triggert tägliche Auto-Posts (04:00 / 04:30)
 # =========================================================
 async def refresh_api_cache(client: discord.Client):
     await client.wait_until_ready()
@@ -1482,7 +1636,7 @@ async def refresh_api_cache(client: discord.Client):
     while not client.is_closed():
         now = datetime.datetime.now(datetime.timezone.utc)
 
-        # --- Upcoming Events cachen ---
+        # --- Upcoming Events cachen + Auto-Posts ---
         try:
             guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
             events = await guild.fetch_scheduled_events()
@@ -1510,6 +1664,18 @@ async def refresh_api_cache(client: discord.Client):
             _API_CACHE["upcoming"]["data"] = data
 
             print(f"[CACHE] Upcoming aktualisiert ({len(data)} Events)")
+
+            # tägliche Auto-Posts (nur, wenn Events geladen werden konnten)
+            try:
+                await maybe_daily_restreamable_post(now, events)
+            except Exception as e_auto1:
+                print(f"[AUTO] Fehler bei maybe_daily_restreamable_post: {e_auto1}")
+
+            try:
+                await maybe_daily_restreams_post(now, events)
+            except Exception as e_auto2:
+                print(f"[AUTO] Fehler bei maybe_daily_restreams_post: {e_auto2}")
+
         except Exception as e:
             print(f"[CACHE] Fehler beim Aktualisieren der Upcoming-Events: {e}")
 
@@ -1634,27 +1800,6 @@ async def showrestreams(interaction: discord.Interaction):
     await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
 
 
-@tree.command(name="pick", description="(deaktiviert) Master-Tabelle entfernt")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def pick(interaction: discord.Interaction):
-    await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
-
-
-@tree.command(name="restreams", description="(deaktiviert) Master-Tabelle entfernt")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def restreams_alias(interaction: discord.Interaction):
-    await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
-
-
-@tree.command(
-    name="showrestreams_syncinfo",
-    description="(deaktiviert) Master-Tabelle entfernt",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def showrestreams_syncinfo(interaction: discord.Interaction):
-    await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
-
-
 # -------------------------------------------------------
 
 
@@ -1728,249 +1873,4 @@ async def playerexit(interaction: discord.Interaction):
         return
 
     view = PlayerExitDivisionSelectView(requester=member)
-    await interaction.response.send_message(
-        "📤 Spieler-Exit starten:\nBitte Division auswählen.",
-        view=view,
-        ephemeral=True,
-    )
-
-
-@tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def help(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📖 TFL Bot Hilfe",
-        description="Aktive Befehle:",
-        color=0x00FFCC,
-    )
-
-    embed.add_field(
-        name="/termin",
-        value="Neues Match eintragen, Event erstellen (kein Sheet)",
-        inline=False,
-    )
-    embed.add_field(
-        name="/restprogramm",
-        value="Offene Spiele je Division, optional Spieler-Filter.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/result",
-        value=(
-            "Ergebnis melden (schreibt ins DIV-Sheet & postet in den "
-            "Ergebnischannel)."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/playerexit",
-        value=(
-            "Admin: Spieler austragen (alle Spiele FF gegen ihn, Name "
-            "durchgestrichen)."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/spielplan",
-        value=(
-            "Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet "
-            "schreiben."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/add",
-        value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).",
-        inline=False,
-    )
-    embed.add_field(
-        name="/sync",
-        value="Admin: Slash-Commands synchronisieren.",
-        inline=False,
-    )
-
-    embed.add_field(
-        name="Vorübergehend deaktiviert",
-        value=(
-            "/today, /div1–/div6, /cup, /alle, /viewall, /showrestreams, "
-            "/pick, /restreams"
-        ),
-        inline=False,
-    )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@tree.command(
-    name="spielplan",
-    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden) und schreibt alles ins Sheet",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(division="Welche Division?")
-@app_commands.choices(
-    division=[
-        app_commands.Choice(name="Division 1", value="1"),
-        app_commands.Choice(name="Division 2", value="2"),
-        app_commands.Choice(name="Division 3", value="3"),
-        app_commands.Choice(name="Division 4", value="4"),
-        app_commands.Choice(name="Division 5", value="5"),
-        app_commands.Choice(name="Division 6", value="6"),
-    ],
-)
-async def spielplan(
-    interaction: discord.Interaction,
-    division: app_commands.Choice[str],
-):
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
-        return
-
-    if not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        players = spielplan_read_players(division.value)
-        if len(players) < 2:
-            await interaction.response.send_message(
-                (
-                    f"❌ Zu wenig Spieler in Division {division.value} gefunden "
-                    "(Spalte L leer oder nur eine Person)."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        rounds = spielplan_build_matches(players)
-        ws = _get_div_ws(division.value)
-        written = spielplan_write(ws, rounds)
-
-        preview_round = rounds[0] if rounds else []
-        preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
-        preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
-
-        msg = (
-            f"✅ Spielplan für Division {division.value} erstellt.\n"
-            f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
-            f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
-        )
-
-        await interaction.response.send_message(msg, ephemeral=True)
-
-    except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Fehler bei /spielplan: {e}",
-            ephemeral=True,
-        )
-
-
-@tree.command(
-    name="sync",
-    description="(Admin) Slash-Commands für diese Guild synchronisieren",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def sync_cmd(interaction: discord.Interaction):
-    member = interaction.user
-    if not isinstance(member, discord.Member) or not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Keine Berechtigung.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
-        names = ", ".join(sorted(c.name for c in synced))
-
-        await interaction.followup.send(
-            f"✅ Synced {len(synced)} Commands: {names}",
-            ephemeral=True,
-        )
-
-    except Exception as e:
-        try:
-            await interaction.followup.send(
-                f"❌ Sync-Fehler: {e}",
-                ephemeral=True,
-            )
-        except Exception as inner:
-            print(f"Fehler in /sync: {e} / {inner}")
-
-
-@tree.command(
-    name="restprogramm",
-    description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def restprogramm(interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        players_by_div = get_players_by_divisions()
-        view = RestprogrammView(players_by_div=players_by_div, start_div="1")
-        await interaction.followup.send(
-            (
-                "📋 Restprogramm – Division wählen, optional Spieler auswählen, "
-                "dann 'Anzeigen' drücken."
-            ),
-            view=view,
-            ephemeral=True,
-        )
-
-    except Exception as e:
-        try:
-            await interaction.followup.send(
-                f"❌ Fehler bei /restprogramm: {e}",
-                ephemeral=True,
-            )
-        except Exception:
-            print(f"Fehler in /restprogramm: {e}")
-
-
-# =========================================================
-# on_ready
-# =========================================================
-_client_synced_once = False
-_cache_task_started = False
-
-
-@client.event
-async def on_ready():
-    print("Bot ist online")
-    global _client_synced_once, _cache_task_started
-    print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
-
-    if not _client_synced_once:
-        await tree.sync(guild=discord.Object(id=GUILD_ID))
-        _client_synced_once = True
-        print("✅ Slash-Befehle synchronisiert")
-
-    # Webserver (API) starten – nur einmal
-    try:
-        asyncio.create_task(start_webserver(client))
-        print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming)")
-    except Exception as e:
-        print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
-
-    # Cache-Refresher nur einmal starten
-    if not _cache_task_started:
-        asyncio.create_task(refresh_api_cache(client))
-        _cache_task_started = True
-        print("♻️ Cache-Refresher gestartet (alle 5 Minuten)")
-
-    # Auto-Posts deaktiviert (kein Master-Tab)
-    print("🧩 Auto-Posts deaktiviert (kein Master-Tab)")
-    print("🤖 Bot bereit")
-
-
-# =========================================================
-# RUN
-# =========================================================
-client.run(TOKEN)
+    await interaction.response.send_message
