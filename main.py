@@ -1564,36 +1564,68 @@ async def add(interaction: discord.Interaction, name: str, twitch: str):
     )
 
 
-# --- /result Command (mit Rollen-Check + defer/followup) ---
+# --- /result Command (mit Rollen-Check + Fallback) ---
 @tree.command(
     name="result", description="Ergebnis melden (nur Orga / Try Force League Rolle)"
 )
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
     member = interaction.user
-    # 1) Mitglied prüfen
     if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True
-        )
-        return
+        # Versuch, Member nachzuladen
+        if interaction.guild is not None:
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except Exception:
+                await interaction.response.send_message(
+                    "❌ Konnte Mitgliedsdaten nicht laden.", ephemeral=True
+                )
+                return
+        else:
+            await interaction.response.send_message(
+                "❌ Dieser Befehl funktioniert nur auf dem Server.", ephemeral=True
+            )
+            return
 
-    # 2) Rollencheck
     if not has_tfl_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.", ephemeral=True
-        )
+        try:
+            await interaction.response.send_message(
+                "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.", ephemeral=True
+            )
+        except discord.NotFound:
+            # Fallback: DM, falls Interaction schon ungültig
+            try:
+                dm = await interaction.user.create_dm()
+                await dm.send("⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.")
+            except Exception as e:
+                print(f"[RESULT] DM-Fallback (no-perm) fehlgeschlagen: {e}")
         return
 
-    # 3) Defer, bevor die View gebaut/geschickt wird
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True, thinking=False)
-
-    # 4) View über followup senden
     view = ResultDivisionSelectView(requester=member)
-    await interaction.followup.send(
-        "Bitte Division auswählen:", view=view, ephemeral=True
-    )
+
+    # Normalfall: ganz normal ephemeral antworten
+    try:
+        await interaction.response.send_message(
+            "Bitte Division auswählen:", view=view, ephemeral=True
+        )
+    except discord.NotFound:
+        # Discord meldet Unknown Interaction -> Fallback in DM
+        print("[RESULT] Unknown interaction bei erster Antwort – Fallback in DM")
+        try:
+            dm = await interaction.user.create_dm()
+            await dm.send("Bitte Division auswählen:", view=view)
+        except Exception as e:
+            print(f"[RESULT] DM-Fallback fehlgeschlagen: {e}")
+    except Exception as e:
+        print(f"[RESULT] Unerwarteter Fehler bei erster Antwort: {e}")
+        # letzte Notbremse: Falls noch keine Antwort, kurzen Fehlertext
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.send_message(
+                    "❌ Unerwarteter Fehler im /result-Start.", ephemeral=True
+                )
+            except Exception:
+                pass
 
 
 # --- /playerexit Command (nur Admin) ---
