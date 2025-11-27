@@ -33,12 +33,12 @@ RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
 # Zeitzone
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
-# Standard-ZSR-Link (kann via ENV überschrieben werden)
+# Standard-Link für ZSR-Stream (kann per ENV überschrieben werden)
 ZSR_RESTREAM_URL = os.getenv("ZSR_RESTREAM_URL", "https://www.twitch.tv/zeldaspeedruns")
 
-# Flags für tägliche Auto-Posts (Datum in Berlin)
-_last_restreamable_post_date: datetime.date | None = None  # 04:00, #restreamable-spiele
-_last_restreams_post_date: datetime.date | None = None     # 04:30, #restreams
+# Flags für tägliche Auto-Posts (Datum in Berlin-Zeit)
+_last_restreamable_post_date = None  # 04:00 Uhr – #restreamable-spiele
+_last_restreams_post_date = None     # 04:30 Uhr – #restreams
 
 # =========================================================
 # Web-API: Ergebnis-Parser (für evtl. spätere Nutzung)
@@ -1477,156 +1477,313 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
 
 
 # =========================================================
-# Restream-Helfer (nur Discord-Events, kein Sheet)
+# Restream-Helfer
 # =========================================================
-def _is_future_event(ev: discord.ScheduledEvent, now_utc: datetime.datetime) -> bool:
-    return (
-        ev.start_time is not None
-        and ev.start_time > now_utc
-        and ev.status in (
-            discord.EventStatus.scheduled,
-            discord.EventStatus.active,
-        )
-    )
-
-
-def _format_event_line(ev: discord.ScheduledEvent) -> str:
-    if ev.start_time is not None:
-        start_local = ev.start_time.astimezone(BERLIN_TZ)
-        start_str = start_local.strftime("%d.%m.%Y %H:%M")
+def _format_event_line_for_post(ev: discord.ScheduledEvent) -> str:
+    start = ev.start_time
+    if start:
+        start_local = start.astimezone(BERLIN_TZ)
+        date_str = start_local.strftime("%d.%m.%Y")
+        time_str = start_local.strftime("%H:%M")
+        dt_str = f"{date_str} {time_str}"
     else:
-        start_str = "kein Datum"
+        dt_str = "ohne Startzeit"
 
     loc = _event_location(ev) or "kein Link"
-    url = f"https://discord.com/events/{GUILD_ID}/{ev.id}"
-    return f"{start_str} – {ev.name} – {loc} – {url}"
+    name = ev.name or "Unbenanntes Event"
+    return f"• {name} – {dt_str} – {loc}"
 
 
 async def apply_restream_to_event(
-    guild: discord.Guild,
-    event_id: int,
+    ev: discord.ScheduledEvent,
     restream_type: str,
-    private_url: str | None,
-    picker: discord.Member,
+    private_url: str | None = None,
 ):
     """
-    restream_type: "ZSR" oder "PRIVAT"
+    Hängt '(Restream)' an den Event-Titel und ergänzt die Beschreibung
+    um den Restream-Hinweis. Location wird bewusst NICHT überschrieben,
+    damit der Multistre.am-Link aus /termin erhalten bleibt.
     """
-    try:
-        event = await guild.fetch_scheduled_event(event_id)
-    except Exception as e:
-        raise RuntimeError(f"Event {event_id} konnte nicht geladen werden: {e}")
+    new_name = ev.name or ""
+    if "(Restream)" not in new_name:
+        new_name = f"{new_name} (Restream)"
 
-    if event is None:
-        raise RuntimeError("Event nicht gefunden.")
-
-    name = event.name or ""
-    if "(Restream)" not in name:
-        name = f"{name} (Restream)"
-
-    desc = (event.description or "").strip()
-    lines = [desc] if desc else []
-
+    desc = ev.description or ""
+    line = ""
     if restream_type.upper() == "ZSR":
-        lines.append(f"Restream: ZSR – {ZSR_RESTREAM_URL}")
+        line = f"Restream: ZSR – {ZSR_RESTREAM_URL}"
     else:
-        url_text = private_url.strip() if private_url else "kein Link angegeben"
-        lines.append(f"Restream: Privat – {url_text}")
+        if not private_url:
+            raise ValueError("Privater Restream ohne URL.")
+        line = f"Restream (Privat): {private_url}"
 
-    lines.append(f"Ausgewählt von: {picker.display_name}")
-    new_desc = "\n".join(lines)
+    if line and line not in desc:
+        if desc.strip():
+            desc = desc.rstrip() + "\n\n" + line
+        else:
+            desc = line
 
-    await event.edit(name=name, description=new_desc)
+    await ev.edit(name=new_name, description=desc)
 
 
-async def maybe_daily_restreamable_post(
+class PrivateRestreamModal(discord.ui.Modal, title="Privater Restream-Link"):
+    def __init__(self, event: discord.ScheduledEvent):
+        super().__init__(timeout=None)
+        self.event = event
+
+        self.url_input = discord.ui.TextInput(
+            label="Link zum privaten Restream (Twitch o.Ä.)",
+            style=discord.TextStyle.short,
+            required=True,
+            placeholder="https://www.twitch.tv/dein_kanal",
+        )
+        self.add_item(self.url_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        url = self.url_input.value.strip()
+        if not url.lower().startswith(("http://", "https://")):
+            await interaction.response.send_message(
+                "❌ Bitte eine vollständige URL mit http(s) angeben.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await apply_restream_to_event(self.event, "PRIVAT", private_url=url)
+            await interaction.response.send_message(
+                f"✅ Privater Restream für Event `{self.event.name}` gesetzt.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Fehler beim Setzen des Restreams: {e}",
+                ephemeral=True,
+            )
+
+
+class PickView(discord.ui.View):
+    """
+    View für /pick:
+    - Event wählen
+    - Restream-Quelle (ZSR / Privat) wählen
+    """
+
+    def __init__(self, events: list[discord.ScheduledEvent], requester: discord.Member):
+        super().__init__(timeout=180)
+        self.requester = requester
+        self.events_by_id: dict[str, discord.ScheduledEvent] = {
+            str(ev.id): ev for ev in events
+        }
+        self.selected_event_id: str | None = None
+
+        self.add_item(self.EventSelect(self))
+        self.add_item(self.SourceSelect(self))
+
+    class EventSelect(discord.ui.Select):
+        def __init__(self, parent_view: "PickView"):
+            self.parent_view = parent_view
+            options = []
+            for ev_id, ev in parent_view.events_by_id.items():
+                label = ev.name or "Unbenanntes Event"
+                if len(label) > 90:
+                    label = label[:87] + "..."
+                options.append(discord.SelectOption(label=label, value=ev_id))
+                if len(options) >= 25:
+                    break
+
+            super().__init__(
+                placeholder="Event wählen …",
+                min_values=1,
+                max_values=1,
+                options=options,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            self.parent_view.selected_event_id = self.values[0]
+            selected_label = None
+            for opt in self.options:
+                if opt.value == self.values[0]:
+                    selected_label = opt.label
+                    break
+
+            await interaction.response.send_message(
+                f"🎯 Event gesetzt: `{selected_label}`",
+                ephemeral=True,
+            )
+
+    class SourceSelect(discord.ui.Select):
+        def __init__(self, parent_view: "PickView"):
+            self.parent_view = parent_view
+            options = [
+                discord.SelectOption(label="ZSR", value="ZSR"),
+                discord.SelectOption(label="Privat", value="PRIVAT"),
+            ]
+            super().__init__(
+                placeholder="Restream-Quelle wählen …",
+                min_values=1,
+                max_values=1,
+                options=options,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            if not self.parent_view.selected_event_id:
+                await interaction.response.send_message(
+                    "Bitte zuerst ein Event auswählen.",
+                    ephemeral=True,
+                )
+                return
+
+            ev = self.parent_view.events_by_id.get(self.parent_view.selected_event_id)
+            if ev is None:
+                await interaction.response.send_message(
+                    "Event nicht mehr gefunden.",
+                    ephemeral=True,
+                )
+                return
+
+            choice = self.values[0]
+
+            if choice == "ZSR":
+                # ZSR direkt setzen
+                try:
+                    await interaction.response.defer(ephemeral=True, thinking=False)
+                except discord.InteractionResponded:
+                    pass
+                try:
+                    await apply_restream_to_event(ev, "ZSR")
+                    await interaction.followup.send(
+                        f"✅ Restream über ZSR für Event `{ev.name}` gesetzt.",
+                        ephemeral=True,
+                    )
+                except Exception as e:
+                    await interaction.followup.send(
+                        f"❌ Fehler beim Setzen des Restreams: {e}",
+                        ephemeral=True,
+                    )
+            else:
+                # Privat -> Modal zum URL-Eingeben
+                await interaction.response.send_modal(PrivateRestreamModal(ev))
+
+
+# =========================================================
+# Hintergrund-Refresher für API-Cache + Auto-Posts
+# =========================================================
+async def _maybe_post_restreamable(
     now_utc: datetime.datetime,
+    now_berlin: datetime.datetime,
     events: list[discord.ScheduledEvent],
 ):
     """
-    04:00 Berlin: alle zukünftigen Events in #restreamable-spiele posten.
+    04:00 Uhr: Liste aller zukünftigen Events ohne '(Restream)' in #restreamable-spiele.
     """
     global _last_restreamable_post_date
 
-    now_berlin = now_utc.astimezone(BERLIN_TZ)
-    if not (now_berlin.hour == 4 and now_berlin.minute < 10):
+    if RESTREAM_CHANNEL_ID == 0:
         return
 
-    if _last_restreamable_post_date == now_berlin.date():
+    today = now_berlin.date()
+    # Window: 04:00–04:29
+    if not (now_berlin.hour == 4 and now_berlin.minute < 30):
+        return
+    if _last_restreamable_post_date == today:
         return
 
-    future_events = [ev for ev in events if _is_future_event(ev, now_utc)]
-    if not future_events:
-        _last_restreamable_post_date = now_berlin.date()
+    channel = client.get_channel(RESTREAM_CHANNEL_ID)
+    if channel is None or not isinstance(channel, discord.TextChannel):
         return
 
-    ch = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
-    if ch is None or not isinstance(ch, (discord.TextChannel, discord.Thread)):
-        print("[AUTO] SHOWRESTREAMS_CHANNEL_ID nicht gefunden oder falscher Typ")
-        _last_restreamable_post_date = now_berlin.date()
+    upcoming = []
+    for ev in events:
+        if ev.status not in (
+            discord.EventStatus.scheduled,
+            discord.EventStatus.active,
+        ):
+            continue
+        if not ev.start_time:
+            continue
+        if ev.start_time <= now_utc:
+            continue
+        if "(restream)" in (ev.name or "").lower():
+            continue
+        upcoming.append(ev)
+
+    if not upcoming:
+        # Wenn nichts da ist, kein Spam – aber Flag trotzdem setzen,
+        # damit nicht im gleichen Zeitfenster dauernd versucht wird.
+        _last_restreamable_post_date = today
+        print("[AUTO] 04:00 – keine restreambaren Events gefunden.")
         return
 
-    lines = ["📺 Restreambare Spiele (zukünftige Events)", ""]
-    for ev in future_events:
-        lines.append("• " + _format_event_line(ev))
+    upcoming.sort(key=lambda e: e.start_time or now_utc)
+
+    lines = ["📺 Restreambare Spiele (heute & Zukunft)", ""]
+    for ev in upcoming:
+        lines.append(_format_event_line_for_post(ev))
 
     try:
-        await send_long_message_channel(ch, "\n".join(lines))
-        _last_restreamable_post_date = now_berlin.date()
-        print(f"[AUTO] Restreamable-Post für {now_berlin.date()} gesendet")
+        await channel.send("\n".join(lines))
+        _last_restreamable_post_date = today
+        print(f"[AUTO] 04:00 – {len(upcoming)} restreambare Events gepostet.")
     except Exception as e:
-        print(f"[AUTO] Fehler beim Posten der Restreamable-Liste: {e}")
+        print(f"[AUTO] Fehler beim Posten der restreambaren Events: {e}")
 
 
-async def maybe_daily_restreams_post(
+async def _maybe_post_restreams(
     now_utc: datetime.datetime,
+    now_berlin: datetime.datetime,
     events: list[discord.ScheduledEvent],
 ):
     """
-    04:30 Berlin: alle zukünftigen Events mit "(Restream)" im Titel in #restreams posten.
+    04:30 Uhr: Liste aller zukünftigen Events MIT '(Restream)' in #restreams.
     """
     global _last_restreams_post_date
 
-    now_berlin = now_utc.astimezone(BERLIN_TZ)
-    if not (now_berlin.hour == 4 and 25 <= now_berlin.minute < 40):
+    if SHOWRESTREAMS_CHANNEL_ID == 0:
         return
 
-    if _last_restreams_post_date == now_berlin.date():
+    today = now_berlin.date()
+    # Window: 04:30–04:59
+    if not (now_berlin.hour == 4 and now_berlin.minute >= 30):
+        return
+    if _last_restreams_post_date == today:
         return
 
-    future_restreams = [
-        ev
-        for ev in events
-        if _is_future_event(ev, now_utc) and "(Restream)" in (ev.name or "")
-    ]
-
-    if not future_restreams:
-        _last_restreams_post_date = now_berlin.date()
+    channel = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
+    if channel is None or not isinstance(channel, discord.TextChannel):
         return
 
-    ch = client.get_channel(RESTREAM_CHANNEL_ID)
-    if ch is None or not isinstance(ch, (discord.TextChannel, discord.Thread)):
-        print("[AUTO] RESTREAM_CHANNEL_ID nicht gefunden oder falscher Typ")
-        _last_restreams_post_date = now_berlin.date()
+    restream_events = []
+    for ev in events:
+        if ev.status not in (
+            discord.EventStatus.scheduled,
+            discord.EventStatus.active,
+        ):
+            continue
+        if not ev.start_time or ev.start_time <= now_utc:
+            continue
+        if "(restream)" not in (ev.name or "").lower():
+            continue
+        restream_events.append(ev)
+
+    if not restream_events:
+        _last_restreams_post_date = today
+        print("[AUTO] 04:30 – keine Restream-Events gefunden.")
         return
 
-    lines = ["🎥 Geplante Restreams (zukünftige Events mit '(Restream)')", ""]
-    for ev in future_restreams:
-        lines.append("• " + _format_event_line(ev))
+    restream_events.sort(key=lambda e: e.start_time or now_utc)
+
+    lines = ["🔁 Geplante Restreams (heute & Zukunft)", ""]
+    for ev in restream_events:
+        lines.append(_format_event_line_for_post(ev))
 
     try:
-        await send_long_message_channel(ch, "\n".join(lines))
-        _last_restreams_post_date = now_berlin.date()
-        print(f"[AUTO] Restreams-Post für {now_berlin.date()} gesendet")
+        await channel.send("\n".join(lines))
+        _last_restreams_post_date = today
+        print(f"[AUTO] 04:30 – {len(restream_events)} Restream-Events gepostet.")
     except Exception as e:
-        print(f"[AUTO] Fehler beim Posten der Restreams-Liste: {e}")
+        print(f"[AUTO] Fehler beim Posten der Restream-Events: {e}")
 
 
-# =========================================================
-# Hintergrund-Refresher für API-Cache
-#   - Hält _API_CACHE["upcoming"] und _API_CACHE["results"] warm
-#   - Triggert tägliche Auto-Posts (04:00 / 04:30)
-# =========================================================
 async def refresh_api_cache(client: discord.Client):
     await client.wait_until_ready()
     # kleinen Delay, damit on_ready sauber durchlaufen kann
@@ -1635,6 +1792,7 @@ async def refresh_api_cache(client: discord.Client):
     print("[CACHE] Hintergrund-Refresher gestartet")
     while not client.is_closed():
         now = datetime.datetime.now(datetime.timezone.utc)
+        now_berlin = now.astimezone(BERLIN_TZ)
 
         # --- Upcoming Events cachen + Auto-Posts ---
         try:
@@ -1665,16 +1823,9 @@ async def refresh_api_cache(client: discord.Client):
 
             print(f"[CACHE] Upcoming aktualisiert ({len(data)} Events)")
 
-            # tägliche Auto-Posts (nur, wenn Events geladen werden konnten)
-            try:
-                await maybe_daily_restreamable_post(now, events)
-            except Exception as e_auto1:
-                print(f"[AUTO] Fehler bei maybe_daily_restreamable_post: {e_auto1}")
-
-            try:
-                await maybe_daily_restreams_post(now, events)
-            except Exception as e_auto2:
-                print(f"[AUTO] Fehler bei maybe_daily_restreams_post: {e_auto2}")
+            # Auto-Posts (nur Discord-Events, kein Sheet)
+            await _maybe_post_restreamable(now, now_berlin, list(events))
+            await _maybe_post_restreams(now, now_berlin, list(events))
 
         except Exception as e:
             print(f"[CACHE] Fehler beim Aktualisieren der Upcoming-Events: {e}")
@@ -1800,7 +1951,7 @@ async def showrestreams(interaction: discord.Interaction):
     await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
 
 
-# -------------------------------------------------------
+# /pick und /restreams sind ab hier **aktiv** (neue Implementierung)
 
 
 @tree.command(name="add", description="Fügt einen neuen Spieler zur Liste hinzu")
@@ -1873,4 +2024,380 @@ async def playerexit(interaction: discord.Interaction):
         return
 
     view = PlayerExitDivisionSelectView(requester=member)
-    await interaction.response.send_message
+    await interaction.response.send_message(
+        "📤 Spieler-Exit starten:\nBitte Division auswählen.",
+        view=view,
+        ephemeral=True,
+    )
+
+
+@tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def help(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 TFL Bot Hilfe",
+        description="Aktive Befehle:",
+        color=0x00FFCC,
+    )
+
+    embed.add_field(
+        name="/termin",
+        value="Neues Match eintragen, Event erstellen (kein Sheet)",
+        inline=False,
+    )
+    embed.add_field(
+        name="/restprogramm",
+        value="Offene Spiele je Division, optional Spieler-Filter.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/result",
+        value=(
+            "Ergebnis melden (schreibt ins DIV-Sheet & postet in den "
+            "Ergebnischannel)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/playerexit",
+        value=(
+            "Admin: Spieler austragen (alle Spiele FF gegen ihn, Name "
+            "durchgestrichen)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/spielplan",
+        value=(
+            "Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet "
+            "schreiben."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/pick",
+        value=(
+            "Restream für ein Event setzen (ZSR oder privater Link). "
+            "Erweitert den Eventtitel um '(Restream)'."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/restreams",
+        value="Zeigt alle zukünftigen Events mit '(Restream)' im Titel.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/add",
+        value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).",
+        inline=False,
+    )
+    embed.add_field(
+        name="/sync",
+        value="Admin: Slash-Commands synchronisieren.",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Vorübergehend deaktiviert",
+        value="/today, /div1–/div6, /cup, /alle, /viewall, /showrestreams",
+        inline=False,
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@tree.command(
+    name="spielplan",
+    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden) und schreibt alles ins Sheet",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(division="Welche Division?")
+@app_commands.choices(
+    division=[
+        app_commands.Choice(name="Division 1", value="1"),
+        app_commands.Choice(name="Division 2", value="2"),
+        app_commands.Choice(name="Division 3", value="3"),
+        app_commands.Choice(name="Division 4", value="4"),
+        app_commands.Choice(name="Division 5", value="5"),
+        app_commands.Choice(name="Division 6", value="6"),
+    ],
+)
+async def spielplan(
+    interaction: discord.Interaction,
+    division: app_commands.Choice[str],
+):
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
+        )
+        return
+
+    if not has_admin_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        players = spielplan_read_players(division.value)
+        if len(players) < 2:
+            await interaction.response.send_message(
+                (
+                    f"❌ Zu wenig Spieler in Division {division.value} gefunden "
+                    "(Spalte L leer oder nur eine Person)."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        rounds = spielplan_build_matches(players)
+        ws = _get_div_ws(division.value)
+        written = spielplan_write(ws, rounds)
+
+        preview_round = rounds[0] if rounds else []
+        preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
+        preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
+
+        msg = (
+            f"✅ Spielplan für Division {division.value} erstellt.\n"
+            f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
+            f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
+        )
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Fehler bei /spielplan: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="sync",
+    description="(Admin) Slash-Commands für diese Guild synchronisieren",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def sync_cmd(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or not has_admin_role(member):
+        await interaction.response.send_message(
+            "⛔ Keine Berechtigung.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+        names = ", ".join(sorted(c.name for c in synced))
+
+        await interaction.followup.send(
+            f"✅ Synced {len(synced)} Commands: {names}",
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        try:
+            await interaction.followup.send(
+                f"❌ Sync-Fehler: {e}",
+                ephemeral=True,
+            )
+        except Exception as inner:
+            print(f"Fehler in /sync: {e} / {inner}")
+
+
+@tree.command(
+    name="restprogramm",
+    description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def restprogramm(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        players_by_div = get_players_by_divisions()
+        view = RestprogrammView(players_by_div=players_by_div, start_div="1")
+        await interaction.followup.send(
+            (
+                "📋 Restprogramm – Division wählen, optional Spieler auswählen, "
+                "dann 'Anzeigen' drücken."
+            ),
+            view=view,
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        try:
+            await interaction.followup.send(
+                f"❌ Fehler bei /restprogramm: {e}",
+                ephemeral=True,
+            )
+        except Exception:
+            print(f"Fehler in /restprogramm: {e}")
+
+
+@tree.command(
+    name="pick",
+    description="Restream für ein Event auswählen (ZSR oder privater Link)",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def pick(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
+        )
+        return
+
+    # Gleicher Rechte-Level wie /result (TFL-Rolle)
+    if not has_tfl_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Konnte Guild nicht ermitteln.",
+                ephemeral=True,
+            )
+            return
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        events = await guild.fetch_scheduled_events()
+
+        selectable = []
+        for ev in events:
+            if ev.status not in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
+                continue
+            if not ev.start_time or ev.start_time <= now_utc:
+                continue
+            if "(restream)" in (ev.name or "").lower():
+                # schon Restream – hier nicht mehr auswählbar
+                continue
+            selectable.append(ev)
+
+        if not selectable:
+            await interaction.followup.send(
+                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
+                ephemeral=True,
+            )
+            return
+
+        view = PickView(selectable, requester=member)
+        await interaction.followup.send(
+            "Bitte Event wählen und anschließend die Restream-Quelle auswählen.",
+            view=view,
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Fehler bei /pick: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="restreams",
+    description="Zeigt alle zukünftigen Events mit '(Restream)' im Titel",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def restreams(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Konnte Guild nicht ermitteln.",
+                ephemeral=True,
+            )
+            return
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        events = await guild.fetch_scheduled_events()
+
+        restream_events = []
+        for ev in events:
+            if ev.status not in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
+                continue
+            if not ev.start_time or ev.start_time <= now_utc:
+                continue
+            if "(restream)" not in (ev.name or "").lower():
+                continue
+            restream_events.append(ev)
+
+        if not restream_events:
+            await interaction.followup.send(
+                "📭 Aktuell sind keine zukünftigen Restream-Events eingetragen.",
+                ephemeral=True,
+            )
+            return
+
+        restream_events.sort(key=lambda e: e.start_time or now_utc)
+        lines = ["🔁 Geplante Restreams (nur Events in der Zukunft)", ""]
+        for ev in restream_events:
+            lines.append(_format_event_line_for_post(ev))
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Fehler bei /restreams: {e}",
+            ephemeral=True,
+        )
+
+
+# =========================================================
+# on_ready
+# =========================================================
+_client_synced_once = False
+_cache_task_started = False
+
+
+@client.event
+async def on_ready():
+    print("Bot ist online")
+    global _client_synced_once, _cache_task_started
+    print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
+
+    if not _client_synced_once:
+        await tree.sync(guild=discord.Object(id=GUILD_ID))
+        _client_synced_once = True
+        print("✅ Slash-Befehle synchronisiert")
+
+    # Webserver (API) starten – nur einmal
+    try:
+        asyncio.create_task(start_webserver(client))
+        print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming)")
+    except Exception as e:
+        print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
+
+    # Cache-Refresher nur einmal starten (inkl. Auto-Posts)
+    if not _cache_task_started:
+        asyncio.create_task(refresh_api_cache(client))
+        _cache_task_started = True
+        print("♻️ Cache-Refresher gestartet (alle 5 Minuten)")
+
+    print("🤖 Bot bereit")
+
+
+# =========================================================
+# RUN
+# =========================================================
+client.run(TOKEN)
