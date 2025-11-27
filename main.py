@@ -186,7 +186,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 guild.fetch_scheduled_events(),
                 timeout=5.0,
             )
-            print(f"[API] upcoming: fetched {len(events)} events from Discord")
+            print(f"[API] upcoming: fetched {len(events)} events from Discord}")
         except asyncio.TimeoutError:
             print("[API] upcoming: TIMEOUT while fetching events")
             if cache["data"]:
@@ -2083,6 +2083,11 @@ async def help(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name="/showpicks",
+        value="Zeigt alle zukünftigen Events ohne Restream (Basis für /pick).",
+        inline=False,
+    )
+    embed.add_field(
         name="/restreams",
         value="Zeigt alle zukünftigen Events mit '(Restream)' im Titel.",
         inline=False,
@@ -2306,6 +2311,59 @@ async def pick(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(
             f"❌ Fehler bei /pick: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="showpicks",
+    description="Zeigt alle zukünftigen Events ohne Restream (für /pick)",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def showpicks(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Konnte Guild nicht ermitteln.",
+                ephemeral=True,
+            )
+            return
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        events = await guild.fetch_scheduled_events()
+
+        selectable = []
+        for ev in events:
+            if ev.status not in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
+                continue
+            if not ev.start_time or ev.start_time <= now_utc:
+                continue
+            if "(restream)" in (ev.name or "").lower():
+                continue
+            selectable.append(ev)
+
+        if not selectable:
+            await interaction.followup.send(
+                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
+                ephemeral=True,
+            )
+            return
+
+        selectable.sort(key=lambda e: e.start_time or now_utc)
+        lines = ["🎯 Events, die für /pick zur Verfügung stehen:", ""]
+        for ev in selectable:
+            lines.append(_format_event_line_for_post(ev))
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Fehler bei /showpicks: {e}",
             ephemeral=True,
         )
 
