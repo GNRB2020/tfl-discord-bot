@@ -1564,27 +1564,34 @@ async def add(interaction: discord.Interaction, name: str, twitch: str):
     )
 
 
-# --- /result Command (mit Rollen-Check) ---
+# --- /result Command (mit Rollen-Check + defer/followup) ---
 @tree.command(
     name="result", description="Ergebnis melden (nur Orga / Try Force League Rolle)"
 )
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
     member = interaction.user
+    # 1) Mitglied prüfen
     if not isinstance(member, discord.Member):
         await interaction.response.send_message(
             "❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True
         )
         return
 
+    # 2) Rollencheck
     if not has_tfl_role(member):
         await interaction.response.send_message(
             "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.", ephemeral=True
         )
         return
 
+    # 3) Defer, bevor die View gebaut/geschickt wird
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True, thinking=False)
+
+    # 4) View über followup senden
     view = ResultDivisionSelectView(requester=member)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         "Bitte Division auswählen:", view=view, ephemeral=True
     )
 
