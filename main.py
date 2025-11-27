@@ -179,7 +179,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 guild.fetch_scheduled_events(),
                 timeout=5.0,
             )
-            print(f"[API] upcoming: fetched {len(events)} events from Discord")
+            print(f"[API] upcoming: fetched {len(events)} events from Discord}")
         except asyncio.TimeoutError:
             print("[API] upcoming: TIMEOUT while fetching events")
             if cache["data"]:
@@ -818,22 +818,46 @@ class ResultDivisionSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        division = self.values[0]
-        heimspieler_liste = get_unique_heimspieler(division)
+        # WICHTIG: sofort defer, dann GSheets-IO, dann followup
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True, thinking=False)
 
-        if not heimspieler_liste:
-            await interaction.response.edit_message(
-                content=f"Keine offenen Spiele in Division {division}.", view=None
+            division = self.values[0]
+            heimspieler_liste = get_unique_heimspieler(division)
+
+            if not heimspieler_liste:
+                await interaction.followup.send(
+                    content=f"Keine offenen Spiele in Division {division}.",
+                    ephemeral=True,
+                )
+                return
+
+            view = ResultHomeSelectView(
+                division=division,
+                heimspieler_list=heimspieler_liste,
+                requester=self.requester,
             )
-            return
 
-        view = ResultHomeSelectView(
-            division=division, heimspieler_list=heimspieler_liste, requester=self.requester
-        )
+            await interaction.followup.send(
+                content=f"Division {division} ausgewählt.\nWer hat Heimrecht?",
+                view=view,
+                ephemeral=True,
+            )
 
-        await interaction.response.edit_message(
-            content=f"Division {division} ausgewählt.\nWer hat Heimrecht?", view=view
-        )
+        except Exception as e:
+            print(f"[RESULT] Fehler in ResultDivisionSelect.callback: {e}")
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "❌ Fehler beim Laden der Division.", ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "❌ Fehler beim Laden der Division.", ephemeral=True
+                    )
+            except Exception as inner:
+                print(f"[RESULT] Folgefehler DivisionSelect: {inner}")
 
 
 class ResultDivisionSelectView(discord.ui.View):
@@ -858,27 +882,50 @@ class ResultHomeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        heim = self.values[0]
-        alle_spiele = load_open_games_for_result(self.division)
-        spiele_dieses_heims = [g for g in alle_spiele if g["heim"] == heim]
+        # Auch hier: erst defer, dann GSheets
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True, thinking=False)
 
-        if not spiele_dieses_heims:
-            await interaction.response.edit_message(
-                content=f"Keine offenen Spiele gefunden, in denen {heim} Heim ist.",
-                view=None,
+            heim = self.values[0]
+            alle_spiele = load_open_games_for_result(self.division)
+            spiele_dieses_heims = [g for g in alle_spiele if g["heim"] == heim]
+
+            if not spiele_dieses_heims:
+                await interaction.followup.send(
+                    content=(
+                        f"Keine offenen Spiele gefunden, in denen {heim} Heim ist."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            view = ResultGameSelectView(
+                division=self.division,
+                heim=heim,
+                games=spiele_dieses_heims,
+                requester=self.requester,
             )
-            return
 
-        view = ResultGameSelectView(
-            division=self.division,
-            heim=heim,
-            games=spiele_dieses_heims,
-            requester=self.requester
-        )
+            await interaction.followup.send(
+                content=f"Heimrecht: {heim}\nBitte Spiel auswählen:",
+                view=view,
+                ephemeral=True,
+            )
 
-        await interaction.response.edit_message(
-            content=f"Heimrecht: {heim}\nBitte Spiel auswählen:", view=view
-        )
+        except Exception as e:
+            print(f"[RESULT] Fehler in ResultHomeSelect.callback: {e}")
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "❌ Fehler beim Laden der Heimspiele.", ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "❌ Fehler beim Laden der Heimspiele.", ephemeral=True
+                    )
+            except Exception as inner:
+                print(f"[RESULT] Folgefehler HomeSelect: {inner}")
 
 
 class ResultHomeSelectView(discord.ui.View):
@@ -911,17 +958,34 @@ class ResultGameSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        sel_idx = int(self.values[0])
-        game_info = self.games[sel_idx]
+        # KEIN defer hier – wir antworten direkt mit send_modal
+        try:
+            sel_idx = int(self.values[0])
+            game_info = self.games[sel_idx]
 
-        modal = ResultEntryModal(
-            division=self.division,
-            row_index=game_info["row_index"],
-            heim=game_info["heim"],
-            auswaerts=game_info["auswaerts"],
-            requester=self.requester,
-        )
-        await interaction.response.send_modal(modal)
+            modal = ResultEntryModal(
+                division=self.division,
+                row_index=game_info["row_index"],
+                heim=game_info["heim"],
+                auswaerts=game_info["auswaerts"],
+                requester=self.requester,
+            )
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            print(f"[RESULT] Fehler in ResultGameSelect.callback: {e}")
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "❌ Fehler beim Öffnen des Ergebnis-Dialogs.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "❌ Fehler beim Öffnen des Ergebnis-Dialogs.",
+                        ephemeral=True,
+                    )
+            except Exception as inner:
+                print(f"[RESULT] Folgefehler GameSelect: {inner}")
 
 
 class ResultGameSelectView(discord.ui.View):
