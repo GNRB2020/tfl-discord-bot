@@ -414,6 +414,8 @@ TWITCH_MAP = {
     "aleximwunderland": "alex_im_wunderland",
     "dominik0688": "Dominik0688",
     "quaschynock": "quaschynock",
+    "rennyur": "rennyur",
+    "marcii": "marciii86",
 }
 
 # =========================================================
