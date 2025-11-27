@@ -186,7 +186,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 guild.fetch_scheduled_events(),
                 timeout=5.0,
             )
-            print(f"[API] upcoming: fetched {len(events)} events from Discord}")
+            print(f"[API] upcoming: fetched {len(events) events from Discord}")
         except asyncio.TimeoutError:
             print("[API] upcoming: TIMEOUT while fetching events")
             if cache["data"]:
