@@ -44,7 +44,7 @@ SCORE_RE = re.compile(
         (?P<pr>.+?)                    # Spieler rechts
         (?:\s*\|\s*(?P<meta>.*))?      # optionale Meta "key: value | key: value"
         \s*$""",
-    re.IGNORECASE | re.VERBOSE
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -247,7 +247,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         ch = client.get_channel(RESULTS_CHANNEL_ID)
         if ch is None or not isinstance(
-            ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)
+            ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel),
         ):
             print(f"[API] results: channel {RESULTS_CHANNEL_ID} not found or wrong type")
             resp = web.json_response({"items": []})
@@ -301,7 +301,7 @@ async def start_webserver(client: discord.Client):
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(
-        f"[WEB] running on 0.0.0.0:{port}   endpoints: /health, /api/upcoming, /api/results"
+        f"[WEB] running on 0.0.0.0:{port}   endpoints: /health, /api/upcoming, /api/results",
     )
 
 
@@ -328,7 +328,9 @@ def chunk_text(text: str, limit: int = 1900):
 
 
 async def send_long_message_interaction(
-    interaction: discord.Interaction, content: str, ephemeral: bool = False
+    interaction: discord.Interaction,
+    content: str,
+    ephemeral: bool = False,
 ):
     if len(content) <= 1900 and not interaction.response.is_done():
         await interaction.response.send_message(content, ephemeral=ephemeral)
@@ -550,7 +552,11 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     return out
 
 
-async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
+async def _rp_show(
+    interaction: discord.Interaction,
+    division_value: str,
+    player_filter: str,
+):
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=False)
@@ -586,12 +592,14 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(
-                    f"❌ Fehler bei /restprogramm: {e}", ephemeral=True
+                    f"❌ Fehler bei /restprogramm: {e}",
+                    ephemeral=True,
                 )
             else:
                 await interaction.response.defer(ephemeral=True, thinking=False)
                 await interaction.followup.send(
-                    f"❌ Fehler bei /restprogramm: {e}", ephemeral=True
+                    f"❌ Fehler bei /restprogramm: {e}",
+                    ephemeral=True,
                 )
         except Exception as inner:
             print(f"Fehler in _rp_show: {e} / {inner}")
@@ -674,19 +682,29 @@ class RestprogrammView(discord.ui.View):
 # =========================================================
 class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
     division = discord.ui.TextInput(
-        label="Division", placeholder="z. B. 2. Division", required=True
+        label="Division",
+        placeholder="z. B. 2. Division",
+        required=True,
     )
     datetime_str = discord.ui.TextInput(
-        label="Datum & Uhrzeit", placeholder="DD.MM.YYYY HH:MM", required=True
+        label="Datum & Uhrzeit",
+        placeholder="DD.MM.YYYY HH:MM",
+        required=True,
     )
     spieler1 = discord.ui.TextInput(
-        label="Spieler 1", placeholder="Name wie in Liste", required=True
+        label="Spieler 1",
+        placeholder="Name wie in Liste",
+        required=True,
     )
     spieler2 = discord.ui.TextInput(
-        label="Spieler 2", placeholder="Name wie in Liste", required=True
+        label="Spieler 2",
+        placeholder="Name wie in Liste",
+        required=True,
     )
     modus = discord.ui.TextInput(
-        label="Modus", placeholder="z. B. Casual Boots", required=True
+        label="Modus",
+        placeholder="z. B. Casual Boots",
+        required=True,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -694,13 +712,14 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             parts = self.datetime_str.value.strip().split()
             if len(parts) < 2:
                 await interaction.response.send_message(
-                    "❌ Formatfehler: Nutze `DD.MM.YYYY HH:MM`.", ephemeral=True
+                    "❌ Formatfehler: Nutze `DD.MM.YYYY HH:MM`.",
+                    ephemeral=True,
                 )
                 return
 
             datum_str, uhrzeit_str = parts[0], parts[1]
             start_dt = BERLIN_TZ.localize(
-                dt.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M")
+                dt.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"),
             )
             end_dt = start_dt + timedelta(hours=1)
 
@@ -737,12 +756,14 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             )
 
             await interaction.response.send_message(
-                "✅ Event wurde erstellt (kein Sheet-Eintrag).", ephemeral=True
+                "✅ Event wurde erstellt (kein Sheet-Eintrag).",
+                ephemeral=True,
             )
 
         except Exception as e:
             await interaction.response.send_message(
-                f"❌ Fehler beim Erstellen des Events: {e}", ephemeral=True
+                f"❌ Fehler beim Erstellen des Events: {e}",
+                ephemeral=True,
             )
 
 
@@ -782,7 +803,13 @@ def get_unique_heimspieler(div_number: str):
 
 
 def batch_update_result(
-    ws, row_index, now_str, mode_val, ergebnis, raceroom_val, reporter_name
+    ws,
+    row_index,
+    now_str,
+    mode_val,
+    ergebnis,
+    raceroom_val,
+    reporter_name,
 ):
     """
     Schreibt das Ergebnis ins DIV-Sheet ohne die Spielernamen in D/F zu löschen.
@@ -814,50 +841,48 @@ class ResultDivisionSelect(discord.ui.Select):
             discord.SelectOption(label="Division 6", value="6"),
         ]
         super().__init__(
-            placeholder="Welche Division?", min_values=1, max_values=1, options=options
+            placeholder="Welche Division?",
+            min_values=1,
+            max_values=1,
+            options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # WICHTIG: sofort defer, dann GSheets-IO, dann followup
+        # schnell deferen, damit kein "Interaktion fehlgeschlagen"
         try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True, thinking=False)
+            await interaction.response.defer(ephemeral=True, thinking=False)
+        except discord.InteractionResponded:
+            pass
 
-            division = self.values[0]
+        division = self.values[0]
+
+        try:
             heimspieler_liste = get_unique_heimspieler(division)
-
-            if not heimspieler_liste:
-                await interaction.followup.send(
-                    content=f"Keine offenen Spiele in Division {division}.",
-                    ephemeral=True,
-                )
-                return
-
-            view = ResultHomeSelectView(
-                division=division,
-                heimspieler_list=heimspieler_liste,
-                requester=self.requester,
-            )
-
+        except Exception as e:
+            print(f"[RESULT] Fehler beim Laden der Division {division}: {e}")
             await interaction.followup.send(
-                content=f"Division {division} ausgewählt.\nWer hat Heimrecht?",
-                view=view,
+                "❌ Fehler beim Laden der Division.",
                 ephemeral=True,
             )
+            return
 
-        except Exception as e:
-            print(f"[RESULT] Fehler in ResultDivisionSelect.callback: {e}")
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(
-                        "❌ Fehler beim Laden der Division.", ephemeral=True
-                    )
-                else:
-                    await interaction.response.send_message(
-                        "❌ Fehler beim Laden der Division.", ephemeral=True
-                    )
-            except Exception as inner:
-                print(f"[RESULT] Folgefehler DivisionSelect: {inner}")
+        if not heimspieler_liste:
+            await interaction.edit_original_response(
+                content=f"Keine offenen Spiele in Division {division}.",
+                view=None,
+            )
+            return
+
+        view = ResultHomeSelectView(
+            division=division,
+            heimspieler_list=heimspieler_liste,
+            requester=self.requester,
+        )
+
+        await interaction.edit_original_response(
+            content=f"Division {division} ausgewählt.\nWer hat Heimrecht?",
+            view=view,
+        )
 
 
 class ResultDivisionSelectView(discord.ui.View):
@@ -882,55 +907,52 @@ class ResultHomeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # Auch hier: erst defer, dann GSheets
         try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True, thinking=False)
+            await interaction.response.defer(ephemeral=True, thinking=False)
+        except discord.InteractionResponded:
+            pass
 
-            heim = self.values[0]
+        heim = self.values[0]
+
+        try:
             alle_spiele = load_open_games_for_result(self.division)
-            spiele_dieses_heims = [g for g in alle_spiele if g["heim"] == heim]
-
-            if not spiele_dieses_heims:
-                await interaction.followup.send(
-                    content=(
-                        f"Keine offenen Spiele gefunden, in denen {heim} Heim ist."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            view = ResultGameSelectView(
-                division=self.division,
-                heim=heim,
-                games=spiele_dieses_heims,
-                requester=self.requester,
-            )
-
+        except Exception as e:
+            print(f"[RESULT] Fehler beim Laden offener Spiele (Div {self.division}): {e}")
             await interaction.followup.send(
-                content=f"Heimrecht: {heim}\nBitte Spiel auswählen:",
-                view=view,
+                "❌ Fehler beim Laden der offenen Spiele.",
                 ephemeral=True,
             )
+            return
 
-        except Exception as e:
-            print(f"[RESULT] Fehler in ResultHomeSelect.callback: {e}")
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(
-                        "❌ Fehler beim Laden der Heimspiele.", ephemeral=True
-                    )
-                else:
-                    await interaction.response.send_message(
-                        "❌ Fehler beim Laden der Heimspiele.", ephemeral=True
-                    )
-            except Exception as inner:
-                print(f"[RESULT] Folgefehler HomeSelect: {inner}")
+        spiele_dieses_heims = [g for g in alle_spiele if g["heim"] == heim]
+
+        if not spiele_dieses_heims:
+            await interaction.edit_original_response(
+                content=f"Keine offenen Spiele gefunden, in denen {heim} Heim ist.",
+                view=None,
+            )
+            return
+
+        view = ResultGameSelectView(
+            division=self.division,
+            heim=heim,
+            games=spiele_dieses_heims,
+            requester=self.requester,
+        )
+
+        await interaction.edit_original_response(
+            content=f"Heimrecht: {heim}\nBitte Spiel auswählen:",
+            view=view,
+        )
 
 
 class ResultHomeSelectView(discord.ui.View):
     def __init__(
-        self, division: str, heimspieler_list, requester: discord.Member, timeout=180
+        self,
+        division: str,
+        heimspieler_list,
+        requester: discord.Member,
+        timeout=180,
     ):
         super().__init__(timeout=timeout)
         self.add_item(ResultHomeSelect(division, heimspieler_list, requester))
@@ -946,9 +968,7 @@ class ResultGameSelect(discord.ui.Select):
         options = []
         for idx, g in enumerate(games):
             label = f"{g['heim']} vs {g['auswaerts']} | Zeile {g['row_index']}"
-            options.append(
-                discord.SelectOption(label=label[:100], value=str(idx))
-            )
+            options.append(discord.SelectOption(label=label[:100], value=str(idx)))
 
         super().__init__(
             placeholder="Bitte Spiel auswählen",
@@ -958,39 +978,27 @@ class ResultGameSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # KEIN defer hier – wir antworten direkt mit send_modal
-        try:
-            sel_idx = int(self.values[0])
-            game_info = self.games[sel_idx]
+        sel_idx = int(self.values[0])
+        game_info = self.games[sel_idx]
 
-            modal = ResultEntryModal(
-                division=self.division,
-                row_index=game_info["row_index"],
-                heim=game_info["heim"],
-                auswaerts=game_info["auswaerts"],
-                requester=self.requester,
-            )
-            await interaction.response.send_modal(modal)
-        except Exception as e:
-            print(f"[RESULT] Fehler in ResultGameSelect.callback: {e}")
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(
-                        "❌ Fehler beim Öffnen des Ergebnis-Dialogs.",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.response.send_message(
-                        "❌ Fehler beim Öffnen des Ergebnis-Dialogs.",
-                        ephemeral=True,
-                    )
-            except Exception as inner:
-                print(f"[RESULT] Folgefehler GameSelect: {inner}")
+        modal = ResultEntryModal(
+            division=self.division,
+            row_index=game_info["row_index"],
+            heim=game_info["heim"],
+            auswaerts=game_info["auswaerts"],
+            requester=self.requester,
+        )
+        await interaction.response.send_modal(modal)
 
 
 class ResultGameSelectView(discord.ui.View):
     def __init__(
-        self, division: str, heim: str, games, requester: discord.Member, timeout=180
+        self,
+        division: str,
+        heim: str,
+        games,
+        requester: discord.Member,
+        timeout=180,
     ):
         super().__init__(timeout=timeout)
         self.add_item(ResultGameSelect(division, heim, games, requester))
@@ -1040,7 +1048,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             label="Raceroom-Link",
             style=discord.TextStyle.short,
             required=True,
-            placeholder="https://raceroom.xyz/..."
+            placeholder="https://raceroom.xyz/...",
         )
 
         self.add_item(self.winner_input)
@@ -1108,7 +1116,9 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                     return
             else:
                 await interaction.followup.send(
-                    content="⚠️ Ergebnis gespeichert, aber Ergebnischannel nicht gefunden.",
+                    content=(
+                        "⚠️ Ergebnis gespeichert, aber Ergebnischannel nicht gefunden."
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -1123,7 +1133,8 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
 
         except Exception as e:
             await interaction.followup.send(
-                content=f"❌ Konnte Ergebnis nicht verarbeiten: {e}", ephemeral=True
+                content=f"❌ Konnte Ergebnis nicht verarbeiten: {e}",
+                ephemeral=True,
             )
 
 
@@ -1187,10 +1198,10 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
             strike_cells.append(f"F{idx}")
 
         batch_reqs.append(
-            {"range": f"B{idx}:C{idx}", "values": [[now_str, "FF"]]}
+            {"range": f"B{idx}:C{idx}", "values": [[now_str, "FF"]]},
         )
         batch_reqs.append(
-            {"range": f"E{idx}:E{idx}", "values": [[result_val]]}
+            {"range": f"E{idx}:E{idx}", "values": [[result_val]]},
         )
         batch_reqs.append({"range": f"G{idx}:G{idx}", "values": [["FF"]]})
         batch_reqs.append({"range": f"H{idx}:H{idx}", "values": [[reporter]]})
@@ -1219,32 +1230,43 @@ class PlayerExitDivisionSelect(discord.ui.Select):
             discord.SelectOption(label="Division 6", value="6"),
         ]
         super().__init__(
-            placeholder="Welche Division?", min_values=1, max_values=1, options=options
+            placeholder="Welche Division?",
+            min_values=1,
+            max_values=1,
+            options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
         div_number = self.values[0]
 
         try:
+            await interaction.response.defer(ephemeral=True, thinking=False)
+        except discord.InteractionResponded:
+            pass
+
+        try:
             players = list_div_players(div_number)
         except Exception as e:
-            await interaction.response.edit_message(
-                content=f"❌ Konnte Spieler nicht laden ({e}).", view=None
+            await interaction.followup.send(
+                f"❌ Konnte Spieler nicht laden ({e}).",
+                ephemeral=True,
             )
             return
 
         if not players:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"Keine Spieler in Division {div_number} gefunden.",
                 view=None,
             )
             return
 
         view = PlayerExitPlayerSelectView(
-            division=div_number, players=players, requester=self.requester
+            division=div_number,
+            players=players,
+            requester=self.requester,
         )
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"Division {div_number} gewählt.\nWelcher Spieler steigt aus?",
             view=view,
         )
@@ -1274,8 +1296,10 @@ class PlayerExitPlayerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         quitting_player = self.values[0]
 
-        if not interaction.response.is_done():
+        try:
             await interaction.response.defer(ephemeral=True, thinking=False)
+        except discord.InteractionResponded:
+            pass
 
         try:
             playerexit_apply(
@@ -1295,12 +1319,19 @@ class PlayerExitPlayerSelect(discord.ui.Select):
 
         except Exception as e:
             await interaction.followup.send(
-                content=f"❌ Fehler beim Austragen: {e}", ephemeral=True
+                content=f"❌ Fehler beim Austragen: {e}",
+                ephemeral=True,
             )
 
 
 class PlayerExitPlayerSelectView(discord.ui.View):
-    def __init__(self, division: str, players, requester: discord.Member, timeout=180):
+    def __init__(
+        self,
+        division: str,
+        players,
+        requester: discord.Member,
+        timeout=180,
+    ):
         super().__init__(timeout=timeout)
         self.add_item(PlayerExitPlayerSelect(division, players, requester))
 
@@ -1486,7 +1517,8 @@ async def refresh_api_cache(client: discord.Client):
         try:
             ch = client.get_channel(RESULTS_CHANNEL_ID)
             if ch is None or not isinstance(
-                ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)
+                ch,
+                (discord.TextChannel, discord.Thread, discord.VoiceChannel),
             ):
                 raise RuntimeError("Ergebnis-Channel nicht gefunden oder falscher Typ")
 
@@ -1517,7 +1549,10 @@ async def refresh_api_cache(client: discord.Client):
 # =========================================================
 # Slash Commands
 # =========================================================
-@tree.command(name="termin", description="Erstelle einen neuen Termin (nur Event, kein Sheet)")
+@tree.command(
+    name="termin",
+    description="Erstelle einen neuen Termin (nur Event, kein Sheet)",
+)
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def termin(interaction: discord.Interaction):
     await interaction.response.send_modal(TerminModal())
@@ -1590,7 +1625,10 @@ async def viewall(interaction: discord.Interaction):
     await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
 
 
-@tree.command(name="showrestreams", description="(deaktiviert) Master-Tabelle entfernt")
+@tree.command(
+    name="showrestreams",
+    description="(deaktiviert) Master-Tabelle entfernt",
+)
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def showrestreams(interaction: discord.Interaction):
     await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
@@ -1609,7 +1647,8 @@ async def restreams_alias(interaction: discord.Interaction):
 
 
 @tree.command(
-    name="showrestreams_syncinfo", description="(deaktiviert) Master-Tabelle entfernt"
+    name="showrestreams_syncinfo",
+    description="(deaktiviert) Master-Tabelle entfernt",
 )
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def showrestreams_syncinfo(interaction: discord.Interaction):
@@ -1626,13 +1665,15 @@ async def add(interaction: discord.Interaction, name: str, twitch: str):
     key = name.strip().lower()
     TWITCH_MAP[key] = twitch.strip()
     await interaction.response.send_message(
-        f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.", ephemeral=True
+        f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.",
+        ephemeral=True,
     )
 
 
 # --- /result Command (mit Rollen-Check, keine DMs) ---
 @tree.command(
-    name="result", description="Ergebnis melden (nur Orga / Try Force League Rolle)"
+    name="result",
+    description="Ergebnis melden (nur Orga / Try Force League Rolle)",
 )
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
@@ -1640,28 +1681,25 @@ async def result(interaction: discord.Interaction):
     if not isinstance(member, discord.Member):
         # sollte in einer Guild-Interaction eigentlich Member sein
         await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
         )
         return
 
     if not has_tfl_role(member):
-        try:
-            await interaction.response.send_message(
-                "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.", ephemeral=True
-            )
-        except Exception as e:
-            print(f"[RESULT] Fehler bei Antwort ohne Berechtigung: {e}")
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
         return
 
     view = ResultDivisionSelectView(requester=member)
 
-    try:
-        await interaction.response.send_message(
-            "Bitte Division auswählen:", view=view, ephemeral=True
-        )
-    except Exception as e:
-        # keine DMs, nur Log
-        print(f"[RESULT] Fehler bei erster Antwort im Channel: {e}")
+    await interaction.response.send_message(
+        "Bitte Division auswählen:",
+        view=view,
+        ephemeral=True,
+    )
 
 
 # --- /playerexit Command (nur Admin) ---
@@ -1677,7 +1715,8 @@ async def playerexit(interaction: discord.Interaction):
     member = interaction.user
     if not isinstance(member, discord.Member):
         await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
         )
         return
 
@@ -1690,7 +1729,9 @@ async def playerexit(interaction: discord.Interaction):
 
     view = PlayerExitDivisionSelectView(requester=member)
     await interaction.response.send_message(
-        "📤 Spieler-Exit starten:\nBitte Division auswählen.", view=view, ephemeral=True
+        "📤 Spieler-Exit starten:\nBitte Division auswählen.",
+        view=view,
+        ephemeral=True,
     )
 
 
@@ -1774,15 +1815,17 @@ async def help(interaction: discord.Interaction):
         app_commands.Choice(name="Division 4", value="4"),
         app_commands.Choice(name="Division 5", value="5"),
         app_commands.Choice(name="Division 6", value="6"),
-    ]
+    ],
 )
 async def spielplan(
-    interaction: discord.Interaction, division: app_commands.Choice[str]
+    interaction: discord.Interaction,
+    division: app_commands.Choice[str],
 ):
     member = interaction.user
     if not isinstance(member, discord.Member):
         await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
         )
         return
 
@@ -1823,17 +1866,22 @@ async def spielplan(
 
     except Exception as e:
         await interaction.response.send_message(
-            f"❌ Fehler bei /spielplan: {e}", ephemeral=True
+            f"❌ Fehler bei /spielplan: {e}",
+            ephemeral=True,
         )
 
 
-@tree.command(name="sync", description="(Admin) Slash-Commands für diese Guild synchronisieren")
+@tree.command(
+    name="sync",
+    description="(Admin) Slash-Commands für diese Guild synchronisieren",
+)
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def sync_cmd(interaction: discord.Interaction):
     member = interaction.user
     if not isinstance(member, discord.Member) or not has_admin_role(member):
         await interaction.response.send_message(
-            "⛔ Keine Berechtigung.", ephemeral=True
+            "⛔ Keine Berechtigung.",
+            ephemeral=True,
         )
         return
 
@@ -1843,12 +1891,16 @@ async def sync_cmd(interaction: discord.Interaction):
         names = ", ".join(sorted(c.name for c in synced))
 
         await interaction.followup.send(
-            f"✅ Synced {len(synced)} Commands: {names}", ephemeral=True
+            f"✅ Synced {len(synced)} Commands: {names}",
+            ephemeral=True,
         )
 
     except Exception as e:
         try:
-            await interaction.followup.send(f"❌ Sync-Fehler: {e}", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Sync-Fehler: {e}",
+                ephemeral=True,
+            )
         except Exception as inner:
             print(f"Fehler in /sync: {e} / {inner}")
 
@@ -1875,7 +1927,8 @@ async def restprogramm(interaction: discord.Interaction):
     except Exception as e:
         try:
             await interaction.followup.send(
-                f"❌ Fehler bei /restprogramm: {e}", ephemeral=True
+                f"❌ Fehler bei /restprogramm: {e}",
+                ephemeral=True,
             )
         except Exception:
             print(f"Fehler in /restprogramm: {e}")
