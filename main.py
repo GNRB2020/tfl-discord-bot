@@ -1973,17 +1973,23 @@ async def add(interaction: discord.Interaction, name: str, twitch: str):
 )
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def result(interaction: discord.Interaction):
+    # immer zuerst sauber deferen, damit nur noch followup benutzt wird
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=False)
+    except discord.InteractionResponded:
+        pass
+
     member = interaction.user
     if not isinstance(member, discord.Member):
-        # sollte in einer Guild-Interaction eigentlich Member sein
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ Konnte Mitgliedsdaten nicht lesen.",
             ephemeral=True,
         )
         return
 
     if not has_tfl_role(member):
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
             ephemeral=True,
         )
@@ -1991,7 +1997,7 @@ async def result(interaction: discord.Interaction):
 
     view = ResultDivisionSelectView(requester=member)
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         "Bitte Division auswählen:",
         view=view,
         ephemeral=True,
