@@ -461,14 +461,14 @@ def _cell(row, idx0):
 # =========================================================
 # Für "<div>.DIV"
 DIV_COL_TIMESTAMP = 2  # B
-DIV_COL_MODE = 3  # C
-DIV_COL_RESULT = 5  # E
-DIV_COL_LINK = 7  # G
-DIV_COL_REPORTER = 8  # H
-DIV_COL_LEFT = 4  # D (Heim)
-DIV_COL_MARKER = 5  # E ("vs"/Ergebnis)
-DIV_COL_RIGHT = 6  # F (Gast)
-DIV_COL_PLAYERS = 12  # L
+DIV_COL_MODE = 3       # C
+DIV_COL_RESULT = 5     # E
+DIV_COL_LINK = 7       # G
+DIV_COL_REPORTER = 8   # H
+DIV_COL_LEFT = 4       # D (Heim)
+DIV_COL_MARKER = 5     # E ("vs"/Ergebnis)
+DIV_COL_RIGHT = 6      # F (Gast)
+DIV_COL_PLAYERS = 12   # L
 
 # =========================================================
 # Rollen-Checks
@@ -542,8 +542,8 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     out = []
     q = player_query.strip().lower()
 
-    D_idx0 = DIV_COL_LEFT - 1  # D -> index 3
-    E_idx0 = DIV_COL_MARKER - 1  # E -> index 4
+    D_idx0 = DIV_COL_LEFT - 1   # D -> index 3
+    E_idx0 = DIV_COL_MARKER - 1 # E -> index 4
     F_idx0 = DIV_COL_RIGHT - 1  # F -> index 5
 
     for r_idx in range(1, len(rows)):  # ab Zeile 2
@@ -775,8 +775,9 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
 
 
 # =========================================================
-# /result Workflow
+# /result Workflow (komplett bereinigt, ohne defer im Slash-Command)
 # =========================================================
+
 def load_open_games_for_result(div_number: str):
     """
     Lädt offene Spiele aus {div}.DIV:
@@ -793,9 +794,9 @@ def load_open_games_for_result(div_number: str):
         if idx == 1:
             continue  # Header
 
-        heim = _cell(row, DIV_COL_LEFT - 1)  # D
+        heim = _cell(row, DIV_COL_LEFT - 1)      # D
         marker = _cell(row, DIV_COL_MARKER - 1)  # E
-        gast = _cell(row, DIV_COL_RIGHT - 1)  # F
+        gast = _cell(row, DIV_COL_RIGHT - 1)     # F
 
         if (heim or gast) and marker.lower() == "vs":
             out.append({"row_index": idx, "heim": heim, "auswaerts": gast})
@@ -855,26 +856,20 @@ class ResultDivisionSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # schnell deferen, damit kein "Interaktion fehlgeschlagen"
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=False)
-        except discord.InteractionResponded:
-            pass
-
         division = self.values[0]
 
         try:
             heimspieler_liste = get_unique_heimspieler(division)
         except Exception as e:
             print(f"[RESULT] Fehler beim Laden der Division {division}: {e}")
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 "❌ Fehler beim Laden der Division.",
                 ephemeral=True,
             )
             return
 
         if not heimspieler_liste:
-            await interaction.edit_original_response(
+            await interaction.response.edit_message(
                 content=f"Keine offenen Spiele in Division {division}.",
                 view=None,
             )
@@ -886,7 +881,7 @@ class ResultDivisionSelect(discord.ui.Select):
             requester=self.requester,
         )
 
-        await interaction.edit_original_response(
+        await interaction.response.edit_message(
             content=f"Division {division} ausgewählt.\nWer hat Heimrecht?",
             view=view,
         )
@@ -914,18 +909,13 @@ class ResultHomeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=False)
-        except discord.InteractionResponded:
-            pass
-
         heim = self.values[0]
 
         try:
             alle_spiele = load_open_games_for_result(self.division)
         except Exception as e:
             print(f"[RESULT] Fehler beim Laden offener Spiele (Div {self.division}): {e}")
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 "❌ Fehler beim Laden der offenen Spiele.",
                 ephemeral=True,
             )
@@ -934,7 +924,7 @@ class ResultHomeSelect(discord.ui.Select):
         spiele_dieses_heims = [g for g in alle_spiele if g["heim"] == heim]
 
         if not spiele_dieses_heims:
-            await interaction.edit_original_response(
+            await interaction.response.edit_message(
                 content=f"Keine offenen Spiele gefunden, in denen {heim} Heim ist.",
                 view=None,
             )
@@ -947,7 +937,7 @@ class ResultHomeSelect(discord.ui.Select):
             requester=self.requester,
         )
 
-        await interaction.edit_original_response(
+        await interaction.response.edit_message(
             content=f"Heimrecht: {heim}\nBitte Spiel auswählen:",
             view=view,
         )
@@ -1063,6 +1053,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
         self.add_item(self.raceroom_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Modal kriegt sein eigenes defer, das ist okay
         await interaction.response.defer(ephemeral=True, thinking=False)
 
         winner_val = self.winner_input.value.strip().upper()
@@ -1143,6 +1134,37 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 content=f"❌ Konnte Ergebnis nicht verarbeiten: {e}",
                 ephemeral=True,
             )
+
+
+# --- /result Command (mit Rollen-Check, ohne defer im Command selbst) ---
+@tree.command(
+    name="result",
+    description="Ergebnis melden (nur Orga / Try Force League Rolle)",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def result(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
+        )
+        return
+
+    if not has_tfl_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    view = ResultDivisionSelectView(requester=member)
+
+    await interaction.response.send_message(
+        "Bitte Division auswählen:",
+        view=view,
+        ephemeral=True,
+    )
 
 
 # =========================================================
@@ -1708,8 +1730,6 @@ async def _maybe_post_restreamable(
         upcoming.append(ev)
 
     if not upcoming:
-        # Wenn nichts da ist, kein Spam – aber Flag trotzdem setzen,
-        # damit nicht im gleichen Zeitfenster dauernd versucht wird.
         _last_restreamable_post_date = today
         print("[AUTO] 04:00 – keine restreambaren Events gefunden.")
         return
@@ -1786,7 +1806,6 @@ async def _maybe_post_restreams(
 
 async def refresh_api_cache(client: discord.Client):
     await client.wait_until_ready()
-    # kleinen Delay, damit on_ready sauber durchlaufen kann
     await asyncio.sleep(5)
 
     print("[CACHE] Hintergrund-Refresher gestartet")
@@ -1823,7 +1842,6 @@ async def refresh_api_cache(client: discord.Client):
 
             print(f"[CACHE] Upcoming aktualisiert ({len(data)} Events)")
 
-            # Auto-Posts (nur Discord-Events, kein Sheet)
             await _maybe_post_restreamable(now, now_berlin, list(events))
             await _maybe_post_restreams(now, now_berlin, list(events))
 
@@ -1859,7 +1877,6 @@ async def refresh_api_cache(client: discord.Client):
         except Exception as e:
             print(f"[CACHE] Fehler beim Aktualisieren der Results: {e}")
 
-        # alle 5 Minuten auffrischen
         await asyncio.sleep(300)
 
 
@@ -1951,9 +1968,6 @@ async def showrestreams(interaction: discord.Interaction):
     await interaction.response.send_message(DEAKTIVIERT_TEXT, ephemeral=True)
 
 
-# /pick und /restreams sind ab hier **aktiv** (neue Implementierung)
-
-
 @tree.command(name="add", description="Fügt einen neuen Spieler zur Liste hinzu")
 @app_commands.describe(name="Name", twitch="Twitch-Username")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -1962,44 +1976,6 @@ async def add(interaction: discord.Interaction, name: str, twitch: str):
     TWITCH_MAP[key] = twitch.strip()
     await interaction.response.send_message(
         f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.",
-        ephemeral=True,
-    )
-
-
-# --- /result Command (mit Rollen-Check, keine DMs) ---
-@tree.command(
-    name="result",
-    description="Ergebnis melden (nur Orga / Try Force League Rolle)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def result(interaction: discord.Interaction):
-    # immer zuerst sauber deferen, damit nur noch followup benutzt wird
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=False)
-    except discord.InteractionResponded:
-        pass
-
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.followup.send(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
-        return
-
-    if not has_tfl_role(member):
-        await interaction.followup.send(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    view = ResultDivisionSelectView(requester=member)
-
-    await interaction.followup.send(
-        "Bitte Division auswählen:",
-        view=view,
         ephemeral=True,
     )
 
@@ -2296,7 +2272,6 @@ async def pick(interaction: discord.Interaction):
             if not ev.start_time or ev.start_time <= now_utc:
                 continue
             if "(restream)" in (ev.name or "").lower():
-                # schon Restream – hier nicht mehr auswählbar
                 continue
             selectable.append(ev)
 
