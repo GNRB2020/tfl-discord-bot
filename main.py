@@ -489,14 +489,36 @@ def _collect_players_from_div_ws(ws) -> list[str]:
 def get_players_for_div(div: str) -> list[str]:
     """
     Öffnet {div}.DIV und liefert alle Spieler aus Spalte D/F.
+    Falls dort nichts steht, versuchen wir zusätzlich den Racer-Block ab Spalte L.
     """
+    sheets_required()
+    ws_name = f"{div}.DIV"
+    print(f"[RESTPROGRAMM] get_players_for_div: versuche Worksheet '{ws_name}' zu öffnen")
+    ws = WB.worksheet(ws_name)
+
+    # 1) Standard: alle Spieler aus D/F (Spalten 4 und 6)
+    players = _collect_players_from_div_ws(ws)
+    if players:
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F): {players}")
+        return players
+
+    # 2) Fallback: Racer-Liste in Spalte L
     try:
-        sheets_required()
-        ws = WB.worksheet(f"{div}.DIV")
-        return _collect_players_from_div_ws(ws)
+        racer_col = ws.col_values(12)  # L = 12
+        racer_players = []
+        for name in racer_col[1:]:  # ab Zeile 2
+            name = name.strip()
+            if name:
+                racer_players.append(name)
+        if racer_players:
+            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(racer_players)} Spieler (L): {racer_players}")
+            return racer_players
     except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
-        return []
+        print(f"[RESTPROGRAMM] Fallback (Racer-Liste) fehlgeschlagen: {e}")
+
+    print(f"[RESTPROGRAMM] get_players_for_div({div}) -> keine Spieler gefunden")
+    return []
+
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
@@ -1939,19 +1961,14 @@ async def sync_cmd(interaction: discord.Interaction):
 # /restprogramm View
 # =========================================================
 class RestprogrammView(discord.ui.View):
-    def __init__(self, start_div: str = "1", start_player: str = "Komplett"):
+    def __init__(self, start_div: str = "1"):
         super().__init__(timeout=180)
 
-        # interner Zustand
         self.division_value = start_div
-        self.player_value = start_player
+        self.player_value = "Komplett"
 
-        # Controls hinzufügen
-        self.div_select = self.DivSelect(self)
-        self.player_select = self.PlayerSelect(self)
-
-        self.add_item(self.div_select)
-        self.add_item(self.player_select)
+        self.add_item(self.DivSelect(self))
+        self.add_item(self.PlayerSelect(self))
 
     # Text für die Steuerungs-Nachricht
     def header_text(self) -> str:
@@ -1966,6 +1983,21 @@ class RestprogrammView(discord.ui.View):
             "Spieler auswählen oder direkt 'Anzeigen' drücken."
         )
 
+    def set_division(self, new_div: str):
+        """
+        Division wechseln, Spieler-Filter zurücksetzen und PlayerSelect neu aufbauen.
+        """
+        self.division_value = new_div
+        self.player_value = "Komplett"
+
+        # vorhandenes PlayerSelect entfernen
+        for child in list(self.children):
+            if isinstance(child, RestprogrammView.PlayerSelect):
+                self.remove_item(child)
+
+        # neuen PlayerSelect für die neue Division hinzufügen
+        self.add_item(self.PlayerSelect(self))
+
     class DivSelect(discord.ui.Select):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
@@ -1978,7 +2010,7 @@ class RestprogrammView(discord.ui.View):
                 discord.SelectOption(label="Division 6", value="6"),
             ]
 
-            # aktuelle Division im Dropdown als ausgewählt markieren
+            # aktuell gewählte Division im Dropdown markieren
             for opt in options:
                 opt.default = (opt.value == parent_view.division_value)
 
@@ -1990,22 +2022,14 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
-            # Neue Division setzen, Spieler-Filter zurück auf "Komplett"
             new_div = self.values[0]
-            self.parent_view.division_value = new_div
-            self.parent_view.player_value = "Komplett"
 
-            # Auswahl im Div-Dropdown sichtbar halten
+            # interne Werte + PlayerSelect aktualisieren
+            self.parent_view.set_division(new_div)
+
+            # eigene Optionen (Defaults) updaten, damit die Auswahl sichtbar bleibt
             for opt in self.options:
                 opt.default = (opt.value == new_div)
-
-            # Player-Select neu aufbauen (damit Spieler für neue Division geladen werden)
-            for child in list(self.parent_view.children):
-                if isinstance(child, RestprogrammView.PlayerSelect):
-                    self.parent_view.remove_item(child)
-
-            self.parent_view.player_select = RestprogrammView.PlayerSelect(self.parent_view)
-            self.parent_view.add_item(self.parent_view.player_select)
 
             await interaction.response.edit_message(
                 content=self.parent_view.header_text(),
@@ -2016,13 +2040,14 @@ class RestprogrammView(discord.ui.View):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
+            # Spieler für die aktuelle Division laden
             players = get_players_for_div(parent_view.division_value)
 
             opts = [discord.SelectOption(label="Komplett", value="Komplett")]
             for p in players:
                 opts.append(discord.SelectOption(label=p, value=p))
 
-            # aktuelle Auswahl (falls schon gesetzt) als default markieren
+            # aktuellen Filter als default markieren
             for opt in opts:
                 opt.default = (opt.value == parent_view.player_value)
 
@@ -2034,9 +2059,10 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
+            # Auswahl merken
             self.parent_view.player_value = self.values[0]
 
-            # Auswahl im eigenen Select sichtbar halten
+            # Dropdown-Auswahl sichtbar halten
             for opt in self.options:
                 opt.default = (opt.value == self.parent_view.player_value)
 
@@ -2049,6 +2075,7 @@ class RestprogrammView(discord.ui.View):
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Ergebnisliste in derselben Nachricht anzeigen
         await _rp_show(interaction, self.division_value, self.player_value)
+
 
 
 @tree.command(
