@@ -490,34 +490,44 @@ def get_players_for_div(div: str) -> list[str]:
     """
     Öffnet {div}.DIV und liefert alle Spieler aus Spalte D/F.
     Falls dort nichts steht, versuchen wir zusätzlich den Racer-Block ab Spalte L.
+    Fehler werden geloggt, aber nicht nach außen geworfen.
     """
-    sheets_required()
-    ws_name = f"{div}.DIV"
-    print(f"[RESTPROGRAMM] get_players_for_div: versuche Worksheet '{ws_name}' zu öffnen")
-    ws = WB.worksheet(ws_name)
-
-    # 1) Standard: alle Spieler aus D/F (Spalten 4 und 6)
-    players = _collect_players_from_div_ws(ws)
-    if players:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F): {players}")
-        return players
-
-    # 2) Fallback: Racer-Liste in Spalte L
     try:
-        racer_col = ws.col_values(12)  # L = 12
-        racer_players = []
-        for name in racer_col[1:]:  # ab Zeile 2
-            name = name.strip()
-            if name:
-                racer_players.append(name)
-        if racer_players:
-            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(racer_players)} Spieler (L): {racer_players}")
-            return racer_players
-    except Exception as e:
-        print(f"[RESTPROGRAMM] Fallback (Racer-Liste) fehlgeschlagen: {e}")
+        sheets_required()
+        ws_name = f"{div}.DIV"
+        print(f"[RESTPROGRAMM] get_players_for_div: versuche Worksheet '{ws_name}' zu öffnen")
+        ws = WB.worksheet(ws_name)
 
-    print(f"[RESTPROGRAMM] get_players_for_div({div}) -> keine Spieler gefunden")
-    return []
+        # 1) Standard: alle Spieler aus D/F (Spalten 4 und 6)
+        players = _collect_players_from_div_ws(ws)
+        if players:
+            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F): {players}")
+            return players
+
+        # 2) Fallback: Racer-Liste in Spalte L
+        try:
+            racer_col = ws.col_values(12)  # L = 12
+            racer_players = []
+            for name in racer_col[1:]:  # ab Zeile 2
+                name = name.strip()
+                if name:
+                    racer_players.append(name)
+            if racer_players:
+                print(
+                    f"[RESTPROGRAMM] get_players_for_div({div}) -> "
+                    f"{len(racer_players)} Spieler (L): {racer_players}"
+                )
+                return racer_players
+        except Exception as e:
+            print(f"[RESTPROGRAMM] Fallback (Racer-Liste) fehlgeschlagen: {e}")
+
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> keine Spieler gefunden")
+        return []
+
+    except Exception as e:
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        return []
+
 
 
 
@@ -2037,39 +2047,41 @@ class RestprogrammView(discord.ui.View):
             )
 
     class PlayerSelect(discord.ui.Select):
-        def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
+    def __init__(self, parent_view: "RestprogrammView"):
+        self.parent_view = parent_view
 
-            # Spieler für die aktuelle Division laden
+        # Spieler laden – Fehler abfangen, damit das View nicht crasht
+        try:
             players = get_players_for_div(parent_view.division_value)
+        except Exception as e:
+            print(f"[RESTPROGRAMM] PlayerSelect init Fehler: {e}")
+            players = []
 
-            opts = [discord.SelectOption(label="Komplett", value="Komplett")]
-            for p in players:
-                opts.append(discord.SelectOption(label=p, value=p))
+        opts = [discord.SelectOption(label="Komplett", value="Komplett")]
+        for p in players:
+            opts.append(discord.SelectOption(label=p, value=p))
 
-            # aktuellen Filter als default markieren
-            for opt in opts:
-                opt.default = (opt.value == parent_view.player_value)
+        for opt in opts:
+            opt.default = (opt.value == parent_view.player_value)
 
-            super().__init__(
-                placeholder="Spieler filtern … (optional)",
-                min_values=1,
-                max_values=1,
-                options=opts,
-            )
+        super().__init__(
+            placeholder="Spieler filtern … (optional)",
+            min_values=1,
+            max_values=1,
+            options=opts,
+        )
 
-        async def callback(self, interaction: discord.Interaction):
-            # Auswahl merken
-            self.parent_view.player_value = self.values[0]
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.player_value = self.values[0]
 
-            # Dropdown-Auswahl sichtbar halten
-            for opt in self.options:
-                opt.default = (opt.value == self.parent_view.player_value)
+        for opt in self.options:
+            opt.default = (opt.value == self.parent_view.player_value)
 
-            await interaction.response.edit_message(
-                content=self.parent_view.header_text(),
-                view=self.parent_view,
-            )
+        await interaction.response.edit_message(
+            content=self.parent_view.header_text(),
+            view=self.parent_view,
+        )
+
 
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
