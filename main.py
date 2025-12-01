@@ -433,7 +433,7 @@ DIV_COL_RESULT = 5     # E
 DIV_COL_LINK = 7       # G
 DIV_COL_REPORTER = 8   # H
 DIV_COL_LEFT = 4       # D
-DIV_COL_MARKER = 5     # E ("vs")
+DIV_COL_MARKER = 5     # E
 DIV_COL_RIGHT = 6      # F
 
 # =========================================================
@@ -490,19 +490,19 @@ def get_players_for_div(div: str) -> list[str]:
     """
     Öffnet {div}.DIV und liefert alle Spieler aus Spalte D/F.
     """
-    sheets_required()
-    ws = WB.worksheet(f"{div}.DIV")
-    return _collect_players_from_div_ws(ws)
+    try:
+        sheets_required()
+        ws = WB.worksheet(f"{div}.DIV")
+        return _collect_players_from_div_ws(ws)
+    except Exception as e:
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        return []
 
 
 def get_players_by_divisions():
     result = {}
     for div in ["1", "2", "3", "4", "5", "6"]:
-        try:
-            players = get_players_for_div(div)
-        except Exception as e:
-            print(f"[RESTPROGRAMM] Fehler beim Laden der Spieler für Division {div}: {e}")
-            players = []
+        players = get_players_for_div(div)
         result[div] = ["Komplett"] + players
     return result
 
@@ -514,10 +514,14 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     E = Marker ("vs" = offen)
     F = Spieler 2
     """
-    sheets_required()
-    ws_name = f"{div}.DIV"
-    ws = WB.worksheet(ws_name)
-    rows = ws.get_all_values()
+    try:
+        sheets_required()
+        ws_name = f"{div}.DIV"
+        ws = WB.worksheet(ws_name)
+        rows = ws.get_all_values()
+    except Exception as e:
+        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}) Fehler: {e}")
+        return []
 
     out = []
     q = player_query.strip().lower()
@@ -544,17 +548,20 @@ async def _rp_show(
     division_value: str,
     player_filter: str,
 ):
+    """
+    Ersetzt die ursprüngliche /restprogramm-Nachricht durch die Ergebnisliste.
+    """
+    effective_filter = (
+        "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
+    )
     try:
-        effective_filter = (
-            "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
-        )
         matches = load_open_from_div_tab(division_value, player_query=effective_filter)
 
         if not matches:
             txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
             if effective_filter:
                 txt += f" (Filter: *{effective_filter}*)"
-            await interaction.response.send_message(txt, ephemeral=True)
+            await interaction.response.edit_message(content=txt, view=None)
             return
 
         lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
@@ -570,14 +577,14 @@ async def _rp_show(
         if len(matches) > 80:
             lines.append(f"… und {len(matches) - 80} weitere.")
 
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.response.edit_message(content="\n".join(lines), view=None)
 
     except Exception as e:
         print(f"[RESTPROGRAMM] Fehler in _rp_show: {e}")
         try:
-            await interaction.response.send_message(
-                "❌ Konnte das Restprogramm gerade nicht laden. Bitte später erneut probieren.",
-                ephemeral=True,
+            await interaction.response.edit_message(
+                content="❌ Konnte das Restprogramm gerade nicht laden. Bitte später erneut probieren.",
+                view=None,
             )
         except Exception:
             pass
@@ -592,6 +599,19 @@ class RestprogrammView(discord.ui.View):
 
         self.add_item(self.DivSelect(self))
         self.add_item(self.PlayerSelect(self))
+
+    # Text für die Steuerungs-Nachricht
+    def header_text(self) -> str:
+        if self.player_value and self.player_value != "Komplett":
+            filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
+        else:
+            filter_part = "Aktueller Spieler-Filter: **Komplett**"
+
+        return (
+            f"📋 Restprogramm – Division {self.division_value} gewählt.\n"
+            f"{filter_part}\n"
+            "Spieler auswählen oder direkt 'Anzeigen' drücken."
+        )
 
     class DivSelect(discord.ui.Select):
         def __init__(self, parent_view: "RestprogrammView"):
@@ -612,18 +632,12 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
-            self.parent_view.division_value = self.values[0]
-
-            # Neue View mit Spieler-Liste dieser Division
-            new_view = RestprogrammView(
-                start_div=self.parent_view.division_value,
-            )
+            # Neue Division setzen, Filter zurück auf Komplett
+            new_div = self.values[0]
+            new_view = RestprogrammView(start_div=new_div)
 
             await interaction.response.edit_message(
-                content=(
-                    "📋 Restprogramm – Division {div} gewählt.\n"
-                    "Spieler auswählen oder direkt 'Anzeigen' drücken."
-                ).format(div=new_view.division_value),
+                content=new_view.header_text(),
                 view=new_view,
             )
 
@@ -631,14 +645,7 @@ class RestprogrammView(discord.ui.View):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
-            try:
-                players = get_players_for_div(parent_view.division_value)
-            except Exception as e:
-                print(
-                    f"[RESTPROGRAMM] Fehler beim Laden der Spieler für Division "
-                    f"{parent_view.division_value}: {e}"
-                )
-                players = []
+            players = get_players_for_div(parent_view.division_value)
 
             opts = [discord.SelectOption(label="Komplett", value="Komplett")]
             for p in players:
@@ -653,13 +660,14 @@ class RestprogrammView(discord.ui.View):
 
         async def callback(self, interaction: discord.Interaction):
             self.parent_view.player_value = self.values[0]
-            await interaction.response.send_message(
-                f"🎯 Spieler-Filter gesetzt: **{self.parent_view.player_value}**",
-                ephemeral=True,
+            await interaction.response.edit_message(
+                content=self.parent_view.header_text(),
+                view=self.parent_view,
             )
 
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ergebnisliste in derselben Nachricht anzeigen
         await _rp_show(interaction, self.division_value, self.player_value)
 
 
@@ -2107,11 +2115,8 @@ async def restprogramm(interaction: discord.Interaction):
     try:
         view = RestprogrammView(start_div="1")
         await interaction.response.send_message(
-            (
-                "📋 Restprogramm – Division wählen, optional Spieler auswählen, "
-                "dann 'Anzeigen' drücken."
-            ),
             view=view,
+            content=view.header_text(),
             ephemeral=True,
         )
 
