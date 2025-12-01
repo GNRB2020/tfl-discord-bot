@@ -515,12 +515,14 @@ def get_players_for_div(div: str):
 def get_players_by_divisions():
     """
     Struktur { "1": ["Komplett", "SpielerA", ...], ... }
+    (Momentan nicht mehr in /restprogramm verwendet, bleibt als Helper erhalten.)
     """
     result = {}
     for div in ["1", "2", "3", "4", "5", "6"]:
         try:
             players = get_players_for_div(div)
-        except Exception:
+        except Exception as e:
+            print(f"[RESTPROGRAMM] Fehler beim Laden der Spieler für Division {div}: {e}")
             players = []
         result[div] = ["Komplett"] + players
     return result
@@ -613,10 +615,9 @@ async def _rp_show(
 
 
 class RestprogrammView(discord.ui.View):
-    def __init__(self, players_by_div: dict, start_div: str = "1"):
+    def __init__(self, start_div: str = "1"):
         super().__init__(timeout=180)
 
-        self.players_by_div = players_by_div
         self.division_value = start_div
         self.player_value = "Komplett"
 
@@ -645,7 +646,6 @@ class RestprogrammView(discord.ui.View):
             self.parent_view.division_value = self.values[0]
 
             new_view = RestprogrammView(
-                players_by_div=self.parent_view.players_by_div,
                 start_div=self.parent_view.division_value,
             )
 
@@ -661,9 +661,18 @@ class RestprogrammView(discord.ui.View):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
-            current_div = parent_view.division_value
-            players = parent_view.players_by_div.get(current_div, ["Komplett"])
-            opts = [discord.SelectOption(label=p, value=p) for p in players]
+            try:
+                players = get_players_for_div(parent_view.division_value)
+            except Exception as e:
+                print(
+                    f"[RESTPROGRAMM] Fehler beim Laden der Spieler für Division "
+                    f"{parent_view.division_value}: {e}"
+                )
+                players = []
+
+            opts = [discord.SelectOption(label="Komplett", value="Komplett")]
+            for p in players:
+                opts.append(discord.SelectOption(label=p, value=p))
 
             super().__init__(
                 placeholder="Spieler filtern … (optional)",
@@ -1512,8 +1521,14 @@ def _format_event_line_for_post(ev: discord.ScheduledEvent) -> str:
         dt_str = "ohne Startzeit"
 
     loc = _event_location(ev) or "kein Link"
+    # Link in spitze Klammern, damit Discord-Markdown keine Unterstriche frisst
+    if loc != "kein Link":
+        loc_display = f"<{loc}>"
+    else:
+        loc_display = loc
+
     name = ev.name or "Unbenanntes Event"
-    return f"• {name} – {dt_str} – {loc}"
+    return f"• {name} – {dt_str} – {loc_display}"
 
 
 async def apply_restream_to_event(
@@ -1704,6 +1719,8 @@ async def _maybe_post_restreamable(
         return
 
     today = now_berlin.date()
+    header = "📺 Restreambare Spiele (heute & Zukunft)"
+
     # Window: 04:00–04:29
     if not (now_berlin.hour == 4 and now_berlin.minute < 30):
         return
@@ -1736,12 +1753,28 @@ async def _maybe_post_restreamable(
 
     upcoming.sort(key=lambda e: e.start_time or now_utc)
 
-    lines = ["📺 Restreambare Spiele (heute & Zukunft)", ""]
+    lines = [header, ""]
     for ev in upcoming:
         lines.append(_format_event_line_for_post(ev))
 
+    text = "\n".join(lines)
+
+    # Doppelpost-Schutz (z. B. bei zwei laufenden Instanzen)
     try:
-        await channel.send("\n".join(lines))
+        async for m in channel.history(limit=5):
+            if (
+                m.author.id == client.user.id
+                and m.created_at.astimezone(BERLIN_TZ).date() == today
+                and m.content.startswith(header)
+            ):
+                print("[AUTO] 04:00 – bereits ein Post im Channel, breche ab.")
+                _last_restreamable_post_date = today
+                return
+    except Exception as e:
+        print(f"[AUTO] 04:00 – Fehler beim Prüfen auf Doppelpost: {e}")
+
+    try:
+        await channel.send(text)
         _last_restreamable_post_date = today
         print(f"[AUTO] 04:00 – {len(upcoming)} restreambare Events gepostet.")
     except Exception as e:
@@ -2206,8 +2239,7 @@ async def sync_cmd(interaction: discord.Interaction):
 async def restprogramm(interaction: discord.Interaction):
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        players_by_div = get_players_by_divisions()
-        view = RestprogrammView(players_by_div=players_by_div, start_div="1")
+        view = RestprogrammView(start_div="1")
         await interaction.followup.send(
             (
                 "📋 Restprogramm – Division wählen, optional Spieler auswählen, "
