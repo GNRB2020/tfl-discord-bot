@@ -499,14 +499,6 @@ def get_players_for_div(div: str) -> list[str]:
         return []
 
 
-def get_players_by_divisions():
-    result = {}
-    for div in ["1", "2", "3", "4", "5", "6"]:
-        players = get_players_for_div(div)
-        result[div] = ["Komplett"] + players
-    return result
-
-
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
     Liest Tab '{div}.DIV' und gibt offene Paarungen zurück.
@@ -588,87 +580,6 @@ async def _rp_show(
             )
         except Exception:
             pass
-
-
-class RestprogrammView(discord.ui.View):
-    def __init__(self, start_div: str = "1"):
-        super().__init__(timeout=180)
-
-        self.division_value = start_div
-        self.player_value = "Komplett"
-
-        self.add_item(self.DivSelect(self))
-        self.add_item(self.PlayerSelect(self))
-
-    # Text für die Steuerungs-Nachricht
-    def header_text(self) -> str:
-        if self.player_value and self.player_value != "Komplett":
-            filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
-        else:
-            filter_part = "Aktueller Spieler-Filter: **Komplett**"
-
-        return (
-            f"📋 Restprogramm – Division {self.division_value} gewählt.\n"
-            f"{filter_part}\n"
-            "Spieler auswählen oder direkt 'Anzeigen' drücken."
-        )
-
-    class DivSelect(discord.ui.Select):
-        def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
-            options = [
-                discord.SelectOption(label="Division 1", value="1"),
-                discord.SelectOption(label="Division 2", value="2"),
-                discord.SelectOption(label="Division 3", value="3"),
-                discord.SelectOption(label="Division 4", value="4"),
-                discord.SelectOption(label="Division 5", value="5"),
-                discord.SelectOption(label="Division 6", value="6"),
-            ]
-            super().__init__(
-                placeholder="Division wählen …",
-                min_values=1,
-                max_values=1,
-                options=options,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            # Neue Division setzen, Filter zurück auf Komplett
-            new_div = self.values[0]
-            new_view = RestprogrammView(start_div=new_div)
-
-            await interaction.response.edit_message(
-                content=new_view.header_text(),
-                view=new_view,
-            )
-
-    class PlayerSelect(discord.ui.Select):
-        def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
-
-            players = get_players_for_div(parent_view.division_value)
-
-            opts = [discord.SelectOption(label="Komplett", value="Komplett")]
-            for p in players:
-                opts.append(discord.SelectOption(label=p, value=p))
-
-            super().__init__(
-                placeholder="Spieler filtern … (optional)",
-                min_values=1,
-                max_values=1,
-                options=opts,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            self.parent_view.player_value = self.values[0]
-            await interaction.response.edit_message(
-                content=self.parent_view.header_text(),
-                view=self.parent_view,
-            )
-
-    @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
-    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Ergebnisliste in derselben Nachricht anzeigen
-        await _rp_show(interaction, self.division_value, self.player_value)
 
 
 # =========================================================
@@ -806,7 +717,6 @@ def batch_update_result(
         {"range": f"H{row_index}:H{row_index}", "values": [[reporter_name]]},
     ]
     ws.batch_update(reqs)
-
 
 class ResultDivisionSelect(discord.ui.Select):
     def __init__(self, requester: discord.Member):
@@ -1289,8 +1199,8 @@ class PlayerExitPlayerSelect(discord.ui.Select):
             await interaction.followup.send(
                 content=(
                     f"✅ `{quitting_player}` in Division {self.division} ausgetragen.\n"
-                    "Alle Spiele (auch bereits gespielte) wurden als FF gegen ihn "
-                    "gewertet und der Name wurde durchgestrichen."
+                    "Alle Spiele (auch bereits gespielte) wurden als FF gegen ihn gewertet "
+                    "und der Name wurde durchgestrichen."
                 ),
                 ephemeral=True,
             )
@@ -1917,12 +1827,6 @@ async def help(interaction: discord.Interaction):
         inline=False,
     )
 
-    embed.add_field(
-        name="Vorübergehend deaktiviert",
-        value="/today, /div1–/div6, /cup, /alle, /viewall, /showrestreams",
-        inline=False,
-    )
-
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -2029,6 +1933,122 @@ async def sync_cmd(interaction: discord.Interaction):
             )
         except Exception:
             pass
+
+
+# =========================================================
+# /restprogramm View
+# =========================================================
+class RestprogrammView(discord.ui.View):
+    def __init__(self, start_div: str = "1", start_player: str = "Komplett"):
+        super().__init__(timeout=180)
+
+        # interner Zustand
+        self.division_value = start_div
+        self.player_value = start_player
+
+        # Controls hinzufügen
+        self.div_select = self.DivSelect(self)
+        self.player_select = self.PlayerSelect(self)
+
+        self.add_item(self.div_select)
+        self.add_item(self.player_select)
+
+    # Text für die Steuerungs-Nachricht
+    def header_text(self) -> str:
+        if self.player_value and self.player_value != "Komplett":
+            filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
+        else:
+            filter_part = "Aktueller Spieler-Filter: **Komplett**"
+
+        return (
+            f"📋 Restprogramm – Division {self.division_value} gewählt.\n"
+            f"{filter_part}\n"
+            "Spieler auswählen oder direkt 'Anzeigen' drücken."
+        )
+
+    class DivSelect(discord.ui.Select):
+        def __init__(self, parent_view: "RestprogrammView"):
+            self.parent_view = parent_view
+            options = [
+                discord.SelectOption(label="Division 1", value="1"),
+                discord.SelectOption(label="Division 2", value="2"),
+                discord.SelectOption(label="Division 3", value="3"),
+                discord.SelectOption(label="Division 4", value="4"),
+                discord.SelectOption(label="Division 5", value="5"),
+                discord.SelectOption(label="Division 6", value="6"),
+            ]
+
+            # aktuelle Division im Dropdown als ausgewählt markieren
+            for opt in options:
+                opt.default = (opt.value == parent_view.division_value)
+
+            super().__init__(
+                placeholder="Division wählen …",
+                min_values=1,
+                max_values=1,
+                options=options,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            # Neue Division setzen, Spieler-Filter zurück auf "Komplett"
+            new_div = self.values[0]
+            self.parent_view.division_value = new_div
+            self.parent_view.player_value = "Komplett"
+
+            # Auswahl im Div-Dropdown sichtbar halten
+            for opt in self.options:
+                opt.default = (opt.value == new_div)
+
+            # Player-Select neu aufbauen (damit Spieler für neue Division geladen werden)
+            for child in list(self.parent_view.children):
+                if isinstance(child, RestprogrammView.PlayerSelect):
+                    self.parent_view.remove_item(child)
+
+            self.parent_view.player_select = RestprogrammView.PlayerSelect(self.parent_view)
+            self.parent_view.add_item(self.parent_view.player_select)
+
+            await interaction.response.edit_message(
+                content=self.parent_view.header_text(),
+                view=self.parent_view,
+            )
+
+    class PlayerSelect(discord.ui.Select):
+        def __init__(self, parent_view: "RestprogrammView"):
+            self.parent_view = parent_view
+
+            players = get_players_for_div(parent_view.division_value)
+
+            opts = [discord.SelectOption(label="Komplett", value="Komplett")]
+            for p in players:
+                opts.append(discord.SelectOption(label=p, value=p))
+
+            # aktuelle Auswahl (falls schon gesetzt) als default markieren
+            for opt in opts:
+                opt.default = (opt.value == parent_view.player_value)
+
+            super().__init__(
+                placeholder="Spieler filtern … (optional)",
+                min_values=1,
+                max_values=1,
+                options=opts,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            self.parent_view.player_value = self.values[0]
+
+            # Auswahl im eigenen Select sichtbar halten
+            for opt in self.options:
+                opt.default = (opt.value == self.parent_view.player_value)
+
+            await interaction.response.edit_message(
+                content=self.parent_view.header_text(),
+                view=self.parent_view,
+            )
+
+    @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ergebnisliste in derselben Nachricht anzeigen
+        await _rp_show(interaction, self.division_value, self.player_value)
 
 
 @tree.command(
