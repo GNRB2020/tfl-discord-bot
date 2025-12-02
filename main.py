@@ -12,6 +12,9 @@ import re
 from aiohttp import web
 from datetime import datetime as dt, timezone, timedelta
 
+# =========================================================
+# .env laden / Konfiguration
+# =========================================================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
@@ -20,22 +23,33 @@ RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID", "0"))
 SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
+# feste Role-IDs aus ENV (müssen gesetzt sein)
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
 TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
+
+# Ergebnis-Channel
 RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
 
+# Zeitzone
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
+
+# Standard-Link für ZSR-Stream (kann per ENV überschrieben werden)
 ZSR_RESTREAM_URL = os.getenv("ZSR_RESTREAM_URL", "https://www.twitch.tv/zeldaspeedruns")
 
-_last_restreamable_post_date = None
-_last_restreams_post_date = None
+# Flags für tägliche Auto-Posts (Datum in Berlin-Zeit)
+_last_restreamable_post_date = None  # 04:00 Uhr – #restreamable-spiele
+_last_restreams_post_date = None     # 04:30 Uhr – #restreams
+
+# =========================================================
+# Web-API: Ergebnis-Parser (für evtl. spätere Nutzung)
+# =========================================================
 
 SCORE_RE = re.compile(
     r"""^\s*
-        (?P<pl>.+?)                    
-        \s+(?P<sl>\d+)\s*[:\-]\s*(?P<sr>\d+)\s+ 
-        (?P<pr>.+?)                    
-        (?:\s*\|\s*(?P<meta>.*))?      
+        (?P<pl>.+?)                    # Spieler links
+        \s+(?P<sl>\d+)\s*[:\-]\s*(?P<sr>\d+)\s+  # Score X:Y oder X-Y
+        (?P<pr>.+?)                    # Spieler rechts
+        (?:\s*\|\s*(?P<meta>.*))?      # optionale Meta "key: value | key: value"
         \s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -44,6 +58,7 @@ SCORE_RE = re.compile(
 def parse_result_message(text: str):
     text = text.strip()
     text = re.sub(r"^\s*\d{1,2}\.\d{1,2}\.\d{2,4}\s*[-–]\s*", "", text)
+
     m = SCORE_RE.match(text)
     if not m:
         return None
@@ -70,9 +85,13 @@ def parse_result_message(text: str):
                 seg_clean = seg.strip("() ")
                 if seg_clean and not out["mode"]:
                     out["mode"] = seg_clean
+
     return out
 
 
+# =========================================================
+# Discord-Client + Intents
+# =========================================================
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -81,11 +100,16 @@ tree = client.tree
 
 print(f"[INTENTS] members={intents.members}, message_content={intents.message_content}")
 
+# --- API-Cache für /api/upcoming und /api/results ---
 _API_CACHE = {
     "upcoming": {"ts": None, "data": []},
     "results": {"ts": None, "data": []},
 }
 API_CACHE_TTL = datetime.timedelta(minutes=10)
+
+# =========================================================
+# Minimaler Webserver für Joomla/Frontend
+# =========================================================
 
 _webserver_started = False
 _webapp_runner: web.AppRunner | None = None
@@ -169,7 +193,10 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         data = []
         for ev in events:
             print(f"[API] upcoming: event {ev.id} status={ev.status}")
-            if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active):
+            if ev.status in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
                 data.append(
                     {
                         "id": ev.id,
@@ -182,7 +209,9 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 )
 
         print(f"[API] upcoming: {len(data)} events nach Filter (scheduled/active)")
+
         data.sort(key=lambda x: (x["start"] is None, x["start"]))
+
         cache["ts"] = now
         cache["data"] = data
 
@@ -262,7 +291,9 @@ async def start_webserver(client: discord.Client):
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print("[WEB] running on 0.0.0.0:%s   endpoints: /health, /api/upcoming, /api/results" % port)
+    print(
+        f"[WEB] running on 0.0.0.0:{port}   endpoints: /health, /api/upcoming, /api/results",
+    )
 
 
 def today_berlin_date() -> datetime.date:
@@ -304,6 +335,9 @@ def map_sheet_channel_to_label(val: str) -> str:
     return v
 
 
+# =========================================================
+# Twitch-Namen Mapping
+# =========================================================
 TWITCH_MAP = {
     "gnrb": "gamenrockbuddys",
     "steinchen89": "Steinchen89",
@@ -363,6 +397,9 @@ TWITCH_MAP = {
     "rennyur": "rennyur",
 }
 
+# =========================================================
+# Google Sheets
+# =========================================================
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
 
@@ -389,6 +426,7 @@ def _cell(row, idx0):
     return row[idx0].strip() if 0 <= idx0 < len(row) else ""
 
 
+# Spaltenkonstanten
 DIV_COL_TIMESTAMP = 2  # B
 DIV_COL_MODE = 3       # C
 DIV_COL_RESULT = 5     # E
@@ -398,7 +436,9 @@ DIV_COL_LEFT = 4       # D
 DIV_COL_MARKER = 5     # E
 DIV_COL_RIGHT = 6      # F
 
-
+# =========================================================
+# Rollen-Checks
+# =========================================================
 def has_admin_role(member: discord.Member) -> bool:
     if not isinstance(member, discord.Member):
         return False
@@ -414,50 +454,28 @@ def has_tfl_role(member: discord.Member) -> bool:
         return False
     return any(r.id == TFL_ROLE_ID for r in member.roles)
 
+
 # =========================================================
-# Spieler-Helfer für DIV-Tabs – NUR Spalte L (L2..L9)
+# Spieler-Helfer für DIV-Tabs (neu, ohne Spalte L)
 # =========================================================
-def get_players_for_div(div: str) -> list[str]:
+def _collect_players_from_div_ws(ws) -> list[str]:
     """
-    Spieler für /restprogramm aus dem DIV-Tab laden.
-
-    Umsetzung nach deiner Vorgabe:
-    - Es werden IMMER die Namen aus Spalte L (Racer-Block) gelesen.
-    - Es werden nur die Zeilen L2 bis L9 berücksichtigt.
-    - Leere Zellen werden ignoriert.
+    Liest alle Spielernamen aus Spalte D (Heim) und F (Gast),
+    entfernt Duplikate, behält Reihenfolge.
     """
-    try:
-        sheets_required()
-        ws_name = f"{div}.DIV"
-        print(f"[RESTPROGRAMM] get_players_for_div: öffne Worksheet '{ws_name}'")
-        ws = WB.worksheet(ws_name)
-
-        # Spalte L = 12, wir wollen L2..L9 -> Index 1..8
-        col_L = ws.col_values(12)
-        players: list[str] = []
-
-        upper = min(len(col_L), 9)
-        for i in range(1, upper):  # ab Zeile 2 (Index 1)
-            name = (col_L[i] or "").strip()
-            if name:
-                players.append(name)
-
-        print(
-            f"[RESTPROGRAMM] get_players_for_div({div}) -> "
-            f"{len(players)} Spieler aus L2..L9: {players}"
-        )
-        return players
-
-    except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) FEHLER: {e}")
-        return []
-
-
+    rows = ws.get_all_values()
     seen = set()
-    players: list[str] = []
+    players = []
 
-    for g in games:
-        for p in (g.get("heim", ""), g.get("auswaerts", "")):
+    D_idx0 = DIV_COL_LEFT - 1
+    F_idx0 = DIV_COL_RIGHT - 1
+
+    for r_idx in range(1, len(rows)):  # ab Zeile 2
+        row = rows[r_idx]
+        p_left = _cell(row, D_idx0)
+        p_right = _cell(row, F_idx0)
+
+        for p in (p_left, p_right):
             if not p:
                 continue
             low = p.lower()
@@ -465,86 +483,97 @@ def get_players_for_div(div: str) -> list[str]:
                 seen.add(low)
                 players.append(p)
 
-    print(
-        f"[RESTPROGRAMM] get_players_for_div({div}) -> "
-        f"{len(players)} Spieler: {players}"
-    )
     return players
+
+
+def get_players_for_div(div: str) -> list[str]:
+    """
+    Öffnet {div}.DIV und liefert alle Spieler aus Spalte D/F.
+    Falls dort nichts steht, versuchen wir zusätzlich den Racer-Block ab Spalte L.
+    Fehler werden geloggt, aber nicht nach außen geworfen.
+    """
+    try:
+        sheets_required()
+        ws_name = f"{div}.DIV"
+        print(f"[RESTPROGRAMM] get_players_for_div: versuche Worksheet '{ws_name}' zu öffnen")
+        ws = WB.worksheet(ws_name)
+
+        # 1) Standard: alle Spieler aus D/F (Spalten 4 und 6)
+        players = _collect_players_from_div_ws(ws)
+        if players:
+            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F): {players}")
+            return players
+
+        # 2) Fallback: Racer-Liste in Spalte L
+        try:
+            racer_col = ws.col_values(12)  # L = 12
+            racer_players = []
+            for name in racer_col[1:]:  # ab Zeile 2
+                name = name.strip()
+                if name:
+                    racer_players.append(name)
+            if racer_players:
+                print(
+                    f"[RESTPROGRAMM] get_players_for_div({div}) -> "
+                    f"{len(racer_players)} Spieler (L): {racer_players}"
+                )
+                return racer_players
+        except Exception as e:
+            print(f"[RESTPROGRAMM] Fallback (Racer-Liste) fehlgeschlagen: {e}")
+
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> keine Spieler gefunden")
+        return []
+
+    except Exception as e:
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        return []
+
+
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
     Liest Tab '{div}.DIV' und gibt offene Paarungen zurück.
-
-    NEUE LOGIK:
-    - Spieler stehen in Spalte D und F (Heim / Auswärts).
-    - Ein Spiel ist offen, wenn in derselben Zeile in Spalte E genau 'vs' steht.
-    - Es werden NUR die Zeilen 2 bis 57 betrachtet.
-    - player_query:
-        - "" oder "Komplett"  -> alle offenen Spiele
-        - ansonsten nur Spiele, in denen der Spieler in D oder F steht (case-insensitive).
-    Rückgabe: Liste von Tupeln (row_nr, block, p1, p2)
-             block bleibt "L", damit _rp_show nichts ändern muss.
+    D = Spieler 1
+    E = Marker ("vs" = offen)
+    F = Spieler 2
     """
     try:
         sheets_required()
         ws_name = f"{div}.DIV"
-        print(
-            f"[RESTPROGRAMM] load_open_from_div_tab: öffne Worksheet '{ws_name}', "
-            f"Filter='{player_query}'"
-        )
         ws = WB.worksheet(ws_name)
         rows = ws.get_all_values()
     except Exception as e:
-        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}) FEHLER beim Laden: {e}")
+        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}) Fehler: {e}")
         return []
 
     out = []
+    q = player_query.strip().lower()
 
-    q = (player_query or "").strip().lower()
-    if q == "komplett":
-        q = ""  # kein Filter
+    D_idx0 = DIV_COL_LEFT - 1
+    E_idx0 = DIV_COL_MARKER - 1
+    F_idx0 = DIV_COL_RIGHT - 1
 
-    # Spalten-Indices (0-basiert)
-    D_idx0 = DIV_COL_LEFT - 1   # D
-    E_idx0 = DIV_COL_MARKER - 1 # E
-    F_idx0 = DIV_COL_RIGHT - 1  # F
-
-    # Nur Zeilen 2 bis 57 (1-basiert) -> Indizes 1..56
-    max_row = min(len(rows), 57)
-    for r_idx in range(1, max_row):
+    for r_idx in range(1, len(rows)):
         row = rows[r_idx]
         p1 = _cell(row, D_idx0)
-        marker = _cell(row, E_idx0).strip().lower()
+        marker = _cell(row, E_idx0).lower()
         p2 = _cell(row, F_idx0)
 
-        # nur echte Paarungen mit "vs" in Spalte E
-        if not (p1 or p2):
-            continue
-        if marker != "vs":
-            continue
+        if (p1 or p2) and marker == "vs":
+            if not q or (q in p1.lower() or q in p2.lower()):
+                out.append((r_idx + 1, "L", p1, p2))
 
-        # Filter nach Spieler (wenn gesetzt)
-        if q:
-            if not (
-                (p1 and p1.lower() == q) or (p2 and p2.lower() == q)
-            ):
-                continue
-
-        row_nr = r_idx + 1  # 1-basiert für Anzeige
-        out.append((row_nr, "L", p1, p2))
-
-    print(
-        f"[RESTPROGRAMM] load_open_from_div_tab({div}) -> "
-        f"{len(out)} offene Spiele gefunden (Filter='{player_query}')"
-    )
     return out
 
 
-
-async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
+async def _rp_show(
+    interaction: discord.Interaction,
+    division_value: str,
+    player_filter: str,
+):
     """
-    (Wird in Teil 2 durch die View verwendet)
+    Ersetzt die ursprüngliche /restprogramm-Nachricht durch die Ergebnisliste.
     """
     effective_filter = (
         "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
@@ -552,18 +581,14 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
     try:
         matches = load_open_from_div_tab(division_value, player_query=effective_filter)
 
-        header = f"📋 Restprogramm – Division {division_value}\n"
-        if effective_filter:
-            header += f"Aktueller Spieler-Filter: **{effective_filter}**\n"
-        else:
-            header += "Aktueller Spieler-Filter: **Komplett**\n"
-
         if not matches:
-            txt = header + "\n📭 Keine offenen Spiele gefunden."
+            txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
+            if effective_filter:
+                txt += f" (Filter: *{effective_filter}*)"
             await interaction.response.edit_message(content=txt, view=None)
             return
 
-        lines = [header, f"Offene Spiele ({len(matches)})"]
+        lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
         if effective_filter:
             lines.append(f"_Filter: {effective_filter}_")
         else:
@@ -577,6 +602,7 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
             lines.append(f"… und {len(matches) - 80} weitere.")
 
         await interaction.response.edit_message(content="\n".join(lines), view=None)
+
     except Exception as e:
         print(f"[RESTPROGRAMM] Fehler in _rp_show: {e}")
         try:
@@ -588,6 +614,9 @@ async def _rp_show(interaction: discord.Interaction, division_value: str, player
             pass
 
 
+# =========================================================
+# /termin Modal
+# =========================================================
 class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
     division = discord.ui.TextInput(
         label="Division",
@@ -675,6 +704,9 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
             )
 
 
+# =========================================================
+# /result Workflow
+# =========================================================
 def load_open_games_for_result(div_number: str):
     sheets_required()
     ws = WB.worksheet(f"{div_number}.DIV")
@@ -691,6 +723,7 @@ def load_open_games_for_result(div_number: str):
 
         if (heim or gast) and marker.lower() == "vs":
             out.append({"row_index": idx, "heim": heim, "auswaerts": gast})
+
     return out
 
 
@@ -716,7 +749,6 @@ def batch_update_result(
         {"range": f"H{row_index}:H{row_index}", "values": [[reporter_name]]},
     ]
     ws.batch_update(reqs)
-
 
 class ResultDivisionSelect(discord.ui.Select):
     def __init__(self, requester: discord.Member):
@@ -1037,60 +1069,11 @@ async def result(interaction: discord.Interaction):
         view=view,
         ephemeral=True,
     )
-# =========================================================
-# Slash Commands (termin, add, playerexit, help, spielplan)
-# =========================================================
-@tree.command(
-    name="termin",
-    description="Erstelle einen neuen Termin (nur Event, kein Sheet)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def termin(interaction: discord.Interaction):
-    await interaction.response.send_modal(TerminModal())
-
-
-@tree.command(name="add", description="Fügt einen neuen Spieler zur Liste hinzu")
-@app_commands.describe(name="Name", twitch="Twitch-Username")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def add(interaction: discord.Interaction, name: str, twitch: str):
-    key = name.strip().lower()
-    TWITCH_MAP[key] = twitch.strip()
-    await interaction.response.send_message(
-        f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.",
-        ephemeral=True,
-    )
 
 
 # =========================================================
 # /playerexit Workflow
 # =========================================================
-
-def _collect_players_from_div_ws(ws) -> list[str]:
-    """
-    Hilfsfunktion: liest alle eindeutigen Spielernamen aus einem DIV-Worksheet.
-    Verwendet Spalte D (Heim) und Spalte F (Auswärts), Zeilen ab 2.
-    Wird von /playerexit und /spielplan verwendet.
-    """
-    rows = ws.get_all_values()
-    players: list[str] = []
-    seen: set[str] = set()
-
-    for row in rows[1:]:  # ab Zeile 2
-        left = _cell(row, DIV_COL_LEFT - 1)   # D
-        right = _cell(row, DIV_COL_RIGHT - 1) # F
-
-        for name in (left, right):
-            if not name:
-                continue
-            low = name.lower()
-            if low in seen:
-                continue
-            seen.add(low)
-            players.append(name)
-
-    return players
-
-
 def list_div_players(div_number: str):
     try:
         sheets_required()
@@ -1183,9 +1166,9 @@ class PlayerExitDivisionSelect(discord.ui.Select):
 
         try:
             players = list_div_players(div_number)
-        except Exception:
+        except Exception as e:
             await interaction.followup.send(
-                "❌ Konnte Spieler nicht laden.",
+                f"❌ Konnte Spieler nicht laden.",
                 ephemeral=True,
             )
             return
@@ -1254,9 +1237,9 @@ class PlayerExitPlayerSelect(discord.ui.Select):
                 ephemeral=True,
             )
 
-        except Exception:
+        except Exception as e:
             await interaction.followup.send(
-                content="❌ Fehler beim Austragen.",
+                content=f"❌ Fehler beim Austragen.",
                 ephemeral=True,
             )
 
@@ -1271,38 +1254,6 @@ class PlayerExitPlayerSelectView(discord.ui.View):
     ):
         super().__init__(timeout=timeout)
         self.add_item(PlayerExitPlayerSelect(division, players, requester))
-
-
-@tree.command(
-    name="playerexit",
-    description=(
-        "Spieler aus Division austragen und alle Spiele als FF gegen ihn "
-        "werten (nur Admin)"
-    ),
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def playerexit(interaction: discord.Interaction):
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
-        return
-
-    if not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    view = PlayerExitDivisionSelectView(requester=member)
-    await interaction.response.send_message(
-        "📤 Spieler-Exit starten:\nBitte Division auswählen.",
-        view=view,
-        ephemeral=True,
-    )
 
 
 # =========================================================
@@ -1399,356 +1350,8 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     return len(rows_to_write)
 
 
-@tree.command(
-    name="spielplan",
-    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden) und schreibt alles ins Sheet",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(division="Welche Division?")
-@app_commands.choices(
-    division=[
-        app_commands.Choice(name="Division 1", value="1"),
-        app_commands.Choice(name="Division 2", value="2"),
-        app_commands.Choice(name="Division 3", value="3"),
-        app_commands.Choice(name="Division 4", value="4"),
-        app_commands.Choice(name="Division 5", value="5"),
-        app_commands.Choice(name="Division 6", value="6"),
-    ],
-)
-async def spielplan(
-    interaction: discord.Interaction,
-    division: app_commands.Choice[str],
-):
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
-        return
-
-    if not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        players = spielplan_read_players(division.value)
-        if len(players) < 2:
-            await interaction.response.send_message(
-                (
-                    f"❌ Zu wenig Spieler in Division {division.value} gefunden "
-                    "(zu wenige Namen in D/F)."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        rounds = spielplan_build_matches(players)
-        ws = _get_div_ws(division.value)
-        written = spielplan_write(ws, rounds)
-
-        preview_round = rounds[0] if rounds else []
-        preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
-        preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
-
-        msg = (
-            f"✅ Spielplan für Division {division.value} erstellt.\n"
-            f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
-            f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
-        )
-
-        await interaction.response.send_message(msg, ephemeral=True)
-
-    except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Fehler bei /spielplan: {e}",
-            ephemeral=True,
-        )
-
-
 # =========================================================
-# /help & /sync
-# =========================================================
-@tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def help(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📖 TFL Bot Hilfe",
-        description="Aktive Befehle:",
-        color=0x00FFCC,
-    )
-
-    embed.add_field(
-        name="/termin",
-        value="Neues Match eintragen, Event erstellen (kein Sheet)",
-        inline=False,
-    )
-    embed.add_field(
-        name="/restprogramm",
-        value="Offene Spiele je Division, optional Spieler-Filter.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/result",
-        value=(
-            "Ergebnis melden (schreibt ins DIV-Sheet & postet in den "
-            "Ergebnischannel)."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/playerexit",
-        value=(
-            "Admin: Spieler austragen (alle Spiele FF gegen ihn, Name "
-            "durchgestrichen)."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/spielplan",
-        value=(
-            "Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet "
-            "schreiben."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/pick",
-        value=(
-            "Restream für ein Event setzen (ZSR oder privater Link). "
-            "Erweitert den Eventtitel um '(Restream)'."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/showpicks",
-        value="Zeigt alle zukünftigen Events ohne Restream (Basis für /pick).",
-        inline=False,
-    )
-    embed.add_field(
-        name="/restreams",
-        value="Zeigt alle zukünftigen Events mit '(Restream)' im Titel.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/add",
-        value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).",
-        inline=False,
-    )
-    embed.add_field(
-        name="/sync",
-        value="Admin: Slash-Commands synchronisieren.",
-        inline=False,
-    )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@tree.command(
-    name="sync",
-    description="(Admin) Slash-Commands für diese Guild synchronisieren",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def sync_cmd(interaction: discord.Interaction):
-    member = interaction.user
-    if not isinstance(member, discord.Member) or not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Keine Berechtigung.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
-        names = ", ".join(sorted(c.name for c in synced))
-
-        await interaction.followup.send(
-            f"✅ Synced {len(synced)} Commands: {names}",
-            ephemeral=True,
-        )
-
-    except Exception as e:
-        print(f"[SYNC] Fehler: {e}")
-        try:
-            await interaction.followup.send(
-                "❌ Sync ist fehlgeschlagen. Bitte Logs prüfen.",
-                ephemeral=True,
-            )
-        except Exception:
-            pass
-
-
-# =========================================================
-# /restprogramm View
-# =========================================================
-class RestprogrammView(discord.ui.View):
-    def __init__(self, start_div: str = "1"):
-        super().__init__(timeout=180)
-        self.division_value = start_div
-        self.player_value = "Komplett"
-
-        print(f"[RESTPROGRAMM] View init – start_div={start_div}")
-
-        # View-Bestandteile hinzufügen
-        self.add_item(self.DivSelect(self))
-        self.add_item(self.PlayerSelect(self))
-
-    # Text für die Steuerungs-Nachricht
-    def header_text(self) -> str:
-        if self.player_value and self.player_value != "Komplett":
-            filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
-        else:
-            filter_part = "Aktueller Spieler-Filter: **Komplett**"
-
-        return (
-            f"📋 Restprogramm – Division {self.division_value} gewählt.\n"
-            f"{filter_part}\n"
-            "Spieler auswählen oder direkt 'Anzeigen' drücken."
-        )
-
-    def set_division(self, new_div: str):
-        """
-        Division wechseln, Spieler-Filter zurücksetzen und PlayerSelect neu aufbauen.
-        """
-        print(f"[RESTPROGRAMM] set_division -> {new_div}")
-        self.division_value = new_div
-        self.player_value = "Komplett"
-
-        # vorhandenes PlayerSelect entfernen
-        for child in list(self.children):
-            if isinstance(child, RestprogrammView.PlayerSelect):
-                self.remove_item(child)
-
-        # neuen PlayerSelect für die neue Division hinzufügen
-        self.add_item(self.PlayerSelect(self))
-
-    class DivSelect(discord.ui.Select):
-        def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
-            options = [
-                discord.SelectOption(label="Division 1", value="1"),
-                discord.SelectOption(label="Division 2", value="2"),
-                discord.SelectOption(label="Division 3", value="3"),
-                discord.SelectOption(label="Division 4", value="4"),
-                discord.SelectOption(label="Division 5", value="5"),
-                discord.SelectOption(label="Division 6", value="6"),
-            ]
-
-            # aktuell gewählte Division im Dropdown markieren
-            for opt in options:
-                opt.default = (opt.value == parent_view.division_value)
-
-            super().__init__(
-                placeholder="Division wählen …",
-                min_values=1,
-                max_values=1,
-                options=options,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            new_div = self.values[0]
-            print(f"[RESTPROGRAMM] DivSelect callback -> {new_div}")
-
-            # Neue Division setzen und PlayerSelect neu bauen
-            self.parent_view.set_division(new_div)
-
-            # eigene Optionen (Defaults) updaten, damit die Auswahl sichtbar bleibt
-            for opt in self.options:
-                opt.default = (opt.value == new_div)
-
-            await interaction.response.edit_message(
-                content=self.parent_view.header_text(),
-                view=self.parent_view,
-            )
-
-    class PlayerSelect(discord.ui.Select):
-        def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
-
-            # Spieler laden – Fehler abfangen, damit das View nicht crasht
-            try:
-                players = get_players_for_div(parent_view.division_value)
-            except Exception as e:
-                print(f"[RESTPROGRAMM] PlayerSelect init Fehler: {e}")
-                players = []
-
-            print(
-                f"[RESTPROGRAMM] PlayerSelect init – Division {parent_view.division_value}, "
-                f"{len(players)} Spieler"
-            )
-
-            opts = [discord.SelectOption(label="Komplett", value="Komplett")]
-            for p in players:
-                opts.append(discord.SelectOption(label=p, value=p))
-
-            # aktuellen Filter als default markieren
-            for opt in opts:
-                opt.default = (opt.value == parent_view.player_value)
-
-            super().__init__(
-                placeholder="Spieler filtern … (optional)",
-                min_values=1,
-                max_values=1,
-                options=opts,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            self.parent_view.player_value = self.values[0]
-            print(
-                f"[RESTPROGRAMM] PlayerSelect callback – Spieler-Filter -> "
-                f"{self.parent_view.player_value}"
-            )
-
-            # Dropdown-Auswahl sichtbar halten
-            for opt in self.options:
-                opt.default = (opt.value == self.parent_view.player_value)
-
-            await interaction.response.edit_message(
-                content=self.parent_view.header_text(),
-                view=self.parent_view,
-            )
-
-    @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
-    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        print(
-            f"[RESTPROGRAMM] show_btn – Division={self.division_value}, "
-            f"Filter={self.player_value}"
-        )
-        await _rp_show(interaction, self.division_value, self.player_value)
-
-
-
-@tree.command(
-    name="restprogramm",
-    description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def restprogramm(interaction: discord.Interaction):
-    try:
-        view = RestprogrammView(start_div="1")
-        await interaction.response.send_message(
-            view=view,
-            content=view.header_text(),
-            ephemeral=True,
-        )
-
-    except Exception as e:
-        print(f"[RESTPROGRAMM] Fehler im Command: {e}")
-        try:
-            await interaction.response.send_message(
-                "❌ Konnte das Restprogramm nicht starten.",
-                ephemeral=True,
-            )
-        except Exception:
-            pass
-
-
-# =========================================================
-# Restream-Helfer & Commands
+# Restream-Helfer
 # =========================================================
 def _format_event_line_for_post(ev: discord.ScheduledEvent) -> str:
     start = ev.start_time
@@ -1776,7 +1379,7 @@ async def apply_restream_to_event(
     private_url: str | None = None,
 ):
     new_name = ev.name or ""
-    if "(Restream)" not in new_name and "(restream)" not in new_name.lower():
+    if "(Restream)" not in new_name:
         new_name = f"{new_name} (Restream)"
 
     desc = ev.description or ""
@@ -1926,180 +1529,6 @@ class PickView(discord.ui.View):
                     )
             else:
                 await interaction.response.send_modal(PrivateRestreamModal(ev))
-
-
-@tree.command(
-    name="pick",
-    description="Restream für ein Event auswählen (ZSR oder privater Link)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def pick(interaction: discord.Interaction):
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
-        return
-
-    if not has_tfl_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        guild = interaction.guild
-        if guild is None:
-            await interaction.followup.send(
-                "❌ Konnte Guild nicht ermitteln.",
-                ephemeral=True,
-            )
-            return
-
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        events = await guild.fetch_scheduled_events()
-
-        selectable = []
-        for ev in events:
-            if ev.status not in (
-                discord.EventStatus.scheduled,
-                discord.EventStatus.active,
-            ):
-                continue
-            if not ev.start_time or ev.start_time <= now_utc:
-                continue
-            if "(restream)" in (ev.name or "").lower():
-                continue
-            selectable.append(ev)
-
-        if not selectable:
-            await interaction.followup.send(
-                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
-                ephemeral=True,
-            )
-            return
-
-        view = PickView(selectable, requester=member)
-        await interaction.followup.send(
-            "Bitte Event wählen und anschließend die Restream-Quelle auswählen.",
-            view=view,
-            ephemeral=True,
-        )
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Fehler bei /pick: {e}",
-            ephemeral=True,
-        )
-
-
-@tree.command(
-    name="showpicks",
-    description="Zeigt alle zukünftigen Events ohne Restream (für /pick)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def showpicks(interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        guild = interaction.guild
-        if guild is None:
-            await interaction.followup.send(
-                "❌ Konnte Guild nicht ermitteln.",
-                ephemeral=True,
-            )
-            return
-
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        events = await guild.fetch_scheduled_events()
-
-        selectable = []
-        for ev in events:
-            if ev.status not in (
-                discord.EventStatus.scheduled,
-                discord.EventStatus.active,
-            ):
-                continue
-            if not ev.start_time or ev.start_time <= now_utc:
-                continue
-            if "(restream)" in (ev.name or "").lower():
-                continue
-            selectable.append(ev)
-
-        if not selectable:
-            await interaction.followup.send(
-                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
-                ephemeral=True,
-            )
-            return
-
-        selectable.sort(key=lambda e: e.start_time or now_utc)
-        lines = ["🎯 Events, die für /pick zur Verfügung stehen:", ""]
-        for ev in selectable:
-            lines.append(_format_event_line_for_post(ev))
-
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Fehler bei /showpicks: {e}",
-            ephemeral=True,
-        )
-
-
-@tree.command(
-    name="restreams",
-    description="Zeigt alle zukünftigen Events mit '(Restream)' im Titel",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def restreams(interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        guild = interaction.guild
-        if guild is None:
-            await interaction.followup.send(
-                "❌ Konnte Guild nicht ermitteln.",
-                ephemeral=True,
-            )
-            return
-
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        events = await guild.fetch_scheduled_events()
-
-        restream_events = []
-        for ev in events:
-            if ev.status not in (
-                discord.EventStatus.scheduled,
-                discord.EventStatus.active,
-            ):
-                continue
-            if not ev.start_time or ev.start_time <= now_utc:
-                continue
-            if "(restream)" not in (ev.name or "").lower():
-                continue
-            restream_events.append(ev)
-
-        if not restream_events:
-            await interaction.followup.send(
-                "📭 Aktuell sind keine zukünftigen Restream-Events eingetragen.",
-                ephemeral=True,
-            )
-            return
-
-        restream_events.sort(key=lambda e: e.start_time or now_utc)
-        lines = ["🔁 Geplante Restreams (nur Events in der Zukunft)", ""]
-        for ev in restream_events:
-            lines.append(_format_event_line_for_post(ev))
-
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Fehler bei /restreams: {e}",
-            ephemeral=True,
-        )
 
 
 # =========================================================
@@ -2303,7 +1732,565 @@ async def refresh_api_cache(client: discord.Client):
 
 
 # =========================================================
-# on_ready & RUN
+# Slash Commands
+# =========================================================
+@tree.command(
+    name="termin",
+    description="Erstelle einen neuen Termin (nur Event, kein Sheet)",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def termin(interaction: discord.Interaction):
+    await interaction.response.send_modal(TerminModal())
+
+
+@tree.command(name="add", description="Fügt einen neuen Spieler zur Liste hinzu")
+@app_commands.describe(name="Name", twitch="Twitch-Username")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def add(interaction: discord.Interaction, name: str, twitch: str):
+    key = name.strip().lower()
+    TWITCH_MAP[key] = twitch.strip()
+    await interaction.response.send_message(
+        f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.",
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="playerexit",
+    description=(
+        "Spieler aus Division austragen und alle Spiele als FF gegen ihn "
+        "werten (nur Admin)"
+    ),
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def playerexit(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
+        )
+        return
+
+    if not has_admin_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    view = PlayerExitDivisionSelectView(requester=member)
+    await interaction.response.send_message(
+        "📤 Spieler-Exit starten:\nBitte Division auswählen.",
+        view=view,
+        ephemeral=True,
+    )
+
+
+@tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def help(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 TFL Bot Hilfe",
+        description="Aktive Befehle:",
+        color=0x00FFCC,
+    )
+
+    embed.add_field(
+        name="/termin",
+        value="Neues Match eintragen, Event erstellen (kein Sheet)",
+        inline=False,
+    )
+    embed.add_field(
+        name="/restprogramm",
+        value="Offene Spiele je Division, optional Spieler-Filter.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/result",
+        value=(
+            "Ergebnis melden (schreibt ins DIV-Sheet & postet in den "
+            "Ergebnischannel)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/playerexit",
+        value=(
+            "Admin: Spieler austragen (alle Spiele FF gegen ihn, Name "
+            "durchgestrichen)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/spielplan",
+        value=(
+            "Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet "
+            "schreiben."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/pick",
+        value=(
+            "Restream für ein Event setzen (ZSR oder privater Link). "
+            "Erweitert den Eventtitel um '(Restream)'."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/showpicks",
+        value="Zeigt alle zukünftigen Events ohne Restream (Basis für /pick).",
+        inline=False,
+    )
+    embed.add_field(
+        name="/restreams",
+        value="Zeigt alle zukünftigen Events mit '(Restream)' im Titel.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/add",
+        value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).",
+        inline=False,
+    )
+    embed.add_field(
+        name="/sync",
+        value="Admin: Slash-Commands synchronisieren.",
+        inline=False,
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@tree.command(
+    name="spielplan",
+    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden) und schreibt alles ins Sheet",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(division="Welche Division?")
+@app_commands.choices(
+    division=[
+        app_commands.Choice(name="Division 1", value="1"),
+        app_commands.Choice(name="Division 2", value="2"),
+        app_commands.Choice(name="Division 3", value="3"),
+        app_commands.Choice(name="Division 4", value="4"),
+        app_commands.Choice(name="Division 5", value="5"),
+        app_commands.Choice(name="Division 6", value="6"),
+    ],
+)
+async def spielplan(
+    interaction: discord.Interaction,
+    division: app_commands.Choice[str],
+):
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
+        )
+        return
+
+    if not has_admin_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        players = spielplan_read_players(division.value)
+        if len(players) < 2:
+            await interaction.response.send_message(
+                (
+                    f"❌ Zu wenig Spieler in Division {division.value} gefunden "
+                    "(zu wenige Namen in D/F)."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        rounds = spielplan_build_matches(players)
+        ws = _get_div_ws(division.value)
+        written = spielplan_write(ws, rounds)
+
+        preview_round = rounds[0] if rounds else []
+        preview_lines = [f"{h} vs {a}" for (h, a) in preview_round[:6]]
+        preview_txt = "\n".join(preview_lines) if preview_lines else "(leer)"
+
+        msg = (
+            f"✅ Spielplan für Division {division.value} erstellt.\n"
+            f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
+            f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
+        )
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Fehler bei /spielplan: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="sync",
+    description="(Admin) Slash-Commands für diese Guild synchronisieren",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def sync_cmd(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or not has_admin_role(member):
+        await interaction.response.send_message(
+            "⛔ Keine Berechtigung.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+        names = ", ".join(sorted(c.name for c in synced))
+
+        await interaction.followup.send(
+            f"✅ Synced {len(synced)} Commands: {names}",
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        print(f"[SYNC] Fehler: {e}")
+        try:
+            await interaction.followup.send(
+                "❌ Sync ist fehlgeschlagen. Bitte Logs prüfen.",
+                ephemeral=True,
+            )
+        except Exception:
+            pass
+
+
+# =========================================================
+# /restprogramm View
+# =========================================================
+class RestprogrammView(discord.ui.View):
+    def __init__(self, start_div: str = "1"):
+        super().__init__(timeout=180)
+        self.division_value = start_div
+        self.player_value = "Komplett"
+
+        # View-Bestandteile hinzufügen
+        self.add_item(self.DivSelect(self))
+        self.add_item(self.PlayerSelect(self))
+
+    # Text für die Steuerungs-Nachricht
+    def header_text(self) -> str:
+        if self.player_value and self.player_value != "Komplett":
+            filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
+        else:
+            filter_part = "Aktueller Spieler-Filter: **Komplett**"
+
+        return (
+            f"📋 Restprogramm – Division {self.division_value} gewählt.\n"
+            f"{filter_part}\n"
+            "Spieler auswählen oder direkt 'Anzeigen' drücken."
+        )
+
+    def set_division(self, new_div: str):
+        """
+        Division wechseln, Spieler-Filter zurücksetzen und PlayerSelect neu aufbauen.
+        """
+        self.division_value = new_div
+        self.player_value = "Komplett"
+
+        # vorhandenes PlayerSelect entfernen
+        for child in list(self.children):
+            if isinstance(child, RestprogrammView.PlayerSelect):
+                self.remove_item(child)
+
+        # neuen PlayerSelect für die neue Division hinzufügen
+        self.add_item(self.PlayerSelect(self))
+
+    class DivSelect(discord.ui.Select):
+        def __init__(self, parent_view: "RestprogrammView"):
+            self.parent_view = parent_view
+            options = [
+                discord.SelectOption(label="Division 1", value="1"),
+                discord.SelectOption(label="Division 2", value="2"),
+                discord.SelectOption(label="Division 3", value="3"),
+                discord.SelectOption(label="Division 4", value="4"),
+                discord.SelectOption(label="Division 5", value="5"),
+                discord.SelectOption(label="Division 6", value="6"),
+            ]
+
+            # aktuell gewählte Division im Dropdown markieren
+            for opt in options:
+                opt.default = (opt.value == parent_view.division_value)
+
+            super().__init__(
+                placeholder="Division wählen …",
+                min_values=1,
+                max_values=1,
+                options=options,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            # Neue Division setzen und PlayerSelect neu bauen
+            new_div = self.values[0]
+            self.parent_view.set_division(new_div)
+
+            # eigene Optionen (Defaults) updaten, damit die Auswahl sichtbar bleibt
+            for opt in self.options:
+                opt.default = (opt.value == new_div)
+
+            await interaction.response.edit_message(
+                content=self.parent_view.header_text(),
+                view=self.parent_view,
+            )
+
+    class PlayerSelect(discord.ui.Select):
+        def __init__(self, parent_view: "RestprogrammView"):
+            self.parent_view = parent_view
+
+            # Spieler laden – Fehler abfangen, damit das View nicht crasht
+            try:
+                players = get_players_for_div(parent_view.division_value)
+            except Exception as e:
+                print(f"[RESTPROGRAMM] PlayerSelect init Fehler: {e}")
+                players = []
+
+            opts = [discord.SelectOption(label="Komplett", value="Komplett")]
+            for p in players:
+                opts.append(discord.SelectOption(label=p, value=p))
+
+            # aktuellen Filter als default markieren
+            for opt in opts:
+                opt.default = (opt.value == parent_view.player_value)
+
+            super().__init__(
+                placeholder="Spieler filtern … (optional)",
+                min_values=1,
+                max_values=1,
+                options=opts,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            # Auswahl merken
+            self.parent_view.player_value = self.values[0]
+
+            # Dropdown-Auswahl sichtbar halten
+            for opt in self.options:
+                opt.default = (opt.value == self.parent_view.player_value)
+
+            await interaction.response.edit_message(
+                content=self.parent_view.header_text(),
+                view=self.parent_view,
+            )
+
+    @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ergebnisliste in derselben Nachricht anzeigen
+        await _rp_show(interaction, self.division_value, self.player_value)
+
+
+@tree.command(
+    name="restprogramm",
+    description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def restprogramm(interaction: discord.Interaction):
+    try:
+        view = RestprogrammView(start_div="1")
+        await interaction.response.send_message(
+            view=view,
+            content=view.header_text(),
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        print(f"[RESTPROGRAMM] Fehler im Command: {e}")
+        try:
+            await interaction.response.send_message(
+                "❌ Konnte das Restprogramm nicht starten.",
+                ephemeral=True,
+            )
+        except Exception:
+            pass
+
+
+@tree.command(
+    name="pick",
+    description="Restream für ein Event auswählen (ZSR oder privater Link)",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def pick(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "❌ Konnte Mitgliedsdaten nicht lesen.",
+            ephemeral=True,
+        )
+        return
+
+    if not has_tfl_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Konnte Guild nicht ermitteln.",
+                ephemeral=True,
+            )
+            return
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        events = await guild.fetch_scheduled_events()
+
+        selectable = []
+        for ev in events:
+            if ev.status not in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
+                continue
+            if not ev.start_time or ev.start_time <= now_utc:
+                continue
+            if "(restream)" in (ev.name or "").lower():
+                continue
+            selectable.append(ev)
+
+        if not selectable:
+            await interaction.followup.send(
+                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
+                ephemeral=True,
+            )
+            return
+
+        view = PickView(selectable, requester=member)
+        await interaction.followup.send(
+            "Bitte Event wählen und anschließend die Restream-Quelle auswählen.",
+            view=view,
+            ephemeral=True,
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Fehler bei /pick: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="showpicks",
+    description="Zeigt alle zukünftigen Events ohne Restream (für /pick)",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def showpicks(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Konnte Guild nicht ermitteln.",
+                ephemeral=True,
+            )
+            return
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        events = await guild.fetch_scheduled_events()
+
+        selectable = []
+        for ev in events:
+            if ev.status not in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
+                continue
+            if not ev.start_time or ev.start_time <= now_utc:
+                continue
+            if "(restream)" in (ev.name or "").lower():
+                continue
+            selectable.append(ev)
+
+        if not selectable:
+            await interaction.followup.send(
+                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
+                ephemeral=True,
+            )
+            return
+
+        selectable.sort(key=lambda e: e.start_time or now_utc)
+        lines = ["🎯 Events, die für /pick zur Verfügung stehen:", ""]
+        for ev in selectable:
+            lines.append(_format_event_line_for_post(ev))
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Fehler bei /showpicks: {e}",
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="restreams",
+    description="Zeigt alle zukünftigen Events mit '(Restream)' im Titel",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def restreams(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Konnte Guild nicht ermitteln.",
+                ephemeral=True,
+            )
+            return
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        events = await guild.fetch_scheduled_events()
+
+        restream_events = []
+        for ev in events:
+            if ev.status not in (
+                discord.EventStatus.scheduled,
+                discord.EventStatus.active,
+            ):
+                continue
+            if not ev.start_time or ev.start_time <= now_utc:
+                continue
+            if "(restream)" not in (ev.name or "").lower():
+                continue
+            restream_events.append(ev)
+
+        if not restream_events:
+            await interaction.followup.send(
+                "📭 Aktuell sind keine zukünftigen Restream-Events eingetragen.",
+                ephemeral=True,
+            )
+            return
+
+        restream_events.sort(key=lambda e: e.start_time or now_utc)
+        lines = ["🔁 Geplante Restreams (nur Events in der Zukunft)", ""]
+        for ev in restream_events:
+            lines.append(_format_event_line_for_post(ev))
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Fehler bei /restreams: {e}",
+            ephemeral=True,
+        )
+
+
+# =========================================================
+# on_ready
 # =========================================================
 _client_synced_once = False
 _cache_task_started = False
@@ -2334,4 +2321,7 @@ async def on_ready():
     print("🤖 Bot bereit")
 
 
+# =========================================================
+# RUN
+# =========================================================
 client.run(TOKEN)
