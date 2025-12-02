@@ -415,80 +415,44 @@ def has_tfl_role(member: discord.Member) -> bool:
     return any(r.id == TFL_ROLE_ID for r in member.roles)
 
 
-def _collect_players_from_div_ws(ws) -> list[str]:
-    rows = ws.get_all_values()
+# =========================================================
+# Spieler-Helfer für DIV-Tabs – basieren auf /result-Logik
+# =========================================================
+def get_players_for_div(div: str) -> list[str]:
+    """
+    Nutzt dieselbe Logik wie /result (load_open_games_for_result),
+    damit Spalten & Sheet-Namen garantiert passen.
+    Gibt alle Spieler zurück, die in offenen Spielen der Division vorkommen.
+    """
+    try:
+        games = load_open_games_for_result(div)
+    except Exception as e:
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        return []
+
     seen = set()
-    players = []
+    players: list[str] = []
 
-    D_idx0 = DIV_COL_LEFT - 1
-    F_idx0 = DIV_COL_RIGHT - 1
-
-    for r_idx in range(1, len(rows)):
-        row = rows[r_idx]
-        p_left = _cell(row, D_idx0)
-        p_right = _cell(row, F_idx0)
-
-        for p in (p_left, p_right):
+    for g in games:
+        for p in (g.get("heim", ""), g.get("auswaerts", "")):
             if not p:
                 continue
             low = p.lower()
             if low not in seen:
                 seen.add(low)
                 players.append(p)
+
+    print(
+        f"[RESTPROGRAMM] get_players_for_div({div}) -> "
+        f"{len(players)} Spieler: {players}"
+    )
     return players
-
-
-def get_players_for_div(div: str) -> list[str]:
-    """
-    Holt Spieler für Restprogramm:
-    1) Alle Spieler aus D/F
-    2) Falls leer, zusätzlich aus Spalte L (Racer-Liste)
-    """
-    try:
-        sheets_required()
-        ws_name = f"{div}.DIV"
-        print(f"[RESTPROGRAMM] get_players_for_div: Worksheet '{ws_name}' öffnen")
-        ws = WB.worksheet(ws_name)
-
-        players = _collect_players_from_div_ws(ws)
-        if players:
-            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F)")
-            return players
-
-        # Fallback: Spalte L
-        try:
-            racer_col = ws.col_values(12)  # L
-            seen = set()
-            racer_players = []
-            for name in racer_col[1:]:
-                name = name.strip()
-                if not name:
-                    continue
-                low = name.lower()
-                if low not in seen:
-                    seen.add(low)
-                    racer_players.append(name)
-            if racer_players:
-                print(
-                    f"[RESTPROGRAMM] get_players_for_div({div}) -> "
-                    f"{len(racer_players)} Spieler (L)"
-                )
-                return racer_players
-        except Exception as e:
-            print(f"[RESTPROGRAMM] Fallback (Racer-Liste) fehlgeschlagen: {e}")
-
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> keine Spieler gefunden")
-        return []
-    except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
-        return []
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
-    Nutzt dieselbe Logik wie /result:
-    - offene Spiele = Zeilen mit Marker 'vs' in Spalte E
-    - optional nach Spieler filtern
+    Liest offene Spiele aus der Division (wie /result) und
+    filtert optional nach einem Spieler.
     """
     try:
         games = load_open_games_for_result(div)
@@ -497,16 +461,23 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
         return []
 
     q = (player_query or "").strip().lower()
-    out = []
+    out: list[tuple[int, str, str, str]] = []
+
     for g in games:
-        p1 = g["heim"]
-        p2 = g["auswaerts"]
-        if not p1 and not p2:
+        row_idx = g.get("row_index")
+        p1 = g.get("heim", "")
+        p2 = g.get("auswaerts", "")
+        if not (p1 or p2):
             continue
-        if q and (q not in p1.lower() and q not in p2.lower()):
-            continue
-        out.append((g["row_index"], "L", p1, p2))
-    print(f"[RESTPROGRAMM] load_open_from_div_tab({div}, '{player_query}') -> {len(out)} Spiele")
+
+        if not q or (q in p1.lower() or q in p2.lower()):
+            # Block = "L" (wir brauchen nur, ob es links/rechts ist – hier egal)
+            out.append((row_idx, "L", p1, p2))
+
+    print(
+        f"[RESTPROGRAMM] load_open_from_div_tab({div}, filter='{q}') "
+        f"-> {len(out)} Spiele"
+    )
     return out
 
 
