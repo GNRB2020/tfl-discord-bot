@@ -41,7 +41,7 @@ _last_restreamable_post_date = None  # 04:00 Uhr – #restreamable-spiele
 _last_restreams_post_date = None     # 04:30 Uhr – #restreams
 
 # =========================================================
-# Web-API: Ergebnis-Parser (für evtl. spätere Nutzung)
+# Web-API: Ergebnis-Parser
 # =========================================================
 
 SCORE_RE = re.compile(
@@ -456,7 +456,7 @@ def has_tfl_role(member: discord.Member) -> bool:
 
 
 # =========================================================
-# Spieler-Helfer für DIV-Tabs (neu, ohne Spalte L)
+# Spieler-Helfer für DIV-Tabs – **NEU vereint D/F + L**
 # =========================================================
 def _collect_players_from_div_ws(ws) -> list[str]:
     """
@@ -465,7 +465,7 @@ def _collect_players_from_div_ws(ws) -> list[str]:
     """
     rows = ws.get_all_values()
     seen = set()
-    players = []
+    players: list[str] = []
 
     D_idx0 = DIV_COL_LEFT - 1
     F_idx0 = DIV_COL_RIGHT - 1
@@ -488,47 +488,38 @@ def _collect_players_from_div_ws(ws) -> list[str]:
 
 def get_players_for_div(div: str) -> list[str]:
     """
-    Öffnet {div}.DIV und liefert alle Spieler aus Spalte D/F.
-    Falls dort nichts steht, versuchen wir zusätzlich den Racer-Block ab Spalte L.
-    Fehler werden geloggt, aber nicht nach außen geworfen.
+    Öffnet {div}.DIV und liefert alle Spieler:
+    - zuerst aus Spalte D/F
+    - zusätzlich aus Spalte L (Racer-Liste)
     """
     try:
         sheets_required()
         ws_name = f"{div}.DIV"
-        print(f"[RESTPROGRAMM] get_players_for_div: versuche Worksheet '{ws_name}' zu öffnen")
+        print(f"[RESTPROGRAMM] get_players_for_div: Worksheet '{ws_name}' …")
         ws = WB.worksheet(ws_name)
-
-        # 1) Standard: alle Spieler aus D/F (Spalten 4 und 6)
-        players = _collect_players_from_div_ws(ws)
-        if players:
-            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F): {players}")
-            return players
-
-        # 2) Fallback: Racer-Liste in Spalte L
-        try:
-            racer_col = ws.col_values(12)  # L = 12
-            racer_players = []
-            for name in racer_col[1:]:  # ab Zeile 2
-                name = name.strip()
-                if name:
-                    racer_players.append(name)
-            if racer_players:
-                print(
-                    f"[RESTPROGRAMM] get_players_for_div({div}) -> "
-                    f"{len(racer_players)} Spieler (L): {racer_players}"
-                )
-                return racer_players
-        except Exception as e:
-            print(f"[RESTPROGRAMM] Fallback (Racer-Liste) fehlgeschlagen: {e}")
-
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> keine Spieler gefunden")
-        return []
-
     except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Worksheet-Fehler: {e}")
         return []
 
+    players = _collect_players_from_div_ws(ws)
+    seen = {p.lower() for p in players}
 
+    # Racer-Liste (Spalte L = 12)
+    try:
+        racer_col = ws.col_values(12)  # L
+        for name in racer_col[1:]:
+            name = (name or "").strip()
+            if not name:
+                continue
+            low = name.lower()
+            if low not in seen:
+                seen.add(low)
+                players.append(name)
+    except Exception as e:
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fallback L-Fehler: {e}")
+
+    print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler: {players}")
+    return players
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
@@ -537,6 +528,8 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     D = Spieler 1
     E = Marker ("vs" = offen)
     F = Spieler 2
+    Rückgabe: Liste von Tupeln (Zeilennummer, Block, Spieler1, Spieler2)
+    Block ist hier immer "L" (= normale Paarung D vs F).
     """
     try:
         sheets_required()
@@ -554,7 +547,7 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
     E_idx0 = DIV_COL_MARKER - 1
     F_idx0 = DIV_COL_RIGHT - 1
 
-    for r_idx in range(1, len(rows)):
+    for r_idx in range(1, len(rows)):  # ab Zeile 2
         row = rows[r_idx]
         p1 = _cell(row, D_idx0)
         marker = _cell(row, E_idx0).lower()
@@ -564,6 +557,10 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
             if not q or (q in p1.lower() or q in p2.lower()):
                 out.append((r_idx + 1, "L", p1, p2))
 
+    print(
+        f"[RESTPROGRAMM] load_open_from_div_tab({div}, filter='{player_query}') "
+        f"-> {len(out)} offene Spiele"
+    )
     return out
 
 
@@ -1166,9 +1163,9 @@ class PlayerExitDivisionSelect(discord.ui.Select):
 
         try:
             players = list_div_players(div_number)
-        except Exception as e:
+        except Exception:
             await interaction.followup.send(
-                f"❌ Konnte Spieler nicht laden.",
+                "❌ Konnte Spieler nicht laden.",
                 ephemeral=True,
             )
             return
@@ -1237,9 +1234,9 @@ class PlayerExitPlayerSelect(discord.ui.Select):
                 ephemeral=True,
             )
 
-        except Exception as e:
+        except Exception:
             await interaction.followup.send(
-                content=f"❌ Fehler beim Austragen.",
+                content="❌ Fehler beim Austragen.",
                 ephemeral=True,
             )
 
@@ -1732,7 +1729,7 @@ async def refresh_api_cache(client: discord.Client):
 
 
 # =========================================================
-# Slash Commands
+# Slash Commands (termin, add, playerexit, help, spielplan, sync)
 # =========================================================
 @tree.command(
     name="termin",
@@ -1976,11 +1973,9 @@ class RestprogrammView(discord.ui.View):
         self.division_value = start_div
         self.player_value = "Komplett"
 
-        # View-Bestandteile hinzufügen
         self.add_item(self.DivSelect(self))
         self.add_item(self.PlayerSelect(self))
 
-    # Text für die Steuerungs-Nachricht
     def header_text(self) -> str:
         if self.player_value and self.player_value != "Komplett":
             filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
@@ -1994,18 +1989,13 @@ class RestprogrammView(discord.ui.View):
         )
 
     def set_division(self, new_div: str):
-        """
-        Division wechseln, Spieler-Filter zurücksetzen und PlayerSelect neu aufbauen.
-        """
         self.division_value = new_div
         self.player_value = "Komplett"
 
-        # vorhandenes PlayerSelect entfernen
         for child in list(self.children):
             if isinstance(child, RestprogrammView.PlayerSelect):
                 self.remove_item(child)
 
-        # neuen PlayerSelect für die neue Division hinzufügen
         self.add_item(self.PlayerSelect(self))
 
     class DivSelect(discord.ui.Select):
@@ -2020,7 +2010,6 @@ class RestprogrammView(discord.ui.View):
                 discord.SelectOption(label="Division 6", value="6"),
             ]
 
-            # aktuell gewählte Division im Dropdown markieren
             for opt in options:
                 opt.default = (opt.value == parent_view.division_value)
 
@@ -2032,11 +2021,9 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
-            # Neue Division setzen und PlayerSelect neu bauen
             new_div = self.values[0]
             self.parent_view.set_division(new_div)
 
-            # eigene Optionen (Defaults) updaten, damit die Auswahl sichtbar bleibt
             for opt in self.options:
                 opt.default = (opt.value == new_div)
 
@@ -2049,18 +2036,21 @@ class RestprogrammView(discord.ui.View):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
-            # Spieler laden – Fehler abfangen, damit das View nicht crasht
             try:
                 players = get_players_for_div(parent_view.division_value)
             except Exception as e:
                 print(f"[RESTPROGRAMM] PlayerSelect init Fehler: {e}")
                 players = []
 
+            print(
+                f"[RESTPROGRAMM] PlayerSelect für Div {parent_view.division_value}: "
+                f"{len(players)} Spieler"
+            )
+
             opts = [discord.SelectOption(label="Komplett", value="Komplett")]
             for p in players:
                 opts.append(discord.SelectOption(label=p, value=p))
 
-            # aktuellen Filter als default markieren
             for opt in opts:
                 opt.default = (opt.value == parent_view.player_value)
 
@@ -2072,10 +2062,8 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
-            # Auswahl merken
             self.parent_view.player_value = self.values[0]
 
-            # Dropdown-Auswahl sichtbar halten
             for opt in self.options:
                 opt.default = (opt.value == self.parent_view.player_value)
 
@@ -2086,7 +2074,6 @@ class RestprogrammView(discord.ui.View):
 
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Ergebnisliste in derselben Nachricht anzeigen
         await _rp_show(interaction, self.division_value, self.player_value)
 
 
@@ -2115,6 +2102,9 @@ async def restprogramm(interaction: discord.Interaction):
             pass
 
 
+# =========================================================
+# /pick, /showpicks, /restreams
+# =========================================================
 @tree.command(
     name="pick",
     description="Restream für ein Event auswählen (ZSR oder privater Link)",
@@ -2290,7 +2280,7 @@ async def restreams(interaction: discord.Interaction):
 
 
 # =========================================================
-# on_ready
+# on_ready & RUN
 # =========================================================
 _client_synced_once = False
 _cache_task_started = False
@@ -2321,7 +2311,4 @@ async def on_ready():
     print("🤖 Bot bereit")
 
 
-# =========================================================
-# RUN
-# =========================================================
 client.run(TOKEN)
