@@ -420,15 +420,39 @@ def has_tfl_role(member: discord.Member) -> bool:
 # =========================================================
 def get_players_for_div(div: str) -> list[str]:
     """
-    Nutzt dieselbe Logik wie /result (load_open_games_for_result),
-    damit Spalten & Sheet-Namen garantiert passen.
-    Gibt alle Spieler zurück, die in offenen Spielen der Division vorkommen.
+    Spieler für /restprogramm aus dem DIV-Tab laden.
+
+    NEUE LOGIK:
+    - Nimmt NUR die Namen aus Spalte L (Racer-Block), Zeilen L2 bis L9.
+    - Alle nicht-leeren Einträge werden als Spieler geliefert.
     """
     try:
-        games = load_open_games_for_result(div)
+        sheets_required()
+        ws_name = f"{div}.DIV"
+        print(f"[RESTPROGRAMM] get_players_for_div: öffne Worksheet '{ws_name}'")
+        ws = WB.worksheet(ws_name)
+
+        # Spalte L = 12, wir wollen L2..L9 -> Index 1..8
+        col_L = ws.col_values(12)
+        players: list[str] = []
+
+        # Schutz, falls die Spalte kürzer ist
+        upper = min(len(col_L), 9)
+        for i in range(1, upper):  # ab Zeile 2 (Index 1)
+            name = (col_L[i] or "").strip()
+            if name:
+                players.append(name)
+
+        print(
+            f"[RESTPROGRAMM] get_players_for_div({div}) -> "
+            f"{len(players)} Spieler aus L2..L9: {players}"
+        )
+        return players
+
     except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) FEHLER: {e}")
         return []
+
 
     seen = set()
     players: list[str] = []
@@ -471,34 +495,72 @@ def get_players_for_div(div: str) -> list[str]:
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
-    Nutzt load_open_games_for_result (wie /result), um offene Spiele
-    einer Division zu laden und optional nach einem Spieler zu filtern.
+    Liest Tab '{div}.DIV' und gibt offene Paarungen zurück.
+
+    NEUE LOGIK:
+    - Spieler stehen in Spalte D und F (Heim / Auswärts).
+    - Ein Spiel ist offen, wenn in derselben Zeile in Spalte E genau 'vs' steht.
+    - Es werden NUR die Zeilen 2 bis 57 betrachtet.
+    - player_query:
+        - "" oder "Komplett"  -> alle offenen Spiele
+        - ansonsten nur Spiele, in denen der Spieler in D oder F steht (case-insensitive).
+    Rückgabe: Liste von Tupeln (row_nr, block, p1, p2)
+             block bleibt "L", damit _rp_show nichts ändern muss.
     """
     try:
-        games = load_open_games_for_result(div)
+        sheets_required()
+        ws_name = f"{div}.DIV"
+        print(
+            f"[RESTPROGRAMM] load_open_from_div_tab: öffne Worksheet '{ws_name}', "
+            f"Filter='{player_query}'"
+        )
+        ws = WB.worksheet(ws_name)
+        rows = ws.get_all_values()
     except Exception as e:
-        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}) Fehler: {e}")
+        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}) FEHLER beim Laden: {e}")
         return []
 
-    q = (player_query or "").strip().lower()
-    out: list[tuple[int, str, str, str]] = []
+    out = []
 
-    for g in games:
-        row_idx = g.get("row_index")
-        p1 = g.get("heim", "")
-        p2 = g.get("auswaerts", "")
+    q = (player_query or "").strip().lower()
+    if q == "komplett":
+        q = ""  # kein Filter
+
+    # Spalten-Indices (0-basiert)
+    D_idx0 = DIV_COL_LEFT - 1   # D
+    E_idx0 = DIV_COL_MARKER - 1 # E
+    F_idx0 = DIV_COL_RIGHT - 1  # F
+
+    # Nur Zeilen 2 bis 57 (1-basiert) -> Indizes 1..56
+    max_row = min(len(rows), 57)
+    for r_idx in range(1, max_row):
+        row = rows[r_idx]
+        p1 = _cell(row, D_idx0)
+        marker = _cell(row, E_idx0).strip().lower()
+        p2 = _cell(row, F_idx0)
+
+        # nur echte Paarungen mit "vs" in Spalte E
         if not (p1 or p2):
             continue
+        if marker != "vs":
+            continue
 
-        if not q or (q in p1.lower() or q in p2.lower()):
-            # Block "L" ist nur für die Ausgabe; hier egal
-            out.append((row_idx, "L", p1, p2))
+        # Filter nach Spieler (wenn gesetzt)
+        if q:
+            if not (
+                (p1 and p1.lower() == q) or (p2 and p2.lower() == q)
+            ):
+                continue
+
+        row_nr = r_idx + 1  # 1-basiert für Anzeige
+        out.append((row_nr, "L", p1, p2))
 
     print(
-        f"[RESTPROGRAMM] load_open_from_div_tab({div}, filter='{q}') "
-        f"-> {len(out)} Spiele"
+        f"[RESTPROGRAMM] load_open_from_div_tab({div}) -> "
+        f"{len(out)} offene Spiele gefunden (Filter='{player_query}')"
     )
     return out
+
 
 
 async def _rp_show(interaction: discord.Interaction, division_value: str, player_filter: str):
