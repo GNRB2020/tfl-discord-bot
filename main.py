@@ -449,10 +449,30 @@ def get_players_for_div(div: str) -> list[str]:
     return players
 
 
+# =========================================================
+# Spieler-Helfer für DIV-Tabs – nutzen die /result-Logik
+# =========================================================
+
+def get_players_for_div(div: str) -> list[str]:
+    """
+    Liefert alle Spieler der Division für das Dropdown.
+    Verwendet dieselbe Logik wie /playerexit (/spielplan),
+    also list_div_players -> _collect_players_from_div_ws.
+    Dann sind wir sicher, dass Spalten & Sheet-Namen passen.
+    """
+    try:
+        players = list_div_players(div)
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler: {players}")
+        return players
+    except Exception as e:
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        return []
+
+
 def load_open_from_div_tab(div: str, player_query: str = ""):
     """
-    Liest offene Spiele aus der Division (wie /result) und
-    filtert optional nach einem Spieler.
+    Nutzt load_open_games_for_result (wie /result), um offene Spiele
+    einer Division zu laden und optional nach einem Spieler zu filtern.
     """
     try:
         games = load_open_games_for_result(div)
@@ -471,7 +491,7 @@ def load_open_from_div_tab(div: str, player_query: str = ""):
             continue
 
         if not q or (q in p1.lower() or q in p2.lower()):
-            # Block = "L" (wir brauchen nur, ob es links/rechts ist – hier egal)
+            # Block "L" ist nur für die Ausgabe; hier egal
             out.append((row_idx, "L", p1, p2))
 
     print(
@@ -1495,7 +1515,7 @@ async def sync_cmd(interaction: discord.Interaction):
 
 
 # =========================================================
-# /restprogramm View (Dropdowns bleiben gesetzt)
+# /restprogramm View
 # =========================================================
 class RestprogrammView(discord.ui.View):
     def __init__(self, start_div: str = "1"):
@@ -1503,9 +1523,13 @@ class RestprogrammView(discord.ui.View):
         self.division_value = start_div
         self.player_value = "Komplett"
 
+        print(f"[RESTPROGRAMM] View init – start_div={start_div}")
+
+        # View-Bestandteile hinzufügen
         self.add_item(self.DivSelect(self))
         self.add_item(self.PlayerSelect(self))
 
+    # Text für die Steuerungs-Nachricht
     def header_text(self) -> str:
         if self.player_value and self.player_value != "Komplett":
             filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
@@ -1519,15 +1543,19 @@ class RestprogrammView(discord.ui.View):
         )
 
     def set_division(self, new_div: str):
+        """
+        Division wechseln, Spieler-Filter zurücksetzen und PlayerSelect neu aufbauen.
+        """
+        print(f"[RESTPROGRAMM] set_division -> {new_div}")
         self.division_value = new_div
         self.player_value = "Komplett"
 
-        # altes PlayerSelect entfernen
+        # vorhandenes PlayerSelect entfernen
         for child in list(self.children):
             if isinstance(child, RestprogrammView.PlayerSelect):
                 self.remove_item(child)
 
-        # neues PlayerSelect für neue Division
+        # neuen PlayerSelect für die neue Division hinzufügen
         self.add_item(self.PlayerSelect(self))
 
     class DivSelect(discord.ui.Select):
@@ -1542,6 +1570,7 @@ class RestprogrammView(discord.ui.View):
                 discord.SelectOption(label="Division 6", value="6"),
             ]
 
+            # aktuell gewählte Division im Dropdown markieren
             for opt in options:
                 opt.default = (opt.value == parent_view.division_value)
 
@@ -1554,8 +1583,12 @@ class RestprogrammView(discord.ui.View):
 
         async def callback(self, interaction: discord.Interaction):
             new_div = self.values[0]
+            print(f"[RESTPROGRAMM] DivSelect callback -> {new_div}")
+
+            # Neue Division setzen und PlayerSelect neu bauen
             self.parent_view.set_division(new_div)
 
+            # eigene Optionen (Defaults) updaten, damit die Auswahl sichtbar bleibt
             for opt in self.options:
                 opt.default = (opt.value == new_div)
 
@@ -1568,16 +1601,23 @@ class RestprogrammView(discord.ui.View):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
+            # Spieler laden – Fehler abfangen, damit das View nicht crasht
             try:
                 players = get_players_for_div(parent_view.division_value)
             except Exception as e:
                 print(f"[RESTPROGRAMM] PlayerSelect init Fehler: {e}")
                 players = []
 
+            print(
+                f"[RESTPROGRAMM] PlayerSelect init – Division {parent_view.division_value}, "
+                f"{len(players)} Spieler"
+            )
+
             opts = [discord.SelectOption(label="Komplett", value="Komplett")]
             for p in players:
                 opts.append(discord.SelectOption(label=p, value=p))
 
+            # aktuellen Filter als default markieren
             for opt in opts:
                 opt.default = (opt.value == parent_view.player_value)
 
@@ -1590,7 +1630,12 @@ class RestprogrammView(discord.ui.View):
 
         async def callback(self, interaction: discord.Interaction):
             self.parent_view.player_value = self.values[0]
+            print(
+                f"[RESTPROGRAMM] PlayerSelect callback – Spieler-Filter -> "
+                f"{self.parent_view.player_value}"
+            )
 
+            # Dropdown-Auswahl sichtbar halten
             for opt in self.options:
                 opt.default = (opt.value == self.parent_view.player_value)
 
@@ -1601,7 +1646,12 @@ class RestprogrammView(discord.ui.View):
 
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        print(
+            f"[RESTPROGRAMM] show_btn – Division={self.division_value}, "
+            f"Filter={self.player_value}"
+        )
         await _rp_show(interaction, self.division_value, self.player_value)
+
 
 
 @tree.command(
