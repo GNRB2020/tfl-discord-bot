@@ -454,23 +454,69 @@ def has_tfl_role(member: discord.Member) -> bool:
         return False
     return any(r.id == TFL_ROLE_ID for r in member.roles)
 
+# =========================================================
+# Spieler-Helfer für DIV-Tabs – Restprogramm
+# =========================================================
 
-# =========================================================
-# Spieler-Helfer für DIV-Tabs – **NEU vereint D/F + L**
-# =========================================================
+def _get_div_ws_for_restprogramm(div: str):
+    """
+    Sucht das passende Worksheet für eine Division.
+    Primär: '{div}.DIV'
+    Fallback: alle Tabs durchsuchen und nach Titeln suchen, die z.B. mit '1.' anfangen
+    und 'DIV' enthalten.
+    """
+    sheets_required()
+
+    ws_name = f"{div}.DIV"
+    try:
+        ws = WB.worksheet(ws_name)
+        print(f"[RESTPROGRAMM] Worksheet '{ws_name}' geöffnet.")
+        return ws
+    except Exception as e:
+        print(f"[RESTPROGRAMM] Worksheet '{ws_name}' nicht direkt gefunden: {e}")
+
+    # Fallback: Liste aller Worksheets durchsuchen
+    try:
+        candidates = []
+        for ws in WB.worksheets():
+            title = (ws.title or "").strip()
+            t_low = title.lower()
+            if t_low == ws_name.lower():
+                print(f"[RESTPROGRAMM] Fallback exakter Titel: '{title}'")
+                return ws
+            # z.B. "1. DIV" oder "1.Division" etc.
+            if t_low.startswith(f"{div.lower()}.") and "div" in t_low:
+                candidates.append(ws)
+
+        if candidates:
+            ws = candidates[0]
+            print(f"[RESTPROGRAMM] Fallback startswith: '{ws.title}'")
+            return ws
+
+        print(f"[RESTPROGRAMM] Kein Worksheet für Division {div} gefunden.")
+        raise RuntimeError(f"Worksheet für Division {div} nicht gefunden")
+
+    except Exception as e2:
+        print(f"[RESTPROGRAMM] Fallback-Suche fehlgeschlagen: {e2}")
+        raise
+
+
 def _collect_players_from_div_ws(ws) -> list[str]:
     """
     Liest alle Spielernamen aus Spalte D (Heim) und F (Gast),
     entfernt Duplikate, behält Reihenfolge.
     """
     rows = ws.get_all_values()
+    print(f"[RESTPROGRAMM] _collect_players_from_div_ws: {len(rows)} Zeilen gelesen aus '{ws.title}'")
+
     seen = set()
     players: list[str] = []
 
-    D_idx0 = DIV_COL_LEFT - 1
-    F_idx0 = DIV_COL_RIGHT - 1
+    D_idx0 = DIV_COL_LEFT - 1  # 3 -> Spalte D
+    F_idx0 = DIV_COL_RIGHT - 1 # 5 -> Spalte F
 
-    for r_idx in range(1, len(rows)):  # ab Zeile 2
+    # ab Zeile 2 (Index 1), weil Zeile 1 Kopfzeile ist
+    for r_idx in range(1, len(rows)):
         row = rows[r_idx]
         p_left = _cell(row, D_idx0)
         p_right = _cell(row, F_idx0)
@@ -483,43 +529,94 @@ def _collect_players_from_div_ws(ws) -> list[str]:
                 seen.add(low)
                 players.append(p)
 
+    print(f"[RESTPROGRAMM] _collect_players_from_div_ws: {len(players)} Spieler gefunden: {players}")
     return players
 
 
 def get_players_for_div(div: str) -> list[str]:
     """
-    Öffnet {div}.DIV und liefert alle Spieler:
-    - zuerst aus Spalte D/F
-    - zusätzlich aus Spalte L (Racer-Liste)
+    Öffnet das passende DIV-Tab und liefert alle Spieler aus Spalte D/F.
+    Fallback auf die Racer-Liste in Spalte L, falls D/F leer wären.
     """
     try:
-        sheets_required()
-        ws_name = f"{div}.DIV"
-        print(f"[RESTPROGRAMM] get_players_for_div: Worksheet '{ws_name}' …")
-        ws = WB.worksheet(ws_name)
-    except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Worksheet-Fehler: {e}")
+        ws = _get_div_ws_for_restprogramm(div)
+
+        # 1) Standard: alle Spieler aus D/F (Spalten 4 und 6)
+        players = _collect_players_from_div_ws(ws)
+        if players:
+            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F)")
+            return players
+
+        # 2) Fallback: Racer-Liste in Spalte L
+        try:
+            racer_col = ws.col_values(12)  # L = 12
+            racer_players = []
+            for name in racer_col[1:]:  # ab Zeile 2
+                name = name.strip()
+                if name:
+                    racer_players.append(name)
+            if racer_players:
+                print(
+                    f"[RESTPROGRAMM] get_players_for_div({div}) -> "
+                    f"{len(racer_players)} Spieler (L): {racer_players}"
+                )
+                return racer_players
+        except Exception as e:
+            print(f"[RESTPROGRAMM] Fallback (Racer-Liste) fehlgeschlagen: {e}")
+
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> keine Spieler gefunden")
         return []
 
-    players = _collect_players_from_div_ws(ws)
-    seen = {p.lower() for p in players}
-
-    # Racer-Liste (Spalte L = 12)
-    try:
-        racer_col = ws.col_values(12)  # L
-        for name in racer_col[1:]:
-            name = (name or "").strip()
-            if not name:
-                continue
-            low = name.lower()
-            if low not in seen:
-                seen.add(low)
-                players.append(name)
     except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fallback L-Fehler: {e}")
+        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
+        return []
 
-    print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler: {players}")
-    return players
+
+def load_open_from_div_tab(div: str, player_query: str = ""):
+    """
+    Liest Tab '{div}.DIV' und gibt offene Paarungen zurück.
+    D = Spieler 1
+    E = Marker ('vs' = offen)
+    F = Spieler 2
+    """
+    try:
+        ws = _get_div_ws_for_restprogramm(div)
+        rows = ws.get_all_values()
+        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}): {len(rows)} Zeilen gelesen")
+    except Exception as e:
+        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}) Fehler beim Öffnen: {e}")
+        return []
+
+    out = []
+    q = player_query.strip().lower()
+
+    D_idx0 = DIV_COL_LEFT - 1  # D
+    E_idx0 = DIV_COL_MARKER - 1  # E
+    F_idx0 = DIV_COL_RIGHT - 1  # F
+
+    # Debug: erste paar Zeilen loggen
+    for dbg_idx, row in enumerate(rows[1:6], start=2):
+        dbg_p1 = _cell(row, D_idx0)
+        dbg_mark = _cell(row, E_idx0)
+        dbg_p2 = _cell(row, F_idx0)
+        print(f"[RESTPROGRAMM] Zeile {dbg_idx}: '{dbg_p1}' | '{dbg_mark}' | '{dbg_p2}'")
+
+    for r_idx in range(1, len(rows)):
+        row = rows[r_idx]
+        p1 = _cell(row, D_idx0)
+        marker = _cell(row, E_idx0).lower()
+        p2 = _cell(row, F_idx0)
+
+        if (p1 or p2) and marker == "vs":
+            if not q or (q in p1.lower() or q in p2.lower()):
+                out.append((r_idx + 1, "L", p1, p2))
+
+    print(
+        f"[RESTPROGRAMM] load_open_from_div_tab({div}, player_query='{player_query}') "
+        f"-> {len(out)} offene Spiele"
+    )
+    return out
+
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
