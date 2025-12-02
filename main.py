@@ -414,17 +414,17 @@ def has_tfl_role(member: discord.Member) -> bool:
         return False
     return any(r.id == TFL_ROLE_ID for r in member.roles)
 
-
 # =========================================================
-# Spieler-Helfer für DIV-Tabs – basieren auf /result-Logik
+# Spieler-Helfer für DIV-Tabs – NUR Spalte L (L2..L9)
 # =========================================================
 def get_players_for_div(div: str) -> list[str]:
     """
     Spieler für /restprogramm aus dem DIV-Tab laden.
 
-    NEUE LOGIK:
-    - Nimmt NUR die Namen aus Spalte L (Racer-Block), Zeilen L2 bis L9.
-    - Alle nicht-leeren Einträge werden als Spieler geliefert.
+    Umsetzung nach deiner Vorgabe:
+    - Es werden IMMER die Namen aus Spalte L (Racer-Block) gelesen.
+    - Es werden nur die Zeilen L2 bis L9 berücksichtigt.
+    - Leere Zellen werden ignoriert.
     """
     try:
         sheets_required()
@@ -436,7 +436,6 @@ def get_players_for_div(div: str) -> list[str]:
         col_L = ws.col_values(12)
         players: list[str] = []
 
-        # Schutz, falls die Spalte kürzer ist
         upper = min(len(col_L), 9)
         for i in range(1, upper):  # ab Zeile 2 (Index 1)
             name = (col_L[i] or "").strip()
@@ -471,26 +470,6 @@ def get_players_for_div(div: str) -> list[str]:
         f"{len(players)} Spieler: {players}"
     )
     return players
-
-
-# =========================================================
-# Spieler-Helfer für DIV-Tabs – nutzen die /result-Logik
-# =========================================================
-
-def get_players_for_div(div: str) -> list[str]:
-    """
-    Liefert alle Spieler der Division für das Dropdown.
-    Verwendet dieselbe Logik wie /playerexit (/spielplan),
-    also list_div_players -> _collect_players_from_div_ws.
-    Dann sind wir sicher, dass Spalten & Sheet-Namen passen.
-    """
-    try:
-        players = list_div_players(div)
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler: {players}")
-        return players
-    except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
-        return []
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
@@ -1085,6 +1064,33 @@ async def add(interaction: discord.Interaction, name: str, twitch: str):
 # =========================================================
 # /playerexit Workflow
 # =========================================================
+
+def _collect_players_from_div_ws(ws) -> list[str]:
+    """
+    Hilfsfunktion: liest alle eindeutigen Spielernamen aus einem DIV-Worksheet.
+    Verwendet Spalte D (Heim) und Spalte F (Auswärts), Zeilen ab 2.
+    Wird von /playerexit und /spielplan verwendet.
+    """
+    rows = ws.get_all_values()
+    players: list[str] = []
+    seen: set[str] = set()
+
+    for row in rows[1:]:  # ab Zeile 2
+        left = _cell(row, DIV_COL_LEFT - 1)   # D
+        right = _cell(row, DIV_COL_RIGHT - 1) # F
+
+        for name in (left, right):
+            if not name:
+                continue
+            low = name.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            players.append(name)
+
+    return players
+
+
 def list_div_players(div_number: str):
     try:
         sheets_required()
