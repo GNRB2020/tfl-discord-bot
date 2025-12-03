@@ -3,13 +3,11 @@ import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import datetime
-import discord
 
 # ========== CONFIG ==========
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "0"))
-EVENT_CHANNEL_ID = int(os.getenv("DISCORD_EVENT_CHANNEL_ID", "0"))
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
@@ -20,7 +18,6 @@ SCOPE = [
 
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
-
 
 # ========== SHEETS ==========
 SHEETS_ENABLED = True
@@ -34,93 +31,95 @@ except Exception:
     SHEETS_ENABLED = False
     WB = None
 
-
 def sheets_required():
     if not SHEETS_ENABLED:
         raise RuntimeError("Google Sheets nicht verbunden")
     if WB is None:
         raise RuntimeError("Workbook fehlt")
 
-
 def _cell(row, idx0):
     return row[idx0].strip() if 0 <= idx0 < len(row) else ""
 
+# ============================================================
+# FETCH FUNCTIONS FÜR DIE API
+# ============================================================
 
-# =========================================================
-# DISCORD CLIENT (nur für API-Fetch – KEIN Bot!)
-# =========================================================
-intents = discord.Intents.none()
-_api_client = discord.Client(intents=intents)
-
-
-# =========================================================
-# DISCORD FETCH: UPCOMING EVENTS
-# =========================================================
 async def fetch_upcoming_events():
-    """Lädt alle kommenden Discord-Events."""
-    try:
-        await _api_client.login(TOKEN)
-        guild = await _api_client.fetch_guild(GUILD_ID)
-        events = await guild.fetch_scheduled_events()
+    """
+    Gibt Events für die Website zurück (5-20 kommende Spiele)
+    Rückgabeformat: Liste von dicts
+    """
+    sheets_required()
+    ws = WB.worksheet("League & Cup Schedule")
+    all_rows = ws.get_all_values()
 
-        now = datetime.datetime.now(tz=BERLIN_TZ)
-        upcoming = []
+    result = []
+    now = datetime.datetime.now(BERLIN_TZ)
 
-        for ev in events:
-            if ev.start_time and ev.start_time > now:
-                upcoming.append({
-                    "name": ev.name,
-                    "description": ev.description,
-                    "start": ev.start_time.isoformat(),
-                    "url": ev.url,
-                    "location": ev.location,
-                })
+    for r in all_rows[1:]:
+        div = _cell(r, 0)
+        date = _cell(r, 1)
+        time = _cell(r, 2)
+        p1 = _cell(r, 3)
+        p2 = _cell(r, 4)
+        mode = _cell(r, 5)
+        link = _cell(r, 6)
 
-        return upcoming
+        if not date or not time:
+            continue
 
-    except Exception as e:
-        print("[API] Fehler in fetch_upcoming_events:", e)
-        return []
-
-    finally:
         try:
-            await _api_client.close()
+            dt = datetime.datetime.strptime(f"{date} {time}", "%d.%m.%Y %H:%M")
+            dt = BERLIN_TZ.localize(dt)
         except:
-            pass
+            continue
+
+        if dt >= now:
+            result.append({
+                "name": f"{p1} vs {p2}",
+                "start": dt.isoformat(),
+                "location": link,
+                "description": f"Division {div}",
+            })
+
+    # Sortieren nach Datum
+    result.sort(key=lambda x: x["start"])
+
+    return result
 
 
-# =========================================================
-# DISCORD FETCH: RESULTS (Vergangene Events)
-# =========================================================
 async def fetch_results():
-    """Lädt die letzten abgeschlossenen Discord-Events."""
-    try:
-        await _api_client.login(TOKEN)
-        guild = await _api_client.fetch_guild(GUILD_ID)
-        events = await guild.fetch_scheduled_events()
+    """
+    Holt fertige Ergebnisse aus dem RESULTS_CHANNEL.
+    Rückgabeformat: Liste von dicts
+    """
+    import discord
+    from discord import Intents
 
-        now = datetime.datetime.now(tz=BERLIN_TZ)
-        results = []
-
-        for ev in events:
-            if ev.end_time and ev.end_time < now:
-                results.append({
-                    "name": ev.name,
-                    "description": ev.description,
-                    "time": ev.end_time.isoformat(),
-                    "content": ev.description or "",
-                })
-
-        # neueste zuerst
-        results.sort(key=lambda x: x["time"], reverse=True)
-        return results
-
-    except Exception as e:
-        print("[API] Fehler in fetch_results:", e)
+    if RESULTS_CHANNEL_ID == 0:
         return []
 
-    finally:
-        try:
-            await _api_client.close()
-        except:
-            pass
+    intents = Intents.default()
+    client = discord.Client(intents=intents)
+
+    messages = []
+
+    async def runner():
+        await client.login(TOKEN)
+        await client.connect()
+
+    async def fetch_msgs():
+        await client.wait_until_ready()
+        channel = client.get_channel(RESULTS_CHANNEL_ID)
+        async for msg in channel.history(limit=50):
+            messages.append({
+                "content": msg.content,
+                "time": msg.created_at.replace(tzinfo=datetime.timezone.utc).astimezone(BERLIN_TZ).isoformat()
+            })
+        await client.close()
+
+    client.loop.create_task(fetch_msgs())
+    await runner()
+
+    # Nur Messages mit Content
+    return [m for m in messages if m["content"]]
