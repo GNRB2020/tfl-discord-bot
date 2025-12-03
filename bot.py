@@ -11,6 +11,9 @@ import asyncio
 from aiohttp import web
 from datetime import datetime as dt, timedelta
 
+print("BOT.PY STARTED — AKTIVE VERSION")
+
+
 # =========================================================
 # .env laden / Konfiguration
 # =========================================================
