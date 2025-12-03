@@ -1,3 +1,6 @@
+import os
+print("BOT FILE PATH:", os.path.abspath(__file__))
+
 import discord
 import pytz
 from discord import app_commands
