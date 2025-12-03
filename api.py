@@ -1,4 +1,5 @@
 from aiohttp import web
+import os
 import asyncio
 import datetime
 from shared import BERLIN_TZ, _cell, GUILD_ID, RESULTS_CHANNEL_ID
