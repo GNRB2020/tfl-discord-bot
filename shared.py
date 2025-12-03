@@ -4,6 +4,13 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import datetime
 
+# ========================
+# API Caches vom BOT
+# ========================
+API_CACHE_UPCOMING = {"data": [], "ts": None}
+API_CACHE_RESULTS = {"data": [], "ts": None}
+
+
 # ========== CONFIG ==========
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
