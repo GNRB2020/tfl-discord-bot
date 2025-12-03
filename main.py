@@ -1627,7 +1627,7 @@ async def refresh_api_cache(client: discord.Client):
             _API_CACHE["upcoming"]["ts"] = now
             _API_CACHE["upcoming"]["data"] = data
 
-                       print(f"[CACHE] Upcoming aktualisiert ({len(data)} Events)")
+            print(f"[CACHE] Upcoming aktualisiert ({len(data)} Events)")
 
             await _maybe_post_restreamable(now, now_berlin, list(events))
             await _maybe_post_restreams(now, now_berlin, list(events))
