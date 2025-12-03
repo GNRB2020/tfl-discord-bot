@@ -2332,10 +2332,7 @@ async def refresh_cache_loop():
         await update_cache_results(client)
         await asyncio.sleep(300)
 
-
-
-asyncio.create_task(refresh_cache_loop())
-
+client.loop.create_task(refresh_cache_loop())
 
 # =========================================================
 # RUN
