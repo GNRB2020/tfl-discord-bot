@@ -365,192 +365,6 @@ def has_tfl_role(member: discord.Member) -> bool:
 
 
 # =========================================================
-# Spieler-Helfer für DIV-Tabs
-# =========================================================
-def _collect_players_from_div_ws(ws) -> list[str]:
-    """
-    Liest alle Spielernamen aus Spalte D (Heim) und F (Gast),
-    entfernt Duplikate, behält Reihenfolge.
-    """
-    rows = ws.get_all_values()
-    seen = set()
-    players = []
-
-    D_idx0 = DIV_COL_LEFT - 1
-    F_idx0 = DIV_COL_RIGHT - 1
-
-    for r_idx in range(1, len(rows)):  # ab Zeile 2
-        row = rows[r_idx]
-        p_left = _cell(row, D_idx0)
-        p_right = _cell(row, F_idx0)
-
-        for p in (p_left, p_right):
-            if not p:
-                continue
-            low = p.lower()
-            if low not in seen:
-                seen.add(low)
-                players.append(p)
-
-    return players
-
-
-def get_players_for_div(div: str) -> list[str]:
-    """
-    Gibt alle Spieler zurück, die in offenen Spielen der Division vorkommen
-    (identische Logik wie /result). Falls keine offenen Spiele existieren,
-    wird auf die komplette D/F-Belegung sowie die Racer-Liste in Spalte L
-    zurückgegriffen.
-    """
-    players: list[str] = []
-    seen: set[str] = set()
-
-    # 1) Versuche zuerst über die open-games-Logik (wie /result)
-    try:
-        games = load_open_games_for_result(div)
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) – via open_games: {len(games)} Spiele")
-        for g in games:
-            for p in (g.get("heim"), g.get("auswaerts")):
-                if not p:
-                    continue
-                low = p.lower()
-                if low not in seen:
-                    seen.add(low)
-                    players.append(p)
-        if players:
-            print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (open_games): {players}")
-            return players
-    except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler (open_games): {e}")
-
-    # 2) Fallback: komplette D/F Spalten + Racer-Liste L wie bisher
-    try:
-        sheets_required()
-        ws_name = f"{div}.DIV"
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) – Fallback via Worksheet '{ws_name}'")
-        ws = WB.worksheet(ws_name)
-
-        df_players = _collect_players_from_div_ws(ws)
-        for p in df_players:
-            low = p.lower()
-            if low not in seen:
-                seen.add(low)
-                players.append(p)
-
-        # Racer-Liste in Spalte L
-        try:
-            racer_col = ws.col_values(12)  # L = 12
-            for name in racer_col[1:]:  # ab Zeile 2
-                name = name.strip()
-                if not name:
-                    continue
-                low = name.lower()
-                if low not in seen:
-                    seen.add(low)
-                    players.append(name)
-        except Exception as e:
-            print(f"[RESTPROGRAMM] get_players_for_div({div}) – Fallback Racer-Liste Fehler: {e}")
-
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (Fallback): {players}")
-        return players
-
-    except Exception as e:
-        print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler (Fallback): {e}")
-        return []
-
-
-def load_open_from_div_tab(div: str, player_query: str = ""):
-    """
-    Liefert offene Paarungen in '{div}.DIV' über dieselbe Logik wie /result.
-    Optionaler player_query filtert nach Spielername (Heim oder Auswärts).
-    Rückgabe: Liste von Tuples (row_index, block, heim, gast),
-    wobei block aktuell immer 'L' ist.
-    """
-    try:
-        games = load_open_games_for_result(div)
-        print(
-            f"[RESTPROGRAMM] load_open_from_div_tab({div}, query='{player_query}') – "
-            f"{len(games)} offene Spiele vor Filter"
-        )
-    except Exception as e:
-        print(f"[RESTPROGRAMM] load_open_from_div_tab({div}) Fehler: {e}")
-        return []
-
-    q = player_query.strip().lower()
-    out = []
-
-    for g in games:
-        p1 = g.get("heim", "") or ""
-        p2 = g.get("auswaerts", "") or ""
-
-        if q and (q not in p1.lower() and q not in p2.lower()):
-            continue
-
-        out.append((g["row_index"], "L", p1, p2))
-
-    print(
-        f"[RESTPROGRAMM] load_open_from_div_tab({div}) -> {len(out)} Spiele nach Filter "
-        f"(Filter='{q or 'Komplett'}')"
-    )
-    return out
-
-
-async def _rp_show(
-    interaction: discord.Interaction,
-    division_value: str,
-    player_filter: str,
-):
-    """
-    Ersetzt die ursprüngliche /restprogramm-Nachricht durch die Ergebnisliste.
-    Erwartet, dass die Interaktion bereits defered wurde.
-    """
-    effective_filter = (
-        "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
-    )
-
-    try:
-        matches = load_open_from_div_tab(division_value, player_query=effective_filter)
-
-        if not matches:
-            txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
-            if effective_filter:
-                txt += f" (Filter: *{effective_filter}*)"
-            await interaction.edit_original_response(content=txt, view=None)
-            return
-
-        lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
-        if effective_filter:
-            lines.append(f"_Filter: {effective_filter}_")
-        else:
-            lines.append("_Filter: Komplett_")
-
-        for (row_nr, block, p1, p2) in matches[:80]:
-            side = "links" if block == "L" else "rechts"
-            lines.append(f"• Zeile {row_nr} ({side}): **{p1}** vs **{p2}**")
-
-        if len(matches) > 80:
-            lines.append(f"… und {len(matches) - 80} weitere.")
-
-        await interaction.edit_original_response(
-            content="\n".join(lines),
-            view=None,
-        )
-
-    except Exception as e:
-        print(f"[RESTPROGRAMM] Fehler in _rp_show: {e}")
-        try:
-            await interaction.edit_original_response(
-                content=(
-                    "❌ Konnte das Restprogramm gerade nicht laden. "
-                    "Bitte später erneut probieren."
-                ),
-                view=None,
-            )
-        except Exception as e2:
-            print(f"[RESTPROGRAMM] Fehler beim Editieren der Nachricht: {e2}")
-
-
-# =========================================================
 # /termin Modal
 # =========================================================
 class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
@@ -1201,6 +1015,265 @@ class PlayerExitPlayerSelectView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.add_item(PlayerExitPlayerSelect(division, players, requester))
 
+# =========================================================
+# Restprogramm-View (/rest)
+# =========================================================
+
+class RestDivisionSelect(discord.ui.Select):
+    def __init__(self, parent_view: "RestView"):
+        self.parent_view = parent_view
+        options = [
+            discord.SelectOption(label="Division 1", value="1"),
+            discord.SelectOption(label="Division 2", value="2"),
+            discord.SelectOption(label="Division 3", value="3"),
+            discord.SelectOption(label="Division 4", value="4"),
+            discord.SelectOption(label="Division 5", value="5"),
+            discord.SelectOption(label="Division 6", value="6"),
+        ]
+        super().__init__(
+            placeholder="Division wählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        div_number = self.values[0]
+        self.parent_view.selected_division = div_number
+
+        try:
+            players = list_rest_players(div_number)
+        except Exception as e:
+            await interaction.response.edit_message(
+                content=f"❌ Fehler beim Laden der Spieler für Division {div_number}: {e}",
+                view=None,
+            )
+            return
+
+        if not players:
+            await interaction.response.edit_message(
+                content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
+                view=self.parent_view,
+            )
+            return
+
+        # vorhandenen Player-Select ggf. entfernen
+        if self.parent_view.player_select is not None:
+            self.parent_view.remove_item(self.parent_view.player_select)
+
+        self.parent_view.player_select = RestPlayerSelect(
+            parent_view=self.parent_view,
+            division=div_number,
+            players=players,
+        )
+        self.parent_view.add_item(self.parent_view.player_select)
+
+        await interaction.response.edit_message(
+            content=(
+                f"Division {div_number} gewählt.\n"
+                "Bitte nun einen Spieler wählen, um das Restprogramm zu sehen."
+            ),
+            view=self.parent_view,
+        )
+
+
+class RestPlayerSelect(discord.ui.Select):
+    def __init__(self, parent_view: "RestView", division: str, players: list[str]):
+        self.parent_view = parent_view
+        self.division = division
+
+        options = [
+            discord.SelectOption(label=p, value=p)
+            for p in players
+        ]
+
+        super().__init__(
+            placeholder="Spieler wählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        player = self.values[0]
+        div_number = self.division
+
+        try:
+            matches = list_restprogramm(div_number, player)
+        except Exception as e:
+            await interaction.response.edit_message(
+                content=(
+                    f"❌ Fehler beim Ermitteln des Restprogramms für "
+                    f"{player} (Division {div_number}): {e}"
+                ),
+                view=self.parent_view,
+            )
+            return
+
+        if not matches:
+            text = (
+                f"Division {div_number} – Restprogramm für **{player}**:\n"
+                "Es sind keine offenen Spiele mehr in der Tabelle (E != 'vs')."
+            )
+        else:
+            lines = [
+                f"Division {div_number} – Restprogramm für **{player}**:",
+                "",
+            ]
+            for m in matches:
+                heim = m["heim"]
+                gast = m["gast"]
+                if heim.lower() == player.lower():
+                    info = f"**{heim} (H)** vs {gast}"
+                elif gast.lower() == player.lower():
+                    info = f"{heim} vs **{gast} (A)**"
+                else:
+                    info = f"{heim} vs {gast}"
+
+                lines.append(f"- {info}")
+
+            text = "\n".join(lines)
+
+        await interaction.response.edit_message(
+            content=text,
+            view=self.parent_view,
+        )
+
+
+class RestView(discord.ui.View):
+    def __init__(self, requester: discord.Member, timeout: int = 180):
+        super().__init__(timeout=timeout)
+        self.requester = requester
+        self.selected_division: str | None = None
+        self.player_select: RestPlayerSelect | None = None
+
+        self.add_item(RestDivisionSelect(self))
+
+
+
+# =========================================================
+# Spieler-Helfer für DIV-Tabs (wird weiter für spielplan/playerexit genutzt)
+# =========================================================
+def _collect_players_from_div_ws(ws) -> list[str]:
+    """
+    Liest alle Spielernamen aus Spalte D (Heim) und F (Gast),
+    entfernt Duplikate, behält Reihenfolge.
+    """
+    rows = ws.get_all_values()
+    seen = set()
+    players = []
+
+    D_idx0 = DIV_COL_LEFT - 1
+    F_idx0 = DIV_COL_RIGHT - 1
+
+    for r_idx in range(1, len(rows)):  # ab Zeile 2
+        row = rows[r_idx]
+        p_left = _cell(row, D_idx0)
+        p_right = _cell(row, F_idx0)
+
+        for p in (p_left, p_right):
+            if not p:
+                continue
+            low = p.lower()
+            if low not in seen:
+                seen.add(low)
+                players.append(p)
+
+    return players
+
+# =========================================================
+# Streichungen (L/M/N2-9) & Restprogramme
+# =========================================================
+
+def list_streichungen(div_number: str):
+    """
+    Liest Streichungen aus dem DIV-Tab:
+    - Spielername: L2-L9
+    - Streichmodus/-info: M2-M9 und N2-N9
+    """
+    sheets_required()
+    ws = WB.worksheet(f"{div_number}.DIV")
+    rows = ws.get_all_values()
+
+    eintraege = []
+    # rows[0] = Zeile 1 -> wir wollen Zeile 2-9 => Index 1..8
+    max_row_index = min(9, len(rows))  # Obergrenze beachten
+    for idx in range(1, max_row_index):
+        row = rows[idx]
+        spieler = _cell(row, 11)  # L = Index 11 (0-basiert)
+        modus_m = _cell(row, 12)  # M
+        modus_n = _cell(row, 13)  # N
+
+        if spieler:
+            eintraege.append(
+                {
+                    "spieler": spieler,
+                    "modus_m": modus_m,
+                    "modus_n": modus_n,
+                },
+            )
+
+    return eintraege
+
+
+def list_rest_players(div_number: str) -> list[str]:
+    """
+    Liest die Spieler für das Restprogramm-Menü aus L2-L9.
+    Doppelte Einträge werden entfernt, Reihenfolge bleibt erhalten.
+    """
+    sheets_required()
+    ws = WB.worksheet(f"{div_number}.DIV")
+    rows = ws.get_all_values()
+
+    players = []
+    seen = set()
+
+    max_row_index = min(9, len(rows))
+    for idx in range(1, max_row_index):
+        row = rows[idx]
+        name = _cell(row, 11)  # L
+        if not name:
+            continue
+        low = name.lower()
+        if low not in seen:
+            seen.add(low)
+            players.append(name)
+
+    return players
+
+
+def list_restprogramm(div_number: str, player_name: str):
+    """
+    Liefert alle offenen Spiele (E == 'vs') aus dem DIV-Tab,
+    an denen der angegebene Spieler beteiligt ist.
+    """
+    sheets_required()
+    ws = WB.worksheet(f"{div_number}.DIV")
+    rows = ws.get_all_values()
+
+    matches = []
+    target = player_name.lower()
+
+    for idx, row in enumerate(rows[1:], start=2):  # ab Zeile 2
+        heim = _cell(row, DIV_COL_LEFT - 1)
+        marker = _cell(row, DIV_COL_MARKER - 1)
+        gast = _cell(row, DIV_COL_RIGHT - 1)
+
+        if marker.lower() != "vs":
+            continue
+
+        if heim.lower() == target or gast.lower() == target:
+            matches.append(
+                {
+                    "row_index": idx,
+                    "heim": heim,
+                    "gast": gast,
+                },
+            )
+
+    return matches
+
+        
 
 # =========================================================
 # Spielplan / Round Robin
@@ -1722,7 +1795,101 @@ async def playerexit(interaction: discord.Interaction):
     )
 
 
-@tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
+@tree.command(
+    name="streich",
+    description="Zeigt die Streichungen (L/M/N2-9) einer Division an",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.choices(
+    division=[
+        app_commands.Choice(name="Division 1", value="1"),
+        app_commands.Choice(name="Division 2", value="2"),
+        app_commands.Choice(name="Division 3", value="3"),
+        app_commands.Choice(name="Division 4", value="4"),
+        app_commands.Choice(name="Division 5", value="5"),
+        app_commands.Choice(name="Division 6", value="6"),
+    ],
+)
+async def streich(
+    interaction: discord.Interaction,
+    division: app_commands.Choice[str],
+):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or not has_tfl_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    div_number = division.value
+
+    try:
+        eintraege = list_streichungen(div_number)
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Fehler beim Lesen der Streichungen aus Division {div_number}: {e}",
+            ephemeral=True,
+        )
+        return
+
+    if not eintraege:
+        await interaction.response.send_message(
+            f"Keine Streichungen in Division {div_number} hinterlegt (L2-L9 leer).",
+            ephemeral=True,
+        )
+        return
+
+    lines = [f"📝 Streichungen in Division {div_number}:", ""]
+    for e in eintraege:
+        spieler = e["spieler"]
+        parts = []
+        if e["modus_m"]:
+            parts.append(e["modus_m"])
+        if e["modus_n"]:
+            parts.append(e["modus_n"])
+
+        if parts:
+            lines.append(f"- **{spieler}**: " + " | ".join(parts))
+        else:
+            lines.append(f"- **{spieler}**")
+
+    await interaction.response.send_message(
+        "\n".join(lines),
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="rest",
+    description="Zeigt das Restprogramm eines Spielers an",
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def rest(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or not has_tfl_role(member):
+        await interaction.response.send_message(
+            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+            ephemeral=True,
+        )
+        return
+
+    view = RestView(requester=member)
+    await interaction.response.send_message(
+        (
+            "🔎 Restprogramm-Ansicht\n\n"
+            "1️⃣ Division wählen\n"
+            "2️⃣ Spieler aus der Liste wählen (basierend auf L2-L9)\n\n"
+            "Das Restprogramm wird im selben Fenster angezeigt."
+        ),
+        view=view,
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="help",
+    description="Zeigt eine Übersicht aller verfügbaren Befehle")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -1734,11 +1901,6 @@ async def help(interaction: discord.Interaction):
     embed.add_field(
         name="/termin",
         value="Neues Match eintragen, Event erstellen (kein Sheet)",
-        inline=False,
-    )
-    embed.add_field(
-        name="/restprogramm",
-        value="Offene Spiele je Division, optional Spieler-Filter.",
         inline=False,
     )
     embed.add_field(
@@ -1786,6 +1948,16 @@ async def help(interaction: discord.Interaction):
     embed.add_field(
         name="/add",
         value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).",
+        inline=False,
+    )
+    embed.add_field(
+        name="/streich",
+        value="Zeigt die Streichungen der gewählten Division (L/M/N2-9).",
+        inline=False,
+    )
+    embed.add_field(
+        name="/rest",
+        value="Zeigt das Restprogramm eines Spielers (offene Spiele mit E='vs').",
         inline=False,
     )
     embed.add_field(
@@ -1896,155 +2068,6 @@ async def sync_cmd(interaction: discord.Interaction):
         try:
             await interaction.followup.send(
                 "❌ Sync ist fehlgeschlagen. Bitte Logs prüfen.",
-                ephemeral=True,
-            )
-        except Exception:
-            pass
-
-
-# =========================================================
-# /restprogramm View & Command (NEU)
-# =========================================================
-class RestprogrammView(discord.ui.View):
-    def __init__(self, start_div: str = "1"):
-        super().__init__(timeout=180)
-        self.division_value = start_div
-        self.player_value = "Komplett"
-
-        self.add_item(self.DivSelect(self))
-        self.add_item(self.PlayerSelect(self))
-
-    def header_text(self) -> str:
-        if self.player_value and self.player_value != "Komplett":
-            filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
-        else:
-            filter_part = "Aktueller Spieler-Filter: **Komplett**"
-
-        return (
-            f"📋 Restprogramm – Division {self.division_value} gewählt.\n"
-            f"{filter_part}\n"
-            "Spieler auswählen oder direkt 'Anzeigen' drücken."
-        )
-
-    def set_division(self, new_div: str):
-        self.division_value = new_div
-        self.player_value = "Komplett"
-
-        for child in list(self.children):
-            if isinstance(child, RestprogrammView.PlayerSelect):
-                self.remove_item(child)
-
-        self.add_item(self.PlayerSelect(self))
-
-    class DivSelect(discord.ui.Select):
-        def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
-            options = [
-                discord.SelectOption(label="Division 1", value="1"),
-                discord.SelectOption(label="Division 2", value="2"),
-                discord.SelectOption(label="Division 3", value="3"),
-                discord.SelectOption(label="Division 4", value="4"),
-                discord.SelectOption(label="Division 5", value="5"),
-                discord.SelectOption(label="Division 6", value="6"),
-            ]
-
-            for opt in options:
-                opt.default = (opt.value == parent_view.division_value)
-
-            super().__init__(
-                placeholder="Division wählen …",
-                min_values=1,
-                max_values=1,
-                options=options,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            new_div = self.values[0]
-
-            try:
-                await interaction.response.defer(ephemeral=True, thinking=False)
-            except discord.InteractionResponded:
-                pass
-
-            self.parent_view.set_division(new_div)
-
-            for opt in self.options:
-                opt.default = (opt.value == new_div)
-
-            await interaction.edit_original_response(
-                content=self.parent_view.header_text(),
-                view=self.parent_view,
-            )
-
-    class PlayerSelect(discord.ui.Select):
-        def __init__(self, parent_view: "RestprogrammView"):
-            self.parent_view = parent_view
-
-            try:
-                players = get_players_for_div(parent_view.division_value)
-            except Exception as e:
-                print(f"[RESTPROGRAMM] PlayerSelect init Fehler: {e}")
-                players = []
-
-            opts = [discord.SelectOption(label="Komplett", value="Komplett")]
-            for p in players:
-                opts.append(discord.SelectOption(label=p, value=p))
-
-            for opt in opts:
-                opt.default = (opt.value == parent_view.player_value)
-
-            super().__init__(
-                placeholder="Spieler filtern … (optional)",
-                min_values=1,
-                max_values=1,
-                options=opts,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            self.parent_view.player_value = self.values[0]
-
-            try:
-                await interaction.response.defer(ephemeral=True, thinking=False)
-            except discord.InteractionResponded:
-                pass
-
-            for opt in self.options:
-                opt.default = (opt.value == self.parent_view.player_value)
-
-            await interaction.edit_original_response(
-                content=self.parent_view.header_text(),
-                view=self.parent_view,
-            )
-
-    @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
-    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=False)
-        except discord.InteractionResponded:
-            pass
-
-        await _rp_show(interaction, self.division_value, self.player_value)
-
-
-@tree.command(
-    name="restprogramm",
-    description="Zeigt offene Spiele: Division wählen, Spieler wählen, anzeigen.",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def restprogramm(interaction: discord.Interaction):
-    try:
-        view = RestprogrammView(start_div="1")
-        await interaction.response.send_message(
-            view=view,
-            content=view.header_text(),
-            ephemeral=True,
-        )
-
-    except Exception as e:
-        print(f"[RESTPROGRAMM] Fehler im Command: {e}")
-        try:
-            await interaction.response.send_message(
-                "❌ Konnte das Restprogramm nicht starten.",
                 ephemeral=True,
             )
         except Exception:
@@ -2233,5 +2256,3 @@ async def on_ready():
 # RUN
 # =========================================================
 client.run(TOKEN)
-
-
