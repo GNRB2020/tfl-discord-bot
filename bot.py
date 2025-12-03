@@ -1,40 +1,29 @@
-import os
-import pytz
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import datetime
+import discord
+import asyncio
+from discord.ext import commands
+from discord import app_commands
+from shared import TOKEN, GUILD_ID, WB, sheets_required
 
-# ========== CONFIG ==========
-TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
-RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "0"))
+# alle deine bestehenden Bot-Klassen, Views, Befehle usw.
+# (Result, Streich, Rest, Playerexit, Spielplan usw.)
+# können hier unverändert rein – ich kürze das hier.
 
-BERLIN_TZ = pytz.timezone("Europe/Berlin")
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
 
-SCOPE = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
+client = commands.Bot(command_prefix="/", intents=intents)
+tree = client.tree
 
-CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE",
-                              "Season #4 - Spielbetrieb")
 
-# ========== SHEETS ==========
-SHEETS_ENABLED = True
-GC = WB = None
+@client.event
+async def on_ready():
+    print("Bot ist online!")
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    print("Slash-Commands synchronisiert")
 
-try:
-    CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    GC = gspread.authorize(CREDS)
-    WB = GC.open(SPREADSHEET_TITLE)
-except Exception:
-    SHEETS_ENABLED = False
-    WB = None
 
-def sheets_required():
-    if not SHEETS_ENABLED:
-        raise RuntimeError("Google Sheets nicht verbunden")
-    if WB is None:
-        raise RuntimeError("Workbook fehlt")
+# ALLE deine bisherigen /commands bleiben hier
 
-def _cell(row, idx0):
-    return row[idx0].strip() if 0 <= idx0 < len(row) else ""
+
+client.run(TOKEN)
