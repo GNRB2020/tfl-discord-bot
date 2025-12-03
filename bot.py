@@ -21,6 +21,7 @@ EVENT_CHANNEL_ID = int(os.getenv("EVENT_CHANNEL_ID", os.getenv("DISCORD_EVENT_CH
 RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID", "0"))
 SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+print("DEBUG CREDS_FILE =", CREDS_FILE)
 
 # feste Role-IDs aus ENV (müssen gesetzt sein)
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
