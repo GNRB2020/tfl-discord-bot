@@ -1041,6 +1041,10 @@ class RestDivisionSelect(discord.ui.Select):
         div_number = self.values[0]
         self.parent_view.selected_division = div_number
 
+        # 👉 Auswahl im Dropdown sichtbar halten
+        for opt in self.options:
+            opt.default = (opt.value == div_number)
+
         try:
             players = list_rest_players(div_number)
         except Exception as e:
@@ -1098,6 +1102,10 @@ class RestPlayerSelect(discord.ui.Select):
         player = self.values[0]
         div_number = self.division
 
+        # 👉 Auswahl im Spieler-Dropdown sichtbar halten
+        for opt in self.options:
+            opt.default = (opt.value == player)
+
         try:
             matches = list_restprogramm(div_number, player)
         except Exception as e:
@@ -1148,6 +1156,7 @@ class RestView(discord.ui.View):
         self.player_select: RestPlayerSelect | None = None
 
         self.add_item(RestDivisionSelect(self))
+
 
 
 
