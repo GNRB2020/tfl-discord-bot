@@ -14,6 +14,15 @@ import asyncio
 from aiohttp import web
 from datetime import datetime as dt, timedelta
 
+import sys
+import traceback
+
+def _fatal(e: Exception):
+    print("FATAL ERROR BEFORE on_ready():", e)
+    traceback.print_exc()
+    sys.exit(1)
+
+
 print("BOT.PY STARTED — AKTIVE VERSION")
 
 
@@ -2267,35 +2276,14 @@ async def on_ready():
 
     print("🤖 Bot bereit")
 
-async def update_cache_upcoming(bot):
-    events = []
-    try:
-        guild = bot.get_guild(GUILD_ID)
-        if not guild:
-            print("[CACHE] Fehler: Guild nicht gefunden")
-            return
-
-        raw = await guild.fetch_scheduled_events()
-
-        for ev in raw:
-            events.append({
-                "name": ev.name,
-                "description": ev.description or "",
-                "start": ev.start_time.isoformat() if ev.start_time else None,
-                "url": ev.url,
-                "location": ev.location or ""
-            })
-
-        from shared import cache_set_upcoming
-        cache_set_upcoming(events)
-
-        print(f"[CACHE] Upcoming aktualisiert ({len(events)} Events)")
-    except Exception as e:
-        print(f"[CACHE] Upcoming Fehler: {e}")
-
 # =========================================================
 # Alte doppelte Cache-Funktionen entfernen!
 # =========================================================
 
 # Der Bot nutzt NUR noch refresh_api_cache() aus on_ready()
 # NICHTS manuell starten, KEIN client.loop.create_task mehr.
+
+try:
+    client.run(TOKEN)
+except Exception as e:
+    _fatal(e)
