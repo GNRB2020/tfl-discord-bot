@@ -2267,6 +2267,63 @@ async def on_ready():
 
     print("🤖 Bot bereit")
 
+async def update_cache_upcoming(bot):
+    events = []
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            print("[CACHE] Fehler: Guild nicht gefunden")
+            return
+
+        raw = await guild.fetch_scheduled_events()
+
+        for ev in raw:
+            events.append({
+                "name": ev.name,
+                "description": ev.description or "",
+                "start": ev.start_time.isoformat() if ev.start_time else None,
+                "url": ev.url,
+                "location": ev.location or ""
+            })
+
+        from shared import cache_set_upcoming
+        cache_set_upcoming(events)
+
+        print(f"[CACHE] Upcoming aktualisiert ({len(events)} Events)")
+    except Exception as e:
+        print(f"[CACHE] Upcoming Fehler: {e}")
+
+async def update_cache_results(bot):
+    results = []
+    try:
+        from shared import RESULTS_CHANNEL_ID
+        ch = bot.get_channel(RESULTS_CHANNEL_ID)
+        if not ch:
+            print("[CACHE] Fehler: Results-Channel nicht gefunden")
+            return
+
+        async for msg in ch.history(limit=20):
+            results.append({
+                "content": msg.content,
+                "time": msg.created_at.isoformat()
+            })
+
+        from shared import cache_set_results
+        cache_set_results(results)
+
+        print(f"[CACHE] Results aktualisiert ({len(results)} Einträge)")
+    except Exception as e:
+        print(f"[CACHE] Results Fehler: {e}")
+
+async def refresh_cache_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await update_cache_upcoming(bot)
+        await update_cache_results(bot)
+        await asyncio.sleep(300)
+
+bot.loop.create_task(refresh_cache_loop())
+
 
 # =========================================================
 # RUN
