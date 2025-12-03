@@ -478,11 +478,13 @@ async def _rp_show(
     player_filter: str,
 ):
     """
-    Zeigt die offene-Liste in derselben Nachricht wie /restprogramm.
+    Ersetzt die ursprüngliche /restprogramm-Nachricht durch die Ergebnisliste.
+    Erwartet, dass die Interaktion bereits defered wurde.
     """
     effective_filter = (
         "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
     )
+
     try:
         matches = load_open_from_div_tab(division_value, player_query=effective_filter)
 
@@ -490,7 +492,7 @@ async def _rp_show(
             txt = f"📭 Keine offenen Spiele in **Division {division_value}**."
             if effective_filter:
                 txt += f" (Filter: *{effective_filter}*)"
-            await interaction.response.edit_message(content=txt, view=None)
+            await interaction.edit_original_response(content=txt, view=None)
             return
 
         lines = [f"**Division {division_value} – offene Spiele ({len(matches)})**"]
@@ -506,17 +508,24 @@ async def _rp_show(
         if len(matches) > 80:
             lines.append(f"… und {len(matches) - 80} weitere.")
 
-        await interaction.response.edit_message(content="\n".join(lines), view=None)
+        await interaction.edit_original_response(
+            content="\n".join(lines),
+            view=None,
+        )
 
     except Exception as e:
         print(f"[RESTPROGRAMM] Fehler in _rp_show: {e}")
         try:
-            await interaction.response.edit_message(
-                content="❌ Konnte das Restprogramm gerade nicht laden. Bitte später erneut probieren.",
+            await interaction.edit_original_response(
+                content=(
+                    "❌ Konnte das Restprogramm gerade nicht laden. "
+                    "Bitte später erneut probieren."
+                ),
                 view=None,
             )
-        except Exception:
-            pass
+        except Exception as e2:
+            print(f"[RESTPROGRAMM] Fehler beim Editieren der Nachricht: {e2}")
+
 
 
 # =========================================================
@@ -1884,9 +1893,11 @@ class RestprogrammView(discord.ui.View):
         self.division_value = start_div
         self.player_value = "Komplett"
 
+        # View-Bestandteile hinzufügen
         self.add_item(self.DivSelect(self))
         self.add_item(self.PlayerSelect(self))
 
+    # Text für die Steuerungs-Nachricht
     def header_text(self) -> str:
         if self.player_value and self.player_value != "Komplett":
             filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
@@ -1900,13 +1911,18 @@ class RestprogrammView(discord.ui.View):
         )
 
     def set_division(self, new_div: str):
+        """
+        Division wechseln, Spieler-Filter zurücksetzen und PlayerSelect neu aufbauen.
+        """
         self.division_value = new_div
         self.player_value = "Komplett"
 
+        # vorhandenes PlayerSelect entfernen
         for child in list(self.children):
             if isinstance(child, RestprogrammView.PlayerSelect):
                 self.remove_item(child)
 
+        # neuen PlayerSelect für die neue Division hinzufügen
         self.add_item(self.PlayerSelect(self))
 
     class DivSelect(discord.ui.Select):
@@ -1921,6 +1937,7 @@ class RestprogrammView(discord.ui.View):
                 discord.SelectOption(label="Division 6", value="6"),
             ]
 
+            # aktuell gewählte Division im Dropdown markieren
             for opt in options:
                 opt.default = (opt.value == parent_view.division_value)
 
@@ -1933,12 +1950,21 @@ class RestprogrammView(discord.ui.View):
 
         async def callback(self, interaction: discord.Interaction):
             new_div = self.values[0]
+
+            # Interaktion deferen, falls das Neuaufbauen des Views + Sheets dauert
+            try:
+                await interaction.response.defer(ephemeral=True, thinking=False)
+            except discord.InteractionResponded:
+                pass
+
+            # Neue Division setzen und PlayerSelect neu bauen
             self.parent_view.set_division(new_div)
 
+            # eigene Optionen (Defaults) updaten, damit die Auswahl sichtbar bleibt
             for opt in self.options:
                 opt.default = (opt.value == new_div)
 
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=self.parent_view.header_text(),
                 view=self.parent_view,
             )
@@ -1947,6 +1973,7 @@ class RestprogrammView(discord.ui.View):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
+            # Spieler laden – Fehler abfangen, damit das View nicht crasht
             try:
                 players = get_players_for_div(parent_view.division_value)
             except Exception as e:
@@ -1957,6 +1984,7 @@ class RestprogrammView(discord.ui.View):
             for p in players:
                 opts.append(discord.SelectOption(label=p, value=p))
 
+            # aktuellen Filter als default markieren
             for opt in opts:
                 opt.default = (opt.value == parent_view.player_value)
 
@@ -1968,19 +1996,37 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
+            # Auswahl merken
             self.parent_view.player_value = self.values[0]
 
+            # Interaktion deferen (Sicherheitsnetz, falls irgendwas länger dauert)
+            try:
+                await interaction.response.defer(ephemeral=True, thinking=False)
+            except discord.InteractionResponded:
+                pass
+
+            # Dropdown-Auswahl sichtbar halten
             for opt in self.options:
                 opt.default = (opt.value == self.parent_view.player_value)
 
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=self.parent_view.header_text(),
                 view=self.parent_view,
             )
 
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Interaktion deferen, damit wir Zeit für Google Sheets haben
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=False)
+        except discord.InteractionResponded:
+            # falls aus irgendeinem Grund schon geantwortet wurde
+            pass
+
+        # Ergebnisliste in derselben Nachricht anzeigen
         await _rp_show(interaction, self.division_value, self.player_value)
+
+
 
 
 @tree.command(
