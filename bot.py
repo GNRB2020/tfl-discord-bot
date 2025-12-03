@@ -2293,48 +2293,9 @@ async def update_cache_upcoming(bot):
     except Exception as e:
         print(f"[CACHE] Upcoming Fehler: {e}")
 
-async def update_cache_upcoming(bot):
-    events = []
-    try:
-        guild = bot.get_guild(GUILD_ID)
-        if not guild:
-            print("[CACHE] Fehler: Guild nicht gefunden")
-            return
-
-        raw = await guild.fetch_scheduled_events()
-
-        for ev in raw:
-            events.append({
-                "name": ev.name,
-                "description": ev.description or "",
-                "start": ev.start_time.isoformat() if ev.start_time else None,
-                "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
-                "location": (
-                    ev.entity_metadata.location
-                    if getattr(ev, "entity_metadata", None)
-                    else ""
-                )
-            })
-
-        from shared import cache_set_upcoming
-        cache_set_upcoming(events)
-
-        print(f"[CACHE] Upcoming aktualisiert ({len(events)} Events)")
-
-    except Exception as e:
-        print(f"[CACHE] Upcoming Fehler: {e}")
-
-
-async def refresh_cache_loop():
-    await client.wait_until_ready()
-    while not client.is_closed():
-        await update_cache_upcoming(client)
-        await update_cache_results(client)
-        await asyncio.sleep(300)
-
-client.loop.create_task(refresh_cache_loop())
-
 # =========================================================
-# RUN
+# Alte doppelte Cache-Funktionen entfernen!
 # =========================================================
-client.run(TOKEN)
+
+# Der Bot nutzt NUR noch refresh_api_cache() aus on_ready()
+# NICHTS manuell starten, KEIN client.loop.create_task mehr.
