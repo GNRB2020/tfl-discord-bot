@@ -527,7 +527,6 @@ async def _rp_show(
             print(f"[RESTPROGRAMM] Fehler beim Editieren der Nachricht: {e2}")
 
 
-
 # =========================================================
 # /termin Modal
 # =========================================================
@@ -1882,8 +1881,6 @@ async def sync_cmd(interaction: discord.Interaction):
             )
         except Exception:
             pass
-
-
 # =========================================================
 # /restprogramm View
 # =========================================================
@@ -2025,8 +2022,6 @@ class RestprogrammView(discord.ui.View):
 
         # Ergebnisliste in derselben Nachricht anzeigen
         await _rp_show(interaction, self.division_value, self.player_value)
-
-
 
 
 @tree.command(
@@ -2236,3 +2231,4 @@ async def on_ready():
 # RUN
 # =========================================================
 client.run(TOKEN)
+
