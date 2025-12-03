@@ -253,7 +253,7 @@ def _cell(row, idx0):
     return row[idx0].strip() if 0 <= idx0 < len(row) else ""
 
 
-# Spaltenkonstanten (0-basierte Indexe für get_all_values())
+# Spaltenkonstanten (Spaltennummern, 1-basiert, für get_all_values() -1)
 DIV_COL_LEFT = 4      # D
 DIV_COL_MARKER = 5    # E
 DIV_COL_RIGHT = 6     # F
@@ -365,7 +365,7 @@ def has_tfl_role(member: discord.Member) -> bool:
 
 
 # =========================================================
-# Spieler-Helfer für DIV-Tabs (neu, ohne Spalte L)
+# Spieler-Helfer für DIV-Tabs
 # =========================================================
 def _collect_players_from_div_ws(ws) -> list[str]:
     """
@@ -398,8 +398,7 @@ def _collect_players_from_div_ws(ws) -> list[str]:
 def get_players_for_div(div: str) -> list[str]:
     """
     Öffnet {div}.DIV und liefert alle Spieler aus Spalte D/F.
-    Falls dort nichts steht, versuchen wir zusätzlich den Racer-Block ab Spalte L.
-    Fehler werden geloggt, aber nicht nach außen geworfen.
+    Falls dort nichts steht, versuchen wir zusätzlich die Racer-Liste in Spalte L.
     """
     try:
         sheets_required()
@@ -407,13 +406,12 @@ def get_players_for_div(div: str) -> list[str]:
         print(f"[RESTPROGRAMM] get_players_for_div: versuche Worksheet '{ws_name}' zu öffnen")
         ws = WB.worksheet(ws_name)
 
-        # 1) Standard: alle Spieler aus D/F (Spalten 4 und 6)
         players = _collect_players_from_div_ws(ws)
         if players:
             print(f"[RESTPROGRAMM] get_players_for_div({div}) -> {len(players)} Spieler (D/F): {players}")
             return players
 
-        # 2) Fallback: Racer-Liste in Spalte L
+        # Fallback: Racer-Liste in Spalte L
         try:
             racer_col = ws.col_values(12)  # L = 12
             racer_players = []
@@ -480,7 +478,7 @@ async def _rp_show(
     player_filter: str,
 ):
     """
-    Ersetzt die ursprüngliche /restprogramm-Nachricht durch die Ergebnisliste.
+    Zeigt die offene-Liste in derselben Nachricht wie /restprogramm.
     """
     effective_filter = (
         "" if (not player_filter or player_filter.lower() == "komplett") else player_filter
@@ -595,7 +593,7 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 start_time=start_dt,
                 end_time=end_dt,
                 entity_type=discord.EntityType.external,
-                location=multistre.am_url,
+                location=multistream_url,  # FIX: richtiger Variablenname
                 privacy_level=discord.PrivacyLevel.guild_only,
             )
 
@@ -957,26 +955,36 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
 async def result(interaction: discord.Interaction):
     member = interaction.user
     if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
+        try:
+            await interaction.response.send_message(
+                "❌ Konnte Mitgliedsdaten nicht lesen.",
+                ephemeral=True,
+            )
+        except discord.NotFound:
+            print("[RESULT] Unknown interaction beim Senden (Mitgliedsdaten).")
         return
 
     if not has_tfl_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
+        try:
+            await interaction.response.send_message(
+                "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+                ephemeral=True,
+            )
+        except discord.NotFound:
+            print("[RESULT] Unknown interaction beim Senden (keine Berechtigung).")
         return
 
     view = ResultDivisionSelectView(requester=member)
 
-    await interaction.response.send_message(
-        "Bitte Division auswählen:",
-        view=view,
-        ephemeral=True,
-    )
+    try:
+        await interaction.response.send_message(
+            "Bitte Division auswählen:",
+            view=view,
+            ephemeral=True,
+        )
+    except discord.NotFound:
+        # Das ist genau der 10062-Fall: Discord kennt das Interaction-Token nicht mehr
+        print("[RESULT] Unknown interaction beim initialen Antwort-Senden (10062).")
 
 
 # =========================================================
@@ -1074,9 +1082,9 @@ class PlayerExitDivisionSelect(discord.ui.Select):
 
         try:
             players = list_div_players(div_number)
-        except Exception as e:
+        except Exception:
             await interaction.followup.send(
-                f"❌ Konnte Spieler nicht laden.",
+                "❌ Konnte Spieler nicht laden.",
                 ephemeral=True,
             )
             return
@@ -1145,9 +1153,9 @@ class PlayerExitPlayerSelect(discord.ui.Select):
                 ephemeral=True,
             )
 
-        except Exception as e:
+        except Exception:
             await interaction.followup.send(
-                content=f"❌ Fehler beim Austragen.",
+                content="❌ Fehler beim Austragen.",
                 ephemeral=True,
             )
 
@@ -1876,11 +1884,9 @@ class RestprogrammView(discord.ui.View):
         self.division_value = start_div
         self.player_value = "Komplett"
 
-        # View-Bestandteile hinzufügen
         self.add_item(self.DivSelect(self))
         self.add_item(self.PlayerSelect(self))
 
-    # Text für die Steuerungs-Nachricht
     def header_text(self) -> str:
         if self.player_value and self.player_value != "Komplett":
             filter_part = f"Aktueller Spieler-Filter: **{self.player_value}**"
@@ -1894,18 +1900,13 @@ class RestprogrammView(discord.ui.View):
         )
 
     def set_division(self, new_div: str):
-        """
-        Division wechseln, Spieler-Filter zurücksetzen und PlayerSelect neu aufbauen.
-        """
         self.division_value = new_div
         self.player_value = "Komplett"
 
-        # vorhandenes PlayerSelect entfernen
         for child in list(self.children):
             if isinstance(child, RestprogrammView.PlayerSelect):
                 self.remove_item(child)
 
-        # neuen PlayerSelect für die neue Division hinzufügen
         self.add_item(self.PlayerSelect(self))
 
     class DivSelect(discord.ui.Select):
@@ -1920,7 +1921,6 @@ class RestprogrammView(discord.ui.View):
                 discord.SelectOption(label="Division 6", value="6"),
             ]
 
-            # aktuell gewählte Division im Dropdown markieren
             for opt in options:
                 opt.default = (opt.value == parent_view.division_value)
 
@@ -1932,11 +1932,9 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
-            # Neue Division setzen und PlayerSelect neu bauen
             new_div = self.values[0]
             self.parent_view.set_division(new_div)
 
-            # eigene Optionen (Defaults) updaten, damit die Auswahl sichtbar bleibt
             for opt in self.options:
                 opt.default = (opt.value == new_div)
 
@@ -1949,7 +1947,6 @@ class RestprogrammView(discord.ui.View):
         def __init__(self, parent_view: "RestprogrammView"):
             self.parent_view = parent_view
 
-            # Spieler laden – Fehler abfangen, damit das View nicht crasht
             try:
                 players = get_players_for_div(parent_view.division_value)
             except Exception as e:
@@ -1960,7 +1957,6 @@ class RestprogrammView(discord.ui.View):
             for p in players:
                 opts.append(discord.SelectOption(label=p, value=p))
 
-            # aktuellen Filter als default markieren
             for opt in opts:
                 opt.default = (opt.value == parent_view.player_value)
 
@@ -1972,10 +1968,8 @@ class RestprogrammView(discord.ui.View):
             )
 
         async def callback(self, interaction: discord.Interaction):
-            # Auswahl merken
             self.parent_view.player_value = self.values[0]
 
-            # Dropdown-Auswahl sichtbar halten
             for opt in self.options:
                 opt.default = (opt.value == self.parent_view.player_value)
 
@@ -1986,7 +1980,6 @@ class RestprogrammView(discord.ui.View):
 
     @discord.ui.button(label="Anzeigen", style=discord.ButtonStyle.primary)
     async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Ergebnisliste in derselben Nachricht anzeigen
         await _rp_show(interaction, self.division_value, self.player_value)
 
 
