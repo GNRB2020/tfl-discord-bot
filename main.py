@@ -8,9 +8,8 @@ import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
-import re
 from aiohttp import web
-from datetime import datetime as dt, timezone, timedelta
+from datetime import datetime as dt, timedelta
 
 # =========================================================
 # .env laden / Konfiguration
@@ -39,55 +38,6 @@ ZSR_RESTREAM_URL = os.getenv("ZSR_RESTREAM_URL", "https://www.twitch.tv/zeldaspe
 # Flags für tägliche Auto-Posts (Datum in Berlin-Zeit)
 _last_restreamable_post_date = None  # 04:00 Uhr – #restreamable-spiele
 _last_restreams_post_date = None     # 04:30 Uhr – #restreams
-
-# =========================================================
-# Web-API: Ergebnis-Parser (für evtl. spätere Nutzung)
-# =========================================================
-
-SCORE_RE = re.compile(
-    r"""^\s*
-        (?P<pl>.+?)                    # Spieler links
-        \s+(?P<sl>\d+)\s*[:\-]\s*(?P<sr>\d+)\s+  # Score X:Y oder X-Y
-        (?P<pr>.+?)                    # Spieler rechts
-        (?:\s*\|\s*(?P<meta>.*))?      # optionale Meta "key: value | key: value"
-        \s*$""",
-    re.IGNORECASE | re.VERBOSE,
-)
-
-
-def parse_result_message(text: str):
-    text = text.strip()
-    text = re.sub(r"^\s*\d{1,2}\.\d{1,2}\.\d{2,4}\s*[-–]\s*", "", text)
-
-    m = SCORE_RE.match(text)
-    if not m:
-        return None
-
-    pl = m.group("pl").strip()
-    pr = m.group("pr").strip()
-    sl = m.group("sl").strip()
-    sr = m.group("sr").strip()
-    meta = (m.group("meta") or "").strip()
-
-    out = {"pl": pl, "pr": pr, "sl": sl, "sr": sr, "mode": "", "venue": ""}
-
-    if meta:
-        for seg in [s.strip() for s in meta.split("|") if s.strip()]:
-            if ":" in seg:
-                key, val = seg.split(":", 1)
-                key = key.strip().lower()
-                val = val.strip()
-                if key in ("modus", "mode"):
-                    out["mode"] = val
-                elif key in ("venue", "ort", "location"):
-                    out["venue"] = val
-            else:
-                seg_clean = seg.strip("() ")
-                if seg_clean and not out["mode"]:
-                    out["mode"] = seg_clean
-
-    return out
-
 
 # =========================================================
 # Discord-Client + Intents
@@ -296,44 +246,17 @@ async def start_webserver(client: discord.Client):
     )
 
 
-def today_berlin_date() -> datetime.date:
-    return dt.now(BERLIN_TZ).date()
+# =========================================================
+# Google- & Sheet-Helfer
+# =========================================================
+def _cell(row, idx0):
+    return row[idx0].strip() if 0 <= idx0 < len(row) else ""
 
 
-def parse_date(d: str) -> datetime.date:
-    return dt.strptime(d, "%d.%m.%Y").date()
-
-
-def chunk_text(text: str, limit: int = 1900):
-    buf, out, count = [], [], 0
-    for line in text.splitlines(True):
-        if count + len(line) > limit:
-            out.append("".join(buf))
-            buf, count = [line], len(line)
-        else:
-            buf.append(line)
-            count += len(line)
-    if buf:
-        out.append("".join(buf))
-    return out
-
-
-async def send_long_message_channel(channel: discord.abc.Messageable, content: str):
-    if len(content) <= 2000:
-        await channel.send(content)
-    else:
-        for part in chunk_text(content, limit=1990):
-            await channel.send(content=part)
-
-
-def map_sheet_channel_to_label(val: str) -> str:
-    v = (val or "").strip().upper()
-    if v == "SGD1":
-        return "SG1"
-    if v == "SGD2":
-        return "SG2"
-    return v
-
+# Spaltenkonstanten (0-basierte Indexe für get_all_values())
+DIV_COL_LEFT = 4      # D
+DIV_COL_MARKER = 5    # E
+DIV_COL_RIGHT = 6     # F
 
 # =========================================================
 # Twitch-Namen Mapping
@@ -421,20 +344,6 @@ def sheets_required():
     if not SHEETS_ENABLED or WB is None:
         raise RuntimeError("Google Sheets nicht verbunden (SHEETS_ENABLED=False).")
 
-
-def _cell(row, idx0):
-    return row[idx0].strip() if 0 <= idx0 < len(row) else ""
-
-
-# Spaltenkonstanten
-DIV_COL_TIMESTAMP = 2  # B
-DIV_COL_MODE = 3       # C
-DIV_COL_RESULT = 5     # E
-DIV_COL_LINK = 7       # G
-DIV_COL_REPORTER = 8   # H
-DIV_COL_LEFT = 4       # D
-DIV_COL_MARKER = 5     # E
-DIV_COL_RIGHT = 6      # F
 
 # =========================================================
 # Rollen-Checks
@@ -527,8 +436,6 @@ def get_players_for_div(div: str) -> list[str]:
     except Exception as e:
         print(f"[RESTPROGRAMM] get_players_for_div({div}) Fehler: {e}")
         return []
-
-
 
 
 def load_open_from_div_tab(div: str, player_query: str = ""):
@@ -688,7 +595,7 @@ class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
                 start_time=start_dt,
                 end_time=end_dt,
                 entity_type=discord.EntityType.external,
-                location=multistream_url,
+                location=multistre.am_url,
                 privacy_level=discord.PrivacyLevel.guild_only,
             )
 
@@ -749,6 +656,7 @@ def batch_update_result(
         {"range": f"H{row_index}:H{row_index}", "values": [[reporter_name]]},
     ]
     ws.batch_update(reqs)
+
 
 class ResultDivisionSelect(discord.ui.Select):
     def __init__(self, requester: discord.Member):
@@ -1373,6 +1281,30 @@ def _format_event_line_for_post(ev: discord.ScheduledEvent) -> str:
     return f"• {name} – {dt_str} – {loc_display}"
 
 
+def _filter_future_events(events: list[discord.ScheduledEvent], now_utc: datetime.datetime):
+    """Filtert alle Events in der Zukunft (scheduled/active mit Startzeit > now_utc)."""
+    return [
+        ev
+        for ev in events
+        if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active)
+        and ev.start_time
+        and ev.start_time > now_utc
+    ]
+
+
+def _is_restream(ev: discord.ScheduledEvent) -> bool:
+    """Erkennt Restream-Events anhand '(restream)' im Namen."""
+    return "(restream)" in (ev.name or "").lower()
+
+
+def _format_event_list(title: str, events: list[discord.ScheduledEvent], now_utc: datetime.datetime) -> str:
+    """Erzeugt eine Textliste mit Überschrift und formatierten Eventzeilen."""
+    events_sorted = sorted(events, key=lambda e: e.start_time or now_utc)
+    lines = [title, ""]
+    lines.extend(_format_event_line_for_post(ev) for ev in events_sorted)
+    return "\n".join(lines)
+
+
 async def apply_restream_to_event(
     ev: discord.ScheduledEvent,
     restream_type: str,
@@ -1556,33 +1488,15 @@ async def _maybe_post_restreamable(
     if channel is None or not isinstance(channel, discord.TextChannel):
         return
 
-    upcoming = []
-    for ev in events:
-        if ev.status not in (
-            discord.EventStatus.scheduled,
-            discord.EventStatus.active,
-        ):
-            continue
-        if not ev.start_time:
-            continue
-        if ev.start_time <= now_utc:
-            continue
-        if "(restream)" in (ev.name or "").lower():
-            continue
-        upcoming.append(ev)
+    future_events = _filter_future_events(events, now_utc)
+    upcoming = [ev for ev in future_events if not _is_restream(ev)]
 
     if not upcoming:
         _last_restreamable_post_date = today
         print("[AUTO] 04:00 – keine restreambaren Events gefunden.")
         return
 
-    upcoming.sort(key=lambda e: e.start_time or now_utc)
-
-    lines = [header, ""]
-    for ev in upcoming:
-        lines.append(_format_event_line_for_post(ev))
-
-    text = "\n".join(lines)
+    text = _format_event_list(header, upcoming, now_utc)
 
     try:
         async for m in channel.history(limit=5):
@@ -1625,32 +1539,18 @@ async def _maybe_post_restreams(
     if channel is None or not isinstance(channel, discord.TextChannel):
         return
 
-    restream_events = []
-    for ev in events:
-        if ev.status not in (
-            discord.EventStatus.scheduled,
-            discord.EventStatus.active,
-        ):
-            continue
-        if not ev.start_time or ev.start_time <= now_utc:
-            continue
-        if "(restream)" not in (ev.name or "").lower():
-            continue
-        restream_events.append(ev)
+    future_events = _filter_future_events(events, now_utc)
+    restream_events = [ev for ev in future_events if _is_restream(ev)]
 
     if not restream_events:
         _last_restreams_post_date = today
         print("[AUTO] 04:30 – keine Restream-Events gefunden.")
         return
 
-    restream_events.sort(key=lambda e: e.start_time or now_utc)
-
-    lines = ["🔁 Geplante Restreams (heute & Zukunft)", ""]
-    for ev in restream_events:
-        lines.append(_format_event_line_for_post(ev))
+    text = _format_event_list("🔁 Geplante Restreams (heute & Zukunft)", restream_events, now_utc)
 
     try:
-        await channel.send("\n".join(lines))
+        await channel.send(text)
         _last_restreams_post_date = today
         print(f"[AUTO] 04:30 – {len(restream_events)} Restream-Events gepostet.")
     except Exception as e:
@@ -2149,18 +2049,8 @@ async def pick(interaction: discord.Interaction):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         events = await guild.fetch_scheduled_events()
 
-        selectable = []
-        for ev in events:
-            if ev.status not in (
-                discord.EventStatus.scheduled,
-                discord.EventStatus.active,
-            ):
-                continue
-            if not ev.start_time or ev.start_time <= now_utc:
-                continue
-            if "(restream)" in (ev.name or "").lower():
-                continue
-            selectable.append(ev)
+        future_events = _filter_future_events(events, now_utc)
+        selectable = [ev for ev in future_events if not _is_restream(ev)]
 
         if not selectable:
             await interaction.followup.send(
@@ -2202,18 +2092,8 @@ async def showpicks(interaction: discord.Interaction):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         events = await guild.fetch_scheduled_events()
 
-        selectable = []
-        for ev in events:
-            if ev.status not in (
-                discord.EventStatus.scheduled,
-                discord.EventStatus.active,
-            ):
-                continue
-            if not ev.start_time or ev.start_time <= now_utc:
-                continue
-            if "(restream)" in (ev.name or "").lower():
-                continue
-            selectable.append(ev)
+        future_events = _filter_future_events(events, now_utc)
+        selectable = [ev for ev in future_events if not _is_restream(ev)]
 
         if not selectable:
             await interaction.followup.send(
@@ -2222,12 +2102,13 @@ async def showpicks(interaction: discord.Interaction):
             )
             return
 
-        selectable.sort(key=lambda e: e.start_time or now_utc)
-        lines = ["🎯 Events, die für /pick zur Verfügung stehen:", ""]
-        for ev in selectable:
-            lines.append(_format_event_line_for_post(ev))
+        text = _format_event_list(
+            "🎯 Events, die für /pick zur Verfügung stehen:",
+            selectable,
+            now_utc,
+        )
 
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        await interaction.followup.send(text, ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(
@@ -2255,18 +2136,8 @@ async def restreams(interaction: discord.Interaction):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         events = await guild.fetch_scheduled_events()
 
-        restream_events = []
-        for ev in events:
-            if ev.status not in (
-                discord.EventStatus.scheduled,
-                discord.EventStatus.active,
-            ):
-                continue
-            if not ev.start_time or ev.start_time <= now_utc:
-                continue
-            if "(restream)" not in (ev.name or "").lower():
-                continue
-            restream_events.append(ev)
+        future_events = _filter_future_events(events, now_utc)
+        restream_events = [ev for ev in future_events if _is_restream(ev)]
 
         if not restream_events:
             await interaction.followup.send(
@@ -2275,12 +2146,13 @@ async def restreams(interaction: discord.Interaction):
             )
             return
 
-        restream_events.sort(key=lambda e: e.start_time or now_utc)
-        lines = ["🔁 Geplante Restreams (nur Events in der Zukunft)", ""]
-        for ev in restream_events:
-            lines.append(_format_event_line_for_post(ev))
+        text = _format_event_list(
+            "🔁 Geplante Restreams (nur Events in der Zukunft)",
+            restream_events,
+            now_utc,
+        )
 
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
+        await interaction.followup.send(text, ephemeral=True)
 
     except Exception as e:
         await interaction.followup.send(
