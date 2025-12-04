@@ -1,80 +1,86 @@
-# api.py – FINAL PUSH-ARCHITECTURE VERSION
+# api.py – FIXED WORKING VERSION FOR RENDER
 import os
-import json
 import asyncio
 from aiohttp import web
+import json
 
-CACHE_FILE = "tfl_cache.json"
+CACHE = {
+    "upcoming": [],
+    "results": []
+}
 
-# ------------------------------------------------------
-# CACHE HANDLING
-# ------------------------------------------------------
+CACHE_FILE = "cache.json"
 
+
+# ------------------------------- Cache
 def load_cache():
-    if not os.path.exists(CACHE_FILE):
-        return {"upcoming": [], "results": []}
-    with open(CACHE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    global CACHE
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                CACHE = json.load(f)
+        except:
+            pass
 
-def save_cache(data):
+
+def save_cache():
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(CACHE, f, ensure_ascii=False, indent=2)
 
-CACHE = load_cache()
 
-# ------------------------------------------------------
-# HANDLER
-# ------------------------------------------------------
+# ------------------------------- Handlers
+async def health(request):
+    return web.json_response({"status": "ok"})
 
-async def api_upcoming_handler(request):
-    return web.json_response({"items": CACHE.get("upcoming", [])[:5]})
 
-async def api_results_handler(request):
-    return web.json_response({"items": CACHE.get("results", [])[:5]})
+async def get_upcoming(request):
+    return web.json_response({"items": CACHE["upcoming"][:20]})
 
-async def api_update_upcoming(request):
+
+async def get_results(request):
+    return web.json_response({"items": CACHE["results"][:20]})
+
+
+async def update_upcoming(request):
     data = await request.json()
     CACHE["upcoming"] = data.get("items", [])
-    save_cache(CACHE)
-    print("[API] Updated UPCOMING cache")
+    save_cache()
     return web.json_response({"status": "ok"})
 
-async def api_update_results(request):
+
+async def update_results(request):
     data = await request.json()
     CACHE["results"] = data.get("items", [])
-    save_cache(CACHE)
-    print("[API] Updated RESULTS cache")
+    save_cache()
     return web.json_response({"status": "ok"})
 
-async def health_handler(request):
-    return web.json_response({"status": "ok"})
 
-# ------------------------------------------------------
-# SERVER START
-# ------------------------------------------------------
+# ------------------------------- START SERVER
+async def start():
+    load_cache()
 
-async def start_api():
     app = web.Application()
 
-    # GET
-    app.router.add_get("/health", health_handler)
-    app.router.add_get("/api/upcoming", api_upcoming_handler)
-    app.router.add_get("/api/results", api_results_handler)
+    app.router.add_get("/health", health)
+    app.router.add_get("/api/upcoming", get_upcoming)
+    app.router.add_get("/api/results", get_results)
 
-    # POST (vom Bot)
-    app.router.add_post("/api/update/upcoming", api_update_upcoming)
-    app.router.add_post("/api/update/results", api_update_results)
+    app.router.add_post("/api/update/upcoming", update_upcoming)
+    app.router.add_post("/api/update/results", update_results)
 
     port = int(os.getenv("PORT", "10000"))
+    print(f"[API] STARTING on port {port}")
+
     runner = web.AppRunner(app)
     await runner.setup()
 
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"[API] Running at http://0.0.0.0:{port}")
 
+    print("[API] RUNNING...")
     while True:
         await asyncio.sleep(3600)
 
+
 if __name__ == "__main__":
-    asyncio.run(start_api())
+    asyncio.run(start())
