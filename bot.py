@@ -1790,6 +1790,10 @@ async def refresh_api_cache(client: discord.Client):
         # -------------------------------------------------
         try:
             await push_updates_to_api()
+            print("[SYNC] push_updates_to_api AUFGERUFEN")
+            print("Upcoming Count:", len(_API_CACHE["upcoming"]["data"]))
+            print("Results Count:", len(_API_CACHE["results"]["data"]))
+
         except Exception as e:
             print(f"[CACHE] Fehler beim Push an externe API: {e}")
 
