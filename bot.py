@@ -2316,15 +2316,3 @@ async def on_ready():
     print("🤖 Bot bereit")
 
 client.run(TOKEN)
-
-# =========================================================
-# Alte doppelte Cache-Funktionen entfernen!
-# =========================================================
-
-# Der Bot nutzt NUR noch refresh_api_cache() aus on_ready()
-# NICHTS manuell starten, KEIN client.loop.create_task mehr.
-
-try:
-    client.run(TOKEN)
-except Exception as e:
-    _fatal(e)
