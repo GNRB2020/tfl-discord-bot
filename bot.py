@@ -1,6 +1,5 @@
 import os
 print("BOT FILE PATH:", os.path.abspath(__file__))
-
 import discord
 import pytz
 from discord import app_commands
@@ -14,19 +13,16 @@ import asyncio
 from aiohttp import web
 from datetime import datetime as dt, timedelta
 import aiohttp
-
-
 import sys
 import traceback
+
+print("🔍 DEBUG: bot.py wurde geladen")
+
 
 def _fatal(e: Exception):
     print("FATAL ERROR BEFORE on_ready():", e)
     traceback.print_exc()
     sys.exit(1)
-
-
-print("BOT.PY STARTED — AKTIVE VERSION")
-
 
 # =========================================================
 # .env laden / Konfiguration
@@ -2291,6 +2287,7 @@ _cache_task_started = False
 
 @client.event
 async def on_ready():
+    print("🔍 DEBUG: on_ready() wurde aufgerufen")
     print("Bot ist online")
     global _client_synced_once, _cache_task_started
     print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
