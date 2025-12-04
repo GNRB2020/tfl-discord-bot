@@ -1707,51 +1707,79 @@ async def _maybe_post_restreams(
         print(f"[AUTO] Fehler beim Posten der Restream-Events: {e}")
 
 
-async def refresh_api_cache(client: discord.Client):
+async def refresh_api_cache(client):
     await client.wait_until_ready()
     await asyncio.sleep(5)
 
     print("[CACHE] Hintergrund-Refresher gestartet")
+
     while not client.is_closed():
         now = datetime.datetime.now(datetime.timezone.utc)
         now_berlin = now.astimezone(BERLIN_TZ)
 
         # -------------------------------------------------
-        # UPCOMING aus Discord holen und in _API_CACHE schreiben
+        # UPCOMING
         # -------------------------------------------------
         try:
             guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
             events = await guild.fetch_scheduled_events()
 
-            data = []
+            upcoming = []
             for ev in events:
-                if ev.status in (
-                    discord.EventStatus.scheduled,
-                    discord.EventStatus.active,
-                ):
-                    data.append(
-                        {
-                            "id": ev.id,
-                            "name": ev.name,
-                            "start": ev.start_time.isoformat() if ev.start_time else None,
-                            "end": ev.end_time.isoformat() if ev.end_time else None,
-                            "location": _event_location(ev),
-                            "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
-                        }
-                    )
-
-            data.sort(key=lambda x: (x["start"] is None, x["start"]))
+                if ev.status in (discord.EventStatus.scheduled,
+                                 discord.EventStatus.active):
+                    upcoming.append({
+                        "id": ev.id,
+                        "name": ev.name,
+                        "start": ev.start_time.isoformat() if ev.start_time else None,
+                        "end": ev.end_time.isoformat() if ev.end_time else None,
+                        "location": _event_location(ev),
+                        "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}"
+                    })
 
             _API_CACHE["upcoming"]["ts"] = now
-            _API_CACHE["upcoming"]["data"] = data
+            _API_CACHE["upcoming"]["data"] = upcoming
 
-            print(f"[CACHE] Upcoming aktualisiert ({len(data)} Events)")
-
-            await _maybe_post_restreamable(now, now_berlin, list(events))
-            await _maybe_post_restreams(now, now_berlin, list(events))
+            print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
 
         except Exception as e:
-            print(f"[CACHE] Fehler beim Aktualisieren der Upcoming-Events: {e}")
+            print(f"[CACHE] Fehler beim Aktualisieren Upcoming: {e}")
+
+        # -------------------------------------------------
+        # RESULTS
+        # -------------------------------------------------
+        try:
+            ch = client.get_channel(RESULTS_CHANNEL_ID)
+            results = []
+
+            async for m in ch.history(limit=20):
+                results.append({
+                    "id": m.id,
+                    "author": str(m.author),
+                    "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
+                    "content": m.content,
+                    "jump_url": m.jump_url,
+                })
+
+            _API_CACHE["results"]["ts"] = now
+            _API_CACHE["results"]["data"] = results
+
+            print(f"[CACHE] Results aktualisiert ({len(results)} Einträge)")
+
+        except Exception as e:
+            print(f"[CACHE] Fehler beim Aktualisieren Results: {e}")
+
+        # -------------------------------------------------
+        # PUSH an externe API
+        # -------------------------------------------------
+        try:
+            await push_updates_to_api()
+            print("[CACHE] Push erfolgreich")
+        except Exception as e:
+            print(f"[CACHE] Fehler beim API Push: {e}")
+
+        await asyncio.sleep(300)
+
 
 
 # =========================================================
@@ -1760,28 +1788,27 @@ async def refresh_api_cache(client: discord.Client):
 async def push_updates_to_api():
     api_base = "https://tfl-discord-api.onrender.com"
 
-    upcoming_url = f"{api_base}/api/update/upcoming"
-    results_url  = f"{api_base}/api/update/results"
-
     payload_upcoming = {"items": _API_CACHE["upcoming"]["data"]}
-    payload_results  = {"items": _API_CACHE["results"]["data"]}
+    payload_results = {"items": _API_CACHE["results"]["data"]}
 
     async with aiohttp.ClientSession() as session:
-        # Upcoming pushen
-        try:
-            async with session.post(upcoming_url, json=payload_upcoming, timeout=5) as r:
-                text = await r.text()
-                print(f"[PUSH] Upcoming: HTTP {r.status} – {text[:200]}")
-        except Exception as e:
-            print(f"[PUSH] Exception Upcoming: {e}")
 
-        # Results pushen
+        # Upcoming
         try:
-            async with session.post(results_url, json=payload_results, timeout=5) as r:
-                text = await r.text()
-                print(f"[PUSH] Results: HTTP {r.status} – {text[:200]}")
+            async with session.post(f"{api_base}/api/update/upcoming",
+                                    json=payload_upcoming, timeout=5) as r:
+                print("[PUSH] upcoming ->", r.status)
         except Exception as e:
-            print(f"[PUSH] Exception Results: {e}")
+            print("[PUSH] Fehler upcoming:", e)
+
+        # Results
+        try:
+            async with session.post(f"{api_base}/api/update/results",
+                                    json=payload_results, timeout=5) as r:
+                print("[PUSH] results ->", r.status)
+        except Exception as e:
+            print("[PUSH] Fehler results:", e)
+
 
 
         # -------------------------------------------------
