@@ -43,9 +43,18 @@ print("DEBUG CREDS_FILE =", CREDS_FILE)
 # =========================================================
 # Discord Client erstellen
 # =========================================================
-intents = discord.Intents.all()
-client = commands.Bot(command_prefix="!", intents=intents)
-tree = client.tree
+intents = discord.Intents.default()
+
+# NUR das aktivieren, was wir wirklich brauchen
+intents.message_content = True
+intents.guilds = True
+intents.members = True  # optional, aber schadet nicht
+
+print("DEBUG Intents:", intents)
+
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
 
 
 # feste Role-IDs aus ENV (müssen gesetzt sein)
