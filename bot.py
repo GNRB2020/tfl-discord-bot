@@ -2269,12 +2269,14 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
 
+    # ❗ HIER korrekt einrücken – kein zusätzliches Leerzeichen!
     if not _cache_task_started:
         asyncio.create_task(refresh_api_cache(client))
         _cache_task_started = True
-        print("♻️ Cache-Refresher gestartet (alle 5 Minuten)")
+        print("♻️ Background cache refresher gestartet")
 
     print("🤖 Bot bereit")
+
 
 # =========================================================
 # Alte doppelte Cache-Funktionen entfernen!
