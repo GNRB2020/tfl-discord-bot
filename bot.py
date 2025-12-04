@@ -40,6 +40,14 @@ SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 print("DEBUG CREDS_FILE =", CREDS_FILE)
 
+# =========================================================
+# Discord Client erstellen
+# =========================================================
+intents = discord.Intents.all()
+client = commands.Bot(command_prefix="!", intents=intents)
+tree = client.tree
+
+
 # feste Role-IDs aus ENV (müssen gesetzt sein)
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
 TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
@@ -63,8 +71,10 @@ _last_restreams_post_date = None     # 04:30 Uhr – #restreams
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-client = commands.Bot(command_prefix="/", intents=intents)
-tree = client.tree
+intents = discord.Intents.all()
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
 
 print(f"[INTENTS] members={intents.members}, message_content={intents.message_content}")
 
@@ -2298,12 +2308,12 @@ async def on_ready():
 @client.event
 async def on_ready():
     print(f"[READY] Bot eingeloggt als {client.user} (ID: {client.user.id})")
-
     try:
         client.loop.create_task(refresh_api_cache(client))
         print("[READY] refresh_api_cache gestartet")
     except Exception as e:
         print(f"[READY] Fehler beim Start von refresh_api_cache: {e}")
+
 
 client.run(TOKEN)
 
