@@ -13,6 +13,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
 from aiohttp import web
 from datetime import datetime as dt, timedelta
+import aiohttp
+
 
 import sys
 import traceback
@@ -1699,6 +1701,9 @@ async def refresh_api_cache(client: discord.Client):
         now = datetime.datetime.now(datetime.timezone.utc)
         now_berlin = now.astimezone(BERLIN_TZ)
 
+        # -------------------------------------------------
+        # UPCOMING aus Discord holen und in _API_CACHE schreiben
+        # -------------------------------------------------
         try:
             guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
             events = await guild.fetch_scheduled_events()
@@ -1733,6 +1738,9 @@ async def refresh_api_cache(client: discord.Client):
         except Exception as e:
             print(f"[CACHE] Fehler beim Aktualisieren der Upcoming-Events: {e}")
 
+        # -------------------------------------------------
+        # RESULTS aus Ergebnischannel holen und in _API_CACHE schreiben
+        # -------------------------------------------------
         try:
             ch = client.get_channel(RESULTS_CHANNEL_ID)
             if ch is None or not isinstance(
@@ -1758,10 +1766,20 @@ async def refresh_api_cache(client: discord.Client):
             _API_CACHE["results"]["data"] = items
 
             print(f"[CACHE] Results aktualisiert ({len(items)} Einträge)")
+
         except Exception as e:
             print(f"[CACHE] Fehler beim Aktualisieren der Results: {e}")
 
+        # -------------------------------------------------
+        # EXTERNE API (api.py) mit beiden Caches füttern
+        # -------------------------------------------------
+        try:
+            await push_updates_to_api()
+        except Exception as e:
+            print(f"[CACHE] Fehler beim Push an externe API: {e}")
+
         await asyncio.sleep(300)
+
 
 
 # =========================================================
