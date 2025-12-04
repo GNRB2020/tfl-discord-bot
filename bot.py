@@ -2314,16 +2314,6 @@ async def on_ready():
 
     print("🤖 Bot bereit")
 
-@client.event
-async def on_ready():
-    print(f"[READY] Bot eingeloggt als {client.user} (ID: {client.user.id})")
-    try:
-        client.loop.create_task(refresh_api_cache(client))
-        print("[READY] refresh_api_cache gestartet")
-    except Exception as e:
-        print(f"[READY] Fehler beim Start von refresh_api_cache: {e}")
-
-
 client.run(TOKEN)
 
 # =========================================================
