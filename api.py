@@ -89,10 +89,22 @@ async def update_results(request):
 # =========================================================
 # START SERVER
 # =========================================================
+
 async def start():
     load_cache()
 
-    app = web.Application()
+    # CORS MIDDLEWARE
+    @web.middleware
+    async def cors_middleware(request, handler):
+        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
+
+    app = web.Application(middlewares=[cors_middleware])
+
+
 
     # Public GET Routes
     app.router.add_get("/health", health)
