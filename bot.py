@@ -1753,6 +1753,37 @@ async def refresh_api_cache(client: discord.Client):
         except Exception as e:
             print(f"[CACHE] Fehler beim Aktualisieren der Upcoming-Events: {e}")
 
+
+# =========================================================
+# Push an externe API (api.py)
+# =========================================================
+async def push_updates_to_api():
+    api_base = "https://tfl-discord-api.onrender.com"
+
+    upcoming_url = f"{api_base}/api/update/upcoming"
+    results_url  = f"{api_base}/api/update/results"
+
+    payload_upcoming = {"items": _API_CACHE["upcoming"]["data"]}
+    payload_results  = {"items": _API_CACHE["results"]["data"]}
+
+    async with aiohttp.ClientSession() as session:
+        # Upcoming pushen
+        try:
+            async with session.post(upcoming_url, json=payload_upcoming, timeout=5) as r:
+                text = await r.text()
+                print(f"[PUSH] Upcoming: HTTP {r.status} – {text[:200]}")
+        except Exception as e:
+            print(f"[PUSH] Exception Upcoming: {e}")
+
+        # Results pushen
+        try:
+            async with session.post(results_url, json=payload_results, timeout=5) as r:
+                text = await r.text()
+                print(f"[PUSH] Results: HTTP {r.status} – {text[:200]}")
+        except Exception as e:
+            print(f"[PUSH] Exception Results: {e}")
+
+
         # -------------------------------------------------
         # RESULTS aus Ergebnischannel holen und in _API_CACHE schreiben
         # -------------------------------------------------
