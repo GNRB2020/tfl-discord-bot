@@ -1715,19 +1715,15 @@ async def refresh_api_cache(client):
 
     while not client.is_closed():
         now = datetime.datetime.now(datetime.timezone.utc)
-        now_berlin = now.astimezone(BERLIN_TZ)
 
-        # -------------------------------------------------
         # UPCOMING
-        # -------------------------------------------------
         try:
             guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
             events = await guild.fetch_scheduled_events()
 
             upcoming = []
             for ev in events:
-                if ev.status in (discord.EventStatus.scheduled,
-                                 discord.EventStatus.active):
+                if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active):
                     upcoming.append({
                         "id": ev.id,
                         "name": ev.name,
@@ -1739,15 +1735,12 @@ async def refresh_api_cache(client):
 
             _API_CACHE["upcoming"]["ts"] = now
             _API_CACHE["upcoming"]["data"] = upcoming
-
             print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
 
         except Exception as e:
-            print(f"[CACHE] Fehler beim Aktualisieren Upcoming: {e}")
+            print(f"[CACHE] Fehler UPCOMING: {e}")
 
-        # -------------------------------------------------
         # RESULTS
-        # -------------------------------------------------
         try:
             ch = client.get_channel(RESULTS_CHANNEL_ID)
             results = []
@@ -1763,18 +1756,14 @@ async def refresh_api_cache(client):
 
             _API_CACHE["results"]["ts"] = now
             _API_CACHE["results"]["data"] = results
-
             print(f"[CACHE] Results aktualisiert ({len(results)} Einträge)")
 
         except Exception as e:
-            print(f"[CACHE] Fehler beim Aktualisieren Results: {e}")
+            print(f"[CACHE] Fehler RESULTS: {e}")
 
-        # -------------------------------------------------
-        # PUSH an externe API
-        # -------------------------------------------------
+        # PUSH
         try:
             await push_updates_to_api()
-            print("[CACHE] Push erfolgreich")
         except Exception as e:
             print(f"[CACHE] Fehler beim API Push: {e}")
 
@@ -1788,26 +1777,24 @@ async def refresh_api_cache(client):
 async def push_updates_to_api():
     api_base = "https://tfl-discord-api.onrender.com"
 
-    payload_upcoming = {"items": _API_CACHE["upcoming"]["data"]}
-    payload_results = {"items": _API_CACHE["results"]["data"]}
-
     async with aiohttp.ClientSession() as session:
-
+        
         # Upcoming
         try:
-            async with session.post(f"{api_base}/api/update/upcoming",
-                                    json=payload_upcoming, timeout=5) as r:
+            payload_upcoming = {"items": _API_CACHE["upcoming"]["data"]}
+            async with session.post(f"{api_base}/api/update/upcoming", json=payload_upcoming, timeout=5) as r:
                 print("[PUSH] upcoming ->", r.status)
         except Exception as e:
             print("[PUSH] Fehler upcoming:", e)
 
         # Results
         try:
-            async with session.post(f"{api_base}/api/update/results",
-                                    json=payload_results, timeout=5) as r:
+            payload_results = {"items": _API_CACHE["results"]["data"]}
+            async with session.post(f"{api_base}/api/update/results", json=payload_results, timeout=5) as r:
                 print("[PUSH] results ->", r.status)
         except Exception as e:
             print("[PUSH] Fehler results:", e)
+
 
 
 
