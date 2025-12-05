@@ -1834,15 +1834,14 @@ async def push_updates_to_api():
         # EXTERNE API (api.py) mit beiden Caches füttern
         # -------------------------------------------------
         try:
-            await push_updates_to_api()
-            print("[SYNC] push_updates_to_api AUFGERUFEN")
+            # Kein neuer Selbstaufruf! Daten werden nur EINMAL gepusht.
+            print("[SYNC] push_updates_to_api abgeschlossen")
             print("Upcoming Count:", len(_API_CACHE["upcoming"]["data"]))
             print("Results Count:", len(_API_CACHE["results"]["data"]))
 
         except Exception as e:
             print(f"[CACHE] Fehler beim Push an externe API: {e}")
 
-        await asyncio.sleep(300)
 
 
 
