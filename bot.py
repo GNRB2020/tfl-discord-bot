@@ -105,50 +105,26 @@ async def _build_web_app(client: discord.Client) -> web.Application:
     async def health(_request: web.Request):
         return add_cors(web.json_response({"status": "ok"}))
 
-   # -------------------------------------------------------
-# /api/upcoming (rate-limit-sicher)
-# -------------------------------------------------------
-@routes.get("/api/upcoming")
-async def api_upcoming(request: web.Request):
+    # -------------------------------------------------------
+    # /api/upcoming (rate-limit-sicher – nur Cache)
+    # -------------------------------------------------------
+    @routes.get("/api/upcoming")
+    async def api_upcoming(request: web.Request):
+        try:
+            n = int(request.query.get("n", "5"))
+        except:
+            n = 5
+        n = max(1, min(20, n))
 
-    # Anzahl Einträge (Default 5)
-    try:
-        n = int(request.query.get("n", "5"))
-    except:
-        n = 5
-    n = max(1, min(20, n))
+        cache = _API_CACHE["upcoming"]
 
-    cache = _API_CACHE["upcoming"]
+        if not cache["data"]:
+            return add_cors(web.json_response({"items": []}))
 
-    # Wenn Cache leer → leere Liste senden (NICHT fetchen!)
-    if not cache["data"]:
-        return add_cors(web.json_response({"items": []}))
-
-    # Nur Cache zurückgeben
-    return add_cors(web.json_response({"items": cache["data"][:n]}))
-
-
-        data = []
-        for ev in events:
-            if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active):
-                data.append({
-                    "id": ev.id,
-                    "name": ev.name,
-                    "start": ev.start_time.isoformat() if ev.start_time else None,
-                    "end": ev.end_time.isoformat() if ev.end_time else None,
-                    "location": _event_location(ev),
-                    "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
-                })
-
-        data.sort(key=lambda x: (x["start"] is None, x["start"]))
-
-        cache["ts"] = now
-        cache["data"] = data
-
-        return add_cors(web.json_response({"items": data[:n]}))
+        return add_cors(web.json_response({"items": cache["data"][:n]}))
 
     # -------------------------------------------------------
-    # /api/results
+    # /api/results (ebenfalls rein Cache – KEIN Live-Fetch!)
     # -------------------------------------------------------
     @routes.get("/api/results")
     async def api_results(request: web.Request):
@@ -158,36 +134,18 @@ async def api_upcoming(request: web.Request):
             n = 5
         n = max(1, min(20, n))
 
-        now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["results"]
 
-        if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
-            return add_cors(web.json_response({"items": cache["data"][:n]}))
-
-        ch = client.get_channel(RESULTS_CHANNEL_ID)
-        if ch is None:
+        if not cache["data"]:
             return add_cors(web.json_response({"items": []}))
 
-        items = []
-        try:
-            async for m in ch.history(limit=100):
-                items.append({
-                    "id": m.id,
-                    "author": str(m.author),
-                    "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
-                    "content": m.content,
-                    "jump_url": m.jump_url,
-                })
-                if len(items) >= n:
-                    break
-        except:
-            return add_cors(web.json_response({"items": []}))
+        return add_cors(web.json_response({"items": cache["data"][:n]}))
 
-        return add_cors(web.json_response({"items": items[:n]}))
-
+    # App erstellen + Routen anhängen
     app = web.Application()
     app.add_routes(routes)
     return app
+
 
 
 async def start_webserver(client: discord.Client):
