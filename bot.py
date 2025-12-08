@@ -1673,10 +1673,10 @@ except Exception as e:
     print(f"[CACHE] Fehler RESULTS: {e}")
 
 
-        # =========================================================
-        # Warte 5 Minuten bis zum nächsten Durchlauf
-        # =========================================================
-        await asyncio.sleep(300)
+    # =========================================================
+    # Warte 5 Minuten bis zum nächsten Durchlauf
+    # =========================================================
+    await asyncio.sleep(300)
 
 
 
