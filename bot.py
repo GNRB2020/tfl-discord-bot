@@ -732,7 +732,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 content=f"❌ Konnte Ergebnis nicht verarbeiten: {e}",
                 ephemeral=True,
             )
-
+            
 @tree.command(
     name="result",
     description="Ergebnis melden (nur Orga / Try Force League Rolle)",
