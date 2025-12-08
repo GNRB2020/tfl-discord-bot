@@ -119,9 +119,9 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         cache = _API_CACHE["upcoming"]
 
         if not cache["data"]:
-            return add_cors(web.json_response({"items": []}))
+    # Wenn Cache leer, NICHT leer zurückgeben, sondern „loading“-Status
+            return add_cors(web.json_response({"items": [], "loading": True}))
 
-        return add_cors(web.json_response({"items": cache["data"][:n]}))
 
     # -------------------------------------------------------
     # /api/results (ebenfalls rein Cache – KEIN Live-Fetch!)
@@ -136,10 +136,9 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         cache = _API_CACHE["results"]
 
-        if not cache["data"]:
-            return add_cors(web.json_response({"items": []}))
+       if not cache["data"]:
+            return add_cors(web.json_response({"items": [], "loading": True}))
 
-        return add_cors(web.json_response({"items": cache["data"][:n]}))
 
     # App erstellen + Routen anhängen
     app = web.Application()
@@ -1605,7 +1604,7 @@ async def refresh_api_cache(client):
     await client.wait_until_ready()
 
     # 20 Sekunden Puffer, damit Discord garantiert bereit ist
-    await asyncio.sleep(20)
+    await asyncio.sleep(2)
 
     print("[CACHE] Hintergrund-Refresher gestartet (stabiler 5-Minuten-Modus)")
 
@@ -1641,37 +1640,38 @@ async def refresh_api_cache(client):
         except Exception as e:
             print(f"[CACHE] Fehler UPCOMING: {e}")
 
-        # =========================================================
-        # RESULTS aktualisieren
-        # =========================================================
-        try:
-            ch = client.get_channel(RESULTS_CHANNEL_ID)
+# =========================================================
+# RESULTS aktualisieren
+# =========================================================
+try:
+    ch = client.get_channel(RESULTS_CHANNEL_ID)
 
-            if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
-                new_results = []
+    if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
+        new_results = []
 
-                async for m in ch.history(limit=50):
-                    new_results.append({
-                        "id": m.id,
-                        "author": str(m.author),
-                        "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
-                        "content": m.content,
-                        "jump_url": m.jump_url,
-                    })
+        async for m in ch.history(limit=50):
+            new_results.append({
+                "id": m.id,
+                "author": str(m.author),
+                "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
+                "content": m.content,
+                "jump_url": m.jump_url,
+            })
 
-                # Nur aktualisieren, wenn wir auch wirklich Daten bekommen
-                if len(new_results) > 0:
-                    _API_CACHE["results"]["ts"] = now
-                    _API_CACHE["results"]["data"] = new_results
-                    print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
-                else:
-                    print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
+        # Nur aktualisieren, wenn wir auch wirklich Daten bekommen
+        if len(new_results) > 0:
+            _API_CACHE["results"]["ts"] = now
+            _API_CACHE["results"]["data"] = new_results
+            print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
+        else:
+            print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
 
-            else:
-                print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
+    else:
+        print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
 
-        except Exception as e:
-            print(f"[CACHE] Fehler RESULTS: {e}")
+except Exception as e:
+    print(f"[CACHE] Fehler RESULTS: {e}")
+
 
         # =========================================================
         # Warte 5 Minuten bis zum nächsten Durchlauf
@@ -2214,18 +2214,20 @@ async def on_ready():
     global _client_synced_once, _cache_task_started
     print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
 
+    # Slash-Commands genau einmal für die Guild synchronisieren
     if not _client_synced_once:
         await tree.sync(guild=discord.Object(id=GUILD_ID))
         _client_synced_once = True
         print("✅ Slash-Befehle synchronisiert")
 
+    # Webserver starten (hat eigene Schutz-Variable _webserver_started)
     try:
         asyncio.create_task(start_webserver(client))
         print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming)")
     except Exception as e:
         print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
 
-    # ❗ HIER korrekt einrücken – kein zusätzliches Leerzeichen!
+    # Hintergrund-Cache-Refresher starten (macht intern wait_until_ready + Sleep)
     if not _cache_task_started:
         asyncio.create_task(refresh_api_cache(client))
         _cache_task_started = True
@@ -2233,4 +2235,6 @@ async def on_ready():
 
     print("🤖 Bot bereit")
 
+
 client.run(TOKEN)
+
