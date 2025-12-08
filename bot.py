@@ -136,7 +136,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         cache = _API_CACHE["results"]
 
-       if not cache["data"]:
+        if not cache["data"]:
             return add_cors(web.json_response({"items": [], "loading": True}))
 
 
