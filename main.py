@@ -196,31 +196,27 @@ async def _build_web_app(client: discord.Client) -> web.Application:
             return add_cors(resp)
 
         items = []
-        try:
-            print("[API] results: fetching messages …")
-           async for m in ch.history(limit=336):
-    ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
-    items.append(
-        {
-            "id": m.id,
-            "author": str(m.author),
-            "time": ts,
-            "content": m.content,
-            "jump_url": m.jump_url,
-        }
-    )
+        
+try:
+    print("[API] results: fetching messages …")
+    async for m in ch.history(limit=336):
+        ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
+        items.append(
+            {
+                "id": m.id,
+                "author": str(m.author),
+                "time": ts,
+                "content": m.content,
+                "jump_url": m.jump_url,
+            }
+        )
 
-            print(f"[API] results: collected {len(items)} messages")
-        except Exception as e:
-            print(f"[API] results: ERROR while fetching messages: {e!r}")
-            resp = web.json_response({"items": []})
-            return add_cors(resp)
+    print(f"[API] results: collected {len(items)} messages")
+except Exception as e:
+    print(f"[API] results: ERROR while fetching messages: {e!r}")
+    resp = web.json_response({"items": []})
+    return add_cors(resp)
 
-        cache["ts"] = now
-        cache["data"] = items
-
-        resp = web.json_response({"items": items[:n]})
-        return add_cors(resp)
 
     app = web.Application()
     app.add_routes(routes)
