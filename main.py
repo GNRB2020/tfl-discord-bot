@@ -99,7 +99,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
             n = int(request.query.get("n", "5"))
         except Exception:
             n = 5
-        n = max(1, min(20, n))
+        n = max(1, min(336, n))
 
         now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["upcoming"]
@@ -174,7 +174,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
             n = int(request.query.get("n", "5"))
         except Exception:
             n = 5
-        n = max(1, min(20, n))
+        n = max(1, min(336, n))
 
         now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["results"]
@@ -198,7 +198,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         items = []
         try:
             print("[API] results: fetching messages …")
-            async for m in ch.history(limit=20):
+            async for m in ch.history(limit=336):
                 ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
                 items.append(
                     {
@@ -1726,7 +1726,7 @@ async def refresh_api_cache(client: discord.Client):
                 raise RuntimeError("Ergebnis-Channel nicht gefunden oder falscher Typ")
 
             items = []
-            async for m in ch.history(limit=20):
+            async for m in ch.history(limit=336):
                 ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
                 items.append(
                     {
