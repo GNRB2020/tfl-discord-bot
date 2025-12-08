@@ -1614,10 +1614,13 @@ async def _maybe_post_restreams(
     except Exception as e:
         print(f"[AUTO] Fehler beim Posten der Restream-Events: {e}")
 
+# =========================================================
+# Hintergrund-Refresher + Auto-Posts
+# =========================================================
 async def refresh_api_cache(client):
     await client.wait_until_ready()
 
-    # 20 Sekunden Puffer, damit Discord garantiert bereit ist
+    # 20 Sekunden warten, damit Discord sicher bereit ist
     await asyncio.sleep(20)
 
     print("[CACHE] Hintergrund-Refresher gestartet (stabiler 5-Minuten-Modus)")
@@ -1630,7 +1633,6 @@ async def refresh_api_cache(client):
         # =========================================================
         try:
             guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
-
             events = await guild.fetch_scheduled_events()
 
             upcoming = []
@@ -1650,56 +1652,55 @@ async def refresh_api_cache(client):
 
             print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
 
-# --------------------------------------------------------
-# API aktualisieren (externen Server füttern)
-# --------------------------------------------------------
-try:
-    await push_updates_to_api()
-    print("[SYNC] API-Sync durchgeführt")
-except Exception as e:
-    print("[SYNC] Fehler beim API-Sync:", e)
+        except Exception as e:
+            print(f"[CACHE] Fehler UPCOMING: {e}")
 
-
-# =========================================================
-# RESULTS aktualisieren
-# =========================================================
-try:
-    ch = client.get_channel(RESULTS_CHANNEL_ID)
-
-    if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
-        new_results = []
-
-        async for m in ch.history(limit=50):
-            new_results.append({
-                "id": m.id,
-                "author": str(m.author),
-                "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
-                "content": m.content,
-                "jump_url": m.jump_url,
-            })
-
-        if len(new_results) > 0:
-            _API_CACHE["results"]["ts"] = now
-            _API_CACHE["results"]["data"] = new_results
-            print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
-        else:
-            print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
-
-    else:
-        print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
-
-except Exception as e:
-    print(f"[CACHE] Fehler RESULTS: {e}")
-
+        # --------------------------------------------------------
+        # API aktualisieren (externen Server füttern)
+        # --------------------------------------------------------
+        try:
+            await push_updates_to_api()
+            print("[SYNC] API-Sync durchgeführt")
+        except Exception as e:
+            print("[SYNC] Fehler beim API-Sync:", e)
 
         # =========================================================
-        # Warte 5 Minuten bis zum nächsten Durchlauf
+        # RESULTS aktualisieren
+        # =========================================================
+        try:
+            ch = client.get_channel(RESULTS_CHANNEL_ID)
+
+            if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
+                new_results = []
+
+                async for m in ch.history(limit=50):
+                    new_results.append({
+                        "id": m.id,
+                        "author": str(m.author),
+                        "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
+                        "content": m.content,
+                        "jump_url": m.jump_url,
+                    })
+
+                if len(new_results) > 0:
+                    _API_CACHE["results"]["ts"] = now
+                    _API_CACHE["results"]["data"] = new_results
+                    print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
+                else:
+                    print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
+
+            else:
+                print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
+
+        except Exception as e:
+            print(f"[CACHE] Fehler RESULTS: {e}")
+
+        # =========================================================
+        # 5 Minuten warten
         # =========================================================
         await asyncio.sleep(300)
 
-
-
-
+# =========================================================
 # =========================================================
 # Push an externe API (api.py)
 # =========================================================
