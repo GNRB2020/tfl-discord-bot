@@ -1648,7 +1648,7 @@ async def refresh_api_cache(client):
             _API_CACHE["upcoming"]["ts"] = now
             _API_CACHE["upcoming"]["data"] = upcoming
 
-           print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
+            print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
 
 # --------------------------------------------------------
 # API aktualisieren (externen Server füttern)
