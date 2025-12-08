@@ -46,6 +46,15 @@ intents.members = True
 
 print("DEBUG Intents:", intents)
 
+# =========================================================
+# Discord Client + CommandTree
+# =========================================================
+
+client = commands.Bot(command_prefix="!", intents=intents)
+
+# Wichtig: jetzt existiert tree wirklich
+tree = client.tree
+
 
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
 TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
@@ -724,8 +733,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
                 ephemeral=True,
             )
 
-
-    @tree.command(
+@tree.command(
     name="result",
     description="Ergebnis melden (nur Orga / Try Force League Rolle)",
 )
