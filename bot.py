@@ -1648,24 +1648,27 @@ async def _maybe_post_restreams(
     except Exception as e:
         print(f"[AUTO] Fehler beim Posten der Restream-Events: {e}")
 
-
+# =========================================================
+# Hintergrund-Refresher + Auto-Posts (stabil, rate-limit-sicher)
+# =========================================================
 async def refresh_api_cache(client):
     await client.wait_until_ready()
-    await asyncio.sleep(5)
 
-    print("[CACHE] Hintergrund-Refresher gestartet")
+    # 20 Sekunden Puffer, damit Discord garantiert bereit ist
+    await asyncio.sleep(20)
 
-    # Cutoff für Ergebnisse ab 01.12.2025 (inkl.)
-    CUTOFF = dt(2025, 12, 1, tzinfo=BERLIN_TZ)
+    print("[CACHE] Hintergrund-Refresher gestartet (stabiler 5-Minuten-Modus)")
 
     while not client.is_closed():
         now = datetime.datetime.now(datetime.timezone.utc)
 
         # =========================================================
-        # UPCOMING
+        # UPCOMING aktualisieren
         # =========================================================
         try:
             guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
+
+            # Nur 1x fetch – das ist wichtig!
             events = await guild.fetch_scheduled_events()
 
             upcoming = []
@@ -1677,25 +1680,27 @@ async def refresh_api_cache(client):
                         "start": ev.start_time.isoformat() if ev.start_time else None,
                         "end": ev.end_time.isoformat() if ev.end_time else None,
                         "location": _event_location(ev),
-                        "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}"
+                        "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
                     })
 
             _API_CACHE["upcoming"]["ts"] = now
             _API_CACHE["upcoming"]["data"] = upcoming
+
             print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
 
         except Exception as e:
             print(f"[CACHE] Fehler UPCOMING: {e}")
 
-               # =========================================================
-        # RESULTS CHANNEL
+        # =========================================================
+        # RESULTS aktualisieren
         # =========================================================
         try:
             ch = client.get_channel(RESULTS_CHANNEL_ID)
-            if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
 
+            if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
                 new_results = []
-                async for m in ch.history(limit=100):
+
+                async for m in ch.history(limit=50):
                     new_results.append({
                         "id": m.id,
                         "author": str(m.author),
@@ -1704,20 +1709,25 @@ async def refresh_api_cache(client):
                         "jump_url": m.jump_url,
                     })
 
-                # ❗ WICHTIG: Cache NICHT überschreiben, wenn wir NICHTS bekommen
+                # Nur aktualisieren, wenn wir auch wirklich Daten bekommen
                 if len(new_results) > 0:
                     _API_CACHE["results"]["ts"] = now
                     _API_CACHE["results"]["data"] = new_results
                     print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
                 else:
-                    print("[CACHE] Results NICHT aktualisiert – 0 Einträge erhalten, behalte alten Cache")
+                    print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
 
             else:
                 print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
 
         except Exception as e:
             print(f"[CACHE] Fehler RESULTS: {e}")
-            print("[CACHE] Fehler – alter Cache bleibt erhalten")
+
+        # =========================================================
+        # Warte 5 Minuten bis zum nächsten Durchlauf
+        # =========================================================
+        await asyncio.sleep(300)
+
 
 
 # =========================================================
