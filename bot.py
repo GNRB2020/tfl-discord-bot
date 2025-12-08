@@ -46,8 +46,6 @@ intents.members = True
 
 print("DEBUG Intents:", intents)
 
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
 
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
 TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
@@ -106,7 +104,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         return add_cors(web.json_response({"status": "ok"}))
 
     # -------------------------------------------------------
-    # /api/upcoming (rate-limit-sicher – nur Cache)
+    # /api/upcoming  (Cache only)
     # -------------------------------------------------------
     @routes.get("/api/upcoming")
     async def api_upcoming(request: web.Request):
@@ -118,13 +116,20 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         cache = _API_CACHE["upcoming"]
 
+        # Wenn Browser sofort ruft, aber Cache noch leer ist
         if not cache["data"]:
-    # Wenn Cache leer, NICHT leer zurückgeben, sondern „loading“-Status
             return add_cors(web.json_response({"items": [], "loading": True}))
 
+        # Sortieren nach Startzeit
+        data = sorted(
+            cache["data"],
+            key=lambda x: (x["start"] is None, x["start"])
+        )
+
+        return add_cors(web.json_response({"items": data[:n]}))
 
     # -------------------------------------------------------
-    # /api/results (ebenfalls rein Cache – KEIN Live-Fetch!)
+    # /api/results  (ebenfalls Cache only)
     # -------------------------------------------------------
     @routes.get("/api/results")
     async def api_results(request: web.Request):
@@ -139,11 +144,15 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         if not cache["data"]:
             return add_cors(web.json_response({"items": [], "loading": True}))
 
+        return add_cors(web.json_response({"items": cache["data"][:n]}))
 
-    # App erstellen + Routen anhängen
+    # -------------------------------------------------------
+    # App bauen
+    # -------------------------------------------------------
     app = web.Application()
     app.add_routes(routes)
     return app
+
 
 
 
