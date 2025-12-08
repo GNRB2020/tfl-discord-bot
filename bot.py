@@ -1759,46 +1759,37 @@ async def refresh_api_cache(client):
         except Exception as e:
             print(f"[CACHE] Fehler UPCOMING: {e}")
 
-        # =========================================================
-        # RESULTS (nur ab dem 01.12.2025)
+               # =========================================================
+        # RESULTS CHANNEL
         # =========================================================
         try:
             ch = client.get_channel(RESULTS_CHANNEL_ID)
-            results = []
+            if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
 
-            async for m in ch.history(limit=200, oldest_first=True):
-                msg_time = m.created_at.astimezone(BERLIN_TZ)
+                new_results = []
+                async for m in ch.history(limit=100):
+                    new_results.append({
+                        "id": m.id,
+                        "author": str(m.author),
+                        "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
+                        "content": m.content,
+                        "jump_url": m.jump_url,
+                    })
 
-                # nur Ergebnisse ab 01.12.2025 (inklusive)
-                if msg_time < CUTOFF:
-                    continue
+                # ❗ WICHTIG: Cache NICHT überschreiben, wenn wir NICHTS bekommen
+                if len(new_results) > 0:
+                    _API_CACHE["results"]["ts"] = now
+                    _API_CACHE["results"]["data"] = new_results
+                    print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
+                else:
+                    print("[CACHE] Results NICHT aktualisiert – 0 Einträge erhalten, behalte alten Cache")
 
-                results.append({
-                    "id": m.id,
-                    "author": str(m.author),
-                    "time": msg_time.isoformat(),
-                    "content": m.content,
-                    "jump_url": m.jump_url,
-                })
-
-            _API_CACHE["results"]["ts"] = now
-            _API_CACHE["results"]["data"] = results
-            print(f"[CACHE] Results aktualisiert ({len(results)} Einträge)")
+            else:
+                print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
 
         except Exception as e:
             print(f"[CACHE] Fehler RESULTS: {e}")
-
-        # =========================================================
-        # PUSH UPDATE TO API
-        # =========================================================
-        try:
-            await push_updates_to_api()
-        except Exception as e:
-            print(f"[CACHE] Fehler beim API Push: {e}")
-
-        await asyncio.sleep(300)
-
-
+            print("[CACHE] Fehler – alter Cache bleibt erhalten")
 
 
 # =========================================================
