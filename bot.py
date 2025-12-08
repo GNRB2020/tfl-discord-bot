@@ -83,7 +83,7 @@ def _event_location(ev: discord.ScheduledEvent) -> str | None:
         if getattr(ev, "location", None):
             return ev.location
         if getattr(ev, "channel", None) and ev.channel:
-            return getattr(ev.channel, "name", None)
+            return ev.channel.name
     except Exception:
         pass
     return None
@@ -98,39 +98,40 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp.headers["Access-Control-Allow-Headers"] = "*"
         return resp
 
+    # -------------------------------------------------------
+    # /health
+    # -------------------------------------------------------
     @routes.get("/health")
     async def health(_request: web.Request):
         return add_cors(web.json_response({"status": "ok"}))
 
-    # =========================================================
+    # -------------------------------------------------------
     # /api/upcoming
-    # =========================================================
+    # -------------------------------------------------------
     @routes.get("/api/upcoming")
     async def api_upcoming(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
-        except Exception:
+        except:
             n = 5
         n = max(1, min(20, n))
 
         now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["upcoming"]
 
-        print(f"[API] /api/upcoming called (n={n})")
-
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
-            print("[API] upcoming: cache HIT")
             return add_cors(web.json_response({"items": cache["data"][:n]}))
 
         guild = client.get_guild(GUILD_ID)
         if guild is None:
-            print("[API] upcoming: guild not found")
             return add_cors(web.json_response({"items": []}))
 
         try:
-            events = await asyncio.wait_for(guild.fetch_scheduled_events(), timeout=5.0)
-        except Exception as e:
-            print("[API] upcoming ERROR:", e)
+            events = await asyncio.wait_for(
+                guild.fetch_scheduled_events(),
+                timeout=5.0,
+            )
+        except:
             if cache["data"]:
                 return add_cors(web.json_response({"items": cache["data"][:n]}))
             return add_cors(web.json_response({"items": []}))
@@ -154,29 +155,25 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         return add_cors(web.json_response({"items": data[:n]}))
 
-    # =========================================================
+    # -------------------------------------------------------
     # /api/results
-    # =========================================================
+    # -------------------------------------------------------
     @routes.get("/api/results")
     async def api_results(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
-        except Exception:
+        except:
             n = 5
         n = max(1, min(20, n))
 
         now = datetime.datetime.now(datetime.timezone.utc)
         cache = _API_CACHE["results"]
 
-        print(f"[API] /api/results called (n={n})")
-
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
-            print("[API] results: cache HIT")
             return add_cors(web.json_response({"items": cache["data"][:n]}))
 
         ch = client.get_channel(RESULTS_CHANNEL_ID)
         if ch is None:
-            print("[API] results: channel not found")
             return add_cors(web.json_response({"items": []}))
 
         items = []
@@ -191,9 +188,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 })
                 if len(items) >= n:
                     break
-
-        except Exception as e:
-            print("[API] results ERROR:", e)
+        except:
             return add_cors(web.json_response({"items": []}))
 
         return add_cors(web.json_response({"items": items[:n]}))
@@ -205,11 +200,13 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
 async def start_webserver(client: discord.Client):
     global _webserver_started, _webapp_runner
+
     if _webserver_started:
         return
-    _webserver_started = True
 
+    _webserver_started = True
     app = await _build_web_app(client)
+
     runner = web.AppRunner(app)
     await runner.setup()
     _webapp_runner = runner
@@ -218,8 +215,8 @@ async def start_webserver(client: discord.Client):
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    print("[WEB] running on 0.0.0.0:", port,
-          " endpoints: /health, /api/upcoming, /api/results")
+    print(f"[WEB] running on 0.0.0.0:{port}  endpoints: /health /api/upcoming /api/results")
+
 
 
 # =========================================================
