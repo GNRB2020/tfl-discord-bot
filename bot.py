@@ -201,14 +201,14 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp = web.json_response({"items": data[:n]})
         return add_cors(resp)
 
-@routes.get("/api/results")
-async def api_results(request: web.Request):
+    @routes.get("/api/results")
+    async def api_results(request: web.Request):
     # Anzahl der zurückgegebenen Einträge limitieren
-    try:
-        n = int(request.query.get("n", "5"))
-    except Exception:
-        n = 5
-    n = max(1, min(20, n))
+        try:
+            n = int(request.query.get("n", "5"))
+        except Exception:
+            n = 5
+            n = max(1, min(20, n))
 
     now = datetime.datetime.now(datetime.timezone.utc)
     cache = _API_CACHE["results"]
