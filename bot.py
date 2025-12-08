@@ -1648,41 +1648,49 @@ async def refresh_api_cache(client):
             _API_CACHE["upcoming"]["ts"] = now
             _API_CACHE["upcoming"]["data"] = upcoming
 
-            print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
+           print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
 
-        except Exception as e:
-            print(f"[CACHE] Fehler UPCOMING: {e}")
+# --------------------------------------------------------
+# API aktualisieren (externen Server füttern)
+# --------------------------------------------------------
+try:
+    await push_updates_to_api()
+    print("[SYNC] API-Sync durchgeführt")
+except Exception as e:
+    print("[SYNC] Fehler beim API-Sync:", e)
 
-        # =========================================================
-        # RESULTS aktualisieren
-        # =========================================================
-        try:
-            ch = client.get_channel(RESULTS_CHANNEL_ID)
 
-            if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
-                new_results = []
+# =========================================================
+# RESULTS aktualisieren
+# =========================================================
+try:
+    ch = client.get_channel(RESULTS_CHANNEL_ID)
 
-                async for m in ch.history(limit=50):
-                    new_results.append({
-                        "id": m.id,
-                        "author": str(m.author),
-                        "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
-                        "content": m.content,
-                        "jump_url": m.jump_url,
-                    })
+    if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
+        new_results = []
 
-                if len(new_results) > 0:
-                    _API_CACHE["results"]["ts"] = now
-                    _API_CACHE["results"]["data"] = new_results
-                    print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
-                else:
-                    print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
+        async for m in ch.history(limit=50):
+            new_results.append({
+                "id": m.id,
+                "author": str(m.author),
+                "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
+                "content": m.content,
+                "jump_url": m.jump_url,
+            })
 
-            else:
-                print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
+        if len(new_results) > 0:
+            _API_CACHE["results"]["ts"] = now
+            _API_CACHE["results"]["data"] = new_results
+            print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
+        else:
+            print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
 
-        except Exception as e:
-            print(f"[CACHE] Fehler RESULTS: {e}")
+    else:
+        print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
+
+except Exception as e:
+    print(f"[CACHE] Fehler RESULTS: {e}")
+
 
         # =========================================================
         # Warte 5 Minuten bis zum nächsten Durchlauf
@@ -2242,17 +2250,7 @@ async def on_ready():
         _cache_task_started = True
         print("♻️ Background cache refresher gestartet")
 
-    # >>>>>>> FEHLENDER TEIL WIEDER EINGEFÜGT <<<<<<<<
-    try:
-        asyncio.create_task(push_updates_to_api())
-        print("🔄 API-Sync Task gestartet")
-    except Exception as e:
-        print(f"⚠️ Fehler beim Start des API-Sync Tasks: {e}")
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
     print("🤖 Bot bereit")
-
-
 
 client.run(TOKEN)
 
