@@ -40,50 +40,26 @@ print("DEBUG CREDS_FILE =", CREDS_FILE)
 # Discord Client erstellen
 # =========================================================
 intents = discord.Intents.default()
-
-# NUR das aktivieren, was wir wirklich brauchen
 intents.message_content = True
 intents.guilds = True
-intents.members = True  # optional, aber schadet nicht
+intents.members = True
 
 print("DEBUG Intents:", intents)
 
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-
-
-# feste Role-IDs aus ENV (müssen gesetzt sein)
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
 TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
 
-# Ergebnis-Channel
 RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
-
-# Zeitzone
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
-
-# Standard-Link für ZSR-Stream (kann per ENV überschrieben werden)
 ZSR_RESTREAM_URL = os.getenv("ZSR_RESTREAM_URL", "https://www.twitch.tv/zeldaspeedruns")
 
-# Flags für tägliche Auto-Posts (Datum in Berlin-Zeit)
-_last_restreamable_post_date = None  # 04:00 Uhr – #restreamable-spiele
-_last_restreams_post_date = None     # 04:30 Uhr – #restreams
+_last_restreamable_post_date = None
+_last_restreams_post_date = None
 
-# =========================================================
-# Discord-Client + Intents
-# =========================================================
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-intents = discord.Intents.all()
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
-
-
-print(f"[INTENTS] members={intents.members}, message_content={intents.message_content}")
-
-# --- API-Cache für /api/upcoming und /api/results ---
+# --- API-Cache ---
 _API_CACHE = {
     "upcoming": {"ts": None, "data": []},
     "results": {"ts": None, "data": []},
@@ -100,9 +76,10 @@ _webapp_runner: web.AppRunner | None = None
 
 def _event_location(ev: discord.ScheduledEvent) -> str | None:
     try:
-        if getattr(ev, "entity_metadata", None) and ev.entity_metadata:
-            if getattr(ev.entity_metadata, "location", None):
-                return ev.entity_metadata.location
+        if getattr(ev, "entity_metadata", None):
+            loc = getattr(ev.entity_metadata, "location", None)
+            if loc:
+                return loc
         if getattr(ev, "location", None):
             return ev.location
         if getattr(ev, "channel", None) and ev.channel:
@@ -123,9 +100,11 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
     @routes.get("/health")
     async def health(_request: web.Request):
-        resp = web.json_response({"status": "ok"})
-        return add_cors(resp)
+        return add_cors(web.json_response({"status": "ok"}))
 
+    # =========================================================
+    # /api/upcoming
+    # =========================================================
     @routes.get("/api/upcoming")
     async def api_upcoming(request: web.Request):
         try:
@@ -140,68 +119,45 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         print(f"[API] /api/upcoming called (n={n})")
 
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
-            print(f"[API] upcoming: cache HIT ({len(cache['data'])} cached items)")
-            data = cache["data"][:n]
-            resp = web.json_response({"items": data})
-            return add_cors(resp)
+            print("[API] upcoming: cache HIT")
+            return add_cors(web.json_response({"items": cache["data"][:n]}))
 
         guild = client.get_guild(GUILD_ID)
         if guild is None:
-            print(f"[API] upcoming: guild with ID {GUILD_ID} not found")
-            resp = web.json_response({"items": []})
-            return add_cors(resp)
+            print("[API] upcoming: guild not found")
+            return add_cors(web.json_response({"items": []}))
 
         try:
-            print("[API] upcoming: fetching scheduled events from Discord …")
-            events = await asyncio.wait_for(
-                guild.fetch_scheduled_events(),
-                timeout=5.0,
-            )
-            print(f"[API] upcoming: fetched {len(events)} events from Discord")
-        except asyncio.TimeoutError:
-            print("[API] upcoming: TIMEOUT while fetching events")
-            if cache["data"]:
-                print("[API] upcoming: using OLD cache due to timeout")
-                data = cache["data"][:n]
-                resp = web.json_response({"items": data})
-            else:
-                print("[API] upcoming: no cache available, returning empty list")
-                resp = web.json_response({"items": []})
-            return add_cors(resp)
+            events = await asyncio.wait_for(guild.fetch_scheduled_events(), timeout=5.0)
         except Exception as e:
-            print(f"[API] upcoming: ERROR while fetching events: {e!r}")
-            resp = web.json_response({"items": []})
-            return add_cors(resp)
+            print("[API] upcoming ERROR:", e)
+            if cache["data"]:
+                return add_cors(web.json_response({"items": cache["data"][:n]}))
+            return add_cors(web.json_response({"items": []}))
 
         data = []
         for ev in events:
-            print(f"[API] upcoming: event {ev.id} status={ev.status}")
-            if ev.status in (
-                discord.EventStatus.scheduled,
-                discord.EventStatus.active,
-            ):
-                data.append(
-                    {
-                        "id": ev.id,
-                        "name": ev.name,
-                        "start": ev.start_time.isoformat() if ev.start_time else None,
-                        "end": ev.end_time.isoformat() if ev.end_time else None,
-                        "location": _event_location(ev),
-                        "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
-                    }
-                )
-
-        print(f"[API] upcoming: {len(data)} events nach Filter (scheduled/active)")
+            if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active):
+                data.append({
+                    "id": ev.id,
+                    "name": ev.name,
+                    "start": ev.start_time.isoformat() if ev.start_time else None,
+                    "end": ev.end_time.isoformat() if ev.end_time else None,
+                    "location": _event_location(ev),
+                    "url": f"https://discord.com/events/{GUILD_ID}/{ev.id}",
+                })
 
         data.sort(key=lambda x: (x["start"] is None, x["start"]))
 
         cache["ts"] = now
         cache["data"] = data
 
-        resp = web.json_response({"items": data[:n]})
-        return add_cors(resp)
+        return add_cors(web.json_response({"items": data[:n]}))
 
-        @routes.get("/api/results")
+    # =========================================================
+    # /api/results
+    # =========================================================
+    @routes.get("/api/results")
     async def api_results(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
@@ -214,12 +170,10 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         print(f"[API] /api/results called (n={n})")
 
-        # Cache HIT
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
-            print(f"[API] results: cache HIT ({len(cache['data'])} cached items)")
+            print("[API] results: cache HIT")
             return add_cors(web.json_response({"items": cache["data"][:n]}))
 
-        # Channel laden
         ch = client.get_channel(RESULTS_CHANNEL_ID)
         if ch is None:
             print("[API] results: channel not found")
@@ -227,7 +181,6 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         items = []
         try:
-            print("[API] results: fetching messages …")
             async for m in ch.history(limit=100):
                 items.append({
                     "id": m.id,
@@ -239,26 +192,15 @@ async def _build_web_app(client: discord.Client) -> web.Application:
                 if len(items) >= n:
                     break
 
-            print(f"[API] results: collected {len(items)} messages")
-
         except Exception as e:
-            print(f"[API] results ERROR: {e!r}")
+            print("[API] results ERROR:", e)
             return add_cors(web.json_response({"items": []}))
-
-        # ❗ KEIN cache["ts"] = now hier!
-        # ❗ KEIN cache["data"] = items hier!
 
         return add_cors(web.json_response({"items": items[:n]}))
 
-
-
-
-    # Cache aktualisieren
-    cache["ts"] = now
-    cache["data"] = items
-
-    resp = web.json_response({"items": items[:n]})
-    return add_cors(resp)
+    app = web.Application()
+    app.add_routes(routes)
+    return app
 
 
 async def start_webserver(client: discord.Client):
@@ -271,12 +213,13 @@ async def start_webserver(client: discord.Client):
     runner = web.AppRunner(app)
     await runner.setup()
     _webapp_runner = runner
+
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(
-        f"[WEB] running on 0.0.0.0:{port}   endpoints: /health, /api/upcoming, /api/results",
-    )
+
+    print("[WEB] running on 0.0.0.0:", port,
+          " endpoints: /health, /api/upcoming, /api/results")
 
 
 # =========================================================
@@ -284,6 +227,7 @@ async def start_webserver(client: discord.Client):
 # =========================================================
 def _cell(row, idx0):
     return row[idx0].strip() if 0 <= idx0 < len(row) else ""
+
 
 
 # Spaltenkonstanten (Spaltennummern, 1-basiert, für get_all_values() -1)
