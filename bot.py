@@ -1744,41 +1744,6 @@ async def push_updates_to_api():
         except Exception as e:
             print("[PUSH] Fehler results:", e)
 
-
-
-
-        # -------------------------------------------------
-        # RESULTS aus Ergebnischannel holen und in _API_CACHE schreiben
-        # -------------------------------------------------
-        try:
-            ch = client.get_channel(RESULTS_CHANNEL_ID)
-            if ch is None or not isinstance(
-                ch,
-                (discord.TextChannel, discord.Thread, discord.VoiceChannel),
-            ):
-                raise RuntimeError("Ergebnis-Channel nicht gefunden oder falscher Typ")
-
-            items = []
-            async for m in ch.history(limit=20):
-                ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
-                items.append(
-                    {
-                        "id": m.id,
-                        "author": str(m.author),
-                        "time": ts,
-                        "content": m.content,
-                        "jump_url": m.jump_url,
-                    }
-                )
-
-            _API_CACHE["results"]["ts"] = now
-            _API_CACHE["results"]["data"] = items
-
-            print(f"[CACHE] Results aktualisiert ({len(items)} Einträge)")
-
-        except Exception as e:
-            print(f"[CACHE] Fehler beim Aktualisieren der Results: {e}")
-
         # -------------------------------------------------
         # EXTERNE API (api.py) mit beiden Caches füttern
         # -------------------------------------------------
