@@ -201,64 +201,69 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp = web.json_response({"items": data[:n]})
         return add_cors(resp)
 
-    @routes.get("/api/results")
-    async def api_results(request: web.Request):
-        try:
-            n = int(request.query.get("n", "5"))
-        except Exception:
-            n = 5
-        n = max(1, min(20, n))
+   @routes.get("/api/results")
+async def api_results(request: web.Request):
+    # Anzahl der zurückgegebenen Einträge limitieren
+    try:
+        n = int(request.query.get("n", "5"))
+    except Exception:
+        n = 5
+    n = max(1, min(20, n))
 
-        now = datetime.datetime.now(datetime.timezone.utc)
-        cache = _API_CACHE["results"]
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cache = _API_CACHE["results"]
 
-        print(f"[API] /api/results called (n={n})")
+    print(f"[API] /api/results called (n={n})")
 
-        if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
-            print(f"[API] results: cache HIT ({len(cache['data'])} cached items)")
-            data = cache["data"][:n]
-            resp = web.json_response({"items": data})
-            return add_cors(resp)
-
-        ch = client.get_channel(RESULTS_CHANNEL_ID)
-        if ch is None or not isinstance(
-            ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel),
-        ):
-            print(f"[API] results: channel {RESULTS_CHANNEL_ID} not found or wrong type")
-            resp = web.json_response({"items": []})
-            return add_cors(resp)
-
-        items = []
-        try:
-            print("[API] results: fetching messages …")
-            async for m in ch.history(limit=20):
-                ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
-                items.append(
-                    {
-                        "id": m.id,
-                        "author": str(m.author),
-                        "time": ts,
-                        "content": m.content,
-                        "jump_url": m.jump_url,
-                    }
-                )
-                if len(items) >= n:
-                    break
-            print(f"[API] results: collected {len(items)} messages")
-        except Exception as e:
-            print(f"[API] results: ERROR while fetching messages: {e!r}")
-            resp = web.json_response({"items": []})
-            return add_cors(resp)
-
-        cache["ts"] = now
-        cache["data"] = items
-
-        resp = web.json_response({"items": items[:n]})
+    # Cache-HIT
+    if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
+        print(f"[API] results: cache HIT ({len(cache['data'])} cached items)")
+        data = cache["data"][:n]
+        resp = web.json_response({"items": data})
         return add_cors(resp)
 
-    app = web.Application()
-    app.add_routes(routes)
-    return app
+    # Channel holen
+    ch = client.get_channel(RESULTS_CHANNEL_ID)
+    if ch is None or not isinstance(
+        ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel),
+    ):
+        print(f"[API] results: channel {RESULTS_CHANNEL_ID} not found or wrong type")
+        resp = web.json_response({"items": []})
+        return add_cors(resp)
+
+    # Nachrichten holen – KEIN Filter
+    items = []
+    try:
+        print("[API] results: fetching messages …")
+
+        # Wir holen einfach 100 Nachrichten und geben die neuesten zuerst zurück
+        async for m in ch.history(limit=100):
+            ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
+            items.append(
+                {
+                    "id": m.id,
+                    "author": str(m.author),
+                    "time": ts,
+                    "content": m.content,
+                    "jump_url": m.jump_url,
+                }
+            )
+            if len(items) >= n:
+                break
+
+        print(f"[API] results: collected {len(items)} messages")
+
+    except Exception as e:
+        print(f"[API] results: ERROR while fetching messages: {e!r}")
+        resp = web.json_response({"items": []})
+        return add_cors(resp)
+
+    # Cache aktualisieren
+    cache["ts"] = now
+    cache["data"] = items
+
+    resp = web.json_response({"items": items[:n]})
+    return add_cors(resp)
 
 
 async def start_webserver(client: discord.Client):
