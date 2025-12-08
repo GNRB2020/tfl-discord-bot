@@ -725,7 +725,7 @@ class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
             )
 
 
-@tree.command(
+    @tree.command(
     name="result",
     description="Ergebnis melden (nur Orga / Try Force League Rolle)",
 )
