@@ -105,36 +105,28 @@ async def _build_web_app(client: discord.Client) -> web.Application:
     async def health(_request: web.Request):
         return add_cors(web.json_response({"status": "ok"}))
 
-    # -------------------------------------------------------
-    # /api/upcoming
-    # -------------------------------------------------------
-    @routes.get("/api/upcoming")
-    async def api_upcoming(request: web.Request):
-        try:
-            n = int(request.query.get("n", "5"))
-        except:
-            n = 5
-        n = max(1, min(20, n))
+   # -------------------------------------------------------
+# /api/upcoming (rate-limit-sicher)
+# -------------------------------------------------------
+@routes.get("/api/upcoming")
+async def api_upcoming(request: web.Request):
 
-        now = datetime.datetime.now(datetime.timezone.utc)
-        cache = _API_CACHE["upcoming"]
+    # Anzahl Einträge (Default 5)
+    try:
+        n = int(request.query.get("n", "5"))
+    except:
+        n = 5
+    n = max(1, min(20, n))
 
-        if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
-            return add_cors(web.json_response({"items": cache["data"][:n]}))
+    cache = _API_CACHE["upcoming"]
 
-        guild = client.get_guild(GUILD_ID)
-        if guild is None:
-            return add_cors(web.json_response({"items": []}))
+    # Wenn Cache leer → leere Liste senden (NICHT fetchen!)
+    if not cache["data"]:
+        return add_cors(web.json_response({"items": []}))
 
-        try:
-            events = await asyncio.wait_for(
-                guild.fetch_scheduled_events(),
-                timeout=5.0,
-            )
-        except:
-            if cache["data"]:
-                return add_cors(web.json_response({"items": cache["data"][:n]}))
-            return add_cors(web.json_response({"items": []}))
+    # Nur Cache zurückgeben
+    return add_cors(web.json_response({"items": cache["data"][:n]}))
+
 
         data = []
         for ev in events:
