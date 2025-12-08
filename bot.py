@@ -201,9 +201,8 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp = web.json_response({"items": data[:n]})
         return add_cors(resp)
 
-    @routes.get("/api/results")
+        @routes.get("/api/results")
     async def api_results(request: web.Request):
-        # Anzahl der zurückgegebenen Einträge limitieren
         try:
             n = int(request.query.get("n", "5"))
         except Exception:
@@ -215,54 +214,42 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         print(f"[API] /api/results called (n={n})")
 
-        # Cache-HIT
+        # Cache HIT
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
             print(f"[API] results: cache HIT ({len(cache['data'])} cached items)")
-            data = cache["data"][:n]
-            resp = web.json_response({"items": data})
-            return add_cors(resp)
+            return add_cors(web.json_response({"items": cache["data"][:n]}))
 
-        # Channel holen
+        # Channel laden
         ch = client.get_channel(RESULTS_CHANNEL_ID)
-        if ch is None or not isinstance(
-            ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel),
-        ):
-            print(f"[API] results: channel {RESULTS_CHANNEL_ID} not found or wrong type")
-            resp = web.json_response({"items": []})
-            return add_cors(resp)
+        if ch is None:
+            print("[API] results: channel not found")
+            return add_cors(web.json_response({"items": []}))
 
-        # Nachrichten holen – KEIN Filter
         items = []
         try:
             print("[API] results: fetching messages …")
-
             async for m in ch.history(limit=100):
-                ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
-                items.append(
-                    {
-                        "id": m.id,
-                        "author": str(m.author),
-                        "time": ts,
-                        "content": m.content,
-                        "jump_url": m.jump_url,
-                    }
-                )
+                items.append({
+                    "id": m.id,
+                    "author": str(m.author),
+                    "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
+                    "content": m.content,
+                    "jump_url": m.jump_url,
+                })
                 if len(items) >= n:
                     break
 
             print(f"[API] results: collected {len(items)} messages")
 
         except Exception as e:
-            print(f"[API] results: ERROR while fetching messages: {e!r}")
-            resp = web.json_response({"items": []})
-            return add_cors(resp)
+            print(f"[API] results ERROR: {e!r}")
+            return add_cors(web.json_response({"items": []}))
 
-        # Cache aktualisieren
-        cache["ts"] = now
-        cache["data"] = items
+        # ❗ KEIN cache["ts"] = now hier!
+        # ❗ KEIN cache["data"] = items hier!
 
-        resp = web.json_response({"items": items[:n]})
-        return add_cors(resp)
+        return add_cors(web.json_response({"items": items[:n]}))
+
 
 
 
