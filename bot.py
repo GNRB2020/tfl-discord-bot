@@ -2226,26 +2226,32 @@ async def on_ready():
     global _client_synced_once, _cache_task_started
     print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
 
-    # Slash-Commands genau einmal für die Guild synchronisieren
     if not _client_synced_once:
         await tree.sync(guild=discord.Object(id=GUILD_ID))
         _client_synced_once = True
         print("✅ Slash-Befehle synchronisiert")
 
-    # Webserver starten (hat eigene Schutz-Variable _webserver_started)
     try:
         asyncio.create_task(start_webserver(client))
         print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming)")
     except Exception as e:
         print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
 
-    # Hintergrund-Cache-Refresher starten (macht intern wait_until_ready + Sleep)
     if not _cache_task_started:
         asyncio.create_task(refresh_api_cache(client))
         _cache_task_started = True
         print("♻️ Background cache refresher gestartet")
 
+    # >>>>>>> FEHLENDER TEIL WIEDER EINGEFÜGT <<<<<<<<
+    try:
+        asyncio.create_task(push_updates_to_api())
+        print("🔄 API-Sync Task gestartet")
+    except Exception as e:
+        print(f"⚠️ Fehler beim Start des API-Sync Tasks: {e}")
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
     print("🤖 Bot bereit")
+
 
 
 client.run(TOKEN)
