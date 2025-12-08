@@ -351,6 +351,7 @@ TWITCH_MAP = {
     "quaschynock": "quaschynock",
     "marcii": "marciii86",
     "rennyur": "rennyur",
+    "yasi89": "yasi89",
 }
 
 # =========================================================
@@ -1713,10 +1714,15 @@ async def refresh_api_cache(client):
 
     print("[CACHE] Hintergrund-Refresher gestartet")
 
+    # Cutoff für Ergebnisse ab 01.12.2025 (inkl.)
+    CUTOFF = dt(2025, 12, 1, tzinfo=BERLIN_TZ)
+
     while not client.is_closed():
         now = datetime.datetime.now(datetime.timezone.utc)
 
+        # =========================================================
         # UPCOMING
+        # =========================================================
         try:
             guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
             events = await guild.fetch_scheduled_events()
@@ -1740,16 +1746,24 @@ async def refresh_api_cache(client):
         except Exception as e:
             print(f"[CACHE] Fehler UPCOMING: {e}")
 
-        # RESULTS
+        # =========================================================
+        # RESULTS (nur ab dem 01.12.2025)
+        # =========================================================
         try:
             ch = client.get_channel(RESULTS_CHANNEL_ID)
             results = []
 
-            async for m in ch.history(limit=20):
+            async for m in ch.history(limit=200, oldest_first=True):
+                msg_time = m.created_at.astimezone(BERLIN_TZ)
+
+                # nur Ergebnisse ab 01.12.2025 (inklusive)
+                if msg_time < CUTOFF:
+                    continue
+
                 results.append({
                     "id": m.id,
                     "author": str(m.author),
-                    "time": m.created_at.astimezone(BERLIN_TZ).isoformat(),
+                    "time": msg_time.isoformat(),
                     "content": m.content,
                     "jump_url": m.jump_url,
                 })
@@ -1761,13 +1775,16 @@ async def refresh_api_cache(client):
         except Exception as e:
             print(f"[CACHE] Fehler RESULTS: {e}")
 
-        # PUSH
+        # =========================================================
+        # PUSH UPDATE TO API
+        # =========================================================
         try:
             await push_updates_to_api()
         except Exception as e:
             print(f"[CACHE] Fehler beim API Push: {e}")
 
         await asyncio.sleep(300)
+
 
 
 
