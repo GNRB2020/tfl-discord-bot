@@ -168,7 +168,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp = web.json_response({"items": data[:n]})
         return add_cors(resp)
 
-    @routes.get("/api/results")
+        @routes.get("/api/results")
     async def api_results(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
@@ -181,12 +181,14 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         print(f"[API] /api/results called (n={n})")
 
+        # Cache HIT?
         if cache["ts"] and (now - cache["ts"]) < API_CACHE_TTL and cache["data"]:
             print(f"[API] results: cache HIT ({len(cache['data'])} cached items)")
             data = cache["data"][:n]
             resp = web.json_response({"items": data})
             return add_cors(resp)
 
+        # Channel laden
         ch = client.get_channel(RESULTS_CHANNEL_ID)
         if ch is None or not isinstance(
             ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel),
@@ -196,31 +198,36 @@ async def _build_web_app(client: discord.Client) -> web.Application:
             return add_cors(resp)
 
         items = []
-        
-try:
-    print("[API] results: fetching messages …")
-    async for m in ch.history(limit=336):
-        ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
-        items.append(
-            {
-                "id": m.id,
-                "author": str(m.author),
-                "time": ts,
-                "content": m.content,
-                "jump_url": m.jump_url,
-            }
-        )
 
-    print(f"[API] results: collected {len(items)} messages")
-except Exception as e:
-    print(f"[API] results: ERROR while fetching messages: {e!r}")
-    resp = web.json_response({"items": []})
-    return add_cors(resp)
+        # >>>>>>> HIER beginnt der reparierte Block <<<<<<<
+        try:
+            print("[API] results: fetching messages …")
+            async for m in ch.history(limit=336):
+                ts = m.created_at.astimezone(BERLIN_TZ).isoformat()
+                items.append(
+                    {
+                        "id": m.id,
+                        "author": str(m.author),
+                        "time": ts,
+                        "content": m.content,
+                        "jump_url": m.jump_url,
+                    }
+                )
 
+            print(f"[API] results: collected {len(items)} messages")
 
-    app = web.Application()
-    app.add_routes(routes)
-    return app
+        except Exception as e:
+            print(f"[API] results: ERROR while fetching messages: {e!r}")
+            resp = web.json_response({"items": []})
+            return add_cors(resp)
+        # >>>>>>> Ende reparierter Block <<<<<<<
+
+        cache["ts"] = now
+        cache["data"] = items
+
+        resp = web.json_response({"items": items[:n]})
+        return add_cors(resp)
+
 
 
 async def start_webserver(client: discord.Client):
