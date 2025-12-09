@@ -161,7 +161,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
     @routes.get("/api/results-db")
     async def api_results_db(request: web.Request):
         division = request.query.get("division")
-        limit = int(request.query.get("limit", "200"))
+        limit = int(request.query.get("limit", "336"))
 
         # Division prüfen
         if division not in ["1", "2", "3", "4", "5", "6"]:
