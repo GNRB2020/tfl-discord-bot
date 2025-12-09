@@ -137,7 +137,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         return add_cors(web.json_response({"items": data[:n]}))
 
-    # -------------------------------------------------------
+      # -------------------------------------------------------
     # /api/results  (ebenfalls Cache only)
     # -------------------------------------------------------
     @routes.get("/api/results")
@@ -154,6 +154,69 @@ async def _build_web_app(client: discord.Client) -> web.Application:
             return add_cors(web.json_response({"items": [], "loading": True}))
 
         return add_cors(web.json_response({"items": cache["data"][:n]}))
+
+    # -------------------------------------------------------
+    # /api/results-db  (NEU – zieht Ergebnisse direkt aus Google Sheet)
+    # -------------------------------------------------------
+    @routes.get("/api/results-db")
+    async def api_results_db(request: web.Request):
+        division = request.query.get("division")
+        limit = int(request.query.get("limit", "200"))
+
+        # Division prüfen
+        if division not in ["1", "2", "3", "4", "5", "6"]:
+            return add_cors(web.json_response({"items": []}))
+
+        # Sheet lesen
+        try:
+            ws = WB.worksheet(f"{division}.DIV")
+            rows = ws.get_all_values()
+        except Exception as e:
+            print(f"[API] results-db ERROR: {e}")
+            return add_cors(web.json_response({"items": []}))
+
+        # Kopfzeile entfernen
+        data = rows[1:]
+        items = []
+
+        for row in data:
+            date = row[1].strip() if len(row) > 1 else ""
+            mode = row[2].strip() if len(row) > 2 else ""
+            p1 = row[3].strip() if len(row) > 3 else ""
+            score = row[4].strip() if len(row) > 4 else ""
+            p2 = row[5].strip() if len(row) > 5 else ""
+            link = row[6].strip() if len(row) > 6 else ""
+            reporter = row[7].strip() if len(row) > 7 else ""
+
+            # Nur fertige Ergebnisse (kein "vs")
+            if score.lower() == "vs" or "vs" in score.lower():
+                continue
+
+            if not date or not p1 or not p2:
+                continue
+
+            items.append({
+                "date": date,
+                "player1": p1,
+                "score": score,
+                "player2": p2,
+                "mode": mode,
+                "link": link,
+                "reporter": reporter,
+            })
+
+        # Sortierung nach Datum DESC
+        def parse_date(d):
+            try:
+                return datetime.datetime.strptime(d, "%d.%m.%Y")
+            except:
+                return datetime.datetime.min
+
+        items.sort(key=lambda x: parse_date(x["date"]), reverse=True)
+
+        # Limit anwenden
+        return add_cors(web.json_response({"items": items[:limit]}))
+
 
     # -------------------------------------------------------
     # App bauen
