@@ -167,9 +167,36 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         if division not in ["1", "2", "3", "4", "5", "6"]:
             return add_cors(web.json_response({"items": []}))
 
+        # ---------- ROBUSTER WORKSHEET-FINDER ----------
+        def find_ws(name: str):
+            # normalize: entfernt alle problematischen Zeichen
+            def norm(s: str):
+                return (
+                    s.replace(" ", "")
+                     .replace("\u00A0", "")   # non-breaking space
+                     .replace("\u2007", "")   # figure space
+                     .replace("\u202F", "")   # narrow no-break space
+                     .replace("\u2002", "")   # en space
+                     .replace("\u2003", "")   # em space
+                     .replace("\u2009", "")   # thin space
+                     .replace("\u200A", "")   # hair space
+                     .replace("\ufeff", "")   # zero width no-break
+                     .replace(".", "")
+                     .lower()
+                )
+
+            target = norm(name)
+
+            for ws in WB.worksheets():
+                if norm(ws.title) == target:
+                    return ws
+
+            raise KeyError(f"Worksheet '{name}' nicht gefunden.")
+        # -------------------------------------------------
+
         # Sheet lesen
         try:
-            ws = WB.worksheet(f"{division}.DIV")
+            ws = find_ws(f"{division}.DIV")
             rows = ws.get_all_values()
         except Exception as e:
             print(f"[API] results-db ERROR: {e}")
@@ -188,7 +215,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
             link = row[6].strip() if len(row) > 6 else ""
             reporter = row[7].strip() if len(row) > 7 else ""
 
-            # Nur fertige Ergebnisse (kein "vs")
+            # Nur fertige Ergebnisse ("vs" rausfiltern)
             if score.lower() == "vs" or "vs" in score.lower():
                 continue
 
@@ -216,6 +243,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
 
         # Limit anwenden
         return add_cors(web.json_response({"items": items[:limit]}))
+
 
 
     # -------------------------------------------------------
