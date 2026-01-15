@@ -1764,7 +1764,7 @@ async def refresh_api_cache(client):
             if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
                 new_results = []
 
-                async for m in ch.history(limit=50):
+                async for m in ch.history(limit=400):
                     new_results.append({
                         "id": m.id,
                         "author": str(m.author),
