@@ -294,7 +294,7 @@ DIV_COL_RIGHT = 6     # F
 # Twitch-Namen Mapping
 # =========================================================
 TWITCH_MAP = {
-    "gnrb": "gamenrockbuddys",
+    "gnrb": "gnrb87",
     "steinchen89": "Steinchen89",
     "dirtbubble": "DirtBubblE",
     "speeka": "Speeka89",
