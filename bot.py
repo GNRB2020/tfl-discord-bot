@@ -1413,21 +1413,31 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
 # =========================================================
 # Restream-Helfer
 # =========================================================
-def _format_event_line_for_post(ev: discord.ScheduledEvent) -> str:
+
+_WEEKDAY_DE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+
+
+def _format_start_dt(ev: discord.ScheduledEvent, include_weekday: bool = False) -> str:
     start = ev.start_time
-    if start:
-        start_local = start.astimezone(BERLIN_TZ)
-        date_str = start_local.strftime("%d.%m.%Y")
-        time_str = start_local.strftime("%H:%M")
-        dt_str = f"{date_str} {time_str}"
-    else:
-        dt_str = "ohne Startzeit"
+    if not start:
+        return "ohne Startzeit"
+
+    start_local = start.astimezone(BERLIN_TZ)
+    date_str = start_local.strftime("%d.%m.%Y")
+    time_str = start_local.strftime("%H:%M")
+
+    if include_weekday:
+        wd = _WEEKDAY_DE[start_local.weekday()]
+        return f"{wd}, {date_str} {time_str}"
+
+    return f"{date_str} {time_str}"
+
+
+def _format_event_line_for_post(ev: discord.ScheduledEvent, include_weekday: bool = False) -> str:
+    dt_str = _format_start_dt(ev, include_weekday=include_weekday)
 
     loc = _event_location(ev) or "kein Link"
-    if loc != "kein Link":
-        loc_display = f"<{loc}>"
-    else:
-        loc_display = loc
+    loc_display = f"<{loc}>" if loc != "kein Link" else loc
 
     name = ev.name or "Unbenanntes Event"
     return f"• {name} – {dt_str} – {loc_display}"
@@ -1447,11 +1457,43 @@ def _is_restream(ev: discord.ScheduledEvent) -> bool:
     return "(restream)" in (ev.name or "").lower()
 
 
-def _format_event_list(title: str, events: list[discord.ScheduledEvent], now_utc: datetime.datetime) -> str:
+def _format_event_list(
+    title: str,
+    events: list[discord.ScheduledEvent],
+    now_utc: datetime.datetime,
+    include_weekday: bool = False,
+) -> str:
     events_sorted = sorted(events, key=lambda e: e.start_time or now_utc)
     lines = [title, ""]
-    lines.extend(_format_event_line_for_post(ev) for ev in events_sorted)
+    lines.extend(_format_event_line_for_post(ev, include_weekday=include_weekday) for ev in events_sorted)
     return "\n".join(lines)
+
+
+async def _post_restream_set(ev: discord.ScheduledEvent, restream_type: str, private_url: str | None = None):
+    if SHOWRESTREAMS_CHANNEL_ID == 0:
+        return
+
+    ch = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
+    if ch is None or not isinstance(ch, discord.TextChannel):
+        return
+
+    dt_str = _format_start_dt(ev, include_weekday=True)
+    event_link = f"https://discord.com/events/{GUILD_ID}/{ev.id}"
+
+    if restream_type.upper() == "ZSR":
+        restream_info = f"ZSR – <{ZSR_RESTREAM_URL}>"
+    else:
+        restream_info = f"Privat – <{private_url}>" if private_url else "Privat"
+
+    msg = (
+        "🔁 **Restream gesetzt**\n"
+        f"• **Event:** {ev.name}\n"
+        f"• **Zeit:** {dt_str}\n"
+        f"• **Restream:** {restream_info}\n"
+        f"• **Event-Link:** <{event_link}>"
+    )
+
+    await ch.send(msg)
 
 
 async def apply_restream_to_event(
@@ -1505,6 +1547,7 @@ class PrivateRestreamModal(discord.ui.Modal, title="Privater Restream-Link"):
 
         try:
             await apply_restream_to_event(self.event, "PRIVAT", private_url=url)
+            await _post_restream_set(self.event, "PRIVAT", private_url=url)
             await interaction.response.send_message(
                 f"✅ Privater Restream für Event `{self.event.name}` gesetzt.",
                 ephemeral=True,
@@ -1599,6 +1642,7 @@ class PickView(discord.ui.View):
                     pass
                 try:
                     await apply_restream_to_event(ev, "ZSR")
+                    await _post_restream_set(ev, "ZSR")
                     await interaction.followup.send(
                         f"✅ Restream über ZSR für Event `{ev.name}` gesetzt.",
                         ephemeral=True,
@@ -1610,7 +1654,6 @@ class PickView(discord.ui.View):
                     )
             else:
                 await interaction.response.send_modal(PrivateRestreamModal(ev))
-
 
 # =========================================================
 # Hintergrund-Refresher + Auto-Posts
