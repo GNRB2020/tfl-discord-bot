@@ -2300,8 +2300,8 @@ async def showpicks(interaction: discord.Interaction):
             "🎯 Events, die für /pick zur Verfügung stehen:",
             selectable,
             now_utc,
+            include_weekday=True,
         )
-
         await interaction.followup.send(text, ephemeral=True)
 
     except Exception as e:
