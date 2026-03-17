@@ -282,31 +282,46 @@ class SignupCog(commands.Cog):
         view = SignupView(member.id, member.display_name.strip())
         await interaction.response.send_message(f"Anmeldung für **{member.display_name}**", view=view, ephemeral=True)
 
-    @app_commands.command(name="signstat")
-    @app_commands.guilds(discord.Object(id=GUILD_ID))
-    async def signstat(self, interaction: discord.Interaction):
-        ws = get_worksheet()
-        row = find_name_row(ws, interaction.user.display_name)
+    @app_commands.command(
+    name="signstat",
+    description="Zeigt deinen Eintrag."
+)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def signstat(self, interaction: discord.Interaction):
+    member = interaction.user
 
-        if not row:
-            await interaction.response.send_message("Kein Eintrag gefunden.", ephemeral=True)
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "Nur Server.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        ws = get_worksheet()
+        name = member.display_name.strip()
+        row = find_name_row(ws, name)
+
+        if row is None:
+            await interaction.followup.send(
+                "Es wurde kein Eintrag mit deinem Namen gefunden.",
+                ephemeral=True
+            )
             return
 
         values = get_row_values(ws, row)
-        await interaction.response.send_message(format_signup_row(values), ephemeral=True)
 
-    @app_commands.command(name="leaguesign")
-    @app_commands.guilds(discord.Object(id=GUILD_ID))
-    async def leaguesign(self, interaction: discord.Interaction):
-        ws = get_worksheet()
-        names = get_names_by_column_value(ws, 3, "Ja")
-
-        if not names:
-            await interaction.response.send_message("Keine League-Anmeldungen.", ephemeral=True)
-            return
-
-        await interaction.response.send_message("\n".join(names), ephemeral=True)
-
+        await interaction.followup.send(
+            format_signup_row(values),
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"Fehler bei /signstat: {e}",
+            ephemeral=True
+        )
     @app_commands.command(name="cupsign")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def cupsign(self, interaction: discord.Interaction):
