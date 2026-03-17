@@ -15,6 +15,8 @@ from datetime import datetime as dt, timedelta
 import aiohttp
 import sys
 import traceback
+from signup import setup_signup
+setup_signup(bot)
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
