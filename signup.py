@@ -344,6 +344,18 @@ class SignupCog(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="leaguesign", description="Zeigt alle League-Anmeldungen")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def leaguesign(self, interaction: discord.Interaction):
+        ws = get_worksheet()
+        names = get_names_by_column_value(ws, 3, "Ja")
+
+        if not names:
+            await interaction.response.send_message("Keine League-Anmeldungen.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("\n".join(names), ephemeral=True)
+
     @app_commands.command(name="cupsign", description="Zeigt alle Cup-Anmeldungen")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def cupsign(self, interaction: discord.Interaction):
