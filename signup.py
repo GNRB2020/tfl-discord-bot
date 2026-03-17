@@ -286,12 +286,12 @@ class SignupCog(commands.Cog):
     name="signstat",
     description="Zeigt deinen Eintrag."
 )
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def signstat(self, interaction: discord.Interaction):
-    member = interaction.user
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def signstat(self, interaction: discord.Interaction):
+        member = interaction.user
 
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
             "Nur Server.",
             ephemeral=True
         )
