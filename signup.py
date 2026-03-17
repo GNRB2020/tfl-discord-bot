@@ -14,7 +14,7 @@ GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
 SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
 WORKSHEET_GID = 463142264
-GOOGLE_CREDENTIALS_FILE = "google_credentials.json"
+GOOGLE_CREDENTIALS_FILE = "credentials.json"
 
 ADMIN_ROLE_NAMES = {"Admin", "Orga", "TFL Admin"}
 
