@@ -20,6 +20,10 @@ TIMEZONE = ZoneInfo("Europe/Berlin")
 # Falls du lieber ein anderes Datumsformat in Spalte E willst:
 DATETIME_FORMAT = "%d.%m.%Y %H:%M"
 
+# Zielkanal für Ergebnis-Posts
+RESULTS_CATEGORY_NAME = "Try Force Cup"
+RESULTS_CHANNEL_NAME = "ergebnisse"
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -64,19 +68,23 @@ def normalize_text(value: str) -> str:
 
 
 def get_round_label(raw_round: str) -> str:
-    round_text = normalize_text(raw_round)
-    return round_text if round_text else "Unbekannte Runde"
+    mapping = {
+        "VR": "Vorrunde",
+        "L32": "Last 32",
+        "L16": "Last 16",
+        "QF": "Quarterfinals",
+        "SF": "Semifinals",
+        "FIN": "Finals",
+    }
+
+    key = normalize_text(raw_round).upper()
+    return mapping.get(key, key if key else "Unbekannte Runde")
 
 
 def get_mode_from_round(raw_round: str) -> str:
-    """
-    Empfehlung:
-    In Spalte A steht die Runde, z. B.
-    Achtelfinale, Viertelfinale, Halbfinale, Finale
-    """
-    round_text = normalize_text(raw_round).lower()
+    key = normalize_text(raw_round).upper()
 
-    if "halbfinale" in round_text or "finale" in round_text:
+    if key in {"SF", "FIN"}:
         return "Best of 3"
 
     return "Best of 1"
@@ -89,6 +97,7 @@ def is_finished_result(result_text: str, mode: str) -> bool:
         return result in {"1-0", "0-1"}
 
     if mode == "Best of 3":
+        # Nur abgeschlossen, wenn jemand 2 Siege hat
         return result in {"2-0", "2-1", "1-2", "0-2"}
 
     return False
@@ -101,7 +110,8 @@ def validate_result_for_mode(result_text: str, mode: str) -> bool:
         return result in {"1-0", "0-1"}
 
     if mode == "Best of 3":
-        return result in {"2-0", "2-1", "1-2", "0-2"}
+        # Zwischenstände erlaubt
+        return result in {"1-0", "0-1", "1-1", "2-0", "2-1", "1-2", "0-2"}
 
     return False
 
@@ -173,6 +183,70 @@ def load_open_matches():
     return matches
 
 
+def find_results_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """
+    Sucht bevorzugt:
+    Kategorie: Try Force Cup
+    Kanal: ergebnisse
+    """
+    target_category = normalize_text(RESULTS_CATEGORY_NAME).lower()
+    target_channel = normalize_text(RESULTS_CHANNEL_NAME).lower()
+
+    for channel in guild.text_channels:
+        if channel.name.lower() != target_channel:
+            continue
+
+        if channel.category and channel.category.name.lower() == target_category:
+            return channel
+
+    for channel in guild.text_channels:
+        if channel.name.lower() == target_channel:
+            return channel
+
+    return None
+
+
+async def post_result_message(
+    guild: discord.Guild,
+    match_data: dict,
+    result_text: str,
+    raceroom_link: str,
+    submitted_by: discord.abc.User,
+) -> tuple[bool, str]:
+    channel = find_results_channel(guild)
+
+    if channel is None:
+        return False, (
+            f"Ergebnis gespeichert, aber #{RESULTS_CHANNEL_NAME} in "
+            f"'{RESULTS_CATEGORY_NAME}' nicht gefunden."
+        )
+
+    status_text = "Abgeschlossen" if is_finished_result(result_text, match_data["mode"]) else "Zwischenstand"
+
+    lines = [
+        f"**TFL Cup Ergebnis**",
+        f"**Begegnung:** {match_data['player1']} vs. {match_data['player2']}",
+        f"**Runde:** {match_data['round']}",
+        f"**Modus:** {match_data['mode']}",
+        f"**Status:** {status_text}",
+        f"**Ergebnis:** {result_text}",
+        f"**Eingetragen von:** {submitted_by.mention}",
+    ]
+
+    if raceroom_link:
+        lines.append(f"**Raceroom-Link:** {raceroom_link}")
+
+    message = "\n".join(lines)
+
+    try:
+        await channel.send(message)
+        return True, f"Ergebnis zusätzlich in {channel.mention} gepostet."
+    except discord.Forbidden:
+        return False, "Ergebnis gespeichert, aber ich darf nicht in den Ergebnis-Kanal schreiben."
+    except Exception as e:
+        return False, f"Ergebnis gespeichert, aber Post im Ergebnis-Kanal fehlgeschlagen: {e}"
+
+
 # =========================
 # MODALS
 # =========================
@@ -224,7 +298,6 @@ class CupTerminModal(discord.ui.Modal, title="Cuptermin eintragen"):
             f"Modus: {self.match_data['mode']}"
         )
 
-        # Für externe Events ist eine Endzeit Pflicht.
         end_dt = start_dt + timedelta(hours=2)
 
         try:
@@ -269,9 +342,17 @@ class CupTerminModal(discord.ui.Modal, title="Cuptermin eintragen"):
 class CupResultModal(discord.ui.Modal, title="Cupresult eintragen"):
     ergebnis = discord.ui.TextInput(
         label="Ergebnis",
-        placeholder="BO1: 1-0 oder 0-1 | BO3: 2-0, 2-1, 1-2, 0-2",
+        placeholder="BO1: 1-0 oder 0-1 | BO3: 1-0, 0-1, 1-1, 2-0, 2-1, 1-2, 0-2",
         required=True,
         max_length=5,
+    )
+
+    raceroom_link = discord.ui.TextInput(
+        label="Raceroom-Link",
+        placeholder="Link zum Raceroom-Result oder Replay",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
     )
 
     def __init__(self, match_data: dict):
@@ -280,6 +361,7 @@ class CupResultModal(discord.ui.Modal, title="Cupresult eintragen"):
 
     async def on_submit(self, interaction: discord.Interaction):
         result_text = normalize_text(str(self.ergebnis)).replace(" ", "")
+        raceroom_link = normalize_text(str(self.raceroom_link))
 
         if not validate_result_for_mode(result_text, self.match_data["mode"]):
             await interaction.response.send_message(
@@ -298,10 +380,24 @@ class CupResultModal(discord.ui.Modal, title="Cupresult eintragen"):
             )
             return
 
+        post_info = ""
+        if interaction.guild is not None:
+            ok, info = await post_result_message(
+                guild=interaction.guild,
+                match_data=self.match_data,
+                result_text=result_text,
+                raceroom_link=raceroom_link,
+                submitted_by=interaction.user,
+            )
+            post_info = info
+        else:
+            post_info = "Ergebnis gespeichert, aber kein Server-Kontext für den Ergebnis-Post vorhanden."
+
         await interaction.response.send_message(
             (
                 f"Ergebnis gespeichert:\n"
-                f"{self.match_data['player1']} vs. {self.match_data['player2']} → {result_text}"
+                f"{self.match_data['player1']} vs. {self.match_data['player2']} → {result_text}\n\n"
+                f"{post_info}"
             ),
             ephemeral=True,
         )
@@ -317,7 +413,12 @@ class CupTerminSelect(discord.ui.Select):
         options = []
         for match in matches[:25]:
             label = truncate(f"{match['player1']} vs. {match['player2']}", 100)
-            description = truncate(f"{match['round']} | {match['mode']}", 100)
+
+            current_result = match["result"] if match["result"] else "offen"
+            description = truncate(
+                f"{match['round']} | {match['mode']} | Stand: {current_result}",
+                100
+            )
 
             options.append(
                 discord.SelectOption(
@@ -353,7 +454,12 @@ class CupResultSelect(discord.ui.Select):
         options = []
         for match in matches[:25]:
             label = truncate(f"{match['player1']} vs. {match['player2']}", 100)
-            description = truncate(f"{match['round']} | {match['mode']}", 100)
+
+            current_result = match["result"] if match["result"] else "offen"
+            description = truncate(
+                f"{match['round']} | {match['mode']} | Stand: {current_result}",
+                100
+            )
 
             options.append(
                 discord.SelectOption(
