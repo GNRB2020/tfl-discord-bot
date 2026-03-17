@@ -169,17 +169,31 @@ class TwitchModal(discord.ui.Modal, title="Twitchkanal"):
         await interaction.response.send_message("Twitch gesetzt.", ephemeral=True)
 
 
-class YesNoSelect(discord.ui.Select):
-    def __init__(self, field):
-        super().__init__(placeholder=field, options=YES_NO_OPTIONS)
-        self.field = field
+class ToggleButton(discord.ui.Button):
+    def __init__(self, field_name: str, label_name: str, row: int):
+        super().__init__(
+            label=f"{label_name}: Nein",
+            style=discord.ButtonStyle.secondary,
+            row=row
+        )
+        self.field_name = field_name
+        self.label_name = label_name
 
     async def callback(self, interaction: discord.Interaction):
-        setattr(self.view, self.field, self.values[0])
-        await interaction.response.send_message(
-            f"{self.field}: {self.values[0]}",
-            ephemeral=True
+        view = self.view
+
+        current_value = getattr(view, self.field_name)
+        new_value = "Ja" if current_value == "Nein" else "Nein"
+        setattr(view, self.field_name, new_value)
+
+        self.label = f"{self.label_name}: {new_value}"
+        self.style = (
+            discord.ButtonStyle.success
+            if new_value == "Ja"
+            else discord.ButtonStyle.secondary
         )
+
+        await interaction.response.edit_message(view=view)
 
 
 class SignupView(discord.ui.View):
@@ -190,45 +204,36 @@ class SignupView(discord.ui.View):
         self.name = name
 
         self.twitch = ""
-        self.league = None
-        self.cup = None
-        self.restream = None
-        self.commentary = None
-        self.tracker = None
+        self.league = "Nein"
+        self.cup = "Nein"
+        self.restream = "Nein"
+        self.commentary = "Nein"
+        self.tracker = "Nein"
 
-        self.add_item(YesNoSelect("league"))
-        self.add_item(YesNoSelect("cup"))
-        self.add_item(YesNoSelect("restream"))
-        self.add_item(YesNoSelect("commentary"))
-        self.add_item(YesNoSelect("tracker"))
+        self.add_item(ToggleButton("league", "League", 0))
+        self.add_item(ToggleButton("cup", "Cup", 0))
+        self.add_item(ToggleButton("restream", "Restream", 0))
+        self.add_item(ToggleButton("commentary", "Commentary", 0))
+        self.add_item(ToggleButton("tracker", "Tracker", 0))
 
-    @discord.ui.button(label="Twitch setzen", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Twitch setzen", style=discord.ButtonStyle.primary, row=1)
     async def twitch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TwitchModal(self))
 
-    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=1)
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nicht dein Formular.", ephemeral=True)
             return
 
         try:
+            await interaction.response.defer(ephemeral=True)
+
             ws = get_worksheet()
 
             if not is_signup_open(ws):
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Die Anmeldephase ist vorbei.",
-                    ephemeral=True
-                )
-                return
-
-            missing = [
-                f for f in ["league", "cup", "restream", "commentary", "tracker"]
-                if getattr(self, f) is None
-            ]
-            if missing:
-                await interaction.response.send_message(
-                    "Bitte alles ausfüllen.",
                     ephemeral=True
                 )
                 return
@@ -243,10 +248,10 @@ class SignupView(discord.ui.View):
                 self.tracker
             )
 
-            await interaction.response.edit_message(content=result, view=None)
+            await interaction.followup.send(result, ephemeral=True)
 
         except Exception as e:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Fehler beim Absenden: {e}",
                 ephemeral=True
             )
