@@ -18,11 +18,6 @@ GOOGLE_CREDENTIALS_FILE = "credentials.json"
 
 ADMIN_ROLE_NAMES = {"Admin", "Orga", "TFL Admin"}
 
-YES_NO_OPTIONS = [
-    discord.SelectOption(label="Ja", value="Ja"),
-    discord.SelectOption(label="Nein", value="Nein"),
-]
-
 # =========================================================
 # GOOGLE SHEET
 # =========================================================
@@ -48,6 +43,10 @@ def is_signup_open(ws) -> bool:
 
 def normalize_name(value: str) -> str:
     return value.strip().lower()
+
+
+def normalize_yes_no(value: str) -> str:
+    return "Ja" if (value or "").strip().lower() == "ja" else "Nein"
 
 
 def find_name_row(ws, name: str) -> Optional[int]:
@@ -101,6 +100,31 @@ def get_row_values(ws, row: int):
     while len(values) < 8:
         values.append("")
     return values[:8]
+
+
+def get_existing_signup_data(ws, name: str) -> dict:
+    row = find_name_row(ws, name)
+
+    if row is None:
+        return {
+            "twitch": "",
+            "league": "Nein",
+            "cup": "Nein",
+            "restream": "Nein",
+            "commentary": "Nein",
+            "tracker": "Nein",
+        }
+
+    values = get_row_values(ws, row)
+
+    return {
+        "twitch": values[1].strip(),
+        "league": normalize_yes_no(values[2]),
+        "cup": normalize_yes_no(values[3]),
+        "restream": normalize_yes_no(values[4]),
+        "commentary": normalize_yes_no(values[5]),
+        "tracker": normalize_yes_no(values[6]),
+    }
 
 
 def format_signup_row(values: list[str]) -> str:
@@ -167,6 +191,7 @@ class TwitchModal(discord.ui.Modal, title="Twitchkanal"):
     def __init__(self, view):
         super().__init__()
         self.view_ref = view
+        self.twitch.default = view.twitch
 
     async def on_submit(self, interaction: discord.Interaction):
         self.view_ref.twitch = str(self.twitch.value).strip()
@@ -176,12 +201,21 @@ class TwitchModal(discord.ui.Modal, title="Twitchkanal"):
 class ToggleButton(discord.ui.Button):
     def __init__(self, field_name: str, label_name: str, row: int):
         super().__init__(
-            label=f"{label_name}: Nein",
+            label=label_name,
             style=discord.ButtonStyle.secondary,
             row=row
         )
         self.field_name = field_name
         self.label_name = label_name
+
+    def sync_state(self, view):
+        current_value = getattr(view, self.field_name, "Nein")
+        self.label = f"{self.label_name}: {current_value}"
+        self.style = (
+            discord.ButtonStyle.success
+            if current_value == "Ja"
+            else discord.ButtonStyle.secondary
+        )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
@@ -198,35 +232,36 @@ class ToggleButton(discord.ui.Button):
         new_value = "Ja" if current_value == "Nein" else "Nein"
         setattr(view, self.field_name, new_value)
 
-        self.label = f"{self.label_name}: {new_value}"
-        self.style = (
-            discord.ButtonStyle.success
-            if new_value == "Ja"
-            else discord.ButtonStyle.secondary
-        )
+        self.sync_state(view)
 
         await interaction.response.edit_message(view=view)
 
 
 class SignupView(discord.ui.View):
-    def __init__(self, user_id, name):
+    def __init__(self, user_id, name, initial_data: Optional[dict] = None):
         super().__init__(timeout=600)
 
         self.user_id = user_id
         self.name = name
 
-        self.twitch = ""
-        self.league = "Nein"
-        self.cup = "Nein"
-        self.restream = "Nein"
-        self.commentary = "Nein"
-        self.tracker = "Nein"
+        initial_data = initial_data or {}
 
-        self.add_item(ToggleButton("league", "League", 0))
-        self.add_item(ToggleButton("cup", "Cup", 0))
-        self.add_item(ToggleButton("restream", "Restream", 0))
-        self.add_item(ToggleButton("commentary", "Commentary", 0))
-        self.add_item(ToggleButton("tracker", "Tracker", 0))
+        self.twitch = initial_data.get("twitch", "")
+        self.league = normalize_yes_no(initial_data.get("league", "Nein"))
+        self.cup = normalize_yes_no(initial_data.get("cup", "Nein"))
+        self.restream = normalize_yes_no(initial_data.get("restream", "Nein"))
+        self.commentary = normalize_yes_no(initial_data.get("commentary", "Nein"))
+        self.tracker = normalize_yes_no(initial_data.get("tracker", "Nein"))
+
+        league_btn = ToggleButton("league", "League", 0)
+        cup_btn = ToggleButton("cup", "Cup", 0)
+        restream_btn = ToggleButton("restream", "Restream", 0)
+        commentary_btn = ToggleButton("commentary", "Commentary", 0)
+        tracker_btn = ToggleButton("tracker", "Tracker", 0)
+
+        for btn in [league_btn, cup_btn, restream_btn, commentary_btn, tracker_btn]:
+            btn.sync_state(self)
+            self.add_item(btn)
 
     @discord.ui.button(label="Twitch setzen", style=discord.ButtonStyle.primary, row=1)
     async def twitch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -295,7 +330,14 @@ class SignupCog(commands.Cog):
             await interaction.response.send_message("Die Anmeldephase ist vorbei.", ephemeral=True)
             return
 
-        view = SignupView(member.id, member.display_name.strip())
+        existing_data = get_existing_signup_data(ws, member.display_name.strip())
+
+        view = SignupView(
+            member.id,
+            member.display_name.strip(),
+            initial_data=existing_data
+        )
+
         await interaction.response.send_message(
             f"Anmeldung für **{member.display_name}**",
             view=view,
