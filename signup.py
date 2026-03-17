@@ -96,6 +96,63 @@ def process_signup(name, twitch, league, cup, restream, commentary, tracker):
     return "Deine Anmeldung wurde eingetragen."
 
 
+def get_row_values(ws, row: int):
+    values = ws.row_values(row)
+    while len(values) < 8:
+        values.append("")
+    return values[:8]
+
+
+def format_signup_row(values: list[str]) -> str:
+    return (
+        f"**Name:** {values[0] or '-'}\n"
+        f"**Twitch:** {values[1] or '-'}\n"
+        f"**League:** {values[2] or '-'}\n"
+        f"**Cup:** {values[3] or '-'}\n"
+        f"**Restream:** {values[4] or '-'}\n"
+        f"**Commentary:** {values[5] or '-'}\n"
+        f"**Tracker:** {values[6] or '-'}\n"
+        f"**Status:** {values[7] or '-'}"
+    )
+
+
+def get_names_by_column_value(ws, column_index: int, target_value: str):
+    rows = ws.get_all_values()
+    matches = []
+
+    for row in rows:
+        if len(row) < column_index:
+            continue
+
+        name = row[0].strip()
+        value = row[column_index - 1].strip().lower()
+
+        if name and value == target_value.lower():
+            matches.append(name)
+
+    return matches
+
+
+def reset_signup_data(ws):
+    rows = ws.get_all_values()
+    count = 0
+
+    for i, row in enumerate(rows, start=1):
+        if not row or not row[0].strip():
+            continue
+
+        if i == 2 and row[0].lower() in ["open", "closed"]:
+            continue
+
+        ws.update(
+            f"C{i}:H{i}",
+            [["Nein", "Nein", "Nein", "Nein", "Nein", "nicht gemeldet"]]
+        )
+        count += 1
+
+    return count
+
+
 # =========================================================
 # UI
 # =========================================================
@@ -203,87 +260,66 @@ class SignupCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(
-        name="switchsignup",
-        description="Öffnet oder schließt die Anmeldung."
-    )
-    @app_commands.guilds(discord.Object(id=GUILD_ID))
-    async def switchsignup(self, interaction: discord.Interaction):
-        member = interaction.user
-
-        if not isinstance(member, discord.Member):
-            await interaction.response.send_message(
-                "Nur auf dem Server nutzbar.",
-                ephemeral=True
-            )
-            return
-
-        roles = [r.name for r in member.roles]
-        if not (
-            member.guild_permissions.administrator
-            or any(r in ADMIN_ROLE_NAMES for r in roles)
-        ):
-            await interaction.response.send_message(
-                "Keine Rechte.",
-                ephemeral=True
-            )
-            return
-
-        try:
-            ws = get_worksheet()
-            current = (ws.acell("A2").value or "").strip().lower()
-            new_value = "Closed" if current == "open" else "Open"
-
-            ws.update_acell("A2", new_value)
-
-            await interaction.response.send_message(
-                f"Status: {new_value}",
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(
-                f"Fehler beim Umschalten der Anmeldung: {e}",
-                ephemeral=True
-            )
-
-    @app_commands.command(
-        name="signup",
-        description="Meldet dich für die kommende Saison an."
-    )
+    @app_commands.command(name="signup", description="Anmelden")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def signup(self, interaction: discord.Interaction):
         member = interaction.user
 
         if not isinstance(member, discord.Member):
-            await interaction.response.send_message(
-                "Nur auf dem Server nutzbar.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("Nur Server.", ephemeral=True)
             return
 
-        try:
-            ws = get_worksheet()
+        ws = get_worksheet()
+        if not is_signup_open(ws):
+            await interaction.response.send_message("Die Anmeldephase ist vorbei.", ephemeral=True)
+            return
 
-            if not is_signup_open(ws):
-                await interaction.response.send_message(
-                    "Die Anmeldephase ist vorbei.",
-                    ephemeral=True
-                )
-                return
+        view = SignupView(member.id, member.display_name.strip())
+        await interaction.response.send_message(f"Anmeldung für **{member.display_name}**", view=view, ephemeral=True)
 
-            name = member.display_name.strip()
-            view = SignupView(member.id, name)
+    @app_commands.command(name="signstat")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def signstat(self, interaction: discord.Interaction):
+        ws = get_worksheet()
+        row = find_name_row(ws, interaction.user.display_name)
 
-            await interaction.response.send_message(
-                f"Anmeldung für **{name}**",
-                view=view,
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(
-                f"Fehler beim Öffnen der Anmeldung: {e}",
-                ephemeral=True
-            )
+        if not row:
+            await interaction.response.send_message("Kein Eintrag gefunden.", ephemeral=True)
+            return
+
+        values = get_row_values(ws, row)
+        await interaction.response.send_message(format_signup_row(values), ephemeral=True)
+
+    @app_commands.command(name="leaguesign")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def leaguesign(self, interaction: discord.Interaction):
+        ws = get_worksheet()
+        names = get_names_by_column_value(ws, 3, "Ja")
+
+        if not names:
+            await interaction.response.send_message("Keine League-Anmeldungen.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("\n".join(names), ephemeral=True)
+
+    @app_commands.command(name="cupsign")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def cupsign(self, interaction: discord.Interaction):
+        ws = get_worksheet()
+        names = get_names_by_column_value(ws, 4, "Ja")
+
+        if not names:
+            await interaction.response.send_message("Keine Cup-Anmeldungen.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("\n".join(names), ephemeral=True)
+
+    @app_commands.command(name="resetsign")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def resetsign(self, interaction: discord.Interaction):
+        ws = get_worksheet()
+        count = reset_signup_data(ws)
+        await interaction.response.send_message(f"{count} Einträge zurückgesetzt.", ephemeral=True)
 
 
 async def setup(bot):
