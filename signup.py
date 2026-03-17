@@ -153,6 +153,10 @@ def reset_signup_data(ws):
     return count
 
 
+def has_admin_role(member: discord.Member) -> bool:
+    return any(role.name in ADMIN_ROLE_NAMES for role in member.roles)
+
+
 # =========================================================
 # UI
 # =========================================================
@@ -181,6 +185,14 @@ class ToggleButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
+
+        if not isinstance(view, SignupView):
+            await interaction.response.send_message("Fehler: Ungültige View.", ephemeral=True)
+            return
+
+        if interaction.user.id != view.user_id:
+            await interaction.response.send_message("Nicht dein Formular.", ephemeral=True)
+            return
 
         current_value = getattr(view, self.field_name)
         new_value = "Ja" if current_value == "Nein" else "Nein"
@@ -218,6 +230,10 @@ class SignupView(discord.ui.View):
 
     @discord.ui.button(label="Twitch setzen", style=discord.ButtonStyle.primary, row=1)
     async def twitch_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nicht dein Formular.", ephemeral=True)
+            return
+
         await interaction.response.send_modal(TwitchModal(self))
 
     @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=1)
@@ -280,11 +296,15 @@ class SignupCog(commands.Cog):
             return
 
         view = SignupView(member.id, member.display_name.strip())
-        await interaction.response.send_message(f"Anmeldung für **{member.display_name}**", view=view, ephemeral=True)
+        await interaction.response.send_message(
+            f"Anmeldung für **{member.display_name}**",
+            view=view,
+            ephemeral=True
+        )
 
     @app_commands.command(
-    name="signstat",
-    description="Zeigt deinen Eintrag."
+        name="signstat",
+        description="Zeigt deinen Eintrag."
     )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def signstat(self, interaction: discord.Interaction):
@@ -295,35 +315,36 @@ class SignupCog(commands.Cog):
                 "Nur Server.",
                 ephemeral=True
             )
-        return
+            return
 
-    await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
 
-    try:
-        ws = get_worksheet()
-        name = member.display_name.strip()
-        row = find_name_row(ws, name)
+        try:
+            ws = get_worksheet()
+            name = member.display_name.strip()
+            row = find_name_row(ws, name)
 
-        if row is None:
+            if row is None:
+                await interaction.followup.send(
+                    "Es wurde kein Eintrag mit deinem Namen gefunden.",
+                    ephemeral=True
+                )
+                return
+
+            values = get_row_values(ws, row)
+
             await interaction.followup.send(
-                "Es wurde kein Eintrag mit deinem Namen gefunden.",
+                format_signup_row(values),
                 ephemeral=True
             )
-        return
 
-        values = ws.row_values(row)
-
+        except Exception as e:
             await interaction.followup.send(
-            f"Dein Eintrag wurde gefunden: Zeile {row}\n```{values}```",
-            ephemeral=True
-        )
+                f"Fehler beim Abrufen deines Eintrags: {e}",
+                ephemeral=True
+            )
 
-    except Exception as e:
-        await interaction.followup.send(
-            f"Fehler beim Abrufen deines Eintrags: {e}",
-            ephemeral=True
-        )
-    @app_commands.command(name="cupsign")
+    @app_commands.command(name="cupsign", description="Zeigt alle Cup-Anmeldungen")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def cupsign(self, interaction: discord.Interaction):
         ws = get_worksheet()
@@ -335,12 +356,28 @@ class SignupCog(commands.Cog):
 
         await interaction.response.send_message("\n".join(names), ephemeral=True)
 
-    @app_commands.command(name="resetsign")
+    @app_commands.command(name="resetsign", description="Setzt alle Signups zurück")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def resetsign(self, interaction: discord.Interaction):
+        member = interaction.user
+
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("Nur Server.", ephemeral=True)
+            return
+
+        if not has_admin_role(member):
+            await interaction.response.send_message(
+                "Dafür fehlen dir die Rechte.",
+                ephemeral=True
+            )
+            return
+
         ws = get_worksheet()
         count = reset_signup_data(ws)
-        await interaction.response.send_message(f"{count} Einträge zurückgesetzt.", ephemeral=True)
+        await interaction.response.send_message(
+            f"{count} Einträge zurückgesetzt.",
+            ephemeral=True
+        )
 
 
 async def setup(bot):
