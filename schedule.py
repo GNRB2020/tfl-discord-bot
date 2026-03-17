@@ -21,7 +21,7 @@ TIMEZONE = ZoneInfo("Europe/Berlin")
 DATETIME_FORMAT = "%d.%m.%Y %H:%M"
 
 # Zielkanal für Ergebnis-Posts
-RESULTS_CHANNEL_ID = 1275077562984435853
+RESULTS_CHANNEL_ID = 1275081670688510002
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
