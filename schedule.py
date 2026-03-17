@@ -21,8 +21,7 @@ TIMEZONE = ZoneInfo("Europe/Berlin")
 DATETIME_FORMAT = "%d.%m.%Y %H:%M"
 
 # Zielkanal für Ergebnis-Posts
-RESULTS_CATEGORY_NAME = "Try Force Cup"
-RESULTS_CHANNEL_NAME = "ergebnisse"
+RESULTS_CHANNEL_ID = 1275077562984435853
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -187,24 +186,13 @@ def load_open_matches():
 
 
 def find_results_channel(guild: discord.Guild) -> discord.TextChannel | None:
-    """
-    Sucht bevorzugt:
-    Kategorie: Try Force Cup
-    Kanal: ergebnisse
-    """
-    target_category = normalize_text(RESULTS_CATEGORY_NAME).lower()
-    target_channel = normalize_text(RESULTS_CHANNEL_NAME).lower()
+    channel = guild.get_channel(RESULTS_CHANNEL_ID)
 
-    for channel in guild.text_channels:
-        if channel.name.lower() != target_channel:
-            continue
+    if channel is None:
+        return None
 
-        if channel.category and channel.category.name.lower() == target_category:
-            return channel
-
-    for channel in guild.text_channels:
-        if channel.name.lower() == target_channel:
-            return channel
+    if isinstance(channel, discord.TextChannel):
+        return channel
 
     return None
 
@@ -219,35 +207,24 @@ async def post_result_message(
     channel = find_results_channel(guild)
 
     if channel is None:
-        return False, (
-            f"Ergebnis gespeichert, aber #{RESULTS_CHANNEL_NAME} in "
-            f"'{RESULTS_CATEGORY_NAME}' nicht gefunden."
-        )
+        return False, f"Ergebnis gespeichert, aber Ergebniskanal {RESULTS_CHANNEL_ID} nicht gefunden."
 
-    status_text = "Abgeschlossen" if is_finished_result(result_text, match_data["mode"]) else "Zwischenstand"
+    now_str = datetime.now(TIMEZONE).strftime("%d.%m.%Y %H:%M")
 
-    lines = [
-        f"**TFL Cup Ergebnis**",
-        f"**Begegnung:** {match_data['player1']} vs. {match_data['player2']}",
-        f"**Runde:** {match_data['round']}",
-        f"**Modus:** {match_data['mode']}",
-        f"**Status:** {status_text}",
-        f"**Ergebnis:** {result_text}",
-        f"**Eingetragen von:** {submitted_by.mention}",
-    ]
-
-    if raceroom_link:
-        lines.append(f"**Raceroom-Link:** {raceroom_link}")
-
-    message = "\n".join(lines)
+    message = (
+        f"[TFL Cup] {now_str}\n"
+        f"{match_data['player1']} vs. {match_data['player2']} -> {result_text}\n"
+        f"Modus: {match_data['round']}\n"
+        f"Raceroom: {raceroom_link if raceroom_link else '-'}"
+    )
 
     try:
         await channel.send(message)
-        return True, f"Ergebnis zusätzlich in {channel.mention} gepostet."
+        return True, f"Ergebnis zusätzlich in <#{RESULTS_CHANNEL_ID}> gepostet."
     except discord.Forbidden:
-        return False, "Ergebnis gespeichert, aber ich darf nicht in den Ergebnis-Kanal schreiben."
+        return False, "Ergebnis gespeichert, aber ich darf nicht in den Ergebniskanal schreiben."
     except Exception as e:
-        return False, f"Ergebnis gespeichert, aber Post im Ergebnis-Kanal fehlgeschlagen: {e}"
+        return False, f"Ergebnis gespeichert, aber Post im Ergebniskanal fehlgeschlagen: {e}"
 
 
 # =========================
