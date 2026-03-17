@@ -7,14 +7,14 @@ import discord
 import gspread
 from discord import app_commands
 from discord.ext import commands
-from google.oauth2.service_account import Credentials
+from oauth2client.service_account import ServiceAccountCredentials
 
 # =========================
 # ANPASSEN
 # =========================
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
-CUP_SPREADSHEET_NAME = "TFL Cup"
-CUP_WORKSHEET_NAME = "TFL Cup"  # Falls der Tabellen-Tab anders heißt, hier ändern
+SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
+WORKSHEET_GID = 47251903
 TIMEZONE = ZoneInfo("Europe/Berlin")
 
 # Falls du lieber ein anderes Datumsformat in Spalte E willst:
@@ -33,31 +33,34 @@ SCOPES = [
 # =========================
 # GOOGLE SHEETS
 # =========================
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+
+CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+
+
 def get_gspread_client() -> gspread.Client:
-    """
-    Unterstützt entweder:
-    - Env-Variable GOOGLE_CREDENTIALS_JSON
-    - oder lokale Datei credentials.json
-    """
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-
-    if creds_json:
-        info = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    else:
-        creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
     return gspread.authorize(creds)
 
 
 def get_cup_worksheet():
     client = get_gspread_client()
-    spreadsheet = client.open(CUP_SPREADSHEET_NAME)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
-    try:
-        return spreadsheet.worksheet(CUP_WORKSHEET_NAME)
-    except gspread.WorksheetNotFound:
-        return spreadsheet.sheet1
+    print("DEBUG spreadsheet geöffnet:", spreadsheet.title)
+
+    for ws in spreadsheet.worksheets():
+        print("DEBUG worksheet:", ws.title, "| id:", ws.id)
+        if ws.id == WORKSHEET_GID:
+            print("DEBUG passendes worksheet gefunden:", ws.title)
+            return ws
+
+    raise RuntimeError(
+        f"Worksheet mit gid/id {WORKSHEET_GID} nicht gefunden."
+    )
 
 
 # =========================
