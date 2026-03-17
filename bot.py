@@ -15,8 +15,6 @@ from datetime import datetime as dt, timedelta
 import aiohttp
 import sys
 import traceback
-from signup import setup_signup
-setup_signup(bot)
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
@@ -52,7 +50,12 @@ print("DEBUG Intents:", intents)
 # Discord Client + CommandTree
 # =========================================================
 
-client = commands.Bot(command_prefix="!", intents=intents)
+class TFLBot(commands.Bot):
+    async def setup_hook(self):
+        await self.load_extension("signup")
+        print("✅ signup.py geladen")
+
+client = TFLBot(command_prefix="!", intents=intents)
 
 # Wichtig: jetzt existiert tree wirklich
 tree = client.tree
