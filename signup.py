@@ -285,16 +285,16 @@ class SignupCog(commands.Cog):
     @app_commands.command(
     name="signstat",
     description="Zeigt deinen Eintrag."
-)
+    )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def signstat(self, interaction: discord.Interaction):
         member = interaction.user
 
         if not isinstance(member, discord.Member):
             await interaction.response.send_message(
-            "Nur Server.",
-            ephemeral=True
-        )
+                "Nur Server.",
+                ephemeral=True
+            )
         return
 
     await interaction.response.defer(ephemeral=True)
@@ -309,17 +309,18 @@ class SignupCog(commands.Cog):
                 "Es wurde kein Eintrag mit deinem Namen gefunden.",
                 ephemeral=True
             )
-            return
+        return
 
-        values = get_row_values(ws, row)
+        values = ws.row_values(row)
 
-        await interaction.followup.send(
-            format_signup_row(values),
+            await interaction.followup.send(
+            f"Dein Eintrag wurde gefunden: Zeile {row}\n```{values}```",
             ephemeral=True
         )
+
     except Exception as e:
         await interaction.followup.send(
-            f"Fehler bei /signstat: {e}",
+            f"Fehler beim Abrufen deines Eintrags: {e}",
             ephemeral=True
         )
     @app_commands.command(name="cupsign")
