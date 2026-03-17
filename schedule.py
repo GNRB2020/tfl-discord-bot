@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 # =========================
 # ANPASSEN
 # =========================
-GUILD_ID = 123456789012345678  # <-- deine Server-ID
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 CUP_SPREADSHEET_NAME = "TFL Cup"
 CUP_WORKSHEET_NAME = "TFL Cup"  # Falls der Tabellen-Tab anders heißt, hier ändern
 TIMEZONE = ZoneInfo("Europe/Berlin")
