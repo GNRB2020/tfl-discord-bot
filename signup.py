@@ -233,7 +233,6 @@ class ToggleButton(discord.ui.Button):
         setattr(view, self.field_name, new_value)
 
         self.sync_state(view)
-
         await interaction.response.edit_message(view=view)
 
 
@@ -325,24 +324,37 @@ class SignupCog(commands.Cog):
             await interaction.response.send_message("Nur Server.", ephemeral=True)
             return
 
-        ws = get_worksheet()
-        if not is_signup_open(ws):
-            await interaction.response.send_message("Die Anmeldephase ist vorbei.", ephemeral=True)
-            return
+        await interaction.response.defer(ephemeral=True)
 
-        existing_data = get_existing_signup_data(ws, member.display_name.strip())
+        try:
+            ws = get_worksheet()
 
-        view = SignupView(
-            member.id,
-            member.display_name.strip(),
-            initial_data=existing_data
-        )
+            if not is_signup_open(ws):
+                await interaction.followup.send(
+                    "Die Anmeldephase ist vorbei.",
+                    ephemeral=True
+                )
+                return
 
-        await interaction.response.send_message(
-            f"Anmeldung für **{member.display_name}**",
-            view=view,
-            ephemeral=True
-        )
+            existing_data = get_existing_signup_data(ws, member.display_name.strip())
+
+            view = SignupView(
+                member.id,
+                member.display_name.strip(),
+                initial_data=existing_data
+            )
+
+            await interaction.followup.send(
+                f"Anmeldung für **{member.display_name}**",
+                view=view,
+                ephemeral=True
+            )
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Laden der Anmeldung: {e}",
+                ephemeral=True
+            )
 
     @app_commands.command(
         name="signstat",
