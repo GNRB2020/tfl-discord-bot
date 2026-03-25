@@ -31,12 +31,12 @@ BERLIN_TZ = pytz.timezone("Europe/Berlin")
 print("DEBUG matchcenter CREDS_FILE =", CREDS_FILE)
 
 DIVISION_SHEETS = {
-    "Div 1": "1.DIV",
-    "Div 2": "2.DIV",
-    "Div 3": "3.DIV",
-    "Div 4": "4.DIV",
-    "Div 5": "5.DIV",
-    "Div 6": "6.DIV",
+    "1.Division": "1.DIV",
+    "2.Division": "2.DIV",
+    "3.Division": "3.DIV",
+    "4.Division": "4.DIV",
+    "5.Division": "5.DIV",
+    "6.Division": "6.DIV",
 }
 
 DIVISION_VALUES = {
