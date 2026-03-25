@@ -55,7 +55,6 @@ DIV_COL_LEFT = 4      # D
 DIV_COL_MARKER = 5    # E
 DIV_COL_RIGHT = 6     # F
 
-# TFL Cup
 CUP_COL_ROUND = 1     # A
 CUP_COL_P1 = 2        # B
 CUP_COL_RESULT = 3    # C
@@ -195,7 +194,7 @@ def get_div_ws_from_label(division_label: str):
 def get_runner_modes() -> list[str]:
     sheets_required()
     ws = WB.worksheet(RUNNER_SHEET)
-    values = ws.col_values(14)  # N
+    values = ws.col_values(14)
 
     out = []
     seen = set()
@@ -227,23 +226,38 @@ def build_multistream_url(player1: str, player2: str) -> str:
 
 
 def result_league_from_value(value: str) -> str:
-    mapping = {
+    return {
         "spieler1": "2:0",
         "spieler2": "0:2",
         "remis": "1:1",
-    }
-    return mapping[value]
+    }[value]
 
 
 def result_cup_from_value(round_name: str, value: str) -> str:
     if round_name in {"Semifinals", "Finals"}:
         return value
-
-    mapping = {
+    return {
         "spieler1": "1:0",
         "spieler2": "0:1",
-    }
-    return mapping[value]
+    }[value]
+
+
+def league_result_post_text(division_label: str, timestamp: str, p1: str, p2: str, result: str, mode: str, racetime: str) -> str:
+    return (
+        f"[{division_label.replace('Div', 'Division')}] {timestamp}\n"
+        f"{p1} vs {p2} → {result}\n"
+        f"Modus: {mode}\n"
+        f"Raceroom: {racetime}"
+    )
+
+
+def cup_result_post_text(timestamp: str, round_label: str, p1: str, p2: str, result: str, racetime: str) -> str:
+    return (
+        f"[TFL Cup {round_label}] {timestamp}\n"
+        f"{p1} vs {p2} → {result}\n"
+        f"Modus: Cup\n"
+        f"Raceroom: {racetime}"
+    )
 
 
 # =========================================================
@@ -342,11 +356,11 @@ def normalize_round_label(raw_round: str) -> str:
         return "Last 32"
     if raw in {"L16", "LAST16", "LAST 16"}:
         return "Last 16"
-    if raw in {"QF", "QUARTERFINALS", "QUARTERFINALS"}:
+    if raw in {"QF", "QUARTERFINAL", "QUARTERFINALS"}:
         return "Quarterfinals"
-    if raw in {"SF", "SEMIFINALS", "SEMIFINAL"}:
+    if raw in {"SF", "SEMIFINAL", "SEMIFINALS"}:
         return "Semifinals"
-    if raw in {"FIN", "F", "FINAL", "FINALS"}:
+    if raw in {"FIN", "FINAL", "FINALS", "F"}:
         return "Finals"
 
     return clean_text(raw_round)
@@ -356,10 +370,8 @@ def is_cup_match_open(round_label: str, result_value: str) -> bool:
     result_clean = clean_text(result_value)
 
     if round_label in {"Semifinals", "Finals"}:
-        # offen solange noch kein 2er-Endstand eingetragen ist
         return "2" not in result_clean
 
-    # alle früheren Runden: offen nur ohne Ergebnis
     return result_clean == ""
 
 
@@ -414,15 +426,11 @@ def get_open_cup_matches(selected_round: str | None = None):
 def append_series_racetime(existing_text: str, score: str, link: str) -> str:
     existing = existing_text.strip() if existing_text else ""
     new_line = f"{score} | {link}".strip()
-
-    if existing:
-        return existing + "\n" + new_line
-    return new_line
+    return existing + "\n" + new_line if existing else new_line
 
 
 def write_cup_result_standard(row_index: int, result: str, racetime_link: str, entered_meta: str):
     ws = WB.worksheet(CUP_SHEET)
-
     reqs = [
         {"range": f"C{row_index}:C{row_index}", "values": [[result]]},
         {"range": f"E{row_index}:E{row_index}", "values": [[racetime_link]]},
@@ -433,7 +441,6 @@ def write_cup_result_standard(row_index: int, result: str, racetime_link: str, e
 
 def write_cup_result_series(row_index: int, series_score: str, racetime_link: str, entered_meta: str):
     ws = WB.worksheet(CUP_SHEET)
-
     existing_racetime = ws.acell(f"E{row_index}").value or ""
     combined_racetime = append_series_racetime(existing_racetime, series_score, racetime_link)
 
@@ -482,40 +489,43 @@ async def send_result_post(guild: discord.Guild, text: str):
 class MatchCenterState:
     def __init__(self):
         self.kind: str | None = None
-
         self.division: str | None = None
         self.home_player: str | None = None
-
         self.match_label: str | None = None
         self.match_row_index: int | None = None
         self.player1: str | None = None
         self.player2: str | None = None
-
         self.mode: str | None = None
         self.cup_round: str | None = None
         self.winner_value: str | None = None
         self.racetime_link: str | None = None
-
         self.date_str: str | None = None
         self.time_str: str | None = None
+
+    def clone(self):
+        new = MatchCenterState()
+        new.kind = self.kind
+        new.division = self.division
+        new.home_player = self.home_player
+        new.match_label = self.match_label
+        new.match_row_index = self.match_row_index
+        new.player1 = self.player1
+        new.player2 = self.player2
+        new.mode = self.mode
+        new.cup_round = self.cup_round
+        new.winner_value = self.winner_value
+        new.racetime_link = self.racetime_link
+        new.date_str = self.date_str
+        new.time_str = self.time_str
+        return new
 
 
 # =========================================================
 # MODALS
 # =========================================================
 class DateTimeModal(discord.ui.Modal, title="Datum und Uhrzeit"):
-    date_input = discord.ui.TextInput(
-        label="Datum",
-        placeholder="26.03.2026",
-        required=True,
-        max_length=10,
-    )
-    time_input = discord.ui.TextInput(
-        label="Uhrzeit",
-        placeholder="20:30",
-        required=True,
-        max_length=5,
-    )
+    date_input = discord.ui.TextInput(label="Datum", placeholder="26.03.2026", required=True, max_length=10)
+    time_input = discord.ui.TextInput(label="Uhrzeit", placeholder="20:30", required=True, max_length=5)
 
     def __init__(self, parent_view):
         super().__init__()
@@ -545,7 +555,7 @@ class DateTimeModal(discord.ui.Modal, title="Datum und Uhrzeit"):
 
 class RacetimeModal(discord.ui.Modal, title="Racetime-Link"):
     racetime_input = discord.ui.TextInput(
-        label="Racetime-Link",
+        label="Raceroom-Link",
         placeholder="https://racetime.gg/...",
         required=True,
         max_length=300,
@@ -606,7 +616,7 @@ class BaseFlowView(discord.ui.View):
         if s.time_str:
             lines.append(f"**Uhrzeit:** {s.time_str}")
         if s.racetime_link:
-            lines.append(f"**Racetime:** {s.racetime_link}")
+            lines.append(f"**Raceroom:** {s.racetime_link}")
 
         return "\n".join(lines)
 
@@ -617,17 +627,11 @@ class BaseFlowView(discord.ui.View):
 class DivisionSelect(discord.ui.Select):
     def __init__(self):
         options = [discord.SelectOption(label=f"Div {i}", value=f"Div {i}") for i in range(1, 7)]
-        super().__init__(
-            placeholder="Welche Division?",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=0,
-        )
+        super().__init__(placeholder="Welche Division?", min_values=1, max_values=1, options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-        if not isinstance(view, (LeagueScheduleView, LeagueResultView)):
+        if not isinstance(view, (LeagueScheduleView, LeagueResultViewStep1)):
             return
 
         view.state.division = self.values[0]
@@ -636,29 +640,19 @@ class DivisionSelect(discord.ui.Select):
         view.state.match_row_index = None
         view.state.player1 = None
         view.state.player2 = None
-
         view.rebuild_dynamic_items()
 
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view,
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class HomePlayerSelect(discord.ui.Select):
     def __init__(self, players: list[str]):
         options = [discord.SelectOption(label=p[:100], value=p) for p in players[:25]]
-        super().__init__(
-            placeholder="Wer hat Heimrecht?",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=1,
-        )
+        super().__init__(placeholder="Wer hat Heimrecht?", min_values=1, max_values=1, options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-        if not isinstance(view, (LeagueScheduleView, LeagueResultView)):
+        if not isinstance(view, (LeagueScheduleView, LeagueResultViewStep1)):
             return
 
         view.state.home_player = self.values[0]
@@ -666,61 +660,40 @@ class HomePlayerSelect(discord.ui.Select):
         view.state.match_row_index = None
         view.state.player1 = None
         view.state.player2 = None
-
         view.rebuild_dynamic_items()
 
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view,
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class LeagueMatchSelect(discord.ui.Select):
     def __init__(self, matches: list[dict]):
-        options = []
-        for m in matches[:25]:
-            options.append(
-                discord.SelectOption(
-                    label=m["label"][:100],
-                    value=f'{m["row_index"]}|{m["heim"]}|{m["gast"]}|{m["label"]}',
-                )
+        options = [
+            discord.SelectOption(
+                label=m["label"][:100],
+                value=f'{m["row_index"]}|{m["heim"]}|{m["gast"]}|{m["label"]}',
             )
-        super().__init__(
-            placeholder="Spiel auswählen",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=2,
-        )
+            for m in matches[:25]
+        ]
+        super().__init__(placeholder="Spiel auswählen", min_values=1, max_values=1, options=options, row=2)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-        if not isinstance(view, (LeagueScheduleView, LeagueResultView)):
+        if not isinstance(view, (LeagueScheduleView, LeagueResultViewStep1)):
             return
 
-        raw = self.values[0]
-        row_index, p1, p2, label = raw.split("|", 3)
-
+        row_index, p1, p2, label = self.values[0].split("|", 3)
         view.state.match_row_index = int(row_index)
         view.state.player1 = p1
         view.state.player2 = p2
         view.state.match_label = label
 
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view,
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class CupMatchSelect(discord.ui.Select):
     def __init__(self, matches: list[dict]):
         if not matches:
-            options = [
-                discord.SelectOption(
-                    label="Keine offenen Cup-Spiele gefunden",
-                    value="0|Keine offenen Cup-Spiele gefunden| | ",
-                )
-            ]
+            options = [discord.SelectOption(label="Keine offenen Cup-Spiele gefunden", value="0|Keine offenen Cup-Spiele gefunden| | ")]
             disabled = True
         else:
             options = [
@@ -732,28 +705,16 @@ class CupMatchSelect(discord.ui.Select):
             ]
             disabled = False
 
-        super().__init__(
-            placeholder="Spiel auswählen",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=1,
-            disabled=disabled,
-        )
+        super().__init__(placeholder="Spiel auswählen", min_values=1, max_values=1, options=options, row=1, disabled=disabled)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if not isinstance(view, (CupScheduleView, CupResultView)):
             return
 
-        raw = self.values[0]
-        row_index, label, p1, p2 = raw.split("|", 3)
-
+        row_index, label, p1, p2 = self.values[0].split("|", 3)
         if row_index == "0":
-            await interaction.response.send_message(
-                "Es wurden keine offenen Cup-Spiele gefunden.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Es wurden keine offenen Cup-Spiele gefunden.", ephemeral=True)
             return
 
         view.state.match_row_index = int(row_index)
@@ -761,43 +722,25 @@ class CupMatchSelect(discord.ui.Select):
         view.state.player1 = p1
         view.state.player2 = p2
 
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view,
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class ModeSelect(discord.ui.Select):
     def __init__(self, modes: list[str], row: int):
         options = [discord.SelectOption(label=m[:100], value=m) for m in modes[:25]]
-        super().__init__(
-            placeholder="Welcher Modus?",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=row,
-        )
+        super().__init__(placeholder="Welcher Modus?", min_values=1, max_values=1, options=options, row=row)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if isinstance(view, BaseFlowView):
             view.state.mode = self.values[0]
-            await interaction.response.edit_message(
-                content=view.render_summary(),
-                view=view,
-            )
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class CupRoundSelect(discord.ui.Select):
     def __init__(self):
         options = [discord.SelectOption(label=r, value=r) for r in CUP_ROUNDS]
-        super().__init__(
-            placeholder="Welche Runde?",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=0,
-        )
+        super().__init__(placeholder="Welche Runde?", min_values=1, max_values=1, options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
@@ -813,15 +756,11 @@ class CupRoundSelect(discord.ui.Select):
 
         if isinstance(view, CupScheduleView):
             view.rebuild_match_select()
-
         if isinstance(view, CupResultView):
             view.rebuild_match_select()
             view.rebuild_winner_select()
 
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view,
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class LeagueWinnerSelect(discord.ui.Select):
@@ -831,22 +770,13 @@ class LeagueWinnerSelect(discord.ui.Select):
             discord.SelectOption(label="Spieler 2", value="spieler2"),
             discord.SelectOption(label="Remis", value="remis"),
         ]
-        super().__init__(
-            placeholder="Wer hat gewonnen?",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=4,
-        )
+        super().__init__(placeholder="Wer hat gewonnen?", min_values=1, max_values=1, options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-        if isinstance(view, LeagueResultView):
+        if isinstance(view, LeagueResultViewStep2):
             view.state.winner_value = self.values[0]
-            await interaction.response.edit_message(
-                content=view.render_summary(),
-                view=view,
-            )
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class CupWinnerNormalSelect(discord.ui.Select):
@@ -855,22 +785,13 @@ class CupWinnerNormalSelect(discord.ui.Select):
             discord.SelectOption(label="Spieler 1", value="spieler1"),
             discord.SelectOption(label="Spieler 2", value="spieler2"),
         ]
-        super().__init__(
-            placeholder="Wer hat gewonnen?",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=2,
-        )
+        super().__init__(placeholder="Wer hat gewonnen?", min_values=1, max_values=1, options=options, row=2)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if isinstance(view, CupResultView):
             view.state.winner_value = self.values[0]
-            await interaction.response.edit_message(
-                content=view.render_summary(),
-                view=view,
-            )
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 class CupWinnerSeriesSelect(discord.ui.Select):
@@ -884,22 +805,13 @@ class CupWinnerSeriesSelect(discord.ui.Select):
             discord.SelectOption(label="2:1", value="2:1"),
             discord.SelectOption(label="1:2", value="1:2"),
         ]
-        super().__init__(
-            placeholder="Aktueller Serienstand",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=2,
-        )
+        super().__init__(placeholder="Aktueller Serienstand", min_values=1, max_values=1, options=options, row=2)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if isinstance(view, CupResultView):
             view.state.winner_value = self.values[0]
-            await interaction.response.edit_message(
-                content=view.render_summary(),
-                view=view,
-            )
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 # =========================================================
@@ -917,7 +829,10 @@ class MatchCenterStartView(BaseFlowView):
             await interaction.response.edit_message(content=view.render_summary(), view=view)
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(f"❌ Fehler bei Termin League: {e}", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Fehler bei Termin League: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Fehler bei Termin League: {e}", ephemeral=True)
 
     @discord.ui.button(label="Termin Cup", style=discord.ButtonStyle.primary, row=0)
     async def termin_cup(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -927,17 +842,23 @@ class MatchCenterStartView(BaseFlowView):
             await interaction.response.edit_message(content=view.render_summary(), view=view)
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(f"❌ Fehler bei Termin Cup: {e}", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Fehler bei Termin Cup: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Fehler bei Termin Cup: {e}", ephemeral=True)
 
     @discord.ui.button(label="Ergebnis League", style=discord.ButtonStyle.success, row=1)
     async def ergebnis_league(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            view = LeagueResultView(self.cog, self.author_id)
+            view = LeagueResultViewStep1(self.cog, self.author_id)
             view.state.kind = "Ergebnis League"
             await interaction.response.edit_message(content=view.render_summary(), view=view)
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(f"❌ Fehler bei Ergebnis League: {e}", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Fehler bei Ergebnis League: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Fehler bei Ergebnis League: {e}", ephemeral=True)
 
     @discord.ui.button(label="Ergebnis Cup", style=discord.ButtonStyle.success, row=1)
     async def ergebnis_cup(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -947,7 +868,10 @@ class MatchCenterStartView(BaseFlowView):
             await interaction.response.edit_message(content=view.render_summary(), view=view)
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(f"❌ Fehler bei Ergebnis Cup: {e}", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Fehler bei Ergebnis Cup: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Fehler bei Ergebnis Cup: {e}", ephemeral=True)
 
 
 # =========================================================
@@ -981,7 +905,6 @@ class LeagueScheduleView(BaseFlowView):
     @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=4)
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
-
         if not all([s.division, s.match_label, s.player1, s.player2, s.mode, s.date_str, s.time_str]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
             return
@@ -1001,16 +924,10 @@ class LeagueScheduleView(BaseFlowView):
                 f"League-Match in {s.division} zwischen {s.player1} und {s.player2}.",
             )
 
-            await interaction.response.send_message(
-                f"✅ Event erstellt:\n**{title}**",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"✅ Event erstellt:\n**{title}**", ephemeral=True)
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(
-                f"❌ Event konnte nicht erstellt werden: {e}",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"❌ Event konnte nicht erstellt werden: {e}", ephemeral=True)
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=4)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1019,83 +936,12 @@ class LeagueScheduleView(BaseFlowView):
 
 
 # =========================================================
-# CUP SCHEDULE
+# LEAGUE RESULT STEP 1
 # =========================================================
-class CupScheduleView(BaseFlowView):
-    def __init__(self, cog, author_id: int):
-        super().__init__(cog, author_id)
-        self.add_item(CupRoundSelect())
-        self.add_item(ModeSelect(get_runner_modes(), row=2))
-        self.rebuild_match_select()
-
-    def rebuild_match_select(self):
-        for item in list(self.children):
-            if isinstance(item, CupMatchSelect):
-                self.remove_item(item)
-
-        matches = get_open_cup_matches(self.state.cup_round)
-        self.add_item(CupMatchSelect(matches))
-
-    @discord.ui.button(label="Datum/Uhrzeit", style=discord.ButtonStyle.secondary, row=3)
-    async def datetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(DateTimeModal(self))
-
-    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=3)
-    async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        s = self.state
-
-        if not all([s.cup_round, s.match_label, s.player1, s.player2, s.mode, s.date_str, s.time_str]):
-            await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
-            return
-
-        if s.match_row_index == 0:
-            await interaction.response.send_message(
-                "Es wurde kein gültiges offenes Cup-Spiel gefunden.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            start_dt = parse_berlin_datetime(s.date_str, s.time_str)
-            end_dt = start_dt + timedelta(hours=2)
-            location = build_multistream_url(s.player1, s.player2)
-            title = f"TFL Cup {s.cup_round} | {s.player1} vs. {s.player2} | {s.mode}"
-
-            await create_scheduled_event(
-                interaction.guild,
-                title,
-                location,
-                start_dt,
-                end_dt,
-                f"TFL Cup {s.cup_round} zwischen {s.player1} und {s.player2}.",
-            )
-
-            await interaction.response.send_message(
-                f"✅ Event erstellt:\n**{title}**",
-                ephemeral=True,
-            )
-        except Exception as e:
-            traceback.print_exc()
-            await interaction.response.send_message(
-                f"❌ Event konnte nicht erstellt werden: {e}",
-                ephemeral=True,
-            )
-
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=3)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = MatchCenterStartView(self.cog, self.author_id)
-        await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
-
-
-# =========================================================
-# LEAGUE RESULT
-# =========================================================
-class LeagueResultView(BaseFlowView):
+class LeagueResultViewStep1(BaseFlowView):
     def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(DivisionSelect())
-        self.add_item(ModeSelect(get_runner_modes(), row=3))
-        self.add_item(LeagueWinnerSelect())
 
     def rebuild_dynamic_items(self):
         for item in list(self.children):
@@ -1112,18 +958,39 @@ class LeagueResultView(BaseFlowView):
             if matches:
                 self.add_item(LeagueMatchSelect(matches))
 
-    @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=4)
-    async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.send_modal(RacetimeModal(self))
-        except Exception as e:
-            traceback.print_exc()
-            await interaction.response.send_message(f"❌ Fehler beim Öffnen des Racetime-Felds: {e}", ephemeral=True)
+    @discord.ui.button(label="Weiter", style=discord.ButtonStyle.primary, row=4)
+    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        s = self.state
+        if not all([s.division, s.match_row_index, s.match_label, s.player1, s.player2]):
+            await interaction.response.send_message("Bitte zuerst Division, Heimrecht und Spiel auswählen.", ephemeral=True)
+            return
 
-    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=4)
+        view = LeagueResultViewStep2(self.cog, self.author_id, s.clone())
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=4)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = MatchCenterStartView(self.cog, self.author_id)
+        await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
+
+
+# =========================================================
+# LEAGUE RESULT STEP 2
+# =========================================================
+class LeagueResultViewStep2(BaseFlowView):
+    def __init__(self, cog, author_id: int, state: MatchCenterState):
+        super().__init__(cog, author_id)
+        self.state = state
+        self.add_item(ModeSelect(get_runner_modes(), row=0))
+        self.add_item(LeagueWinnerSelect())
+
+    @discord.ui.button(label="Raceroom-Link", style=discord.ButtonStyle.secondary, row=2)
+    async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RacetimeModal(self))
+
+    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=2)
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
-
         if not all([s.division, s.match_row_index, s.match_label, s.player1, s.player2, s.mode, s.winner_value, s.racetime_link]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
             return
@@ -1146,35 +1013,85 @@ class LeagueResultView(BaseFlowView):
                 s.division,
             )
 
-            post_text = (
-                f"**[League {s.division}]** {timestamp}\n"
-                f"**{s.player1}** vs **{s.player2}** → **{result}**\n"
-                f"Modus: {s.mode}\n"
-                f"Racetime: {s.racetime_link}"
+            post_text = league_result_post_text(
+                s.division,
+                timestamp,
+                s.player1,
+                s.player2,
+                result,
+                s.mode,
+                s.racetime_link,
             )
             await send_result_post(interaction.guild, post_text)
 
-            await interaction.response.send_message(
-                "✅ League-Ergebnis gespeichert und gepostet.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("✅ League-Ergebnis gespeichert und gepostet.", ephemeral=True)
         except Exception as e:
             traceback.print_exc()
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send(
-                        f"❌ Fehler beim Speichern des League-Ergebnisses: {e}",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.response.send_message(
-                        f"❌ Fehler beim Speichern des League-Ergebnisses: {e}",
-                        ephemeral=True,
-                    )
-            except Exception:
-                pass
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Fehler beim Speichern des League-Ergebnisses: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Fehler beim Speichern des League-Ergebnisses: {e}", ephemeral=True)
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=4)
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        prev = LeagueResultViewStep1(self.cog, self.author_id)
+        prev.state = self.state.clone()
+        prev.rebuild_dynamic_items()
+        await interaction.response.edit_message(content=prev.render_summary(), view=prev)
+
+
+# =========================================================
+# CUP SCHEDULE
+# =========================================================
+class CupScheduleView(BaseFlowView):
+    def __init__(self, cog, author_id: int):
+        super().__init__(cog, author_id)
+        self.add_item(CupRoundSelect())
+        self.add_item(ModeSelect(get_runner_modes(), row=2))
+        self.rebuild_match_select()
+
+    def rebuild_match_select(self):
+        for item in list(self.children):
+            if isinstance(item, CupMatchSelect):
+                self.remove_item(item)
+        self.add_item(CupMatchSelect(get_open_cup_matches(self.state.cup_round)))
+
+    @discord.ui.button(label="Datum/Uhrzeit", style=discord.ButtonStyle.secondary, row=3)
+    async def datetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DateTimeModal(self))
+
+    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=3)
+    async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        s = self.state
+        if not all([s.cup_round, s.match_label, s.player1, s.player2, s.mode, s.date_str, s.time_str]):
+            await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
+            return
+
+        if s.match_row_index == 0:
+            await interaction.response.send_message("Es wurde kein gültiges offenes Cup-Spiel gefunden.", ephemeral=True)
+            return
+
+        try:
+            start_dt = parse_berlin_datetime(s.date_str, s.time_str)
+            end_dt = start_dt + timedelta(hours=2)
+            location = build_multistream_url(s.player1, s.player2)
+            title = f"TFL Cup {s.cup_round} | {s.player1} vs. {s.player2} | {s.mode}"
+
+            await create_scheduled_event(
+                interaction.guild,
+                title,
+                location,
+                start_dt,
+                end_dt,
+                f"TFL Cup {s.cup_round} zwischen {s.player1} und {s.player2}.",
+            )
+
+            await interaction.response.send_message(f"✅ Event erstellt:\n**{title}**", ephemeral=True)
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(f"❌ Event konnte nicht erstellt werden: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = MatchCenterStartView(self.cog, self.author_id)
         await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
@@ -1194,9 +1111,7 @@ class CupResultView(BaseFlowView):
         for item in list(self.children):
             if isinstance(item, CupMatchSelect):
                 self.remove_item(item)
-
-        matches = get_open_cup_matches(self.state.cup_round)
-        self.add_item(CupMatchSelect(matches))
+        self.add_item(CupMatchSelect(get_open_cup_matches(self.state.cup_round)))
 
     def rebuild_winner_select(self):
         for item in list(self.children):
@@ -1208,23 +1123,19 @@ class CupResultView(BaseFlowView):
         else:
             self.add_item(CupWinnerNormalSelect())
 
-    @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Raceroom-Link", style=discord.ButtonStyle.secondary, row=3)
     async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RacetimeModal(self))
 
     @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=3)
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
-
         if not all([s.cup_round, s.match_row_index, s.match_label, s.player1, s.player2, s.winner_value, s.racetime_link]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
             return
 
         if s.match_row_index == 0:
-            await interaction.response.send_message(
-                "Es wurde kein gültiges offenes Cup-Spiel gefunden.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Es wurde kein gültiges offenes Cup-Spiel gefunden.", ephemeral=True)
             return
 
         try:
@@ -1233,7 +1144,6 @@ class CupResultView(BaseFlowView):
             entered_meta = f"{interaction.user} | {timestamp}"
 
             loop = asyncio.get_event_loop()
-
             if s.cup_round in {"Semifinals", "Finals"}:
                 await loop.run_in_executor(
                     None,
@@ -1253,24 +1163,20 @@ class CupResultView(BaseFlowView):
                     entered_meta,
                 )
 
-            post_text = (
-                f"**[TFL Cup]** {timestamp}\n"
-                f"Runde: {s.cup_round}\n"
-                f"**{s.player1}** vs **{s.player2}** → **{result}**\n"
-                f"Racetime: {s.racetime_link}"
+            post_text = cup_result_post_text(
+                timestamp,
+                s.cup_round,
+                s.player1,
+                s.player2,
+                result,
+                s.racetime_link,
             )
             await send_result_post(interaction.guild, post_text)
 
-            await interaction.response.send_message(
-                "✅ Cup-Ergebnis gespeichert und gepostet.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("✅ Cup-Ergebnis gespeichert und gepostet.", ephemeral=True)
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(
-                f"❌ Fehler beim Speichern des Cup-Ergebnisses: {e}",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"❌ Fehler beim Speichern des Cup-Ergebnisses: {e}", ephemeral=True)
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1290,38 +1196,22 @@ class MatchCenterCog(commands.Cog):
     async def matchcenter(self, interaction: discord.Interaction):
         member = interaction.user
         if not isinstance(member, discord.Member):
-            await interaction.response.send_message(
-                "❌ Konnte Mitgliedsdaten nicht lesen.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True)
             return
 
         if not has_tfl_role(member):
-            await interaction.response.send_message(
-                "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.", ephemeral=True)
             return
 
         try:
             view = MatchCenterStartView(self, interaction.user.id)
-            await interaction.response.send_message(
-                "## TFL Matchcenter",
-                view=view,
-                ephemeral=True,
-            )
+            await interaction.response.send_message("## TFL Matchcenter", view=view, ephemeral=True)
         except Exception:
             traceback.print_exc()
             if interaction.response.is_done():
-                await interaction.followup.send(
-                    "❌ Fehler beim Öffnen des Matchcenters.",
-                    ephemeral=True,
-                )
+                await interaction.followup.send("❌ Fehler beim Öffnen des Matchcenters.", ephemeral=True)
             else:
-                await interaction.response.send_message(
-                    "❌ Fehler beim Öffnen des Matchcenters.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("❌ Fehler beim Öffnen des Matchcenters.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
