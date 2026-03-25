@@ -1,30 +1,34 @@
+import os
 import asyncio
 import re
+import gspread
 from datetime import datetime as dt, timedelta
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from oauth2client.service_account import ServiceAccountCredentials
 
 # =========================================================
 # KONFIG
 # =========================================================
 
-GUILD_ID = 1275076189173579846  
-QUALI1_SEED_URL = "https://dein-link-fuer-quali-1-seed"
-QUALI2_SEED_URL = "https://dein-link-fuer-quali-2-seed"
-QUALI_SHEET_NAME = "Quali"  # Name des Tabellenblatts, falls benötigt
+GUILD_ID = 1275076189173579846
+QUALI_SHEET_NAME = "Quali"
+START_ROW = 4
 
-# Spalten:
 # B = Discordname
 # D = Quali1 VoD
 # E = Quali1 Zeit
 # F = Quali2 VoD
 # G = Quali2 Zeit
-START_ROW = 4
+# D2 = Seed Quali 1
+# F2 = Seed Quali 2
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 
+CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
+SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE")
 
 # =========================================================
 # HILFSFUNKTIONEN
@@ -67,25 +71,42 @@ def safe_cell(values, idx: int) -> str:
 
 
 # =========================================================
-# SHEET-HILFSFUNKTIONEN
+# GOOGLE SHEETS
 # =========================================================
 
+def get_gspread_client():
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
+    return gspread.authorize(creds)
+
+
 def get_quali_worksheet():
-    """
-    Passe diese Funktion an deinen vorhandenen Sheet-Code an.
-    Falls du schon get_worksheet() hast und das richtige Blatt zurückkommt,
-    ersetze den Inhalt einfach durch:
-        return get_worksheet()
-    """
-    ws = get_worksheet()  # bestehende Funktion aus deinem Bot
-    # Wenn dein get_worksheet() bereits das richtige Blatt liefert, reicht das.
-    return ws
+    if not SPREADSHEET_TITLE:
+        raise ValueError("SPREADSHEET_TITLE ist nicht gesetzt.")
+
+    client = get_gspread_client()
+    sheet = client.open(SPREADSHEET_TITLE)
+    return sheet.worksheet(QUALI_SHEET_NAME)
+
+
+def get_quali_seed(ws, quali_number: int) -> str:
+    if quali_number == 1:
+        seed = ws.acell("D2").value
+    elif quali_number == 2:
+        seed = ws.acell("F2").value
+    else:
+        raise ValueError("Ungültige Quali-Nummer.")
+
+    seed = (seed or "").strip()
+    if not seed:
+        raise ValueError(f"Kein Seed für Quali {quali_number} im Sheet hinterlegt.")
+    return seed
 
 
 def find_existing_runner_row(ws, runner_name: str):
-    """
-    Sucht ab Zeile 4 in Spalte B nach dem Runner.
-    """
     all_values = ws.get_all_values()
 
     for row_idx in range(START_ROW, len(all_values) + 1):
@@ -98,9 +119,6 @@ def find_existing_runner_row(ws, runner_name: str):
 
 
 def find_first_free_row(ws):
-    """
-    Erste freie Zeile ab START_ROW in Spalte B.
-    """
     all_values = ws.get_all_values()
 
     row_idx = START_ROW
@@ -127,10 +145,6 @@ def get_or_create_runner_row(ws, runner_name: str):
 
 
 def read_runner_status(ws, runner_name: str) -> dict:
-    """
-    Liefert Status für Quali 1 und Quali 2.
-    completed = Zeit oder VoD vorhanden
-    """
     row_idx = find_existing_runner_row(ws, runner_name)
     if row_idx is None:
         return {
@@ -237,18 +251,15 @@ class QualiSubmitModal(discord.ui.Modal):
             ws = get_quali_worksheet()
 
             vod_link = str(self.vod_input.value).strip()
+            if not vod_link:
+                await interaction.response.send_message("VoD-Link ist Pflicht.", ephemeral=True)
+                return
 
             if self.forfeit:
                 final_time = "03:00:00"
             else:
-                entered_time = normalize_hms(str(self.time_input.value))
-                computed_time = self.state.measured_time()
-
-                # Hier bewusst: gemessene Zeit ist maßgeblich.
-                # Das Pflichtfeld "Zeit" bleibt trotzdem erhalten.
-                # Wenn du stattdessen die eingetragene Zeit schreiben willst:
-                # final_time = entered_time
-                final_time = computed_time
+                _entered_time = normalize_hms(str(self.time_input.value))
+                final_time = self.state.measured_time()
 
             status = read_runner_status(ws, runner_name)
 
@@ -387,9 +398,6 @@ class QualiCog(commands.Cog):
         self.bot = bot
         self.active_runs: dict[int, QualiRunState] = {}
 
-    # -----------------------------------------------------
-    # Slash Command
-    # -----------------------------------------------------
     @app_commands.command(
         name="quali",
         description="Startet die Qualifikationsauswahl."
@@ -430,9 +438,6 @@ class QualiCog(commands.Cog):
                 ephemeral=True
             )
 
-    # -----------------------------------------------------
-    # Flow
-    # -----------------------------------------------------
     async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
         runner_name = get_runner_name(interaction)
         ws = get_quali_worksheet()
@@ -454,7 +459,8 @@ class QualiCog(commands.Cog):
             )
             return
 
-        seed_url = QUALI1_SEED_URL if quali_number == 1 else QUALI2_SEED_URL
+        seed_url = get_quali_seed(ws, quali_number)
+
         state = QualiRunState(
             user_id=interaction.user.id,
             runner_name=runner_name,
@@ -493,12 +499,14 @@ class QualiCog(commands.Cog):
 
         state.seed_shown_at = dt.utcnow()
 
+        deadline = state.seed_shown_at + timedelta(minutes=5)
+
         content = (
             f"**Quali {state.quali_number} – Seed geöffnet**\n\n"
             f"Seed-Link: {state.seed_url}\n\n"
             f"Du musst innerhalb von **5 Minuten** starten.\n"
-            f"Startfenster endet um: <t:{int((state.seed_shown_at + timedelta(minutes=5)).timestamp())}:T>\n"
-            f"Noch verbleibend: <t:{int((state.seed_shown_at + timedelta(minutes=5)).timestamp())}:R>"
+            f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
+            f"Noch verbleibend: <t:{int(deadline.timestamp())}:R>"
         )
 
         view = QualiStartView(self, state)
@@ -558,9 +566,6 @@ class QualiCog(commands.Cog):
 
         state.update_task = asyncio.create_task(self.race_timer_updater(state))
 
-    # -----------------------------------------------------
-    # Timer / Auto-FF
-    # -----------------------------------------------------
     async def seed_countdown_updater(self, state: QualiRunState):
         try:
             while not state.finished and state.seed_shown_at and state.started_at is None and state.message:
