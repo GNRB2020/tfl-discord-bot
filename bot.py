@@ -60,6 +60,9 @@ class TFLBot(commands.Bot):
 
         await self.load_extension("matchcenter")
         print("✅ matchcenter.py geladen")
+        
+        await self.load_extension("asnyc")
+        print("✅ asnyc.py geladen")
 
 client = TFLBot(command_prefix="!", intents=intents)
 
