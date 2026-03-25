@@ -405,7 +405,7 @@ class QualiCog(commands.Cog):
     )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def quali(self, interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
 
     try:
         runner_name = get_runner_name(interaction)
