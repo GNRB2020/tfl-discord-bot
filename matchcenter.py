@@ -39,8 +39,8 @@ DIVISION_SHEETS = {
     "Div 6": "6.DIV",
 }
 
-CUP_SHEET = "TFL Cup"
 RUNNER_SHEET = "Runner"
+CUP_SHEET = "TFL Cup"
 
 CUP_ROUNDS = [
     "Vorrunde",
@@ -55,19 +55,13 @@ DIV_COL_LEFT = 4      # D
 DIV_COL_MARKER = 5    # E
 DIV_COL_RIGHT = 6     # F
 
-# TFL Cup Spalten:
-# A = Runde
-# B = Spieler 1
-# C = Ergebnis
-# D = Spieler 2
-# E = Racetime
-# F = Eingebender + Zeitstempel
-CUP_COL_ROUND = 1
-CUP_COL_P1 = 2
-CUP_COL_RESULT = 3
-CUP_COL_P2 = 4
-CUP_COL_RACETIME = 5
-CUP_COL_META = 6
+# TFL Cup
+CUP_COL_ROUND = 1     # A
+CUP_COL_P1 = 2        # B
+CUP_COL_RESULT = 3    # C
+CUP_COL_P2 = 4        # D
+CUP_COL_RACETIME = 5  # E
+CUP_COL_META = 6      # F
 
 
 # =========================================================
@@ -181,15 +175,6 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value).strip())
 
 
-def parse_matchup(match_text: str):
-    text = clean_text(match_text)
-    text = text.replace(" vs ", " vs. ")
-    parts = [p.strip() for p in text.split("vs.")]
-    if len(parts) == 2:
-        return parts[0], parts[1]
-    return text, ""
-
-
 def now_berlin_str() -> str:
     return dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
 
@@ -219,8 +204,7 @@ def get_runner_modes() -> list[str]:
         val = clean_text(v)
         if not val:
             continue
-        low = val.lower()
-        if low in {"modus", "mode", "modi"}:
+        if val.lower() in {"modus", "mode", "modi"}:
             continue
         if val not in seen:
             seen.add(val)
@@ -229,6 +213,42 @@ def get_runner_modes() -> list[str]:
     return out[:25] if out else ["Standard"]
 
 
+def build_multistream_url(player1: str, player2: str) -> str:
+    p1 = TWITCH_MAP.get(player1.strip().lower())
+    p2 = TWITCH_MAP.get(player2.strip().lower())
+
+    if p1 and p2:
+        return f"https://multistre.am/{p1}/{p2}/layout4"
+    if p1:
+        return f"https://www.twitch.tv/{p1}"
+    if p2:
+        return f"https://www.twitch.tv/{p2}"
+    return "Kein Streamlink im Mapping gefunden"
+
+
+def result_league_from_value(value: str) -> str:
+    mapping = {
+        "spieler1": "2:0",
+        "spieler2": "0:2",
+        "remis": "1:1",
+    }
+    return mapping[value]
+
+
+def result_cup_from_value(round_name: str, value: str) -> str:
+    if round_name in {"Semifinals", "Finals"}:
+        return value
+
+    mapping = {
+        "spieler1": "1:0",
+        "spieler2": "0:1",
+    }
+    return mapping[value]
+
+
+# =========================================================
+# LEAGUE DATEN
+# =========================================================
 def collect_players_from_div_ws(ws) -> list[str]:
     rows = ws.get_all_values()
     seen = set()
@@ -244,9 +264,9 @@ def collect_players_from_div_ws(ws) -> list[str]:
         for p in (p1, p2):
             if not p:
                 continue
-            key = p.lower()
-            if key not in seen:
-                seen.add(key)
+            low = p.lower()
+            if low not in seen:
+                seen.add(low)
                 players.append(p)
 
     return players[:25]
@@ -276,11 +296,11 @@ def get_league_home_matches(division_label: str, home_player: str):
             continue
 
         if heim.lower() == home_player.lower() and marker.lower() == "vs":
-            match_text = f"{heim} vs. {gast}"
-            if match_text not in seen:
-                seen.add(match_text)
+            label = f"{heim} vs. {gast}"
+            if label not in seen:
+                seen.add(label)
                 out.append({
-                    "label": match_text,
+                    "label": label,
                     "value": str(idx),
                     "row_index": idx,
                     "heim": heim,
@@ -288,115 +308,6 @@ def get_league_home_matches(division_label: str, home_player: str):
                 })
 
     return out[:25]
-
-
-def get_cup_matches():
-    """
-    Robuste Cup-Spielerkennung:
-    1. Bevorzugt strukturierte Zeilen über Spalten B und D
-    2. Fallback: komplette Zeile nach 'vs' durchsuchen
-    So wird auch das Finale unten zuverlässig erkannt.
-    """
-    sheets_required()
-    ws = WB.worksheet(CUP_SHEET)
-    rows = ws.get_all_values()
-
-    out = []
-    seen = set()
-
-    for idx, row in enumerate(rows, start=1):
-        # Strukturierter Versuch:
-        p1 = _cell(row, CUP_COL_P1 - 1)
-        p2 = _cell(row, CUP_COL_P2 - 1)
-        round_code = _cell(row, CUP_COL_ROUND - 1)
-
-        structured_hit = False
-        if p1 and p2:
-            # Header/Trennzeilen raus
-            invalid_p1 = {"spieler 1", "spieler1"}
-            invalid_p2 = {"spieler 2", "spieler2", "racetime"}
-
-            if p1.lower() not in invalid_p1 and p2.lower() not in invalid_p2:
-                label = f"{p1} vs. {p2}"
-                key = label.lower()
-                if key not in seen:
-                    seen.add(key)
-                    out.append({
-                        "label": label,
-                        "value": str(idx),
-                        "row_index": idx,
-                        "round_code": round_code,
-                        "player1": p1,
-                        "player2": p2,
-                    })
-                structured_hit = True
-
-        if structured_hit:
-            continue
-
-        # Fallback über ganze Zeile
-        row_joined = " ".join(clean_text(c) for c in row if clean_text(c))
-        if "vs" in row_joined.lower():
-            p1f, p2f = parse_matchup(row_joined)
-            if p1f and p2f:
-                label = f"{p1f} vs. {p2f}"
-                key = label.lower()
-                if key not in seen:
-                    seen.add(key)
-                    out.append({
-                        "label": label,
-                        "value": str(idx),
-                        "row_index": idx,
-                        "round_code": round_code,
-                        "player1": p1f,
-                        "player2": p2f,
-                    })
-
-    return out[:25]
-
-
-def build_multistream_url(player1: str, player2: str) -> str:
-    p1 = TWITCH_MAP.get(player1.strip().lower())
-    p2 = TWITCH_MAP.get(player2.strip().lower())
-
-    if p1 and p2:
-        return f"https://multistre.am/{p1}/{p2}/layout4"
-    if p1:
-        return f"https://www.twitch.tv/{p1}"
-    if p2:
-        return f"https://www.twitch.tv/{p2}"
-
-    return "Kein Streamlink im Mapping gefunden"
-
-
-def result_league_from_value(value: str) -> str:
-    mapping = {
-        "spieler1": "2:0",
-        "spieler2": "0:2",
-        "remis": "1:1",
-    }
-    return mapping[value]
-
-
-def result_cup_from_value(round_name: str, value: str) -> str:
-    if round_name in {"Semifinals", "Finals"}:
-        # Serienstand
-        mapping = {
-            "1:0": "1:0",
-            "0:1": "0:1",
-            "1:1": "1:1",
-            "2:0": "2:0",
-            "0:2": "0:2",
-            "2:1": "2:1",
-            "1:2": "1:2",
-        }
-        return mapping[value]
-
-    mapping = {
-        "spieler1": "1:0",
-        "spieler2": "0:1",
-    }
-    return mapping[value]
 
 
 def write_league_result(
@@ -419,14 +330,97 @@ def write_league_result(
     ws.batch_update(reqs)
 
 
-def write_cup_result_standard(row_index: int, result: str, racetime_link: str, entered_meta: str):
-    """
-    Normale Cup-Runden:
-    C = Ergebnis
-    E = Racetime
-    F = Eingebender + Zeitstempel
-    """
+# =========================================================
+# CUP DATEN
+# =========================================================
+def normalize_round_label(raw_round: str) -> str:
+    raw = clean_text(raw_round).upper()
+
+    if raw in {"VR", "VR.", "VORRUNDE"}:
+        return "Vorrunde"
+    if raw in {"L32", "LAST32", "LAST 32"}:
+        return "Last 32"
+    if raw in {"L16", "LAST16", "LAST 16"}:
+        return "Last 16"
+    if raw in {"QF", "QUARTERFINALS", "QUARTERFINALS"}:
+        return "Quarterfinals"
+    if raw in {"SF", "SEMIFINALS", "SEMIFINAL"}:
+        return "Semifinals"
+    if raw in {"FIN", "F", "FINAL", "FINALS"}:
+        return "Finals"
+
+    return clean_text(raw_round)
+
+
+def is_cup_match_open(round_label: str, result_value: str) -> bool:
+    result_clean = clean_text(result_value)
+
+    if round_label in {"Semifinals", "Finals"}:
+        # offen solange noch kein 2er-Endstand eingetragen ist
+        return "2" not in result_clean
+
+    # alle früheren Runden: offen nur ohne Ergebnis
+    return result_clean == ""
+
+
+def get_open_cup_matches(selected_round: str | None = None):
     sheets_required()
+    ws = WB.worksheet(CUP_SHEET)
+    rows = ws.get_all_values()
+
+    out = []
+    seen = set()
+
+    for idx, row in enumerate(rows, start=1):
+        p1 = _cell(row, CUP_COL_P1 - 1)
+        result_val = _cell(row, CUP_COL_RESULT - 1)
+        p2 = _cell(row, CUP_COL_P2 - 1)
+        round_code = _cell(row, CUP_COL_ROUND - 1)
+
+        if not p1 or not p2:
+            continue
+
+        if p1.lower() in {"spieler 1", "spieler1"}:
+            continue
+        if p2.lower() in {"spieler 2", "spieler2", "racetime"}:
+            continue
+
+        round_label = normalize_round_label(round_code)
+        if selected_round and round_label != selected_round:
+            continue
+
+        if not is_cup_match_open(round_label, result_val):
+            continue
+
+        label = f"{p1} vs. {p2}"
+        key = f"{idx}|{label}".lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        out.append({
+            "label": label,
+            "value": str(idx),
+            "row_index": idx,
+            "round_label": round_label,
+            "player1": p1,
+            "player2": p2,
+            "current_result": result_val,
+        })
+
+    return out[:25]
+
+
+def append_series_racetime(existing_text: str, score: str, link: str) -> str:
+    existing = existing_text.strip() if existing_text else ""
+    new_line = f"{score} | {link}".strip()
+
+    if existing:
+        return existing + "\n" + new_line
+    return new_line
+
+
+def write_cup_result_standard(row_index: int, result: str, racetime_link: str, entered_meta: str):
     ws = WB.worksheet(CUP_SHEET)
 
     reqs = [
@@ -438,36 +432,22 @@ def write_cup_result_standard(row_index: int, result: str, racetime_link: str, e
 
 
 def write_cup_result_series(row_index: int, series_score: str, racetime_link: str, entered_meta: str):
-    """
-    Semifinals / Finals:
-    C = aktueller Serienstand
-    E = Verlauf untereinander:
-        1:0 https://...
-        1:1 https://...
-        2:1 https://...
-    F = letzter Eingebender + Zeitstempel
-    """
-    sheets_required()
     ws = WB.worksheet(CUP_SHEET)
 
-    existing_racetime = ws.acell(f"E{row_index}").value
-    existing_racetime = existing_racetime.strip() if existing_racetime else ""
-
-    new_line = f"{series_score} {racetime_link}".strip()
-
-    if existing_racetime:
-        combined = existing_racetime + "\n" + new_line
-    else:
-        combined = new_line
+    existing_racetime = ws.acell(f"E{row_index}").value or ""
+    combined_racetime = append_series_racetime(existing_racetime, series_score, racetime_link)
 
     reqs = [
         {"range": f"C{row_index}:C{row_index}", "values": [[series_score]]},
-        {"range": f"E{row_index}:E{row_index}", "values": [[combined]]},
+        {"range": f"E{row_index}:E{row_index}", "values": [[combined_racetime]]},
         {"range": f"F{row_index}:F{row_index}", "values": [[entered_meta]]},
     ]
     ws.batch_update(reqs)
 
 
+# =========================================================
+# DISCORD HELFER
+# =========================================================
 async def create_scheduled_event(
     guild: discord.Guild,
     title: str,
@@ -737,8 +717,8 @@ class CupMatchSelect(discord.ui.Select):
         if not matches:
             options = [
                 discord.SelectOption(
-                    label="Keine Cup-Spiele gefunden",
-                    value="0|Keine Cup-Spiele gefunden| | ",
+                    label="Keine offenen Cup-Spiele gefunden",
+                    value="0|Keine offenen Cup-Spiele gefunden| | ",
                 )
             ]
             disabled = True
@@ -771,7 +751,7 @@ class CupMatchSelect(discord.ui.Select):
 
         if row_index == "0":
             await interaction.response.send_message(
-                "Es wurden keine Cup-Spiele im Sheet gefunden.",
+                "Es wurden keine offenen Cup-Spiele gefunden.",
                 ephemeral=True,
             )
             return
@@ -825,8 +805,17 @@ class CupRoundSelect(discord.ui.Select):
             return
 
         view.state.cup_round = self.values[0]
+        view.state.match_label = None
+        view.state.match_row_index = None
+        view.state.player1 = None
+        view.state.player2 = None
+        view.state.winner_value = None
+
+        if isinstance(view, CupScheduleView):
+            view.rebuild_match_select()
 
         if isinstance(view, CupResultView):
+            view.rebuild_match_select()
             view.rebuild_winner_select()
 
         await interaction.response.edit_message(
@@ -922,27 +911,43 @@ class MatchCenterStartView(BaseFlowView):
 
     @discord.ui.button(label="Termin League", style=discord.ButtonStyle.primary, row=0)
     async def termin_league(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = LeagueScheduleView(self.cog, self.author_id)
-        view.state.kind = "Termin League"
-        await interaction.response.edit_message(content=view.render_summary(), view=view)
+        try:
+            view = LeagueScheduleView(self.cog, self.author_id)
+            view.state.kind = "Termin League"
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(f"❌ Fehler bei Termin League: {e}", ephemeral=True)
 
     @discord.ui.button(label="Termin Cup", style=discord.ButtonStyle.primary, row=0)
     async def termin_cup(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = CupScheduleView(self.cog, self.author_id)
-        view.state.kind = "Termin Cup"
-        await interaction.response.edit_message(content=view.render_summary(), view=view)
+        try:
+            view = CupScheduleView(self.cog, self.author_id)
+            view.state.kind = "Termin Cup"
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(f"❌ Fehler bei Termin Cup: {e}", ephemeral=True)
 
     @discord.ui.button(label="Ergebnis League", style=discord.ButtonStyle.success, row=1)
     async def ergebnis_league(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = LeagueResultView(self.cog, self.author_id)
-        view.state.kind = "Ergebnis League"
-        await interaction.response.edit_message(content=view.render_summary(), view=view)
+        try:
+            view = LeagueResultView(self.cog, self.author_id)
+            view.state.kind = "Ergebnis League"
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(f"❌ Fehler bei Ergebnis League: {e}", ephemeral=True)
 
     @discord.ui.button(label="Ergebnis Cup", style=discord.ButtonStyle.success, row=1)
     async def ergebnis_cup(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = CupResultView(self.cog, self.author_id)
-        view.state.kind = "Ergebnis Cup"
-        await interaction.response.edit_message(content=view.render_summary(), view=view)
+        try:
+            view = CupResultView(self.cog, self.author_id)
+            view.state.kind = "Ergebnis Cup"
+            await interaction.response.edit_message(content=view.render_summary(), view=view)
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(f"❌ Fehler bei Ergebnis Cup: {e}", ephemeral=True)
 
 
 # =========================================================
@@ -1020,9 +1025,16 @@ class CupScheduleView(BaseFlowView):
     def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(CupRoundSelect())
-        cup_matches = get_cup_matches()
-        self.add_item(CupMatchSelect(cup_matches))
         self.add_item(ModeSelect(get_runner_modes(), row=2))
+        self.rebuild_match_select()
+
+    def rebuild_match_select(self):
+        for item in list(self.children):
+            if isinstance(item, CupMatchSelect):
+                self.remove_item(item)
+
+        matches = get_open_cup_matches(self.state.cup_round)
+        self.add_item(CupMatchSelect(matches))
 
     @discord.ui.button(label="Datum/Uhrzeit", style=discord.ButtonStyle.secondary, row=3)
     async def datetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1038,7 +1050,7 @@ class CupScheduleView(BaseFlowView):
 
         if s.match_row_index == 0:
             await interaction.response.send_message(
-                "Es wurde kein gültiges Cup-Spiel gefunden.",
+                "Es wurde kein gültiges offenes Cup-Spiel gefunden.",
                 ephemeral=True,
             )
             return
@@ -1102,7 +1114,11 @@ class LeagueResultView(BaseFlowView):
 
     @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=4)
     async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RacetimeModal(self))
+        try:
+            await interaction.response.send_modal(RacetimeModal(self))
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(f"❌ Fehler beim Öffnen des Racetime-Felds: {e}", ephemeral=True)
 
     @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=4)
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1144,10 +1160,19 @@ class LeagueResultView(BaseFlowView):
             )
         except Exception as e:
             traceback.print_exc()
-            await interaction.response.send_message(
-                f"❌ Fehler beim Speichern des League-Ergebnisses: {e}",
-                ephemeral=True,
-            )
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        f"❌ Fehler beim Speichern des League-Ergebnisses: {e}",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"❌ Fehler beim Speichern des League-Ergebnisses: {e}",
+                        ephemeral=True,
+                    )
+            except Exception:
+                pass
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=4)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1162,9 +1187,16 @@ class CupResultView(BaseFlowView):
     def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(CupRoundSelect())
-        cup_matches = get_cup_matches()
-        self.add_item(CupMatchSelect(cup_matches))
+        self.rebuild_match_select()
         self.rebuild_winner_select()
+
+    def rebuild_match_select(self):
+        for item in list(self.children):
+            if isinstance(item, CupMatchSelect):
+                self.remove_item(item)
+
+        matches = get_open_cup_matches(self.state.cup_round)
+        self.add_item(CupMatchSelect(matches))
 
     def rebuild_winner_select(self):
         for item in list(self.children):
@@ -1190,7 +1222,7 @@ class CupResultView(BaseFlowView):
 
         if s.match_row_index == 0:
             await interaction.response.send_message(
-                "Es wurde kein gültiges Cup-Spiel gefunden.",
+                "Es wurde kein gültiges offenes Cup-Spiel gefunden.",
                 ephemeral=True,
             )
             return
