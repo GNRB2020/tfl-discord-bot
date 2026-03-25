@@ -1,30 +1,35 @@
 import os
 import re
+import asyncio
 import traceback
-from datetime import datetime, timedelta
-from typing import Optional, List, Tuple, Dict
+import datetime
+from datetime import datetime as dt, timedelta
 
 import discord
+import pytz
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from discord import app_commands
 from discord.ext import commands
+from dotenv import load_dotenv
 
 
 # =========================================================
 # ENV / CONFIG
 # =========================================================
+load_dotenv()
 
-TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 EVENT_CHANNEL_ID = int(os.getenv("EVENT_CHANNEL_ID", os.getenv("DISCORD_EVENT_CHANNEL_ID", "0")))
-RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID", "0"))
 SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
+RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
+TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
 
-print("DEBUG CREDS_FILE =", CREDS_FILE)
+BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
-SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
+print("DEBUG matchcenter CREDS_FILE =", CREDS_FILE)
 
 DIVISION_SHEETS = {
     "Div 1": "1.DIV",
@@ -35,10 +40,17 @@ DIVISION_SHEETS = {
     "Div 6": "6.DIV",
 }
 
+DIVISION_VALUES = {
+    "1": "1.DIV",
+    "2": "2.DIV",
+    "3": "3.DIV",
+    "4": "4.DIV",
+    "5": "5.DIV",
+    "6": "6.DIV",
+}
+
 CUP_SHEET = "TFL Cup"
 RUNNER_SHEET = "Runner"
-
-DIVISIONS = list(DIVISION_SHEETS.keys())
 
 CUP_ROUNDS = [
     "Vorrunde",
@@ -49,57 +61,124 @@ CUP_ROUNDS = [
     "Finals",
 ]
 
-# Optional: Hier Stream-/Restream-Mapping pflegen
-# Beispiel:
-# "crackerito": "https://www.twitch.tv/crackerito"
-PLAYER_STREAMS: Dict[str, str] = {}
+# Spalten wie in deiner bot.py / bestehenden DIV-Sheets
+DIV_COL_LEFT = 4      # D
+DIV_COL_MARKER = 5    # E
+DIV_COL_RIGHT = 6     # F
 
+# =========================================================
+# TWITCH MAP
+# Aus bot.py übernommen
+# =========================================================
+TWITCH_MAP = {
+    "gnrb": "gnrb87",
+    "steinchen89": "Steinchen89",
+    "dirtbubble": "DirtBubblE",
+    "speeka": "Speeka89",
+    "link-q": "linkq87",
+    "derdasch": "derdasch",
+    "bumble": "bumblebee86x",
+    "leisureking": "Leisureking",
+    "tyrant242": "Tyrant242",
+    "loadpille": "LoaDPille",
+    "offiziell_alex2k6": "offiziell_alex2k6",
+    "dafritza": "dafritza84",
+    "teku361": "TeKu361",
+    "holysmoke": "holysmoke",
+    "wabnik": "Wabnik",
+    "sydraves": "Sydraves",
+    "roteralarm": "roteralarm",
+    "kromb": "kromb4787",
+    "ntapple": "NTapple",
+    "kico_89": "Kico_89",
+    "oeptown": "oeptown",
+    "mr__navigator": "mr__navigator",
+    "basdingo": "Basdingo",
+    "phoenix": "phoenix_tyrol",
+    "wolle": "wolle_91",
+    "mc_thomas3": "mc_thomas3",
+    "esto": "estaryo90",
+    "dafatbrainbug": "dafatbrainbug",
+    "funtreecake": "FunTreeCake",
+    "darpex": "darpex3",
+    "schieva96": "Schieva96",
+    "crackerito": "crackerito88",
+    "blackirave": "blackirave",
+    "nezil": "Nezil7",
+    "officermiaumiau": "officermiaumiautwitch",
+    "papaschland": "Papaschland",
+    "hideonbush": "hideonbush1909",
+    "mahony": "mahony19888",
+    "iconic": "iconic22",
+    "krawalltofu": "krawalltofu",
+    "osora": "osora90",
+    "randonorris": "Rando_Norris",
+    "neo-sanji": "neo_sanji",
+    "cfate91": "CFate91",
+    "kalamarino": "Kalamarino",
+    "dekar112": "dekar_112",
+    "drdiabetus": "dr_diabetus",
+    "darknesslink81": "Darknesslink81",
+    "littlevaia": "LittleVaia",
+    "boothisman": "boothisman",
+    "cptnsabo": "CptnSabo",
+    "aleximwunderland": "alex_im_wunderland",
+    "dominik0688": "Dominik0688",
+    "quaschynock": "quaschynock",
+    "marcii": "marciii86",
+    "rennyur": "rennyur",
+    "yasi89": "yasi89",
+}
 
 # =========================================================
 # GOOGLE SHEETS
 # =========================================================
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
-def get_gspread_client():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    return gspread.authorize(creds)
+SHEETS_ENABLED = True
+GC = None
+WB = None
+
+try:
+    CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+    GC = gspread.authorize(CREDS)
+    WB = GC.open(SPREADSHEET_TITLE)
+    print("✅ matchcenter Google Sheets verbunden")
+except Exception as e:
+    SHEETS_ENABLED = False
+    WB = None
+    print(f"⚠️ matchcenter Google Sheets deaktiviert: {e}")
 
 
-def get_spreadsheet():
-    gc = get_gspread_client()
-    return gc.open_by_key(SPREADSHEET_ID)
-
-
-def get_worksheet(name: str):
-    return get_spreadsheet().worksheet(name)
-
-
-def get_division_ws(division: str):
-    sheet_name = DIVISION_SHEETS.get(division)
-    if not sheet_name:
-        raise ValueError(f"Unbekannte Division: {division}")
-    return get_worksheet(sheet_name)
+def sheets_required():
+    if not SHEETS_ENABLED or WB is None:
+        raise RuntimeError("Google Sheets nicht verbunden.")
 
 
 # =========================================================
-# HELPER
+# HELFER
 # =========================================================
+def has_tfl_role(member: discord.Member) -> bool:
+    if not isinstance(member, discord.Member):
+        return False
+    if TFL_ROLE_ID == 0:
+        return False
+    return any(r.id == TFL_ROLE_ID for r in member.roles)
+
+
+def _cell(row, idx0):
+    return row[idx0].strip() if 0 <= idx0 < len(row) else ""
+
 
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value).strip())
 
 
-def clean_text_lower(value: str) -> str:
-    return clean_text(value).lower()
-
-
-def parse_matchup(match_text: str) -> Tuple[str, str]:
-    text = clean_text(match_text)
-    text = text.replace(" vs ", " vs. ")
+def parse_matchup(match_text: str):
+    text = clean_text(match_text).replace(" vs ", " vs. ")
     parts = [p.strip() for p in text.split("vs.")]
     if len(parts) == 2:
         return parts[0], parts[1]
@@ -113,15 +192,159 @@ def normalize_match_text(match_text: str) -> str:
     return clean_text(match_text)
 
 
-def parse_datetime(date_str: str, time_str: str) -> datetime:
-    return datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
+def now_berlin_str() -> str:
+    return dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
 
 
-def now_str() -> str:
-    return datetime.now().strftime("%d.%m.%Y %H:%M")
+def parse_berlin_datetime(date_str: str, time_str: str):
+    naive = dt.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
+    return BERLIN_TZ.localize(naive)
 
 
-def result_league_from_winner(value: str) -> str:
+def get_div_ws_from_label(division_label: str):
+    sheets_required()
+    ws_name = DIVISION_SHEETS.get(division_label)
+    if not ws_name:
+        raise ValueError(f"Unbekannte Division: {division_label}")
+    return WB.worksheet(ws_name)
+
+
+def get_div_ws_from_number(division_number: str):
+    sheets_required()
+    ws_name = DIVISION_VALUES.get(division_number)
+    if not ws_name:
+        raise ValueError(f"Unbekannte Division: {division_number}")
+    return WB.worksheet(ws_name)
+
+
+def get_runner_modes() -> list[str]:
+    sheets_required()
+    ws = WB.worksheet(RUNNER_SHEET)
+    values = ws.col_values(14)  # N
+
+    out = []
+    seen = set()
+
+    for v in values:
+        val = clean_text(v)
+        if not val:
+            continue
+        low = val.lower()
+        if low in {"modus", "mode", "modi"}:
+            continue
+        if val not in seen:
+            seen.add(val)
+            out.append(val)
+
+    return out[:25] if out else ["Kein Modus gefunden"]
+
+
+def collect_players_from_div_ws(ws) -> list[str]:
+    rows = ws.get_all_values()
+    seen = set()
+    players = []
+
+    d_idx = DIV_COL_LEFT - 1
+    f_idx = DIV_COL_RIGHT - 1
+
+    for row in rows[1:]:
+        p1 = _cell(row, d_idx)
+        p2 = _cell(row, f_idx)
+
+        for p in (p1, p2):
+            if not p:
+                continue
+            key = p.lower()
+            if key not in seen:
+                seen.add(key)
+                players.append(p)
+
+    return players[:25]
+
+
+def get_division_players(division_label: str) -> list[str]:
+    ws = get_div_ws_from_label(division_label)
+    return collect_players_from_div_ws(ws)
+
+
+def get_league_home_matches(division_label: str, home_player: str):
+    ws = get_div_ws_from_label(division_label)
+    rows = ws.get_all_values()
+
+    out = []
+    seen = set()
+
+    for idx, row in enumerate(rows, start=1):
+        if idx == 1:
+            continue
+
+        heim = _cell(row, DIV_COL_LEFT - 1)
+        marker = _cell(row, DIV_COL_MARKER - 1)
+        gast = _cell(row, DIV_COL_RIGHT - 1)
+
+        if not heim or not gast:
+            continue
+
+        if heim.lower() == home_player.lower() and marker.lower() == "vs":
+            match_text = f"{heim} vs. {gast}"
+            if match_text not in seen:
+                seen.add(match_text)
+                out.append({
+                    "label": match_text,
+                    "value": str(idx),
+                    "row_index": idx,
+                    "heim": heim,
+                    "gast": gast,
+                })
+
+    return out[:25]
+
+
+def get_cup_matches():
+    sheets_required()
+    ws = WB.worksheet(CUP_SHEET)
+    rows = ws.get_all_values()
+
+    out = []
+    seen = set()
+
+    for idx, row in enumerate(rows, start=1):
+        row_hit = None
+
+        for cell in row:
+            txt = clean_text(cell)
+            if "vs" in txt.lower():
+                normalized = normalize_match_text(txt)
+                if "vs." in normalized:
+                    row_hit = normalized
+                    break
+
+        if row_hit and row_hit not in seen:
+            seen.add(row_hit)
+            out.append({
+                "label": row_hit,
+                "value": str(idx),
+                "row_index": idx,
+            })
+
+    return out[:25]
+
+
+def build_multistream_url(player1: str, player2: str) -> str:
+    p1 = TWITCH_MAP.get(player1.strip().lower())
+    p2 = TWITCH_MAP.get(player2.strip().lower())
+
+    if p1 and p2:
+        return f"https://multistre.am/{p1}/{p2}/layout4"
+    if p1:
+        return f"https://www.twitch.tv/{p1}"
+    if p2:
+        return f"https://www.twitch.tv/{p2}"
+
+    return "Kein Streamlink im Mapping gefunden"
+
+
+def result_league_from_value(value: str) -> str:
     mapping = {
         "spieler1": "2:0",
         "spieler2": "0:2",
@@ -147,296 +370,78 @@ def result_cup_from_value(round_name: str, value: str) -> str:
     return mapping[value]
 
 
-def is_nonempty(value: Optional[str]) -> bool:
-    return bool(value and str(value).strip())
+def write_league_result(row_index: int, mode: str, result: str, racetime_link: str, entered_by: str, timestamp: str, division_label: str):
+    ws = get_div_ws_from_label(division_label)
+
+    reqs = [
+        {"range": f"B{row_index}:C{row_index}", "values": [[timestamp, mode]]},
+        {"range": f"E{row_index}:E{row_index}", "values": [[result]]},
+        {"range": f"G{row_index}:G{row_index}", "values": [[racetime_link]]},
+        {"range": f"H{row_index}:H{row_index}", "values": [[entered_by]]},
+    ]
+    ws.batch_update(reqs)
 
 
-def truncate_label(text: str, max_len: int = 100) -> str:
-    text = clean_text(text)
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 3] + "..."
+def write_cup_result(row_index: int, result: str, racetime_link: str, entered_meta: str):
+    sheets_required()
+    ws = WB.worksheet(CUP_SHEET)
+
+    reqs = [
+        {"range": f"C{row_index}:C{row_index}", "values": [[result]]},
+        {"range": f"E{row_index}:E{row_index}", "values": [[racetime_link]]},
+        {"range": f"F{row_index}:F{row_index}", "values": [[entered_meta]]},
+    ]
+    ws.batch_update(reqs)
 
 
-# =========================================================
-# DATEN AUS SHEETS
-# =========================================================
-
-def get_runner_modes() -> List[str]:
-    """
-    Lädt Sheet 'Runner', Spalte N.
-    Entfernt leere und doppelte Einträge.
-    """
-    ws = get_worksheet(RUNNER_SHEET)
-    values = ws.col_values(14)  # Spalte N
-
-    modes = []
-    seen = set()
-
-    for v in values:
-        val = clean_text(v)
-        if not val:
-            continue
-        low = val.lower()
-        if low in {"modus", "mode", "modi", "spalte n"}:
-            continue
-        if val not in seen:
-            seen.add(val)
-            modes.append(val)
-
-    return modes[:25]
+async def create_scheduled_event(guild: discord.Guild, title: str, location: str, start_dt, end_dt, description: str):
+    return await guild.create_scheduled_event(
+        name=title,
+        description=description,
+        start_time=start_dt,
+        end_time=end_dt,
+        entity_type=discord.EntityType.external,
+        location=location,
+        privacy_level=discord.PrivacyLevel.guild_only,
+    )
 
 
-def get_division_players(division: str) -> List[str]:
-    """
-    Spieler werden aus allen Matchups 'A vs. B' im jeweiligen Div-Sheet gesammelt.
-    """
-    ws = get_division_ws(division)
-    values = ws.get_all_values()
+async def send_result_post(guild: discord.Guild, text: str):
+    channel = guild.get_channel(RESULTS_CHANNEL_ID)
+    if channel is None:
+        channel = guild.get_channel(SHOWRESTREAMS_CHANNEL_ID)
 
-    players = set()
-
-    for row in values:
-        for cell in row:
-            txt = clean_text(cell)
-            if "vs" not in txt.lower():
-                continue
-            p1, p2 = parse_matchup(txt)
-            if p1:
-                players.add(p1)
-            if p2:
-                players.add(p2)
-
-    return sorted(players)[:25]
-
-
-def get_league_home_matches(division: str, home_player: str) -> List[str]:
-    """
-    Sucht alle Matchups im Div-Sheet und filtert auf Heimrecht = Spieler1.
-    """
-    ws = get_division_ws(division)
-    values = ws.get_all_values()
-
-    matches = []
-    seen = set()
-
-    for row in values:
-        for cell in row:
-            txt = clean_text(cell)
-            if "vs" not in txt.lower():
-                continue
-
-            p1, p2 = parse_matchup(txt)
-            if clean_text_lower(p1) == clean_text_lower(home_player):
-                match_text = f"{p1} vs. {p2}"
-                if match_text not in seen:
-                    seen.add(match_text)
-                    matches.append(match_text)
-
-    return matches[:25]
-
-
-def get_cup_matches() -> List[str]:
-    """
-    Holt alle Spiele aus dem Cup-Sheet, in denen irgendwo im Sheet 'vs' vorkommt.
-    So ist es robuster, falls die Spalte nicht immer gleich ist.
-    """
-    ws = get_worksheet(CUP_SHEET)
-    values = ws.get_all_values()
-
-    matches = []
-    seen = set()
-
-    for row in values:
-        for cell in row:
-            txt = clean_text(cell)
-            if "vs" not in txt.lower():
-                continue
-
-            normalized = normalize_match_text(txt)
-            if "vs." not in normalized:
-                continue
-
-            if normalized not in seen:
-                seen.add(normalized)
-                matches.append(normalized)
-
-    return matches[:25]
-
-
-def get_multistream_link(player1: str, player2: str) -> str:
-    """
-    Nutzt PLAYER_STREAMS. Wenn beide da sind, werden beide Links kombiniert.
-    Falls nur einer existiert, wird der genommen.
-    """
-    p1 = PLAYER_STREAMS.get(player1)
-    p2 = PLAYER_STREAMS.get(player2)
-
-    if p1 and p2:
-        return f"{p1} | {p2}"
-    if p1:
-        return p1
-    if p2:
-        return p2
-    return "Kein Restream/Multistream-Link im Mapping gefunden"
-
-
-# =========================================================
-# SHEET-SCHREIBEN
-# =========================================================
-
-def find_row_by_match(ws, match_text: str) -> Optional[int]:
-    """
-    Sucht die Zeile, in der das Match vorkommt.
-    Flexible Suche, damit kleine Schreibabweichungen nicht direkt alles zerstören.
-    """
-    target = clean_text_lower(normalize_match_text(match_text))
-    all_values = ws.get_all_values()
-
-    for row_idx, row in enumerate(all_values, start=1):
-        for cell in row:
-            cell_norm = clean_text_lower(normalize_match_text(cell))
-            if cell_norm == target:
-                return row_idx
-
-    # Fallback: enthält den Text
-    for row_idx, row in enumerate(all_values, start=1):
-        row_joined = " | ".join(clean_text(c) for c in row)
-        row_norm = clean_text_lower(normalize_match_text(row_joined))
-        if target in row_norm:
-            return row_idx
-
-    return None
-
-
-def write_league_result(
-    division: str,
-    match_text: str,
-    mode: str,
-    result: str,
-    racetime_link: str,
-    entered_by: str,
-    timestamp: str,
-) -> bool:
-    """
-    Schreibt in die Zeile des Spiels:
-    B = Zeitstempel
-    C = Modus
-    E = Ergebnis
-    G = Racetime
-    H = Discordname
-    """
-    ws = get_division_ws(division)
-    row_idx = find_row_by_match(ws, match_text)
-
-    if row_idx is None:
-        return False
-
-    ws.update(f"B{row_idx}", [[timestamp]])
-    ws.update(f"C{row_idx}", [[mode]])
-    ws.update(f"E{row_idx}", [[result]])
-    ws.update(f"G{row_idx}", [[racetime_link]])
-    ws.update(f"H{row_idx}", [[entered_by]])
-    return True
-
-
-def write_cup_result(
-    round_name: str,
-    match_text: str,
-    result: str,
-    racetime_link: str,
-    entered_meta: str,
-) -> bool:
-    """
-    Schreibt in die Zeile des Cup-Spiels:
-    C = Ergebnis
-    E = Racetime
-    F = Eingebender + Zeitstempel
-
-    Das Match wird flexibel im gesamten Cup-Sheet gesucht.
-    """
-    ws = get_worksheet(CUP_SHEET)
-    row_idx = find_row_by_match(ws, match_text)
-
-    if row_idx is None:
-        return False
-
-    ws.update(f"C{row_idx}", [[result]])
-    ws.update(f"E{row_idx}", [[racetime_link]])
-    ws.update(f"F{row_idx}", [[entered_meta]])
-    return True
-
-
-# =========================================================
-# DISCORD EVENT / POSTS
-# =========================================================
-
-async def create_discord_scheduled_event(
-    guild: discord.Guild,
-    title: str,
-    location: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    description: Optional[str] = None,
-) -> Optional[discord.ScheduledEvent]:
-    try:
-        event = await guild.create_scheduled_event(
-            name=title,
-            description=description or "",
-            start_time=start_dt,
-            end_time=end_dt,
-            entity_type=discord.EntityType.external,
-            privacy_level=discord.PrivacyLevel.guild_only,
-            location=location,
-        )
-        return event
-    except Exception:
-        traceback.print_exc()
-        return None
-
-
-async def send_channel_message(guild: discord.Guild, channel_id: int, text: str) -> bool:
-    if not channel_id:
-        return False
-
-    channel = guild.get_channel(channel_id)
-    if not isinstance(channel, discord.TextChannel):
-        return False
-
-    try:
+    if isinstance(channel, discord.TextChannel):
         await channel.send(text)
-        return True
-    except Exception:
-        traceback.print_exc()
-        return False
 
 
 # =========================================================
 # STATE
 # =========================================================
-
 class MatchCenterState:
     def __init__(self):
-        self.kind: Optional[str] = None
+        self.kind: str | None = None
 
-        self.division: Optional[str] = None
-        self.home_player: Optional[str] = None
-        self.match_text: Optional[str] = None
-        self.mode: Optional[str] = None
+        self.division: str | None = None
+        self.home_player: str | None = None
 
-        self.cup_round: Optional[str] = None
+        self.match_label: str | None = None
+        self.match_row_index: int | None = None
+        self.player1: str | None = None
+        self.player2: str | None = None
 
-        self.winner: Optional[str] = None
-        self.racetime_link: Optional[str] = None
+        self.mode: str | None = None
+        self.cup_round: str | None = None
+        self.winner_value: str | None = None
+        self.racetime_link: str | None = None
 
-        self.date_str: Optional[str] = None
-        self.time_str: Optional[str] = None
+        self.date_str: str | None = None
+        self.time_str: str | None = None
 
 
 # =========================================================
 # MODALS
 # =========================================================
-
 class DateTimeModal(discord.ui.Modal, title="Datum und Uhrzeit"):
     date_input = discord.ui.TextInput(
         label="Datum",
@@ -444,7 +449,6 @@ class DateTimeModal(discord.ui.Modal, title="Datum und Uhrzeit"):
         required=True,
         max_length=10,
     )
-
     time_input = discord.ui.TextInput(
         label="Uhrzeit",
         placeholder="20:30",
@@ -452,7 +456,7 @@ class DateTimeModal(discord.ui.Modal, title="Datum und Uhrzeit"):
         max_length=5,
     )
 
-    def __init__(self, parent_view: "BaseFlowView"):
+    def __init__(self, parent_view):
         super().__init__()
         self.parent_view = parent_view
 
@@ -461,10 +465,10 @@ class DateTimeModal(discord.ui.Modal, title="Datum und Uhrzeit"):
         time_str = str(self.time_input).strip()
 
         try:
-            parse_datetime(date_str, time_str)
+            parse_berlin_datetime(date_str, time_str)
         except ValueError:
             await interaction.response.send_message(
-                "Ungültiges Format. Bitte Datum als TT.MM.JJJJ und Uhrzeit als HH:MM eingeben.",
+                "Ungültiges Format. Datum: TT.MM.JJJJ und Uhrzeit: HH:MM",
                 ephemeral=True,
             )
             return
@@ -474,7 +478,7 @@ class DateTimeModal(discord.ui.Modal, title="Datum und Uhrzeit"):
 
         await interaction.response.edit_message(
             content=self.parent_view.render_summary(),
-            view=self.parent_view
+            view=self.parent_view,
         )
 
 
@@ -486,7 +490,7 @@ class RacetimeModal(discord.ui.Modal, title="Racetime-Link"):
         max_length=300,
     )
 
-    def __init__(self, parent_view: "BaseFlowView"):
+    def __init__(self, parent_view):
         super().__init__()
         self.parent_view = parent_view
 
@@ -495,16 +499,15 @@ class RacetimeModal(discord.ui.Modal, title="Racetime-Link"):
 
         await interaction.response.edit_message(
             content=self.parent_view.render_summary(),
-            view=self.parent_view
+            view=self.parent_view,
         )
 
 
 # =========================================================
 # BASE VIEW
 # =========================================================
-
 class BaseFlowView(discord.ui.View):
-    def __init__(self, cog: "MatchCenterCog", author_id: int, timeout: int = 900):
+    def __init__(self, cog, author_id: int, timeout: int = 900):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.author_id = author_id
@@ -513,8 +516,8 @@ class BaseFlowView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "Dieses Matchcenter-Fenster gehört nicht dir.",
-                ephemeral=True
+                "Dieses Fenster gehört nicht dir.",
+                ephemeral=True,
             )
             return False
         return True
@@ -525,31 +528,22 @@ class BaseFlowView(discord.ui.View):
 
         if s.kind:
             lines.append(f"**Bereich:** {s.kind}")
-
         if s.division:
             lines.append(f"**Division:** {s.division}")
-
         if s.cup_round:
             lines.append(f"**Runde:** {s.cup_round}")
-
         if s.home_player:
             lines.append(f"**Heimrecht:** {s.home_player}")
-
-        if s.match_text:
-            lines.append(f"**Spiel:** {s.match_text}")
-
+        if s.match_label:
+            lines.append(f"**Spiel:** {s.match_label}")
         if s.mode:
             lines.append(f"**Modus:** {s.mode}")
-
-        if s.winner:
-            lines.append(f"**Auswahl Ergebnis/Gewinner:** {s.winner}")
-
+        if s.winner_value:
+            lines.append(f"**Ergebnis-Auswahl:** {s.winner_value}")
         if s.date_str:
             lines.append(f"**Datum:** {s.date_str}")
-
         if s.time_str:
             lines.append(f"**Uhrzeit:** {s.time_str}")
-
         if s.racetime_link:
             lines.append(f"**Racetime:** {s.racetime_link}")
 
@@ -559,16 +553,15 @@ class BaseFlowView(discord.ui.View):
 # =========================================================
 # SELECTS
 # =========================================================
-
 class DivisionSelect(discord.ui.Select):
     def __init__(self):
-        options = [discord.SelectOption(label=d, value=d) for d in DIVISIONS]
+        options = [discord.SelectOption(label=f"Div {i}", value=f"Div {i}") for i in range(1, 7)]
         super().__init__(
             placeholder="Welche Division?",
-            options=options,
             min_values=1,
             max_values=1,
-            row=0
+            options=options,
+            row=0,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -578,27 +571,28 @@ class DivisionSelect(discord.ui.Select):
 
         view.state.division = self.values[0]
         view.state.home_player = None
-        view.state.match_text = None
+        view.state.match_label = None
+        view.state.match_row_index = None
+        view.state.player1 = None
+        view.state.player2 = None
+
         view.rebuild_dynamic_items()
 
         await interaction.response.edit_message(
             content=view.render_summary(),
-            view=view
+            view=view,
         )
 
 
 class HomePlayerSelect(discord.ui.Select):
-    def __init__(self, players: List[str]):
-        options = [
-            discord.SelectOption(label=truncate_label(p), value=p)
-            for p in players[:25]
-        ]
+    def __init__(self, players: list[str]):
+        options = [discord.SelectOption(label=p[:100], value=p) for p in players[:25]]
         super().__init__(
             placeholder="Wer hat Heimrecht?",
-            options=options,
             min_values=1,
             max_values=1,
-            row=1
+            options=options,
+            row=1,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -607,54 +601,103 @@ class HomePlayerSelect(discord.ui.Select):
             return
 
         view.state.home_player = self.values[0]
-        view.state.match_text = None
+        view.state.match_label = None
+        view.state.match_row_index = None
+        view.state.player1 = None
+        view.state.player2 = None
+
         view.rebuild_dynamic_items()
 
         await interaction.response.edit_message(
             content=view.render_summary(),
-            view=view
+            view=view,
         )
 
 
-class MatchSelect(discord.ui.Select):
-    def __init__(self, matches: List[str], placeholder: str = "Spiel auswählen", row: int = 2):
-        options = [
-            discord.SelectOption(label=truncate_label(m), value=m)
-            for m in matches[:25]
-        ]
+class LeagueMatchSelect(discord.ui.Select):
+    def __init__(self, matches: list[dict]):
+        options = []
+        for m in matches[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=m["label"][:100],
+                    value=f'{m["row_index"]}|{m["heim"]}|{m["gast"]}|{m["label"]}',
+                )
+            )
         super().__init__(
-            placeholder=placeholder,
-            options=options,
+            placeholder="Spiel auswählen",
             min_values=1,
             max_values=1,
-            row=row
+            options=options,
+            row=2,
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-        if isinstance(view, BaseFlowView):
-            view.state.match_text = self.values[0]
-            await interaction.response.edit_message(
-                content=view.render_summary(),
-                view=view
+        if not isinstance(view, (LeagueScheduleView, LeagueResultView)):
+            return
+
+        raw = self.values[0]
+        row_index, p1, p2, label = raw.split("|", 3)
+
+        view.state.match_row_index = int(row_index)
+        view.state.player1 = p1
+        view.state.player2 = p2
+        view.state.match_label = label
+
+        await interaction.response.edit_message(
+            content=view.render_summary(),
+            view=view,
+        )
+
+
+class CupMatchSelect(discord.ui.Select):
+    def __init__(self, matches: list[dict]):
+        options = []
+        for m in matches[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=m["label"][:100],
+                    value=f'{m["row_index"]}|{m["label"]}',
+                )
             )
+        super().__init__(
+            placeholder="Spiel auswählen",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, (CupScheduleView, CupResultView)):
+            return
+
+        raw = self.values[0]
+        row_index, label = raw.split("|", 1)
+        p1, p2 = parse_matchup(label)
+
+        view.state.match_row_index = int(row_index)
+        view.state.match_label = label
+        view.state.player1 = p1
+        view.state.player2 = p2
+
+        await interaction.response.edit_message(
+            content=view.render_summary(),
+            view=view,
+        )
 
 
 class ModeSelect(discord.ui.Select):
-    def __init__(self, modes: List[str], row: int = 3):
-        if not modes:
-            modes = ["Kein Modus gefunden"]
-
-        options = [
-            discord.SelectOption(label=truncate_label(m), value=m)
-            for m in modes[:25]
-        ]
+    def __init__(self, modes: list[str], row: int):
+        options = [discord.SelectOption(label=m[:100], value=m) for m in modes[:25]]
         super().__init__(
             placeholder="Welcher Modus?",
-            options=options,
             min_values=1,
             max_values=1,
-            row=row
+            options=options,
+            row=row,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -663,7 +706,7 @@ class ModeSelect(discord.ui.Select):
             view.state.mode = self.values[0]
             await interaction.response.edit_message(
                 content=view.render_summary(),
-                view=view
+                view=view,
             )
 
 
@@ -672,24 +715,26 @@ class CupRoundSelect(discord.ui.Select):
         options = [discord.SelectOption(label=r, value=r) for r in CUP_ROUNDS]
         super().__init__(
             placeholder="Welche Runde?",
-            options=options,
             min_values=1,
             max_values=1,
-            row=0
+            options=options,
+            row=0,
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-        if isinstance(view, (CupScheduleView, CupResultView)):
-            view.state.cup_round = self.values[0]
+        if not isinstance(view, (CupScheduleView, CupResultView)):
+            return
 
-            if isinstance(view, CupResultView):
-                view.rebuild_dynamic_items()
+        view.state.cup_round = self.values[0]
 
-            await interaction.response.edit_message(
-                content=view.render_summary(),
-                view=view
-            )
+        if isinstance(view, CupResultView):
+            view.rebuild_winner_select()
+
+        await interaction.response.edit_message(
+            content=view.render_summary(),
+            view=view,
+        )
 
 
 class LeagueWinnerSelect(discord.ui.Select):
@@ -701,23 +746,23 @@ class LeagueWinnerSelect(discord.ui.Select):
         ]
         super().__init__(
             placeholder="Wer hat gewonnen?",
-            options=options,
             min_values=1,
             max_values=1,
-            row=4
+            options=options,
+            row=4,
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if isinstance(view, LeagueResultView):
-            view.state.winner = self.values[0]
+            view.state.winner_value = self.values[0]
             await interaction.response.edit_message(
                 content=view.render_summary(),
-                view=view
+                view=view,
             )
 
 
-class CupWinnerStandardSelect(discord.ui.Select):
+class CupWinnerNormalSelect(discord.ui.Select):
     def __init__(self):
         options = [
             discord.SelectOption(label="Spieler 1", value="spieler1"),
@@ -725,23 +770,23 @@ class CupWinnerStandardSelect(discord.ui.Select):
         ]
         super().__init__(
             placeholder="Wer hat gewonnen?",
-            options=options,
             min_values=1,
             max_values=1,
-            row=2
+            options=options,
+            row=2,
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if isinstance(view, CupResultView):
-            view.state.winner = self.values[0]
+            view.state.winner_value = self.values[0]
             await interaction.response.edit_message(
                 content=view.render_summary(),
-                view=view
+                view=view,
             )
 
 
-class CupWinnerBestOf3Select(discord.ui.Select):
+class CupWinnerBo3Select(discord.ui.Select):
     def __init__(self):
         options = [
             discord.SelectOption(label="Spieler 1 gewinnt 2:0", value="p1_2_0"),
@@ -751,80 +796,66 @@ class CupWinnerBestOf3Select(discord.ui.Select):
         ]
         super().__init__(
             placeholder="Best of 3 Ergebnis",
-            options=options,
             min_values=1,
             max_values=1,
-            row=2
+            options=options,
+            row=2,
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if isinstance(view, CupResultView):
-            view.state.winner = self.values[0]
+            view.state.winner_value = self.values[0]
             await interaction.response.edit_message(
                 content=view.render_summary(),
-                view=view
+                view=view,
             )
 
 
 # =========================================================
 # START VIEW
 # =========================================================
-
 class MatchCenterStartView(BaseFlowView):
-    def __init__(self, cog: "MatchCenterCog", author_id: int):
+    def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
 
     @discord.ui.button(label="Termin League", style=discord.ButtonStyle.primary, row=0)
     async def termin_league(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = LeagueScheduleView(self.cog, self.author_id)
         view.state.kind = "Termin League"
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
     @discord.ui.button(label="Termin Cup", style=discord.ButtonStyle.primary, row=0)
     async def termin_cup(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = CupScheduleView(self.cog, self.author_id)
         view.state.kind = "Termin Cup"
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
     @discord.ui.button(label="Ergebnis League", style=discord.ButtonStyle.success, row=1)
     async def ergebnis_league(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = LeagueResultView(self.cog, self.author_id)
         view.state.kind = "Ergebnis League"
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
     @discord.ui.button(label="Ergebnis Cup", style=discord.ButtonStyle.success, row=1)
     async def ergebnis_cup(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = CupResultView(self.cog, self.author_id)
         view.state.kind = "Ergebnis Cup"
-        await interaction.response.edit_message(
-            content=view.render_summary(),
-            view=view
-        )
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
 
 # =========================================================
-# LEAGUE SCHEDULE VIEW
+# LEAGUE SCHEDULE
 # =========================================================
-
 class LeagueScheduleView(BaseFlowView):
-    def __init__(self, cog: "MatchCenterCog", author_id: int):
+    def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(DivisionSelect())
         self.add_item(ModeSelect(get_runner_modes(), row=3))
 
     def rebuild_dynamic_items(self):
         for item in list(self.children):
-            if isinstance(item, (HomePlayerSelect, MatchSelect)):
+            if isinstance(item, (HomePlayerSelect, LeagueMatchSelect)):
                 self.remove_item(item)
 
         if self.state.division:
@@ -835,129 +866,111 @@ class LeagueScheduleView(BaseFlowView):
         if self.state.division and self.state.home_player:
             matches = get_league_home_matches(self.state.division, self.state.home_player)
             if matches:
-                self.add_item(MatchSelect(matches, row=2))
+                self.add_item(LeagueMatchSelect(matches))
 
     @discord.ui.button(label="Datum/Uhrzeit", style=discord.ButtonStyle.secondary, row=4)
-    async def date_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def datetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DateTimeModal(self))
 
     @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=4)
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
 
-        if not all([s.division, s.home_player, s.match_text, s.mode, s.date_str, s.time_str]):
+        if not all([s.division, s.match_label, s.player1, s.player2, s.mode, s.date_str, s.time_str]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
             return
 
         try:
-            start_dt = parse_datetime(s.date_str, s.time_str)
-        except ValueError:
-            await interaction.response.send_message("Datum/Uhrzeit ungültig.", ephemeral=True)
-            return
+            start_dt = parse_berlin_datetime(s.date_str, s.time_str)
+            end_dt = start_dt + timedelta(hours=2)
+            location = build_multistream_url(s.player1, s.player2)
+            title = f"{s.division} | {s.player1} vs. {s.player2} | {s.mode}"
 
-        end_dt = start_dt + timedelta(hours=2)
-        player1, player2 = parse_matchup(s.match_text)
-        location = get_multistream_link(player1, player2)
-        title = f"{s.division} | {player1} vs. {player2} | {s.mode}"
-
-        event = await create_discord_scheduled_event(
-            guild=interaction.guild,
-            title=title,
-            location=location,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            description="League-Match aus dem TFL Matchcenter"
-        )
-
-        if event:
-            await interaction.response.send_message(
-                f"Event erstellt:\n**{title}**",
-                ephemeral=True
+            await create_scheduled_event(
+                interaction.guild,
+                title,
+                location,
+                start_dt,
+                end_dt,
+                f"League-Match in {s.division} zwischen {s.player1} und {s.player2}.",
             )
-        else:
+
             await interaction.response.send_message(
-                "Event konnte nicht erstellt werden.",
-                ephemeral=True
+                f"✅ Event erstellt:\n**{title}**",
+                ephemeral=True,
+            )
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(
+                f"❌ Event konnte nicht erstellt werden: {e}",
+                ephemeral=True,
             )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=4)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = MatchCenterStartView(self.cog, self.author_id)
-        await interaction.response.edit_message(
-            content="## TFL Matchcenter",
-            view=view
-        )
+        await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
 
 
 # =========================================================
-# CUP SCHEDULE VIEW
+# CUP SCHEDULE
 # =========================================================
-
 class CupScheduleView(BaseFlowView):
-    def __init__(self, cog: "MatchCenterCog", author_id: int):
+    def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(CupRoundSelect())
-        self.add_item(MatchSelect(get_cup_matches(), row=1))
+        self.add_item(CupMatchSelect(get_cup_matches()))
         self.add_item(ModeSelect(get_runner_modes(), row=2))
 
     @discord.ui.button(label="Datum/Uhrzeit", style=discord.ButtonStyle.secondary, row=3)
-    async def date_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def datetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DateTimeModal(self))
 
     @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=3)
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
 
-        if not all([s.cup_round, s.match_text, s.mode, s.date_str, s.time_str]):
+        if not all([s.cup_round, s.match_label, s.player1, s.player2, s.mode, s.date_str, s.time_str]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
             return
 
         try:
-            start_dt = parse_datetime(s.date_str, s.time_str)
-        except ValueError:
-            await interaction.response.send_message("Datum/Uhrzeit ungültig.", ephemeral=True)
-            return
+            start_dt = parse_berlin_datetime(s.date_str, s.time_str)
+            end_dt = start_dt + timedelta(hours=2)
+            location = build_multistream_url(s.player1, s.player2)
+            title = f"TFL Cup {s.cup_round} | {s.player1} vs. {s.player2} | {s.mode}"
 
-        end_dt = start_dt + timedelta(hours=2)
-        player1, player2 = parse_matchup(s.match_text)
-        location = get_multistream_link(player1, player2)
-        title = f"TFL Cup {s.cup_round} | {player1} vs. {player2} | {s.mode}"
-
-        event = await create_discord_scheduled_event(
-            guild=interaction.guild,
-            title=title,
-            location=location,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            description="Cup-Match aus dem TFL Matchcenter"
-        )
-
-        if event:
-            await interaction.response.send_message(
-                f"Event erstellt:\n**{title}**",
-                ephemeral=True
+            await create_scheduled_event(
+                interaction.guild,
+                title,
+                location,
+                start_dt,
+                end_dt,
+                f"TFL Cup {s.cup_round} zwischen {s.player1} und {s.player2}.",
             )
-        else:
+
             await interaction.response.send_message(
-                "Event konnte nicht erstellt werden.",
-                ephemeral=True
+                f"✅ Event erstellt:\n**{title}**",
+                ephemeral=True,
+            )
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(
+                f"❌ Event konnte nicht erstellt werden: {e}",
+                ephemeral=True,
             )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = MatchCenterStartView(self.cog, self.author_id)
-        await interaction.response.edit_message(
-            content="## TFL Matchcenter",
-            view=view
-        )
+        await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
 
 
 # =========================================================
-# LEAGUE RESULT VIEW
+# LEAGUE RESULT
 # =========================================================
-
 class LeagueResultView(BaseFlowView):
-    def __init__(self, cog: "MatchCenterCog", author_id: int):
+    def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(DivisionSelect())
         self.add_item(ModeSelect(get_runner_modes(), row=3))
@@ -965,7 +978,7 @@ class LeagueResultView(BaseFlowView):
 
     def rebuild_dynamic_items(self):
         for item in list(self.children):
-            if isinstance(item, (HomePlayerSelect, MatchSelect)):
+            if isinstance(item, (HomePlayerSelect, LeagueMatchSelect)):
                 self.remove_item(item)
 
         if self.state.division:
@@ -976,7 +989,7 @@ class LeagueResultView(BaseFlowView):
         if self.state.division and self.state.home_player:
             matches = get_league_home_matches(self.state.division, self.state.home_player)
             if matches:
-                self.add_item(MatchSelect(matches, row=2))
+                self.add_item(LeagueMatchSelect(matches))
 
     @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=5)
     async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -986,77 +999,72 @@ class LeagueResultView(BaseFlowView):
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
 
-        if not all([s.division, s.home_player, s.match_text, s.mode, s.winner, s.racetime_link]):
+        if not all([s.division, s.match_row_index, s.match_label, s.player1, s.player2, s.mode, s.winner_value, s.racetime_link]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
             return
 
-        result = result_league_from_winner(s.winner)
-        timestamp = now_str()
-        entered_by = interaction.user.display_name
+        try:
+            result = result_league_from_value(s.winner_value)
+            timestamp = now_berlin_str()
+            entered_by = str(interaction.user)
 
-        ok = write_league_result(
-            division=s.division,
-            match_text=s.match_text,
-            mode=s.mode,
-            result=result,
-            racetime_link=s.racetime_link,
-            entered_by=entered_by,
-            timestamp=timestamp,
-        )
-
-        if not ok:
-            await interaction.response.send_message(
-                "League-Ergebnis konnte nicht ins Sheet geschrieben werden. Wahrscheinlich wurde die Spiel-Zeile nicht gefunden.",
-                ephemeral=True
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                write_league_result,
+                s.match_row_index,
+                s.mode,
+                result,
+                s.racetime_link,
+                entered_by,
+                timestamp,
+                s.division,
             )
-            return
 
-        player1, player2 = parse_matchup(s.match_text)
-        msg = (
-            f"[TFL League] {timestamp}\n"
-            f"{s.division}\n"
-            f"{player1} vs. {player2} -> {result}\n"
-            f"Modus: {s.mode}\n"
-            f"Racetime: {s.racetime_link}\n"
-            f"Eingetragen von: {entered_by}"
-        )
+            post_text = (
+                f"**[League {s.division}]** {timestamp}\n"
+                f"**{s.player1}** vs **{s.player2}** → **{result}**\n"
+                f"Modus: {s.mode}\n"
+                f"Racetime: {s.racetime_link}"
+            )
+            await send_result_post(interaction.guild, post_text)
 
-        await send_channel_message(interaction.guild, SHOWRESTREAMS_CHANNEL_ID, msg)
-
-        await interaction.response.send_message(
-            "League-Ergebnis wurde eingetragen.",
-            ephemeral=True
-        )
+            await interaction.response.send_message(
+                "✅ League-Ergebnis gespeichert und gepostet.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(
+                f"❌ Fehler beim Speichern des League-Ergebnisses: {e}",
+                ephemeral=True,
+            )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=5)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = MatchCenterStartView(self.cog, self.author_id)
-        await interaction.response.edit_message(
-            content="## TFL Matchcenter",
-            view=view
-        )
+        await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
 
 
 # =========================================================
-# CUP RESULT VIEW
+# CUP RESULT
 # =========================================================
-
 class CupResultView(BaseFlowView):
-    def __init__(self, cog: "MatchCenterCog", author_id: int):
+    def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(CupRoundSelect())
-        self.add_item(MatchSelect(get_cup_matches(), row=1))
-        self.rebuild_dynamic_items()
+        self.add_item(CupMatchSelect(get_cup_matches()))
+        self.rebuild_winner_select()
 
-    def rebuild_dynamic_items(self):
+    def rebuild_winner_select(self):
         for item in list(self.children):
-            if isinstance(item, (CupWinnerStandardSelect, CupWinnerBestOf3Select)):
+            if isinstance(item, (CupWinnerNormalSelect, CupWinnerBo3Select)):
                 self.remove_item(item)
 
         if self.state.cup_round in {"Semifinals", "Finals"}:
-            self.add_item(CupWinnerBestOf3Select())
+            self.add_item(CupWinnerBo3Select())
         else:
-            self.add_item(CupWinnerStandardSelect())
+            self.add_item(CupWinnerNormalSelect())
 
     @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=3)
     async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1066,58 +1074,53 @@ class CupResultView(BaseFlowView):
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
 
-        if not all([s.cup_round, s.match_text, s.winner, s.racetime_link]):
+        if not all([s.cup_round, s.match_row_index, s.match_label, s.player1, s.player2, s.winner_value, s.racetime_link]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
             return
 
-        result = result_cup_from_value(s.cup_round, s.winner)
-        timestamp = now_str()
-        entered_meta = f"{interaction.user.display_name} | {timestamp}"
+        try:
+            result = result_cup_from_value(s.cup_round, s.winner_value)
+            timestamp = now_berlin_str()
+            entered_meta = f"{interaction.user} | {timestamp}"
 
-        ok = write_cup_result(
-            round_name=s.cup_round,
-            match_text=s.match_text,
-            result=result,
-            racetime_link=s.racetime_link,
-            entered_meta=entered_meta,
-        )
-
-        if not ok:
-            await interaction.response.send_message(
-                "Cup-Ergebnis konnte nicht ins Sheet geschrieben werden. Wahrscheinlich wurde die Spiel-Zeile nicht gefunden.",
-                ephemeral=True
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                write_cup_result,
+                s.match_row_index,
+                result,
+                s.racetime_link,
+                entered_meta,
             )
-            return
 
-        player1, player2 = parse_matchup(s.match_text)
-        msg = (
-            f"[TFL Cup] {timestamp}\n"
-            f"Runde: {s.cup_round}\n"
-            f"{player1} vs. {player2} -> {result}\n"
-            f"Racetime: {s.racetime_link}\n"
-            f"Eingetragen von: {interaction.user.display_name}"
-        )
+            post_text = (
+                f"**[TFL Cup]** {timestamp}\n"
+                f"Runde: {s.cup_round}\n"
+                f"**{s.player1}** vs **{s.player2}** → **{result}**\n"
+                f"Racetime: {s.racetime_link}"
+            )
+            await send_result_post(interaction.guild, post_text)
 
-        await send_channel_message(interaction.guild, SHOWRESTREAMS_CHANNEL_ID, msg)
-
-        await interaction.response.send_message(
-            "Cup-Ergebnis wurde eingetragen.",
-            ephemeral=True
-        )
+            await interaction.response.send_message(
+                "✅ Cup-Ergebnis gespeichert und gepostet.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.response.send_message(
+                f"❌ Fehler beim Speichern des Cup-Ergebnisses: {e}",
+                ephemeral=True,
+            )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = MatchCenterStartView(self.cog, self.author_id)
-        await interaction.response.edit_message(
-            content="## TFL Matchcenter",
-            view=view
-        )
+        await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
 
 
 # =========================================================
 # COG
 # =========================================================
-
 class MatchCenterCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1125,24 +1128,39 @@ class MatchCenterCog(commands.Cog):
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.command(name="matchcenter", description="Öffnet das TFL Matchcenter.")
     async def matchcenter(self, interaction: discord.Interaction):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "❌ Konnte Mitgliedsdaten nicht lesen.",
+                ephemeral=True,
+            )
+            return
+
+        if not has_tfl_role(member):
+            await interaction.response.send_message(
+                "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
+                ephemeral=True,
+            )
+            return
+
         try:
             view = MatchCenterStartView(self, interaction.user.id)
             await interaction.response.send_message(
                 "## TFL Matchcenter",
                 view=view,
-                ephemeral=True
+                ephemeral=True,
             )
         except Exception:
             traceback.print_exc()
             if interaction.response.is_done():
                 await interaction.followup.send(
-                    "Fehler beim Öffnen des Matchcenters.",
-                    ephemeral=True
+                    "❌ Fehler beim Öffnen des Matchcenters.",
+                    ephemeral=True,
                 )
             else:
                 await interaction.response.send_message(
-                    "Fehler beim Öffnen des Matchcenters.",
-                    ephemeral=True
+                    "❌ Fehler beim Öffnen des Matchcenters.",
+                    ephemeral=True,
                 )
 
 
