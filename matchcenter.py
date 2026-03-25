@@ -31,21 +31,12 @@ BERLIN_TZ = pytz.timezone("Europe/Berlin")
 print("DEBUG matchcenter CREDS_FILE =", CREDS_FILE)
 
 DIVISION_SHEETS = {
-    "1.Division": "1.DIV",
-    "2.Division": "2.DIV",
-    "3.Division": "3.DIV",
-    "4.Division": "4.DIV",
-    "5.Division": "5.DIV",
-    "6.Division": "6.DIV",
-}
-
-DIVISION_VALUES = {
-    "1": "1.DIV",
-    "2": "2.DIV",
-    "3": "3.DIV",
-    "4": "4.DIV",
-    "5": "5.DIV",
-    "6": "6.DIV",
+    "Div 1": "1.DIV",
+    "Div 2": "2.DIV",
+    "Div 3": "3.DIV",
+    "Div 4": "4.DIV",
+    "Div 5": "5.DIV",
+    "Div 6": "6.DIV",
 }
 
 CUP_SHEET = "TFL Cup"
@@ -63,6 +54,20 @@ CUP_ROUNDS = [
 DIV_COL_LEFT = 4      # D
 DIV_COL_MARKER = 5    # E
 DIV_COL_RIGHT = 6     # F
+
+# TFL Cup Spalten:
+# A = Runde
+# B = Spieler 1
+# C = Ergebnis
+# D = Spieler 2
+# E = Racetime
+# F = Eingebender + Zeitstempel
+CUP_COL_ROUND = 1
+CUP_COL_P1 = 2
+CUP_COL_RESULT = 3
+CUP_COL_P2 = 4
+CUP_COL_RACETIME = 5
+CUP_COL_META = 6
 
 
 # =========================================================
@@ -177,18 +182,12 @@ def clean_text(value: str) -> str:
 
 
 def parse_matchup(match_text: str):
-    text = clean_text(match_text).replace(" vs ", " vs. ")
+    text = clean_text(match_text)
+    text = text.replace(" vs ", " vs. ")
     parts = [p.strip() for p in text.split("vs.")]
     if len(parts) == 2:
         return parts[0], parts[1]
     return text, ""
-
-
-def normalize_match_text(match_text: str) -> str:
-    p1, p2 = parse_matchup(match_text)
-    if p2:
-        return f"{p1} vs. {p2}"
-    return clean_text(match_text)
 
 
 def now_berlin_str() -> str:
@@ -205,14 +204,6 @@ def get_div_ws_from_label(division_label: str):
     ws_name = DIVISION_SHEETS.get(division_label)
     if not ws_name:
         raise ValueError(f"Unbekannte Division: {division_label}")
-    return WB.worksheet(ws_name)
-
-
-def get_div_ws_from_number(division_number: str):
-    sheets_required()
-    ws_name = DIVISION_VALUES.get(division_number)
-    if not ws_name:
-        raise ValueError(f"Unbekannte Division: {division_number}")
     return WB.worksheet(ws_name)
 
 
@@ -300,6 +291,12 @@ def get_league_home_matches(division_label: str, home_player: str):
 
 
 def get_cup_matches():
+    """
+    Robuste Cup-Spielerkennung:
+    1. Bevorzugt strukturierte Zeilen über Spalten B und D
+    2. Fallback: komplette Zeile nach 'vs' durchsuchen
+    So wird auch das Finale unten zuverlässig erkannt.
+    """
     sheets_required()
     ws = WB.worksheet(CUP_SHEET)
     rows = ws.get_all_values()
@@ -308,26 +305,52 @@ def get_cup_matches():
     seen = set()
 
     for idx, row in enumerate(rows, start=1):
-        row_hit = None
+        # Strukturierter Versuch:
+        p1 = _cell(row, CUP_COL_P1 - 1)
+        p2 = _cell(row, CUP_COL_P2 - 1)
+        round_code = _cell(row, CUP_COL_ROUND - 1)
 
-        for cell in row:
-            txt = clean_text(cell)
-            if not txt:
-                continue
+        structured_hit = False
+        if p1 and p2:
+            # Header/Trennzeilen raus
+            invalid_p1 = {"spieler 1", "spieler1"}
+            invalid_p2 = {"spieler 2", "spieler2", "racetime"}
 
-            if "vs" in txt.lower():
-                normalized = normalize_match_text(txt)
-                if "vs." in normalized:
-                    row_hit = normalized
-                    break
+            if p1.lower() not in invalid_p1 and p2.lower() not in invalid_p2:
+                label = f"{p1} vs. {p2}"
+                key = label.lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append({
+                        "label": label,
+                        "value": str(idx),
+                        "row_index": idx,
+                        "round_code": round_code,
+                        "player1": p1,
+                        "player2": p2,
+                    })
+                structured_hit = True
 
-        if row_hit and row_hit not in seen:
-            seen.add(row_hit)
-            out.append({
-                "label": row_hit,
-                "value": str(idx),
-                "row_index": idx,
-            })
+        if structured_hit:
+            continue
+
+        # Fallback über ganze Zeile
+        row_joined = " ".join(clean_text(c) for c in row if clean_text(c))
+        if "vs" in row_joined.lower():
+            p1f, p2f = parse_matchup(row_joined)
+            if p1f and p2f:
+                label = f"{p1f} vs. {p2f}"
+                key = label.lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append({
+                        "label": label,
+                        "value": str(idx),
+                        "row_index": idx,
+                        "round_code": round_code,
+                        "player1": p1f,
+                        "player2": p2f,
+                    })
 
     return out[:25]
 
@@ -357,11 +380,15 @@ def result_league_from_value(value: str) -> str:
 
 def result_cup_from_value(round_name: str, value: str) -> str:
     if round_name in {"Semifinals", "Finals"}:
+        # Serienstand
         mapping = {
-            "p1_2_0": "2:0",
-            "p1_2_1": "2:1",
-            "p2_2_1": "1:2",
-            "p2_2_0": "0:2",
+            "1:0": "1:0",
+            "0:1": "0:1",
+            "1:1": "1:1",
+            "2:0": "2:0",
+            "0:2": "0:2",
+            "2:1": "2:1",
+            "1:2": "1:2",
         }
         return mapping[value]
 
@@ -372,7 +399,15 @@ def result_cup_from_value(round_name: str, value: str) -> str:
     return mapping[value]
 
 
-def write_league_result(row_index: int, mode: str, result: str, racetime_link: str, entered_by: str, timestamp: str, division_label: str):
+def write_league_result(
+    row_index: int,
+    mode: str,
+    result: str,
+    racetime_link: str,
+    entered_by: str,
+    timestamp: str,
+    division_label: str,
+):
     ws = get_div_ws_from_label(division_label)
 
     reqs = [
@@ -384,7 +419,13 @@ def write_league_result(row_index: int, mode: str, result: str, racetime_link: s
     ws.batch_update(reqs)
 
 
-def write_cup_result(row_index: int, result: str, racetime_link: str, entered_meta: str):
+def write_cup_result_standard(row_index: int, result: str, racetime_link: str, entered_meta: str):
+    """
+    Normale Cup-Runden:
+    C = Ergebnis
+    E = Racetime
+    F = Eingebender + Zeitstempel
+    """
     sheets_required()
     ws = WB.worksheet(CUP_SHEET)
 
@@ -396,7 +437,45 @@ def write_cup_result(row_index: int, result: str, racetime_link: str, entered_me
     ws.batch_update(reqs)
 
 
-async def create_scheduled_event(guild: discord.Guild, title: str, location: str, start_dt, end_dt, description: str):
+def write_cup_result_series(row_index: int, series_score: str, racetime_link: str, entered_meta: str):
+    """
+    Semifinals / Finals:
+    C = aktueller Serienstand
+    E = Verlauf untereinander:
+        1:0 https://...
+        1:1 https://...
+        2:1 https://...
+    F = letzter Eingebender + Zeitstempel
+    """
+    sheets_required()
+    ws = WB.worksheet(CUP_SHEET)
+
+    existing_racetime = ws.acell(f"E{row_index}").value
+    existing_racetime = existing_racetime.strip() if existing_racetime else ""
+
+    new_line = f"{series_score} {racetime_link}".strip()
+
+    if existing_racetime:
+        combined = existing_racetime + "\n" + new_line
+    else:
+        combined = new_line
+
+    reqs = [
+        {"range": f"C{row_index}:C{row_index}", "values": [[series_score]]},
+        {"range": f"E{row_index}:E{row_index}", "values": [[combined]]},
+        {"range": f"F{row_index}:F{row_index}", "values": [[entered_meta]]},
+    ]
+    ws.batch_update(reqs)
+
+
+async def create_scheduled_event(
+    guild: discord.Guild,
+    title: str,
+    location: str,
+    start_dt,
+    end_dt,
+    description: str,
+):
     return await guild.create_scheduled_event(
         name=title,
         description=description,
@@ -659,7 +738,7 @@ class CupMatchSelect(discord.ui.Select):
             options = [
                 discord.SelectOption(
                     label="Keine Cup-Spiele gefunden",
-                    value="0|Keine Cup-Spiele gefunden",
+                    value="0|Keine Cup-Spiele gefunden| | ",
                 )
             ]
             disabled = True
@@ -667,7 +746,7 @@ class CupMatchSelect(discord.ui.Select):
             options = [
                 discord.SelectOption(
                     label=m["label"][:100],
-                    value=f'{m["row_index"]}|{m["label"]}',
+                    value=f'{m["row_index"]}|{m["label"]}|{m["player1"]}|{m["player2"]}',
                 )
                 for m in matches[:25]
             ]
@@ -688,7 +767,7 @@ class CupMatchSelect(discord.ui.Select):
             return
 
         raw = self.values[0]
-        row_index, label = raw.split("|", 1)
+        row_index, label, p1, p2 = raw.split("|", 3)
 
         if row_index == "0":
             await interaction.response.send_message(
@@ -696,8 +775,6 @@ class CupMatchSelect(discord.ui.Select):
                 ephemeral=True,
             )
             return
-
-        p1, p2 = parse_matchup(label)
 
         view.state.match_row_index = int(row_index)
         view.state.match_label = label
@@ -807,16 +884,19 @@ class CupWinnerNormalSelect(discord.ui.Select):
             )
 
 
-class CupWinnerBo3Select(discord.ui.Select):
+class CupWinnerSeriesSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Spieler 1 gewinnt 2:0", value="p1_2_0"),
-            discord.SelectOption(label="Spieler 1 gewinnt 2:1", value="p1_2_1"),
-            discord.SelectOption(label="Spieler 2 gewinnt 2:1", value="p2_2_1"),
-            discord.SelectOption(label="Spieler 2 gewinnt 2:0", value="p2_2_0"),
+            discord.SelectOption(label="1:0", value="1:0"),
+            discord.SelectOption(label="0:1", value="0:1"),
+            discord.SelectOption(label="1:1", value="1:1"),
+            discord.SelectOption(label="2:0", value="2:0"),
+            discord.SelectOption(label="0:2", value="0:2"),
+            discord.SelectOption(label="2:1", value="2:1"),
+            discord.SelectOption(label="1:2", value="1:2"),
         ]
         super().__init__(
-            placeholder="Best of 3 Ergebnis",
+            placeholder="Aktueller Serienstand",
             min_values=1,
             max_values=1,
             options=options,
@@ -1088,11 +1168,11 @@ class CupResultView(BaseFlowView):
 
     def rebuild_winner_select(self):
         for item in list(self.children):
-            if isinstance(item, (CupWinnerNormalSelect, CupWinnerBo3Select)):
+            if isinstance(item, (CupWinnerNormalSelect, CupWinnerSeriesSelect)):
                 self.remove_item(item)
 
         if self.state.cup_round in {"Semifinals", "Finals"}:
-            self.add_item(CupWinnerBo3Select())
+            self.add_item(CupWinnerSeriesSelect())
         else:
             self.add_item(CupWinnerNormalSelect())
 
@@ -1121,14 +1201,25 @@ class CupResultView(BaseFlowView):
             entered_meta = f"{interaction.user} | {timestamp}"
 
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                write_cup_result,
-                s.match_row_index,
-                result,
-                s.racetime_link,
-                entered_meta,
-            )
+
+            if s.cup_round in {"Semifinals", "Finals"}:
+                await loop.run_in_executor(
+                    None,
+                    write_cup_result_series,
+                    s.match_row_index,
+                    result,
+                    s.racetime_link,
+                    entered_meta,
+                )
+            else:
+                await loop.run_in_executor(
+                    None,
+                    write_cup_result_standard,
+                    s.match_row_index,
+                    result,
+                    s.racetime_link,
+                    entered_meta,
+                )
 
             post_text = (
                 f"**[TFL Cup]** {timestamp}\n"
