@@ -2,7 +2,6 @@ import os
 import re
 import asyncio
 import traceback
-import datetime
 from datetime import datetime as dt, timedelta
 
 import discord
@@ -61,14 +60,13 @@ CUP_ROUNDS = [
     "Finals",
 ]
 
-# Spalten wie in deiner bot.py / bestehenden DIV-Sheets
 DIV_COL_LEFT = 4      # D
 DIV_COL_MARKER = 5    # E
 DIV_COL_RIGHT = 6     # F
 
+
 # =========================================================
 # TWITCH MAP
-# Aus bot.py übernommen
 # =========================================================
 TWITCH_MAP = {
     "gnrb": "gnrb87",
@@ -129,6 +127,7 @@ TWITCH_MAP = {
     "rennyur": "rennyur",
     "yasi89": "yasi89",
 }
+
 
 # =========================================================
 # GOOGLE SHEETS
@@ -236,7 +235,7 @@ def get_runner_modes() -> list[str]:
             seen.add(val)
             out.append(val)
 
-    return out[:25] if out else ["Kein Modus gefunden"]
+    return out[:25] if out else ["Standard"]
 
 
 def collect_players_from_div_ws(ws) -> list[str]:
@@ -313,6 +312,9 @@ def get_cup_matches():
 
         for cell in row:
             txt = clean_text(cell)
+            if not txt:
+                continue
+
             if "vs" in txt.lower():
                 normalized = normalize_match_text(txt)
                 if "vs." in normalized:
@@ -653,20 +655,31 @@ class LeagueMatchSelect(discord.ui.Select):
 
 class CupMatchSelect(discord.ui.Select):
     def __init__(self, matches: list[dict]):
-        options = []
-        for m in matches[:25]:
-            options.append(
+        if not matches:
+            options = [
+                discord.SelectOption(
+                    label="Keine Cup-Spiele gefunden",
+                    value="0|Keine Cup-Spiele gefunden",
+                )
+            ]
+            disabled = True
+        else:
+            options = [
                 discord.SelectOption(
                     label=m["label"][:100],
                     value=f'{m["row_index"]}|{m["label"]}',
                 )
-            )
+                for m in matches[:25]
+            ]
+            disabled = False
+
         super().__init__(
             placeholder="Spiel auswählen",
             min_values=1,
             max_values=1,
             options=options,
             row=1,
+            disabled=disabled,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -676,6 +689,14 @@ class CupMatchSelect(discord.ui.Select):
 
         raw = self.values[0]
         row_index, label = raw.split("|", 1)
+
+        if row_index == "0":
+            await interaction.response.send_message(
+                "Es wurden keine Cup-Spiele im Sheet gefunden.",
+                ephemeral=True,
+            )
+            return
+
         p1, p2 = parse_matchup(label)
 
         view.state.match_row_index = int(row_index)
@@ -919,7 +940,8 @@ class CupScheduleView(BaseFlowView):
     def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(CupRoundSelect())
-        self.add_item(CupMatchSelect(get_cup_matches()))
+        cup_matches = get_cup_matches()
+        self.add_item(CupMatchSelect(cup_matches))
         self.add_item(ModeSelect(get_runner_modes(), row=2))
 
     @discord.ui.button(label="Datum/Uhrzeit", style=discord.ButtonStyle.secondary, row=3)
@@ -932,6 +954,13 @@ class CupScheduleView(BaseFlowView):
 
         if not all([s.cup_round, s.match_label, s.player1, s.player2, s.mode, s.date_str, s.time_str]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
+            return
+
+        if s.match_row_index == 0:
+            await interaction.response.send_message(
+                "Es wurde kein gültiges Cup-Spiel gefunden.",
+                ephemeral=True,
+            )
             return
 
         try:
@@ -991,11 +1020,11 @@ class LeagueResultView(BaseFlowView):
             if matches:
                 self.add_item(LeagueMatchSelect(matches))
 
-    @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=5)
+    @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=4)
     async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RacetimeModal(self))
 
-    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=5)
+    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=4)
     async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = self.state
 
@@ -1040,7 +1069,7 @@ class LeagueResultView(BaseFlowView):
                 ephemeral=True,
             )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=5)
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.danger, row=4)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = MatchCenterStartView(self.cog, self.author_id)
         await interaction.response.edit_message(content="## TFL Matchcenter", view=view)
@@ -1053,7 +1082,8 @@ class CupResultView(BaseFlowView):
     def __init__(self, cog, author_id: int):
         super().__init__(cog, author_id)
         self.add_item(CupRoundSelect())
-        self.add_item(CupMatchSelect(get_cup_matches()))
+        cup_matches = get_cup_matches()
+        self.add_item(CupMatchSelect(cup_matches))
         self.rebuild_winner_select()
 
     def rebuild_winner_select(self):
@@ -1076,6 +1106,13 @@ class CupResultView(BaseFlowView):
 
         if not all([s.cup_round, s.match_row_index, s.match_label, s.player1, s.player2, s.winner_value, s.racetime_link]):
             await interaction.response.send_message("Es fehlen noch Angaben.", ephemeral=True)
+            return
+
+        if s.match_row_index == 0:
+            await interaction.response.send_message(
+                "Es wurde kein gültiges Cup-Spiel gefunden.",
+                ephemeral=True,
+            )
             return
 
         try:
