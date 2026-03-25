@@ -58,6 +58,9 @@ class TFLBot(commands.Bot):
         await self.load_extension("schedule")
         print("✅ schedule.py geladen")
 
+        await self.load_extension("matchcenter")
+        print("✅ matchcenter.py geladen")
+
 client = TFLBot(command_prefix="!", intents=intents)
 
 # Wichtig: jetzt existiert tree wirklich
