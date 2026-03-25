@@ -18,10 +18,10 @@ QUALI_SHEET_NAME = "Quali"
 START_ROW = 4
 RUN_STALE_SECONDS = 15 * 60  # 15 Minuten
 
-# B = Discordname
-# D = Quali1 VoD
+# B = Runner
+# D = Quali1 Async?/VoD/DNF
 # E = Quali1 Zeit
-# F = Quali2 VoD
+# F = Quali2 Async?/VoD/DNF
 # G = Quali2 Zeit
 # D2 = Seed Quali 1
 # F2 = Seed Quali 2
@@ -29,7 +29,7 @@ RUN_STALE_SECONDS = 15 * 60  # 15 Minuten
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 
 CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
-SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE")
+SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 
 # =========================================================
 # HILFSFUNKTIONEN
@@ -85,11 +85,8 @@ def get_gspread_client():
 
 
 def get_quali_worksheet():
-    if not SPREADSHEET_TITLE:
-        raise ValueError("SPREADSHEET_TITLE ist nicht gesetzt.")
-
     client = get_gspread_client()
-    sheet = client.open(SPREADSHEET_TITLE)
+    sheet = client.open_by_key(SPREADSHEET_ID)
     return sheet.worksheet(QUALI_SHEET_NAME)
 
 
@@ -152,37 +149,37 @@ def read_runner_status(ws, runner_name: str) -> dict:
             "row": None,
             "q1_done": False,
             "q2_done": False,
-            "q1_vod": "",
+            "q1_async": "",
             "q1_time": "",
-            "q2_vod": "",
+            "q2_async": "",
             "q2_time": "",
         }
 
     row = ws.row_values(row_idx)
 
-    q1_vod = safe_cell(row, 3)   # D
-    q1_time = safe_cell(row, 4)  # E
-    q2_vod = safe_cell(row, 5)   # F
-    q2_time = safe_cell(row, 6)  # G
+    q1_async = safe_cell(row, 3)   # D
+    q1_time = safe_cell(row, 4)    # E
+    q2_async = safe_cell(row, 5)   # F
+    q2_time = safe_cell(row, 6)    # G
 
     return {
         "row": row_idx,
-        "q1_done": is_filled(q1_vod) or is_filled(q1_time),
-        "q2_done": is_filled(q2_vod) or is_filled(q2_time),
-        "q1_vod": q1_vod,
+        "q1_done": is_filled(q1_async),
+        "q2_done": is_filled(q2_async),
+        "q1_async": q1_async,
         "q1_time": q1_time,
-        "q2_vod": q2_vod,
+        "q2_async": q2_async,
         "q2_time": q2_time,
     }
 
 
-def write_quali_result(ws, runner_name: str, quali_number: int, vod_link: str, race_time: str):
+def write_quali_result(ws, runner_name: str, quali_number: int, async_value: str, race_time: str):
     row_idx = get_or_create_runner_row(ws, runner_name)
 
     if quali_number == 1:
-        ws.update(f"D{row_idx}:E{row_idx}", [[vod_link, race_time]])
+        ws.update(f"D{row_idx}:E{row_idx}", [[async_value, race_time]])
     elif quali_number == 2:
-        ws.update(f"F{row_idx}:G{row_idx}", [[vod_link, race_time]])
+        ws.update(f"F{row_idx}:G{row_idx}", [[async_value, race_time]])
     else:
         raise ValueError("Ungültige Quali-Nummer.")
 
@@ -242,10 +239,11 @@ class QualiSubmitModal(discord.ui.Modal):
             default=computed,
             max_length=8
         )
+
         self.vod_input = discord.ui.TextInput(
             label="VoD-Link",
             placeholder="https://...",
-            required=True
+            required=not forfeit
         )
 
         self.add_item(self.time_input)
@@ -263,15 +261,17 @@ class QualiSubmitModal(discord.ui.Modal):
             runner_name = self.state.runner_name
             ws = await asyncio.to_thread(get_quali_worksheet)
 
-            vod_link = str(self.vod_input.value).strip()
-            if not vod_link:
-                await interaction.response.send_message("VoD-Link ist Pflicht.", ephemeral=True)
-                return
-
             if self.forfeit:
+                async_value = "DNF"
                 final_time = "03:00:00"
             else:
+                vod_link = str(self.vod_input.value).strip()
+                if not vod_link:
+                    await interaction.response.send_message("VoD-Link ist Pflicht.", ephemeral=True)
+                    return
+
                 normalize_hms(str(self.time_input.value))
+                async_value = vod_link
                 final_time = self.state.measured_time()
 
             status = await asyncio.to_thread(read_runner_status, ws, runner_name)
@@ -295,7 +295,7 @@ class QualiSubmitModal(discord.ui.Modal):
                 ws,
                 runner_name,
                 self.state.quali_number,
-                vod_link,
+                async_value,
                 final_time
             )
 
@@ -308,6 +308,7 @@ class QualiSubmitModal(discord.ui.Modal):
                 f"Runner: **{runner_name}**\n"
                 f"Quali: **{self.state.quali_number}**\n"
                 f"Zeile: **{row_idx}**\n"
+                f"Eintrag: **{async_value}**\n"
                 f"Zeit: **{final_time}**",
                 ephemeral=True
             )
@@ -317,8 +318,8 @@ class QualiSubmitModal(discord.ui.Modal):
                     await self.state.message.edit(
                         content=(
                             f"**Quali {self.state.quali_number} abgeschlossen**\n"
-                            f"Zeit: **{final_time}**\n"
-                            f"VoD: {vod_link}"
+                            f"Eintrag: **{async_value}**\n"
+                            f"Zeit: **{final_time}**"
                         ),
                         view=None
                     )
@@ -726,7 +727,7 @@ class QualiCog(commands.Cog):
                 ws,
                 state.runner_name,
                 state.quali_number,
-                "TIMEOUT - kein VOD",
+                "DNF",
                 "03:00:00"
             )
 
@@ -740,7 +741,7 @@ class QualiCog(commands.Cog):
                         content=(
                             f"**Quali {state.quali_number} beendet**\n"
                             f"Startfenster überschritten.\n"
-                            f"Ergebnis: **FF / 03:00:00**"
+                            f"Ergebnis: **DNF / 03:00:00**"
                         ),
                         view=None
                     )
