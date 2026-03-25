@@ -27,7 +27,8 @@ START_ROW = 4
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 
-CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
+CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
+print("DEBUG CREDS_FILE =", repr(CREDS_FILE))
 SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE")
 
 # =========================================================
