@@ -405,62 +405,67 @@ class QualiCog(commands.Cog):
     )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def quali(self, interaction: discord.Interaction):
-        try:
-            runner_name = get_runner_name(interaction)
-            ws = get_quali_worksheet()
-            status = read_runner_status(ws, runner_name)
+    await interaction.response.defer(ephemeral=True)
 
-            active = self.active_runs.get(interaction.user.id)
-            if active and not active.finished:
-                await interaction.response.send_message(
-                    f"Du hast bereits eine laufende Quali {active.quali_number}.",
-                    ephemeral=True
-                )
-                return
-
-            view = QualiSelectView(
-                cog=self,
-                runner_name=runner_name,
-                q1_disabled=status["q1_done"],
-                q2_disabled=status["q2_done"]
-            )
-
-            text = (
-                f"**Qualifikationsauswahl für {runner_name}**\n\n"
-                f"Quali 1: {'bereits gespielt' if status['q1_done'] else 'offen'}\n"
-                f"Quali 2: {'bereits gespielt' if status['q2_done'] else 'offen'}"
-            )
-
-            await interaction.response.send_message(text, view=view, ephemeral=True)
-
-        except Exception as e:
-            await interaction.response.send_message(
-                f"Fehler bei /quali: {e}",
-                ephemeral=True
-            )
-
-    async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
+    try:
         runner_name = get_runner_name(interaction)
-        ws = get_quali_worksheet()
-        status = read_runner_status(ws, runner_name)
-
-        if quali_number == 1 and status["q1_done"]:
-            await interaction.response.send_message("Quali 1 ist für dich bereits eingetragen.", ephemeral=True)
-            return
-
-        if quali_number == 2 and status["q2_done"]:
-            await interaction.response.send_message("Quali 2 ist für dich bereits eingetragen.", ephemeral=True)
-            return
+        ws = await asyncio.to_thread(get_quali_worksheet)
+        status = await asyncio.to_thread(read_runner_status, ws, runner_name)
 
         active = self.active_runs.get(interaction.user.id)
         if active and not active.finished:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Du hast bereits eine laufende Quali {active.quali_number}.",
                 ephemeral=True
             )
             return
 
-        seed_url = get_quali_seed(ws, quali_number)
+        view = QualiSelectView(
+            cog=self,
+            runner_name=runner_name,
+            q1_disabled=status["q1_done"],
+            q2_disabled=status["q2_done"]
+        )
+
+        text = (
+            f"**Qualifikationsauswahl für {runner_name}**\n\n"
+            f"Quali 1: {'bereits gespielt' if status['q1_done'] else 'offen'}\n"
+            f"Quali 2: {'bereits gespielt' if status['q2_done'] else 'offen'}"
+        )
+
+        await interaction.followup.send(text, view=view, ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"Fehler bei /quali: {e}",
+            ephemeral=True
+        )
+
+    async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        runner_name = get_runner_name(interaction)
+        ws = await asyncio.to_thread(get_quali_worksheet)
+        status = await asyncio.to_thread(read_runner_status, ws, runner_name)
+
+        if quali_number == 1 and status["q1_done"]:
+            await interaction.followup.send("Quali 1 ist für dich bereits eingetragen.", ephemeral=True)
+            return
+
+        if quali_number == 2 and status["q2_done"]:
+            await interaction.followup.send("Quali 2 ist für dich bereits eingetragen.", ephemeral=True)
+            return
+
+        active = self.active_runs.get(interaction.user.id)
+        if active and not active.finished:
+            await interaction.followup.send(
+                f"Du hast bereits eine laufende Quali {active.quali_number}.",
+                ephemeral=True
+            )
+            return
+
+        seed_url = await asyncio.to_thread(get_quali_seed, ws, quali_number)
 
         state = QualiRunState(
             user_id=interaction.user.id,
@@ -482,8 +487,14 @@ class QualiCog(commands.Cog):
 
         view = QualiSeedView(self, state)
 
-        await interaction.response.send_message(hint_text, view=view, ephemeral=True)
+        await interaction.followup.send(hint_text, view=view, ephemeral=True)
         state.message = await interaction.original_response()
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"Fehler beim Öffnen der Quali: {e}",
+            ephemeral=True
+        )
 
     async def reveal_seed(self, interaction: discord.Interaction, state: QualiRunState):
         if state.finished:
