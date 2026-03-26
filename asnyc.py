@@ -200,6 +200,7 @@ class QualiRunState:
         self.created_at = dt.utcnow()
         self.seed_shown_at: dt | None = None
         self.started_at: dt | None = None
+        self.finished_at: dt | None = None
         self.finished = False
         self.cancelled = False
 
@@ -216,7 +217,9 @@ class QualiRunState:
         return format_seconds_to_hms(seconds)
 
     def is_stale(self) -> bool:
-        return (dt.utcnow() - self.created_at).total_seconds() > RUN_STALE_SECONDS
+        if self.started_at is None:
+            return (dt.utcnow() - self.created_at).total_seconds() > RUN_STALE_SECONDS
+        return False
 
 
 # =========================================================
@@ -251,8 +254,10 @@ class QualiSubmitModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            await interaction.response.defer(ephemeral=True)
+
             if self.state.cancelled:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Diese Quali wurde bereits abgebrochen.",
                     ephemeral=True
                 )
@@ -267,24 +272,23 @@ class QualiSubmitModal(discord.ui.Modal):
             else:
                 vod_link = str(self.vod_input.value).strip()
                 if not vod_link:
-                    await interaction.response.send_message("VoD-Link ist Pflicht.", ephemeral=True)
+                    await interaction.followup.send("VoD-Link ist Pflicht.", ephemeral=True)
                     return
 
-                normalize_hms(str(self.time_input.value))
+                final_time = normalize_hms(str(self.time_input.value))
                 async_value = vod_link
-                final_time = self.state.measured_time()
 
             status = await asyncio.to_thread(read_runner_status, ws, runner_name)
 
             if self.state.quali_number == 1 and status["q1_done"]:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Quali 1 ist für dich bereits eingetragen.",
                     ephemeral=True
                 )
                 return
 
             if self.state.quali_number == 2 and status["q2_done"]:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Quali 2 ist für dich bereits eingetragen.",
                     ephemeral=True
                 )
@@ -300,10 +304,11 @@ class QualiSubmitModal(discord.ui.Modal):
             )
 
             self.state.finished = True
+            self.state.finished_at = dt.utcnow()
             self.cog.stop_state_tasks(self.state)
             self.cog.active_runs.pop(self.state.user_id, None)
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Ergebnis gespeichert.\n"
                 f"Runner: **{runner_name}**\n"
                 f"Quali: **{self.state.quali_number}**\n"
@@ -328,10 +333,16 @@ class QualiSubmitModal(discord.ui.Modal):
 
         except Exception as e:
             try:
-                await interaction.response.send_message(
-                    f"Fehler beim Speichern: {e}",
-                    ephemeral=True
-                )
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        f"Fehler beim Speichern: {e}",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"Fehler beim Speichern: {e}",
+                        ephemeral=True
+                    )
             except Exception:
                 pass
 
@@ -364,13 +375,9 @@ class QualiSeedView(discord.ui.View):
         self.cog = cog
         self.state = state
 
-    @discord.ui.button(label="Seed 1", style=discord.ButtonStyle.success, custom_id="quali_seed_1")
+    @discord.ui.button(label="Seed öffnen", style=discord.ButtonStyle.success, custom_id="quali_seed_1")
     async def seed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.reveal_seed(interaction, self.state)
-
-    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary, custom_id="quali_cancel_seed")
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.cancel_run(interaction, self.state)
 
 
 class QualiStartView(discord.ui.View):
@@ -382,10 +389,6 @@ class QualiStartView(discord.ui.View):
     @discord.ui.button(label="Start", style=discord.ButtonStyle.success, custom_id="quali_start")
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.start_race(interaction, self.state)
-
-    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary, custom_id="quali_cancel_start")
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.cancel_run(interaction, self.state)
 
 
 class QualiRunningView(discord.ui.View):
@@ -422,10 +425,6 @@ class QualiRunningView(discord.ui.View):
         modal = QualiSubmitModal(self.cog, self.state, forced_time="03:00:00", forfeit=True)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary, custom_id="quali_cancel_running")
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.cancel_run(interaction, self.state)
-
 
 # =========================================================
 # COG
@@ -460,7 +459,7 @@ class QualiCog(commands.Cog):
             active = self.active_runs.get(interaction.user.id)
             if active and not active.finished:
                 await interaction.followup.send(
-                    f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **Abbrechen** oder **/qualireset**.",
+                    f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **/qualireset**.",
                     ephemeral=True
                 )
                 return
@@ -551,7 +550,7 @@ class QualiCog(commands.Cog):
             active = self.active_runs.get(interaction.user.id)
             if active and not active.finished:
                 await interaction.followup.send(
-                    f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **Abbrechen** oder **/qualireset**.",
+                    f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **/qualireset**.",
                     ephemeral=True
                 )
                 return
@@ -568,10 +567,10 @@ class QualiCog(commands.Cog):
 
             hint_text = (
                 f"**Quali {quali_number}**\n\n"
-                f"Mit Klick auf **Seed** erhältst du den Link zum ersten Quali-Seed und ein Timer, "
+                f"Mit Klick auf **Seed öffnen** erhältst du den Link zum Quali-Seed und ein Timer, "
                 f"der von 5 Minuten runterzählt erscheint. Innerhalb dieser 5 Minuten musst du den Seed starten. "
                 f"Bei Überschreiten dieser Zeit erhältst du ein FF und **03:00:00** als Ergebnis für das Race.\n\n"
-                f"Drücke also erst auf **Seed**, wenn du wirklich bereit bist.\n\n"
+                f"Drücke also erst auf **Seed öffnen**, wenn du wirklich bereit bist.\n\n"
                 f"Achte bei deiner Aufnahme darauf, dass dein Timer durchgehend zu sehen ist und lasse den Endscreen "
                 f"bis zum Ende durchlaufen."
             )
@@ -666,7 +665,7 @@ class QualiCog(commands.Cog):
             f"**Quali {state.quali_number} läuft**\n\n"
             f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
             f"Laufzeit: **00:00:00**\n\n"
-            f"Drücke **Finish**, **Forfeit** oder **Abbrechen**."
+            f"Drücke **Finish** oder **Forfeit**."
         )
 
         view = QualiRunningView(self, state)
@@ -732,6 +731,7 @@ class QualiCog(commands.Cog):
             )
 
             state.finished = True
+            state.finished_at = dt.utcnow()
             self.stop_state_tasks(state)
             self.active_runs.pop(state.user_id, None)
 
@@ -762,7 +762,7 @@ class QualiCog(commands.Cog):
                     f"**Quali {state.quali_number} läuft**\n\n"
                     f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
                     f"Laufzeit: **{runtime}**\n\n"
-                    f"Drücke **Finish**, **Forfeit** oder **Abbrechen**."
+                    f"Drücke **Finish** oder **Forfeit**."
                 )
 
                 await state.message.edit(content=content, view=QualiRunningView(self, state))
