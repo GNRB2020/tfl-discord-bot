@@ -201,6 +201,7 @@ class QualiRunState:
         self.seed_shown_at: dt | None = None
         self.started_at: dt | None = None
         self.finished_at: dt | None = None
+        self.locked_final_time: str | None = None
         self.finished = False
         self.cancelled = False
 
@@ -227,29 +228,18 @@ class QualiRunState:
 # =========================================================
 
 class QualiSubmitModal(discord.ui.Modal):
-    def __init__(self, cog, state: QualiRunState, forced_time: str | None = None, forfeit: bool = False):
+    def __init__(self, cog, state: QualiRunState, forfeit: bool = False):
         super().__init__(title=f"Quali {state.quali_number} Ergebnis")
         self.cog = cog
         self.state = state
         self.forfeit = forfeit
 
-        computed = forced_time if forced_time else state.measured_time()
-
-        self.time_input = discord.ui.TextInput(
-            label="Deine Zeit (HH:MM:SS)",
-            placeholder="z. B. 00:37:12",
-            required=True,
-            default=computed,
-            max_length=8
-        )
-
         self.vod_input = discord.ui.TextInput(
-            label="VoD-Link",
-            placeholder="https://...",
+            label="VoD-Link" if not forfeit else "Kommentar (optional)",
+            placeholder="https://..." if not forfeit else "Optional",
             required=not forfeit
         )
 
-        self.add_item(self.time_input)
         self.add_item(self.vod_input)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -275,8 +265,15 @@ class QualiSubmitModal(discord.ui.Modal):
                     await interaction.followup.send("VoD-Link ist Pflicht.", ephemeral=True)
                     return
 
-                final_time = normalize_hms(str(self.time_input.value))
+                if not self.state.locked_final_time:
+                    await interaction.followup.send(
+                        "Die Zielzeit konnte nicht eindeutig gespeichert werden. Bitte erneut versuchen.",
+                        ephemeral=True
+                    )
+                    return
+
                 async_value = vod_link
+                final_time = self.state.locked_final_time
 
             status = await asyncio.to_thread(read_runner_status, ws, runner_name)
 
@@ -407,7 +404,9 @@ class QualiRunningView(discord.ui.View):
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
 
+        self.state.locked_final_time = self.state.measured_time()
         self.cog.stop_state_tasks(self.state)
+
         modal = QualiSubmitModal(self.cog, self.state, forfeit=False)
         await interaction.response.send_modal(modal)
 
@@ -421,8 +420,10 @@ class QualiRunningView(discord.ui.View):
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
 
+        self.state.locked_final_time = "03:00:00"
         self.cog.stop_state_tasks(self.state)
-        modal = QualiSubmitModal(self.cog, self.state, forced_time="03:00:00", forfeit=True)
+
+        modal = QualiSubmitModal(self.cog, self.state, forfeit=True)
         await interaction.response.send_modal(modal)
 
 
@@ -513,21 +514,6 @@ class QualiCog(commands.Cog):
                 pass
 
         await interaction.followup.send("Quali wurde zurückgesetzt.", ephemeral=True)
-
-    async def cancel_run(self, interaction: discord.Interaction, state: QualiRunState):
-        if interaction.user.id != state.user_id:
-            await interaction.response.send_message("Nicht deine Quali.", ephemeral=True)
-            return
-
-        self.active_runs.pop(state.user_id, None)
-        state.cancelled = True
-        state.finished = True
-        self.stop_state_tasks(state)
-
-        await interaction.response.edit_message(
-            content="**Quali abgebrochen.** Du kannst `/quali` jetzt neu starten.",
-            view=None
-        )
 
     async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
         await interaction.response.defer(ephemeral=True)
@@ -652,6 +638,7 @@ class QualiCog(commands.Cog):
             return
 
         state.started_at = dt.utcnow()
+        state.locked_final_time = None
 
         if state.timeout_task:
             state.timeout_task.cancel()
@@ -732,6 +719,7 @@ class QualiCog(commands.Cog):
 
             state.finished = True
             state.finished_at = dt.utcnow()
+            state.locked_final_time = "03:00:00"
             self.stop_state_tasks(state)
             self.active_runs.pop(state.user_id, None)
 
