@@ -31,6 +31,7 @@ TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
 SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 
+
 # =========================================================
 # HILFSFUNKTIONEN
 # =========================================================
@@ -205,7 +206,7 @@ class QualiRunState:
         self.finished = False
         self.cancelled = False
 
-        self.message: discord.Message | None = None  # DM-Nachricht
+        self.message: discord.Message | None = None  # DM-Nachricht, dieselbe Nachricht bleibt erhalten
         self.update_task: asyncio.Task | None = None
         self.timeout_task: asyncio.Task | None = None
 
@@ -631,7 +632,7 @@ class QualiCog(commands.Cog):
             f"Seed-Link: {state.seed_url}\n\n"
             f"Du musst innerhalb von **5 Minuten** starten.\n"
             f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
-            f"Verbleibend: **05:00**"
+            f"Verbleibend: **00:05:00**"
         )
 
         try:
@@ -715,15 +716,15 @@ class QualiCog(commands.Cog):
             f"Drücke **Finish** oder **Forfeit**."
         )
 
+        # WICHTIGER FIX:
+        # dieselbe DM-Nachricht weiterverwenden und NICHT mit
+        # interaction.original_response() überschreiben
+        state.message = interaction.message
+
         await interaction.response.edit_message(
             content=content,
             view=QualiRunningView(self, state)
         )
-
-        try:
-            state.message = await interaction.original_response()
-        except Exception:
-            pass
 
         state.update_task = asyncio.create_task(self.race_timer_updater(state))
 
