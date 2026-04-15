@@ -31,7 +31,6 @@ TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
 SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 
-
 # =========================================================
 # HILFSFUNKTIONEN
 # =========================================================
@@ -321,14 +320,13 @@ class QualiSubmitModal(discord.ui.Modal):
                     await self.state.message.edit(
                         content=(
                             f"**Quali {self.state.quali_number} abgeschlossen**\n"
-                            f"Runner: **{runner_name}**\n"
                             f"Eintrag: **{async_value}**\n"
                             f"Zeit: **{final_time}**"
                         ),
                         view=None
                     )
-                except Exception as e:
-                    print(f"[QualiSubmitModal.message.edit] Fehler: {e}")
+                except Exception:
+                    pass
 
         except Exception as e:
             try:
@@ -342,8 +340,8 @@ class QualiSubmitModal(discord.ui.Modal):
                         f"Fehler beim Speichern: {e}",
                         ephemeral=True
                     )
-            except Exception as inner_e:
-                print(f"[QualiSubmitModal.on_submit] Folgefehler: {inner_e}")
+            except Exception:
+                pass
 
 
 # =========================================================
@@ -374,7 +372,7 @@ class QualiSeedView(discord.ui.View):
         self.cog = cog
         self.state = state
 
-    @discord.ui.button(label="Seed per DM senden", style=discord.ButtonStyle.success, custom_id="quali_seed_dm")
+    @discord.ui.button(label="Seed öffnen", style=discord.ButtonStyle.success, custom_id="quali_seed_1")
     async def seed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.reveal_seed(interaction, self.state)
 
@@ -406,10 +404,6 @@ class QualiRunningView(discord.ui.View):
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
 
-        if interaction.user.id != self.state.user_id:
-            await interaction.response.send_message("Das ist nicht deine Quali.", ephemeral=True)
-            return
-
         self.state.locked_final_time = self.state.measured_time()
         self.cog.stop_state_tasks(self.state)
 
@@ -424,10 +418,6 @@ class QualiRunningView(discord.ui.View):
 
         if self.state.cancelled:
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
-            return
-
-        if interaction.user.id != self.state.user_id:
-            await interaction.response.send_message("Das ist nicht deine Quali.", ephemeral=True)
             return
 
         self.state.locked_final_time = "03:00:00"
@@ -501,7 +491,6 @@ class QualiCog(commands.Cog):
         description="Setzt eine hängende Quali zurück."
     )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
-    @app_commands.checks.has_permissions(administrator=True)
     async def qualireset(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -521,36 +510,10 @@ class QualiCog(commands.Cog):
                     content="**Quali abgebrochen und zurückgesetzt.**",
                     view=None
                 )
-            except Exception as e:
-                print(f"[qualireset.message.edit] Fehler: {e}")
+            except Exception:
+                pass
 
         await interaction.followup.send("Quali wurde zurückgesetzt.", ephemeral=True)
-
-    @qualireset.error
-    async def qualireset_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.errors.MissingPermissions):
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "Diesen Command dürfen nur Admins ausführen.",
-                    ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    "Diesen Command dürfen nur Admins ausführen.",
-                    ephemeral=True
-                )
-            return
-
-        if interaction.response.is_done():
-            await interaction.followup.send(
-                f"Fehler bei /qualireset: {error}",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"Fehler bei /qualireset: {error}",
-                ephemeral=True
-            )
 
     async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
         await interaction.response.defer(ephemeral=True)
@@ -590,15 +553,18 @@ class QualiCog(commands.Cog):
 
             hint_text = (
                 f"**Quali {quali_number}**\n\n"
-                f"Der Seed wird dir nach Klick auf **Seed per DM senden** direkt als DM geschickt.\n"
-                f"Dort läuft dann auch der 5-Minuten-Countdown und später derselbe Screen für **Start**, "
-                f"**Finish** und **Forfeit**.\n\n"
+                f"Mit Klick auf **Seed öffnen** erhältst du den Link zum Quali-Seed und ein Timer, "
+                f"der von 5 Minuten runterzählt erscheint. Innerhalb dieser 5 Minuten musst du den Seed starten. "
+                f"Bei Überschreiten dieser Zeit erhältst du ein FF und **03:00:00** als Ergebnis für das Race.\n\n"
+                f"Drücke also erst auf **Seed öffnen**, wenn du wirklich bereit bist.\n\n"
                 f"Achte bei deiner Aufnahme darauf, dass dein Timer durchgehend zu sehen ist und lasse den Endscreen "
                 f"bis zum Ende durchlaufen."
             )
 
             view = QualiSeedView(self, state)
+
             await interaction.followup.send(hint_text, view=view, ephemeral=True)
+            state.message = await interaction.original_response()
 
         except Exception as e:
             await interaction.followup.send(
@@ -623,47 +589,21 @@ class QualiCog(commands.Cog):
             await interaction.response.send_message("Das ist nicht deine Quali.", ephemeral=True)
             return
 
-        seed_shown_at = dt.utcnow()
-        deadline = seed_shown_at + timedelta(minutes=5)
+        state.seed_shown_at = dt.utcnow()
+        deadline = state.seed_shown_at + timedelta(minutes=5)
 
-        dm_content = (
+        content = (
             f"**Quali {state.quali_number} – Seed geöffnet**\n\n"
-            f"Runner: **{state.runner_name}**\n"
             f"Seed-Link: {state.seed_url}\n\n"
             f"Du musst innerhalb von **5 Minuten** starten.\n"
             f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
-            f"Verbleibend: **00:05:00**"
+            f"Noch verbleibend: <t:{int(deadline.timestamp())}:R>"
         )
 
-        try:
-            dm_message = await interaction.user.send(
-                content=dm_content,
-                view=QualiStartView(self, state)
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "Ich konnte dir keine DM schicken. Bitte aktiviere Direktnachrichten für den Server und versuche es erneut.",
-                ephemeral=True
-            )
-            return
-        except Exception as e:
-            await interaction.response.send_message(
-                f"Fehler beim Senden der DM: {e}",
-                ephemeral=True
-            )
-            return
+        view = QualiStartView(self, state)
 
-        state.seed_shown_at = seed_shown_at
-        state.message = dm_message
-
-        await interaction.response.edit_message(
-            content=(
-                f"**Quali {state.quali_number}**\n\n"
-                f"Der Seed wurde dir per DM geschickt.\n"
-                f"Nutze dort **Start**. Dein Startfenster läuft ab jetzt."
-            ),
-            view=None
-        )
+        await interaction.response.edit_message(content=content, view=view)
+        state.message = await interaction.original_response()
 
         state.update_task = asyncio.create_task(self.seed_countdown_updater(state))
         state.timeout_task = asyncio.create_task(self.seed_start_timeout(state))
@@ -710,20 +650,16 @@ class QualiCog(commands.Cog):
 
         content = (
             f"**Quali {state.quali_number} läuft**\n\n"
-            f"Runner: **{state.runner_name}**\n"
             f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
             f"Laufzeit: **00:00:00**\n\n"
             f"Drücke **Finish** oder **Forfeit**."
         )
 
-        running_view = QualiRunningView(self, state)
+        view = QualiRunningView(self, state)
 
-        await interaction.response.edit_message(
-            content=content,
-            view=running_view
-        )
+        await interaction.response.edit_message(content=content, view=view)
+        state.message = await interaction.original_response()
 
-        state.message = interaction.message
         state.update_task = asyncio.create_task(self.race_timer_updater(state))
 
     async def seed_countdown_updater(self, state: QualiRunState):
@@ -742,19 +678,17 @@ class QualiCog(commands.Cog):
 
                 content = (
                     f"**Quali {state.quali_number} – Seed geöffnet**\n\n"
-                    f"Runner: **{state.runner_name}**\n"
                     f"Seed-Link: {state.seed_url}\n\n"
                     f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
                     f"Verbleibend: **{format_seconds_to_hms(remaining)}**"
                 )
 
-                await state.message.edit(content=content)
+                await state.message.edit(content=content, view=QualiStartView(self, state))
                 await asyncio.sleep(1)
-
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            print(f"[seed_countdown_updater] Fehler: {e}")
+        except Exception:
+            pass
 
     async def seed_start_timeout(self, state: QualiRunState):
         try:
@@ -794,19 +728,18 @@ class QualiCog(commands.Cog):
                     await state.message.edit(
                         content=(
                             f"**Quali {state.quali_number} beendet**\n"
-                            f"Runner: **{state.runner_name}**\n"
                             f"Startfenster überschritten.\n"
                             f"Ergebnis: **DNF / 03:00:00**"
                         ),
                         view=None
                     )
-                except Exception as e:
-                    print(f"[seed_start_timeout.message.edit] Fehler: {e}")
+                except Exception:
+                    pass
 
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            print(f"[seed_start_timeout] Fehler: {e}")
+        except Exception:
+            pass
 
     async def race_timer_updater(self, state: QualiRunState):
         try:
@@ -815,19 +748,17 @@ class QualiCog(commands.Cog):
 
                 content = (
                     f"**Quali {state.quali_number} läuft**\n\n"
-                    f"Runner: **{state.runner_name}**\n"
                     f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
                     f"Laufzeit: **{runtime}**\n\n"
                     f"Drücke **Finish** oder **Forfeit**."
                 )
 
-                await state.message.edit(content=content)
+                await state.message.edit(content=content, view=QualiRunningView(self, state))
                 await asyncio.sleep(1)
-
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            print(f"[race_timer_updater] Fehler: {e}")
+        except Exception:
+            pass
 
     def stop_state_tasks(self, state: QualiRunState):
         for task in (state.update_task, state.timeout_task):
