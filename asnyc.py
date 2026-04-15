@@ -205,7 +205,8 @@ class QualiRunState:
         self.finished = False
         self.cancelled = False
 
-        self.message: discord.Message | None = None
+        self.message: discord.Message | None = None          # aktive Timer-Nachricht (DM)
+        self.seed_message: discord.Message | None = None     # ursprüngliche ephemeral Nachricht
         self.update_task: asyncio.Task | None = None
         self.timeout_task: asyncio.Task | None = None
 
@@ -320,6 +321,7 @@ class QualiSubmitModal(discord.ui.Modal):
                     await self.state.message.edit(
                         content=(
                             f"**Quali {self.state.quali_number} abgeschlossen**\n"
+                            f"Runner: **{runner_name}**\n"
                             f"Eintrag: **{async_value}**\n"
                             f"Zeit: **{final_time}**"
                         ),
@@ -404,6 +406,10 @@ class QualiRunningView(discord.ui.View):
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
 
+        if interaction.user.id != self.state.user_id:
+            await interaction.response.send_message("Das ist nicht deine Quali.", ephemeral=True)
+            return
+
         self.state.locked_final_time = self.state.measured_time()
         self.cog.stop_state_tasks(self.state)
 
@@ -418,6 +424,10 @@ class QualiRunningView(discord.ui.View):
 
         if self.state.cancelled:
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
+            return
+
+        if interaction.user.id != self.state.user_id:
+            await interaction.response.send_message("Das ist nicht deine Quali.", ephemeral=True)
             return
 
         self.state.locked_final_time = "03:00:00"
@@ -591,7 +601,7 @@ class QualiCog(commands.Cog):
             view = QualiSeedView(self, state)
 
             await interaction.followup.send(hint_text, view=view, ephemeral=True)
-            state.message = await interaction.original_response()
+            state.seed_message = await interaction.original_response()
 
         except Exception as e:
             await interaction.followup.send(
@@ -630,7 +640,7 @@ class QualiCog(commands.Cog):
         view = QualiStartView(self, state)
 
         await interaction.response.edit_message(content=content, view=view)
-        state.message = await interaction.original_response()
+        state.seed_message = await interaction.original_response()
 
         state.update_task = asyncio.create_task(self.seed_countdown_updater(state))
         state.timeout_task = asyncio.create_task(self.seed_start_timeout(state))
@@ -664,8 +674,35 @@ class QualiCog(commands.Cog):
             )
             return
 
+        # Erst DM testen, bevor der Run wirklich gestartet wird
+        dm_content = (
+            f"**Quali {state.quali_number} läuft**\n\n"
+            f"Runner: **{state.runner_name}**\n"
+            f"Gestartet um: <t:{int(dt.utcnow().timestamp())}:T>\n"
+            f"Laufzeit: **00:00:00**\n\n"
+            f"Drücke **Finish** oder **Forfeit**."
+        )
+
+        dm_view = QualiRunningView(self, state)
+
+        try:
+            dm_message = await interaction.user.send(content=dm_content, view=dm_view)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Ich konnte dir keine DM schicken. Bitte aktiviere Direktnachrichten für den Server und starte die Quali erneut.",
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Fehler beim Senden der DM: {e}",
+                ephemeral=True
+            )
+            return
+
         state.started_at = dt.utcnow()
         state.locked_final_time = None
+        state.message = dm_message
 
         if state.timeout_task:
             state.timeout_task.cancel()
@@ -675,17 +712,25 @@ class QualiCog(commands.Cog):
             state.update_task.cancel()
             state.update_task = None
 
-        content = (
-            f"**Quali {state.quali_number} läuft**\n\n"
-            f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
-            f"Laufzeit: **00:00:00**\n\n"
-            f"Drücke **Finish** oder **Forfeit**."
-        )
-
-        view = QualiRunningView(self, state)
-
-        await interaction.response.edit_message(content=content, view=view)
-        state.message = await interaction.original_response()
+        try:
+            await interaction.response.edit_message(
+                content=(
+                    f"**Quali {state.quali_number} gestartet**\n\n"
+                    f"Der Live-Timer läuft jetzt in deiner DM.\n"
+                    f"Nutze dort **Finish** oder **Forfeit**."
+                ),
+                view=None
+            )
+        except Exception as e:
+            print(f"[start_race.edit_message] Fehler: {e}")
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "Race gestartet. Der Live-Timer läuft jetzt in deiner DM.",
+                        ephemeral=True
+                    )
+            except Exception as inner_e:
+                print(f"[start_race.followup] Fehler: {inner_e}")
 
         state.update_task = asyncio.create_task(self.race_timer_updater(state))
 
@@ -696,7 +741,7 @@ class QualiCog(commands.Cog):
                 and not state.cancelled
                 and state.seed_shown_at
                 and state.started_at is None
-                and state.message
+                and state.seed_message
             ):
                 deadline = state.seed_shown_at + timedelta(minutes=5)
                 remaining = int((deadline - dt.utcnow()).total_seconds())
@@ -710,7 +755,7 @@ class QualiCog(commands.Cog):
                     f"Verbleibend: **{format_seconds_to_hms(remaining)}**"
                 )
 
-                await state.message.edit(content=content)
+                await state.seed_message.edit(content=content)
                 await asyncio.sleep(1)
 
         except asyncio.CancelledError:
@@ -751,9 +796,9 @@ class QualiCog(commands.Cog):
             self.stop_state_tasks(state)
             self.active_runs.pop(state.user_id, None)
 
-            if state.message:
+            if state.seed_message:
                 try:
-                    await state.message.edit(
+                    await state.seed_message.edit(
                         content=(
                             f"**Quali {state.quali_number} beendet**\n"
                             f"Startfenster überschritten.\n"
@@ -762,7 +807,7 @@ class QualiCog(commands.Cog):
                         view=None
                     )
                 except Exception as e:
-                    print(f"[seed_start_timeout.message.edit] Fehler: {e}")
+                    print(f"[seed_start_timeout.seed_message.edit] Fehler: {e}")
 
         except asyncio.CancelledError:
             pass
@@ -776,13 +821,14 @@ class QualiCog(commands.Cog):
 
                 content = (
                     f"**Quali {state.quali_number} läuft**\n\n"
+                    f"Runner: **{state.runner_name}**\n"
                     f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
                     f"Laufzeit: **{runtime}**\n\n"
                     f"Drücke **Finish** oder **Forfeit**."
                 )
 
                 await state.message.edit(content=content)
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
 
         except asyncio.CancelledError:
             pass
