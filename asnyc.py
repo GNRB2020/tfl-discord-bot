@@ -325,8 +325,8 @@ class QualiSubmitModal(discord.ui.Modal):
                         ),
                         view=None
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[QualiSubmitModal.message.edit] Fehler: {e}")
 
         except Exception as e:
             try:
@@ -340,8 +340,8 @@ class QualiSubmitModal(discord.ui.Modal):
                         f"Fehler beim Speichern: {e}",
                         ephemeral=True
                     )
-            except Exception:
-                pass
+            except Exception as inner_e:
+                print(f"[QualiSubmitModal.on_submit] Folgefehler: {inner_e}")
 
 
 # =========================================================
@@ -511,8 +511,8 @@ class QualiCog(commands.Cog):
                     content="**Quali abgebrochen und zurückgesetzt.**",
                     view=None
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[qualireset.message.edit] Fehler: {e}")
 
         await interaction.followup.send("Quali wurde zurückgesetzt.", ephemeral=True)
 
@@ -710,12 +710,13 @@ class QualiCog(commands.Cog):
                     f"Verbleibend: **{format_seconds_to_hms(remaining)}**"
                 )
 
-                await state.message.edit(content=content, view=QualiStartView(self, state))
+                await state.message.edit(content=content)
                 await asyncio.sleep(1)
+
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[seed_countdown_updater] Fehler: {e}")
 
     async def seed_start_timeout(self, state: QualiRunState):
         try:
@@ -760,13 +761,13 @@ class QualiCog(commands.Cog):
                         ),
                         view=None
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[seed_start_timeout.message.edit] Fehler: {e}")
 
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[seed_start_timeout] Fehler: {e}")
 
     async def race_timer_updater(self, state: QualiRunState):
         try:
@@ -780,12 +781,13 @@ class QualiCog(commands.Cog):
                     f"Drücke **Finish** oder **Forfeit**."
                 )
 
-                await state.message.edit(content=content, view=QualiRunningView(self, state))
-                await asyncio.sleep(1)
+                await state.message.edit(content=content)
+                await asyncio.sleep(5)
+
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[race_timer_updater] Fehler: {e}")
 
     def stop_state_tasks(self, state: QualiRunState):
         for task in (state.update_task, state.timeout_task):
