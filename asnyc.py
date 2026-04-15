@@ -31,6 +31,7 @@ TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
 SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 
+
 # =========================================================
 # HILFSFUNKTIONEN
 # =========================================================
@@ -69,6 +70,16 @@ def safe_cell(values, idx: int) -> str:
     if idx < len(values):
         return str(values[idx]).strip()
     return ""
+
+
+def safe_time_to_seconds(value: str):
+    value = str(value).strip()
+    if not value or not TIME_RE.match(value):
+        return None
+    try:
+        return parse_hms_to_seconds(value)
+    except Exception:
+        return None
 
 
 # =========================================================
@@ -186,6 +197,84 @@ def write_quali_result(ws, runner_name: str, quali_number: int, async_value: str
     return row_idx
 
 
+def get_quali_results(ws, quali_number: int):
+    all_values = ws.get_all_values()
+    results = []
+
+    for row_idx in range(START_ROW, len(all_values) + 1):
+        row = all_values[row_idx - 1]
+        runner_name = safe_cell(row, 1)  # B
+        if not runner_name:
+            continue
+
+        if quali_number == 1:
+            async_value = safe_cell(row, 3)  # D
+            time_value = safe_cell(row, 4)   # E
+        elif quali_number == 2:
+            async_value = safe_cell(row, 5)  # F
+            time_value = safe_cell(row, 6)   # G
+        else:
+            raise ValueError("Ungültige Quali-Nummer.")
+
+        seconds = safe_time_to_seconds(time_value)
+        if is_filled(async_value) and seconds is not None:
+            results.append((runner_name, seconds))
+
+    results.sort(key=lambda item: (item[1], item[0].lower()))
+    return results
+
+
+def get_quali_stats_for_runner(ws, runner_name: str, quali_number: int):
+    results = get_quali_results(ws, quali_number)
+    total_played = len(results)
+    rank = None
+
+    for idx, (name, _) in enumerate(results, start=1):
+        if name.lower() == runner_name.lower():
+            rank = idx
+            break
+
+    return total_played, rank
+
+
+def get_overall_results(ws):
+    all_values = ws.get_all_values()
+    results = []
+
+    for row_idx in range(START_ROW, len(all_values) + 1):
+        row = all_values[row_idx - 1]
+        runner_name = safe_cell(row, 1)  # B
+        if not runner_name:
+            continue
+
+        q1_async = safe_cell(row, 3)  # D
+        q1_time = safe_cell(row, 4)   # E
+        q2_async = safe_cell(row, 5)  # F
+        q2_time = safe_cell(row, 6)   # G
+
+        q1_seconds = safe_time_to_seconds(q1_time)
+        q2_seconds = safe_time_to_seconds(q2_time)
+
+        if is_filled(q1_async) and is_filled(q2_async) and q1_seconds is not None and q2_seconds is not None:
+            results.append((runner_name, q1_seconds + q2_seconds))
+
+    results.sort(key=lambda item: (item[1], item[0].lower()))
+    return results
+
+
+def get_overall_stats_for_runner(ws, runner_name: str):
+    results = get_overall_results(ws)
+    total_completed = len(results)
+    rank = None
+
+    for idx, (name, _) in enumerate(results, start=1):
+        if name.lower() == runner_name.lower():
+            rank = idx
+            break
+
+    return total_completed, rank
+
+
 # =========================================================
 # AKTIVE RUNS IM SPEICHER
 # =========================================================
@@ -206,7 +295,6 @@ class QualiRunState:
         self.cancelled = False
 
         self.message: discord.Message | None = None
-        self.update_task: asyncio.Task | None = None
         self.timeout_task: asyncio.Task | None = None
 
     def measured_time(self) -> str:
@@ -300,10 +388,19 @@ class QualiSubmitModal(discord.ui.Modal):
                 final_time
             )
 
+            total_played, rank = await asyncio.to_thread(
+                get_quali_stats_for_runner,
+                ws,
+                runner_name,
+                self.state.quali_number
+            )
+
             self.state.finished = True
             self.state.finished_at = dt.utcnow()
             self.cog.stop_state_tasks(self.state)
             self.cog.active_runs.pop(self.state.user_id, None)
+
+            place_text = f"Platz: **{rank}/{total_played}**" if rank is not None else "Platz aktuell nicht verfügbar."
 
             await interaction.followup.send(
                 f"Ergebnis gespeichert.\n"
@@ -311,7 +408,9 @@ class QualiSubmitModal(discord.ui.Modal):
                 f"Quali: **{self.state.quali_number}**\n"
                 f"Zeile: **{row_idx}**\n"
                 f"Eintrag: **{async_value}**\n"
-                f"Zeit: **{final_time}**",
+                f"Zeit: **{final_time}**\n"
+                f"Bereits gespielt: **{total_played}**\n"
+                f"{place_text}",
                 ephemeral=True
             )
 
@@ -321,7 +420,9 @@ class QualiSubmitModal(discord.ui.Modal):
                         content=(
                             f"**Quali {self.state.quali_number} abgeschlossen**\n"
                             f"Eintrag: **{async_value}**\n"
-                            f"Zeit: **{final_time}**"
+                            f"Zeit: **{final_time}**\n"
+                            f"Bereits gespielt: **{total_played}**\n"
+                            f"{place_text}"
                         ),
                         view=None
                     )
@@ -427,6 +528,24 @@ class QualiRunningView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
 
+class QualiStandView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @discord.ui.button(label="Stand Quali 1", style=discord.ButtonStyle.primary, custom_id="quali_stand_q1")
+    async def stand_q1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.send_quali_stand(interaction, 1)
+
+    @discord.ui.button(label="Stand Quali 2", style=discord.ButtonStyle.primary, custom_id="quali_stand_q2")
+    async def stand_q2_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.send_quali_stand(interaction, 2)
+
+    @discord.ui.button(label="Gesamtstand", style=discord.ButtonStyle.secondary, custom_id="quali_stand_total")
+    async def stand_total_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.send_overall_stand(interaction)
+
+
 # =========================================================
 # COG
 # =========================================================
@@ -475,7 +594,9 @@ class QualiCog(commands.Cog):
             text = (
                 f"**Qualifikationsauswahl für {runner_name}**\n\n"
                 f"Quali 1: {'bereits gespielt' if status['q1_done'] else 'offen'}\n"
-                f"Quali 2: {'bereits gespielt' if status['q2_done'] else 'offen'}"
+                f"Quali 2: {'bereits gespielt' if status['q2_done'] else 'offen'}\n\n"
+                f"**Wichtig:** Nach dem Klick auf **Start** läuft deine Zeit, aber es wird kein Live-Timer im Discord angezeigt.\n"
+                f"Nutze für dich selbst einen eigenen Timer oder orientiere dich an deiner Aufnahme."
             )
 
             await interaction.followup.send(text, view=view, ephemeral=True)
@@ -485,6 +606,19 @@ class QualiCog(commands.Cog):
                 f"Fehler bei /quali: {e}",
                 ephemeral=True
             )
+
+    @app_commands.command(
+        name="qualistand",
+        description="Zeigt deinen aktuellen Stand in Quali 1, Quali 2 oder Gesamt."
+    )
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def qualistand(self, interaction: discord.Interaction):
+        view = QualiStandView(self)
+        await interaction.response.send_message(
+            "**Welchen Stand möchtest du sehen?**",
+            view=view,
+            ephemeral=True
+        )
 
     @app_commands.command(
         name="qualireset",
@@ -542,6 +676,73 @@ class QualiCog(commands.Cog):
                 ephemeral=True
             )
 
+    async def send_quali_stand(self, interaction: discord.Interaction, quali_number: int):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            runner_name = get_runner_name(interaction)
+            ws = await asyncio.to_thread(get_quali_worksheet)
+            total_played, rank = await asyncio.to_thread(
+                get_quali_stats_for_runner,
+                ws,
+                runner_name,
+                quali_number
+            )
+
+            if rank is None:
+                text = (
+                    f"**Stand Quali {quali_number}**\n\n"
+                    f"Bereits gespielt: **{total_played}**\n"
+                    f"Du hast Quali {quali_number} aktuell noch nicht abgeschlossen."
+                )
+            else:
+                text = (
+                    f"**Stand Quali {quali_number}**\n\n"
+                    f"Bereits gespielt: **{total_played}**\n"
+                    f"Dein aktueller Platz: **{rank}/{total_played}**"
+                )
+
+            await interaction.followup.send(text, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler bei Stand Quali {quali_number}: {e}",
+                ephemeral=True
+            )
+
+    async def send_overall_stand(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            runner_name = get_runner_name(interaction)
+            ws = await asyncio.to_thread(get_quali_worksheet)
+            total_completed, rank = await asyncio.to_thread(
+                get_overall_stats_for_runner,
+                ws,
+                runner_name
+            )
+
+            if rank is None:
+                text = (
+                    f"**Gesamtstand**\n\n"
+                    f"Beide Qualis abgeschlossen: **{total_completed}**\n"
+                    f"Du bist aktuell noch nicht im Gesamtstand, weil dir mindestens eine Quali fehlt."
+                )
+            else:
+                text = (
+                    f"**Gesamtstand**\n\n"
+                    f"Beide Qualis abgeschlossen: **{total_completed}**\n"
+                    f"Dein aktueller Platz: **{rank}/{total_completed}**"
+                )
+
+            await interaction.followup.send(text, ephemeral=True)
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Gesamtstand: {e}",
+                ephemeral=True
+            )
+
     async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
         await interaction.response.defer(ephemeral=True)
 
@@ -580,10 +781,11 @@ class QualiCog(commands.Cog):
 
             hint_text = (
                 f"**Quali {quali_number}**\n\n"
-                f"Mit Klick auf **Seed öffnen** erhältst du den Link zum Quali-Seed und ein Timer, "
-                f"der von 5 Minuten runterzählt erscheint. Innerhalb dieser 5 Minuten musst du den Seed starten. "
-                f"Bei Überschreiten dieser Zeit erhältst du ein FF und **03:00:00** als Ergebnis für das Race.\n\n"
-                f"Drücke also erst auf **Seed öffnen**, wenn du wirklich bereit bist.\n\n"
+                f"Mit Klick auf **Seed öffnen** erhältst du den Link zum Quali-Seed.\n"
+                f"Innerhalb von **5 Minuten** nach dem Öffnen musst du starten. Bei Überschreiten erhältst du "
+                f"ein FF und **03:00:00** als Ergebnis.\n\n"
+                f"**Wichtig:** Nach dem Klick auf **Start** läuft deine Zeit, aber Discord zeigt keinen Live-Timer an.\n"
+                f"Drücke also erst auf **Start**, wenn du wirklich bereit bist.\n\n"
                 f"Achte bei deiner Aufnahme darauf, dass dein Timer durchgehend zu sehen ist und lasse den Endscreen "
                 f"bis zum Ende durchlaufen."
             )
@@ -624,7 +826,8 @@ class QualiCog(commands.Cog):
             f"Seed-Link: {state.seed_url}\n\n"
             f"Du musst innerhalb von **5 Minuten** starten.\n"
             f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
-            f"Noch verbleibend: <t:{int(deadline.timestamp())}:R>"
+            f"Noch verbleibend: <t:{int(deadline.timestamp())}:R>\n\n"
+            f"**Hinweis:** Nach dem Klick auf **Start** läuft deine Zeit ohne Live-Anzeige im Discord weiter."
         )
 
         view = QualiStartView(self, state)
@@ -632,7 +835,6 @@ class QualiCog(commands.Cog):
         await interaction.response.edit_message(content=content, view=view)
         state.message = await interaction.original_response()
 
-        state.update_task = asyncio.create_task(self.seed_countdown_updater(state))
         state.timeout_task = asyncio.create_task(self.seed_start_timeout(state))
 
     async def start_race(self, interaction: discord.Interaction, state: QualiRunState):
@@ -671,51 +873,19 @@ class QualiCog(commands.Cog):
             state.timeout_task.cancel()
             state.timeout_task = None
 
-        if state.update_task:
-            state.update_task.cancel()
-            state.update_task = None
-
         content = (
             f"**Quali {state.quali_number} läuft**\n\n"
             f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
-            f"Laufzeit: **00:00:00**\n\n"
-            f"Drücke **Finish** oder **Forfeit**."
+            f"Deine Zeit läuft jetzt.\n\n"
+            f"**Wichtig:** Discord zeigt keinen Live-Timer an.\n"
+            f"Nutze deinen eigenen Timer bzw. deine Aufnahme als Referenz.\n\n"
+            f"Drücke am Ende **Finish** oder **Forfeit**."
         )
 
         view = QualiRunningView(self, state)
 
         await interaction.response.edit_message(content=content, view=view)
         state.message = await interaction.original_response()
-
-        state.update_task = asyncio.create_task(self.race_timer_updater(state))
-
-    async def seed_countdown_updater(self, state: QualiRunState):
-        try:
-            while (
-                not state.finished
-                and not state.cancelled
-                and state.seed_shown_at
-                and state.started_at is None
-                and state.message
-            ):
-                deadline = state.seed_shown_at + timedelta(minutes=5)
-                remaining = int((deadline - dt.utcnow()).total_seconds())
-                if remaining < 0:
-                    remaining = 0
-
-                content = (
-                    f"**Quali {state.quali_number} – Seed geöffnet**\n\n"
-                    f"Seed-Link: {state.seed_url}\n\n"
-                    f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
-                    f"Verbleibend: **{format_seconds_to_hms(remaining)}**"
-                )
-
-                await state.message.edit(content=content, view=QualiStartView(self, state))
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
 
     async def seed_start_timeout(self, state: QualiRunState):
         try:
@@ -744,11 +914,20 @@ class QualiCog(commands.Cog):
                 "03:00:00"
             )
 
+            total_played, rank = await asyncio.to_thread(
+                get_quali_stats_for_runner,
+                ws,
+                state.runner_name,
+                state.quali_number
+            )
+
             state.finished = True
             state.finished_at = dt.utcnow()
             state.locked_final_time = "03:00:00"
             self.stop_state_tasks(state)
             self.active_runs.pop(state.user_id, None)
+
+            place_text = f"Platz: **{rank}/{total_played}**" if rank is not None else "Platz aktuell nicht verfügbar."
 
             if state.message:
                 try:
@@ -756,7 +935,9 @@ class QualiCog(commands.Cog):
                         content=(
                             f"**Quali {state.quali_number} beendet**\n"
                             f"Startfenster überschritten.\n"
-                            f"Ergebnis: **DNF / 03:00:00**"
+                            f"Ergebnis: **DNF / 03:00:00**\n"
+                            f"Bereits gespielt: **{total_played}**\n"
+                            f"{place_text}"
                         ),
                         view=None
                     )
@@ -768,30 +949,10 @@ class QualiCog(commands.Cog):
         except Exception:
             pass
 
-    async def race_timer_updater(self, state: QualiRunState):
-        try:
-            while not state.finished and not state.cancelled and state.started_at and state.message:
-                runtime = state.measured_time()
-
-                content = (
-                    f"**Quali {state.quali_number} läuft**\n\n"
-                    f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
-                    f"Laufzeit: **{runtime}**\n\n"
-                    f"Drücke **Finish** oder **Forfeit**."
-                )
-
-                await state.message.edit(content=content, view=QualiRunningView(self, state))
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
     def stop_state_tasks(self, state: QualiRunState):
-        for task in (state.update_task, state.timeout_task):
-            if task and not task.done():
-                task.cancel()
-        state.update_task = None
+        task = state.timeout_task
+        if task and not task.done():
+            task.cancel()
         state.timeout_task = None
 
 
