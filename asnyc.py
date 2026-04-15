@@ -206,7 +206,7 @@ class QualiRunState:
         self.finished = False
         self.cancelled = False
 
-        self.message: discord.Message | None = None  # DM-Nachricht, dieselbe Nachricht bleibt erhalten
+        self.message: discord.Message | None = None
         self.update_task: asyncio.Task | None = None
         self.timeout_task: asyncio.Task | None = None
 
@@ -716,16 +716,14 @@ class QualiCog(commands.Cog):
             f"Drücke **Finish** oder **Forfeit**."
         )
 
-        # WICHTIGER FIX:
-        # dieselbe DM-Nachricht weiterverwenden und NICHT mit
-        # interaction.original_response() überschreiben
-        state.message = interaction.message
+        running_view = QualiRunningView(self, state)
 
         await interaction.response.edit_message(
             content=content,
-            view=QualiRunningView(self, state)
+            view=running_view
         )
 
+        state.message = interaction.message
         state.update_task = asyncio.create_task(self.race_timer_updater(state))
 
     async def seed_countdown_updater(self, state: QualiRunState):
