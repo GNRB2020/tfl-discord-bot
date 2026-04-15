@@ -322,12 +322,20 @@ class QualiSubmitModal(discord.ui.Modal):
         self.state = state
         self.forfeit = forfeit
 
+        if not forfeit:
+            shown_time = state.locked_final_time or "Unbekannt"
+            self.time_info = discord.ui.TextInput(
+                label="Erreichte Zeit",
+                default=shown_time,
+                required=True
+            )
+            self.add_item(self.time_info)
+
         self.vod_input = discord.ui.TextInput(
             label="VoD-Link" if not forfeit else "Kommentar (optional)",
             placeholder="https://..." if not forfeit else "Optional",
             required=not forfeit
         )
-
         self.add_item(self.vod_input)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -782,9 +790,10 @@ class QualiCog(commands.Cog):
             hint_text = (
                 f"**Quali {quali_number}**\n\n"
                 f"Mit Klick auf **Seed öffnen** erhältst du den Link zum Quali-Seed.\n"
-                f"Innerhalb von **5 Minuten** nach dem Öffnen musst du starten. Bei Überschreiten erhältst du "
+                f"Innerhalb von **5 Minuten** nach dem Öffnen musst du starten. Bei Überschreitung erhältst du "
                 f"ein FF und **03:00:00** als Ergebnis.\n\n"
-                f"**Wichtig:** Nach dem Klick auf **Start** läuft deine Zeit, aber Discord zeigt keinen Live-Timer an.\n"
+                f"**Wichtig:** Sobald du später auf **Start** drückst, läuft deine Race-Zeit sofort los.\n"
+                f"Es gibt während des Races **keinen Live-Timer im Discord**.\n\n"
                 f"Drücke also erst auf **Start**, wenn du wirklich bereit bist.\n\n"
                 f"Achte bei deiner Aufnahme darauf, dass dein Timer durchgehend zu sehen ist und lasse den Endscreen "
                 f"bis zum Ende durchlaufen."
@@ -827,7 +836,8 @@ class QualiCog(commands.Cog):
             f"Du musst innerhalb von **5 Minuten** starten.\n"
             f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
             f"Noch verbleibend: <t:{int(deadline.timestamp())}:R>\n\n"
-            f"**Hinweis:** Nach dem Klick auf **Start** läuft deine Zeit ohne Live-Anzeige im Discord weiter."
+            f"**Wichtig:** Sobald du auf **Start** drückst, läuft deine Zeit sofort los.\n"
+            f"Während des Races gibt es **keinen Live-Timer im Discord**."
         )
 
         view = QualiStartView(self, state)
@@ -875,9 +885,9 @@ class QualiCog(commands.Cog):
 
         content = (
             f"**Quali {state.quali_number} läuft**\n\n"
-            f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n"
-            f"Deine Zeit läuft jetzt.\n\n"
-            f"**Wichtig:** Discord zeigt keinen Live-Timer an.\n"
+            f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n\n"
+            f"**Deine Zeit läuft jetzt bereits.**\n"
+            f"Es gibt während des Races **keinen Live-Timer im Discord**.\n"
             f"Nutze deinen eigenen Timer bzw. deine Aufnahme als Referenz.\n\n"
             f"Drücke am Ende **Finish** oder **Forfeit**."
         )
