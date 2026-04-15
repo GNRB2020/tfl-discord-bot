@@ -491,6 +491,7 @@ class QualiCog(commands.Cog):
         description="Setzt eine hängende Quali zurück."
     )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.checks.has_permissions(administrator=True)
     async def qualireset(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -514,6 +515,32 @@ class QualiCog(commands.Cog):
                 pass
 
         await interaction.followup.send("Quali wurde zurückgesetzt.", ephemeral=True)
+
+    @qualireset.error
+    async def qualireset_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Diesen Command dürfen nur Admins ausführen.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "Diesen Command dürfen nur Admins ausführen.",
+                    ephemeral=True
+                )
+            return
+
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"Fehler bei /qualireset: {error}",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Fehler bei /qualireset: {error}",
+                ephemeral=True
+            )
 
     async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
         await interaction.response.defer(ephemeral=True)
