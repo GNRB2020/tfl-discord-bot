@@ -15,9 +15,6 @@ from datetime import datetime as dt, timedelta
 import aiohttp
 import sys
 import traceback
-from player import register_player_commands
-
-register_player_commands(tree)
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
@@ -66,6 +63,10 @@ class TFLBot(commands.Bot):
         
         await self.load_extension("asnyc")
         print("✅ asnyc.py geladen")
+
+        await self.load_extension("player")
+        print("✅ player.py geladen")
+        
 
 client = TFLBot(command_prefix="!", intents=intents)
 
