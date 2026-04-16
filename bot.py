@@ -66,6 +66,7 @@ class TFLBot(commands.Bot):
 
         await self.load_extension("player")
         print("✅ player.py geladen")
+        print("TREE NACH PLAYER LOAD:", [cmd.name for cmd in self.tree.get_commands(guild=discord.Object(id=GUILD_ID))])
         
 
 client = TFLBot(command_prefix="!", intents=intents)
@@ -2388,9 +2389,9 @@ async def on_ready():
     print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
 
     if not _client_synced_once:
-        await tree.sync(guild=discord.Object(id=GUILD_ID))
+        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+        print("✅ Slash-Befehle synchronisiert:", [cmd.name for cmd in synced])
         _client_synced_once = True
-        print("✅ Slash-Befehle synchronisiert")
 
     try:
         asyncio.create_task(start_webserver(client))
