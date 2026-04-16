@@ -136,7 +136,6 @@ class PlayerMenuView(PlayerBaseView):
         await interaction.response.edit_message(
             content="**Spiel planen**\nWähle einen Bereich:",
             view=PlanMenuView(owner_id=interaction.user.id)
-    )
         )
 
     @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
