@@ -140,6 +140,38 @@ def format_signup_row(values: list[str]) -> str:
     )
 
 
+def get_signup_status_text_for_member(member: discord.Member) -> str:
+    ws = get_worksheet()
+    name = member.display_name.strip()
+    row = find_name_row(ws, name)
+
+    if row is None:
+        return "Es wurde kein Eintrag mit deinem Namen gefunden."
+
+    values = get_row_values(ws, row)
+    return format_signup_row(values)
+
+
+def get_league_signup_text() -> str:
+    ws = get_worksheet()
+    names = get_names_by_column_value(ws, 3, "Ja")
+
+    if not names:
+        return "Keine League-Anmeldungen."
+
+    return "\n".join(names)
+
+
+def get_cup_signup_text() -> str:
+    ws = get_worksheet()
+    names = get_names_by_column_value(ws, 4, "Ja")
+
+    if not names:
+        return "Keine Cup-Anmeldungen."
+
+    return "\n".join(names)
+
+
 def get_names_by_column_value(ws, column_index: int, target_value: str):
     rows = ws.get_all_values()
     matches = []
@@ -374,23 +406,8 @@ class SignupCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            ws = get_worksheet()
-            name = member.display_name.strip()
-            row = find_name_row(ws, name)
-
-            if row is None:
-                await interaction.followup.send(
-                    "Es wurde kein Eintrag mit deinem Namen gefunden.",
-                    ephemeral=True
-                )
-                return
-
-            values = get_row_values(ws, row)
-
-            await interaction.followup.send(
-                format_signup_row(values),
-                ephemeral=True
-            )
+            text = get_signup_status_text_for_member(member)
+            await interaction.followup.send(text, ephemeral=True)
 
         except Exception as e:
             await interaction.followup.send(
@@ -401,26 +418,26 @@ class SignupCog(commands.Cog):
     @app_commands.command(name="leaguesign", description="Zeigt alle League-Anmeldungen")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def leaguesign(self, interaction: discord.Interaction):
-        ws = get_worksheet()
-        names = get_names_by_column_value(ws, 3, "Ja")
-
-        if not names:
-            await interaction.response.send_message("Keine League-Anmeldungen.", ephemeral=True)
-            return
-
-        await interaction.response.send_message("\n".join(names), ephemeral=True)
+        try:
+            text = get_league_signup_text()
+            await interaction.response.send_message(text, ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Fehler beim Abrufen der League-Anmeldungen: {e}",
+                ephemeral=True
+            )
 
     @app_commands.command(name="cupsign", description="Zeigt alle Cup-Anmeldungen")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def cupsign(self, interaction: discord.Interaction):
-        ws = get_worksheet()
-        names = get_names_by_column_value(ws, 4, "Ja")
-
-        if not names:
-            await interaction.response.send_message("Keine Cup-Anmeldungen.", ephemeral=True)
-            return
-
-        await interaction.response.send_message("\n".join(names), ephemeral=True)
+        try:
+            text = get_cup_signup_text()
+            await interaction.response.send_message(text, ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Fehler beim Abrufen der Cup-Anmeldungen: {e}",
+                ephemeral=True
+            )
 
     @app_commands.command(name="resetsign", description="Setzt alle Signups zurück")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
