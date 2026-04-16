@@ -374,7 +374,7 @@ class InfoQualifikationView(PlayerBaseView):
             try:
                 await interaction.response.defer()
                 text = await build_quali_overall_text(member)
-                await interaction.edit_originalResponse(
+                await interaction.edit_original_response(
                     content=f"**Info → Qualifikation → Gesamt**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
@@ -423,12 +423,14 @@ class RestOtherPlayerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         player = self.values[0]
 
+        await interaction.response.defer()
+
         try:
-            text = format_restprogramm_text(self.division, player)
+            text = await asyncio.to_thread(format_restprogramm_text, self.division, player)
         except Exception as e:
             text = f"Fehler beim Ermitteln des Restprogramms: {e}"
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=text,
             view=PlaceholderView(
                 owner_id=interaction.user.id,
@@ -472,23 +474,25 @@ class RestOtherDivisionSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         div_number = self.values[0]
 
+        await interaction.response.defer()
+
         try:
-            players = list_rest_players(div_number)
+            players = await asyncio.to_thread(list_rest_players, div_number)
         except Exception as e:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"❌ Fehler beim Laden der Spieler für Division {div_number}: {e}",
                 view=RestOtherDivisionView(owner_id=interaction.user.id)
             )
             return
 
         if not players:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
                 view=RestOtherDivisionView(owner_id=interaction.user.id)
             )
             return
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"**Info → Restprogramm → Andere**\nDivision {div_number} gewählt. Bitte Spieler wählen:",
             view=RestOtherPlayerView(
                 owner_id=interaction.user.id,
@@ -518,36 +522,36 @@ class RestprogrammView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
 
-@discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
-async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-    member = interaction.user
+    @discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
+    async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
 
-    await interaction.response.defer()
+        await interaction.response.defer()
 
-    if not isinstance(member, discord.Member):
-        text = "Nur auf dem Server verfügbar."
-    else:
-        try:
-            name_candidates = [
-                member.display_name,
-                getattr(member, "global_name", None),
-                member.name,
-            ]
-            text = await asyncio.to_thread(
-                get_open_restprogramm_text_for_name_candidates,
-                name_candidates
+        if not isinstance(member, discord.Member):
+            text = "Nur auf dem Server verfügbar."
+        else:
+            try:
+                name_candidates = [
+                    member.display_name,
+                    getattr(member, "global_name", None),
+                    member.name,
+                ]
+                text = await asyncio.to_thread(
+                    get_open_restprogramm_text_for_name_candidates,
+                    name_candidates
+                )
+            except Exception as e:
+                text = f"Fehler beim Abrufen deines Restprogramms: {e}"
+
+        await interaction.edit_original_response(
+            content=f"**Info → Restprogramm → Eigenes**\n{text}",
+            view=PlaceholderView(
+                owner_id=interaction.user.id,
+                back_view=RestprogrammView(owner_id=interaction.user.id),
+                back_content="**Info → Restprogramm**\nWähle einen Bereich:"
             )
-        except Exception as e:
-            text = f"Fehler beim Abrufen deines Restprogramms: {e}"
-
-    await interaction.edit_original_response(
-        content=f"**Info → Restprogramm → Eigenes**\n{text}",
-        view=PlaceholderView(
-            owner_id=interaction.user.id,
-            back_view=RestprogrammView(owner_id=interaction.user.id),
-            back_content="**Info → Restprogramm**\nWähle einen Bereich:"
         )
-    )
 
     @discord.ui.button(label="Andere", style=discord.ButtonStyle.primary, row=0)
     async def andere_button(self, interaction: discord.Interaction, button: discord.ui.Button):
