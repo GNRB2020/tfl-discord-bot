@@ -131,11 +131,11 @@ class PlayerMenuView(PlayerBaseView):
             view=InfoMenuView(owner_id=interaction.user.id)
         )
 
-   @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
-   async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-       await interaction.response.edit_message(
-           content="**Spiel planen**\nWähle einen Bereich:",
-           view=PlanMenuView(owner_id=interaction.user.id)
+    @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
+    async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spiel planen**\nWähle einen Bereich:",
+            view=PlanMenuView(owner_id=interaction.user.id)
     )
         )
 
