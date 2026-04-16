@@ -1,11 +1,78 @@
 import os
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from signup import (
+    get_signup_status_text_for_member,
+    get_league_signup_text,
+    get_cup_signup_text,
+)
+
+from asnyc import (
+    get_quali_worksheet,
+    get_quali_stats_for_runner,
+    get_overall_stats_for_runner,
+)
+
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 
 
+# =========================================================
+# Hilfsfunktionen
+# =========================================================
+
+async def build_quali_info_text(member: discord.Member, quali_number: int) -> str:
+    runner_name = member.display_name.strip()
+    ws = await asyncio.to_thread(get_quali_worksheet)
+    total_played, rank = await asyncio.to_thread(
+        get_quali_stats_for_runner,
+        ws,
+        runner_name,
+        quali_number
+    )
+
+    if rank is None:
+        return (
+            f"**Stand Quali {quali_number}**\n\n"
+            f"Bereits gespielt: **{total_played}**\n"
+            f"Du hast Quali {quali_number} aktuell noch nicht abgeschlossen."
+        )
+
+    return (
+        f"**Stand Quali {quali_number}**\n\n"
+        f"Bereits gespielt: **{total_played}**\n"
+        f"Dein aktueller Platz: **{rank}/{total_played}**"
+    )
+
+
+async def build_quali_overall_text(member: discord.Member) -> str:
+    runner_name = member.display_name.strip()
+    ws = await asyncio.to_thread(get_quali_worksheet)
+    total_completed, rank = await asyncio.to_thread(
+        get_overall_stats_for_runner,
+        ws,
+        runner_name
+    )
+
+    if rank is None:
+        return (
+            f"**Gesamtstand**\n\n"
+            f"Beide Qualis abgeschlossen: **{total_completed}**\n"
+            f"Du bist aktuell noch nicht im Gesamtstand, weil dir mindestens eine Quali fehlt."
+        )
+
+    return (
+        f"**Gesamtstand**\n\n"
+        f"Beide Qualis abgeschlossen: **{total_completed}**\n"
+        f"Dein aktueller Platz: **{rank}/{total_completed}**"
+    )
+
+
+# =========================================================
+# Basis-View
+# =========================================================
 class PlayerBaseView(discord.ui.View):
     def __init__(self, owner_id: int, timeout: float = 180):
         super().__init__(timeout=timeout)
@@ -19,6 +86,23 @@ class PlayerBaseView(discord.ui.View):
             )
             return False
         return True
+
+
+# =========================================================
+# Allgemeine Detailansicht mit Zurück
+# =========================================================
+class PlaceholderView(PlayerBaseView):
+    def __init__(self, owner_id: int, back_view: discord.ui.View, back_content: str):
+        super().__init__(owner_id)
+        self.back_view = back_view
+        self.back_content = back_content
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=0)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=self.back_content,
+            view=self.back_view
+        )
 
 
 # =========================================================
@@ -41,8 +125,6 @@ class PlayerMenuView(PlayerBaseView):
             content="**Spielermenü → Spiel planen**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Spielermenü → Spiel planen**",
-                text="Hier kommt später die Navigation rein.",
                 back_view=PlayerMenuView(owner_id=interaction.user.id),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
@@ -54,8 +136,6 @@ class PlayerMenuView(PlayerBaseView):
             content="**Spielermenü → Ergebnis melden**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Spielermenü → Ergebnis melden**",
-                text="Hier kommt später die Navigation rein.",
                 back_view=PlayerMenuView(owner_id=interaction.user.id),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
@@ -67,8 +147,6 @@ class PlayerMenuView(PlayerBaseView):
             content="**Spielermenü → Qualifikation**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Spielermenü → Qualifikation**",
-                text="Hier kommt später die Navigation rein.",
                 back_view=PlayerMenuView(owner_id=interaction.user.id),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
@@ -80,8 +158,6 @@ class PlayerMenuView(PlayerBaseView):
             content="**Spielermenü → Saisonmeldung**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Spielermenü → Saisonmeldung**",
-                text="Hier kommt später die Navigation rein.",
                 back_view=PlayerMenuView(owner_id=interaction.user.id),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
@@ -93,30 +169,9 @@ class PlayerMenuView(PlayerBaseView):
             content="**Spielermenü → Einstellungen**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Spielermenü → Einstellungen**",
-                text="Hier kommt später die Navigation rein.",
                 back_view=PlayerMenuView(owner_id=interaction.user.id),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
-        )
-
-
-# =========================================================
-# Allgemeine Platzhalter-Detailansicht
-# =========================================================
-class PlaceholderView(PlayerBaseView):
-    def __init__(self, owner_id: int, title: str, text: str, back_view: discord.ui.View, back_content: str):
-        super().__init__(owner_id)
-        self.title = title
-        self.text = text
-        self.back_view = back_view
-        self.back_content = back_content
-
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=0)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content=self.back_content,
-            view=self.back_view
         )
 
 
@@ -158,7 +213,7 @@ class InfoMenuView(PlayerBaseView):
     @discord.ui.button(label="Ergebnisse/Tabelle", style=discord.ButtonStyle.primary, row=2)
     async def ergebnisse_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:",
+            content="**Info → Ergebnisse/Tabelle**\nWähle eine Liga oder den Cup:",
             view=ErgebnisseTabelleView(owner_id=interaction.user.id)
         )
 
@@ -179,12 +234,19 @@ class MeldestatusView(PlayerBaseView):
 
     @discord.ui.button(label="Meiner", style=discord.ButtonStyle.primary, row=0)
     async def meiner_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            text = "Nur auf dem Server verfügbar."
+        else:
+            try:
+                text = get_signup_status_text_for_member(member)
+            except Exception as e:
+                text = f"Fehler beim Abrufen deines Eintrags: {e}"
+
         await interaction.response.edit_message(
-            content="**Info → Meldestatus → Meiner**\nHier kommt später der Inhalt rein.",
+            content=f"**Info → Meldestatus → Meiner**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Meldestatus → Meiner**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=MeldestatusView(owner_id=interaction.user.id),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
@@ -192,12 +254,15 @@ class MeldestatusView(PlayerBaseView):
 
     @discord.ui.button(label="League", style=discord.ButtonStyle.primary, row=0)
     async def league_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            text = get_league_signup_text()
+        except Exception as e:
+            text = f"Fehler beim Abrufen der League-Anmeldungen: {e}"
+
         await interaction.response.edit_message(
-            content="**Info → Meldestatus → League**\nHier kommt später der Inhalt rein.",
+            content=f"**Info → Meldestatus → League**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Meldestatus → League**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=MeldestatusView(owner_id=interaction.user.id),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
@@ -205,12 +270,15 @@ class MeldestatusView(PlayerBaseView):
 
     @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
     async def cup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            text = get_cup_signup_text()
+        except Exception as e:
+            text = f"Fehler beim Abrufen der Cup-Anmeldungen: {e}"
+
         await interaction.response.edit_message(
-            content="**Info → Meldestatus → Cup**\nHier kommt später der Inhalt rein.",
+            content=f"**Info → Meldestatus → Cup**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Meldestatus → Cup**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=MeldestatusView(owner_id=interaction.user.id),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
@@ -233,12 +301,29 @@ class InfoQualifikationView(PlayerBaseView):
 
     @discord.ui.button(label="Quali 1", style=discord.ButtonStyle.primary, row=0)
     async def quali1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            text = "Nur auf dem Server verfügbar."
+        else:
+            try:
+                await interaction.response.defer()
+                text = await build_quali_info_text(member, 1)
+                await interaction.edit_original_response(
+                    content=f"**Info → Qualifikation → Quali 1**\n{text}",
+                    view=PlaceholderView(
+                        owner_id=interaction.user.id,
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                        back_content="**Info → Qualifikation**\nWähle einen Bereich:"
+                    )
+                )
+                return
+            except Exception as e:
+                text = f"Fehler bei Quali 1: {e}"
+
         await interaction.response.edit_message(
-            content="**Info → Qualifikation → Quali 1**\nHier kommt später der Inhalt rein.",
+            content=f"**Info → Qualifikation → Quali 1**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Qualifikation → Quali 1**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=InfoQualifikationView(owner_id=interaction.user.id),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
@@ -246,12 +331,29 @@ class InfoQualifikationView(PlayerBaseView):
 
     @discord.ui.button(label="Quali 2", style=discord.ButtonStyle.primary, row=0)
     async def quali2_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            text = "Nur auf dem Server verfügbar."
+        else:
+            try:
+                await interaction.response.defer()
+                text = await build_quali_info_text(member, 2)
+                await interaction.edit_original_response(
+                    content=f"**Info → Qualifikation → Quali 2**\n{text}",
+                    view=PlaceholderView(
+                        owner_id=interaction.user.id,
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                        back_content="**Info → Qualifikation**\nWähle einen Bereich:"
+                    )
+                )
+                return
+            except Exception as e:
+                text = f"Fehler bei Quali 2: {e}"
+
         await interaction.response.edit_message(
-            content="**Info → Qualifikation → Quali 2**\nHier kommt später der Inhalt rein.",
+            content=f"**Info → Qualifikation → Quali 2**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Qualifikation → Quali 2**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=InfoQualifikationView(owner_id=interaction.user.id),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
@@ -259,12 +361,29 @@ class InfoQualifikationView(PlayerBaseView):
 
     @discord.ui.button(label="Gesamt", style=discord.ButtonStyle.primary, row=0)
     async def gesamt_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            text = "Nur auf dem Server verfügbar."
+        else:
+            try:
+                await interaction.response.defer()
+                text = await build_quali_overall_text(member)
+                await interaction.edit_original_response(
+                    content=f"**Info → Qualifikation → Gesamt**\n{text}",
+                    view=PlaceholderView(
+                        owner_id=interaction.user.id,
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                        back_content="**Info → Qualifikation**\nWähle einen Bereich:"
+                    )
+                )
+                return
+            except Exception as e:
+                text = f"Fehler beim Gesamtstand: {e}"
+
         await interaction.response.edit_message(
-            content="**Info → Qualifikation → Gesamt**\nHier kommt später der Inhalt rein.",
+            content=f"**Info → Qualifikation → Gesamt**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Qualifikation → Gesamt**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=InfoQualifikationView(owner_id=interaction.user.id),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
@@ -291,8 +410,6 @@ class RestprogrammView(PlayerBaseView):
             content="**Info → Restprogramm → Eigenes**\nHier kommt später der Inhalt rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Restprogramm → Eigenes**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=RestprogrammView(owner_id=interaction.user.id),
                 back_content="**Info → Restprogramm**\nWähle einen Bereich:"
             )
@@ -304,8 +421,6 @@ class RestprogrammView(PlayerBaseView):
             content="**Info → Restprogramm → Andere**\nHier kommt später der Inhalt rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Restprogramm → Andere**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=RestprogrammView(owner_id=interaction.user.id),
                 back_content="**Info → Restprogramm**\nWähle einen Bereich:"
             )
@@ -332,8 +447,6 @@ class StreichmodusView(PlayerBaseView):
             content="**Info → Streichmodus → Eigene Division**\nHier kommt später der Inhalt rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Streichmodus → Eigene Division**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=StreichmodusView(owner_id=interaction.user.id),
                 back_content="**Info → Streichmodus**\nWähle einen Bereich:"
             )
@@ -345,8 +458,6 @@ class StreichmodusView(PlayerBaseView):
             content="**Info → Streichmodus → Andere Divisionen**\nHier kommt später der Inhalt rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                title="**Info → Streichmodus → Andere Divisionen**",
-                text="Hier kommt später der Inhalt rein.",
                 back_view=StreichmodusView(owner_id=interaction.user.id),
                 back_content="**Info → Streichmodus**\nWähle einen Bereich:"
             )
@@ -361,102 +472,54 @@ class StreichmodusView(PlayerBaseView):
 
 
 # =========================================================
-# Ergebnisse / Tabelle
+# Ergebnisse / Tabelle mit Browser-Links
 # =========================================================
 class ErgebnisseTabelleView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
 
-    @discord.ui.button(label="1. Div", style=discord.ButtonStyle.primary, row=0)
-    async def div1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle → 1. Div**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                title="**Info → Ergebnisse/Tabelle → 1. Div**",
-                text="Hier kommt später der Inhalt rein.",
-                back_view=ErgebnisseTabelleView(owner_id=interaction.user.id),
-                back_content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:"
-            )
-        )
-
-    @discord.ui.button(label="2. Div", style=discord.ButtonStyle.primary, row=0)
-    async def div2_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle → 2. Div**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                title="**Info → Ergebnisse/Tabelle → 2. Div**",
-                text="Hier kommt später der Inhalt rein.",
-                back_view=ErgebnisseTabelleView(owner_id=interaction.user.id),
-                back_content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:"
-            )
-        )
-
-    @discord.ui.button(label="3. Div", style=discord.ButtonStyle.primary, row=0)
-    async def div3_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle → 3. Div**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                title="**Info → Ergebnisse/Tabelle → 3. Div**",
-                text="Hier kommt später der Inhalt rein.",
-                back_view=ErgebnisseTabelleView(owner_id=interaction.user.id),
-                back_content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:"
-            )
-        )
-
-    @discord.ui.button(label="4. Div", style=discord.ButtonStyle.primary, row=1)
-    async def div4_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle → 4. Div**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                title="**Info → Ergebnisse/Tabelle → 4. Div**",
-                text="Hier kommt später der Inhalt rein.",
-                back_view=ErgebnisseTabelleView(owner_id=interaction.user.id),
-                back_content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:"
-            )
-        )
-
-    @discord.ui.button(label="5. Div", style=discord.ButtonStyle.primary, row=1)
-    async def div5_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle → 5. Div**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                title="**Info → Ergebnisse/Tabelle → 5. Div**",
-                text="Hier kommt später der Inhalt rein.",
-                back_view=ErgebnisseTabelleView(owner_id=interaction.user.id),
-                back_content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:"
-            )
-        )
-
-    @discord.ui.button(label="6. Div", style=discord.ButtonStyle.primary, row=1)
-    async def div6_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle → 6. Div**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                title="**Info → Ergebnisse/Tabelle → 6. Div**",
-                text="Hier kommt später der Inhalt rein.",
-                back_view=ErgebnisseTabelleView(owner_id=interaction.user.id),
-                back_content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:"
-            )
-        )
-
-    @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=2)
-    async def cup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle → Cup**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                title="**Info → Ergebnisse/Tabelle → Cup**",
-                text="Hier kommt später der Inhalt rein.",
-                back_view=ErgebnisseTabelleView(owner_id=interaction.user.id),
-                back_content="**Info → Ergebnisse/Tabelle**\nWähle einen Bereich:"
-            )
-        )
+        self.add_item(discord.ui.Button(
+            label="1. Div",
+            style=discord.ButtonStyle.link,
+            url="https://tryforceleague.de/index.php/1-division",
+            row=0
+        ))
+        self.add_item(discord.ui.Button(
+            label="2. Div",
+            style=discord.ButtonStyle.link,
+            url="https://tryforceleague.de/index.php/1-division-2",
+            row=0
+        ))
+        self.add_item(discord.ui.Button(
+            label="3. Div",
+            style=discord.ButtonStyle.link,
+            url="https://tryforceleague.de/index.php/3-division",
+            row=0
+        ))
+        self.add_item(discord.ui.Button(
+            label="4. Div",
+            style=discord.ButtonStyle.link,
+            url="https://tryforceleague.de/index.php/3-division-2",
+            row=1
+        ))
+        self.add_item(discord.ui.Button(
+            label="5. Div",
+            style=discord.ButtonStyle.link,
+            url="https://tryforceleague.de/index.php/3-division-3",
+            row=1
+        ))
+        self.add_item(discord.ui.Button(
+            label="6. Div",
+            style=discord.ButtonStyle.link,
+            url="https://tryforceleague.de/index.php/3-division-3",
+            row=1
+        ))
+        self.add_item(discord.ui.Button(
+            label="Cup",
+            style=discord.ButtonStyle.link,
+            url="https://tryforceleague.de/index.php/cup",
+            row=2
+        ))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -466,6 +529,9 @@ class ErgebnisseTabelleView(PlayerBaseView):
         )
 
 
+# =========================================================
+# Cog
+# =========================================================
 class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
