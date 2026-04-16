@@ -16,6 +16,12 @@ from asnyc import (
     get_overall_stats_for_runner,
 )
 
+from restinfo import (
+    list_rest_players,
+    format_restprogramm_text,
+    get_open_restprogramm_text_for_player,
+)
+
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 
 
@@ -398,6 +404,114 @@ class InfoQualifikationView(PlayerBaseView):
 
 
 # =========================================================
+# Restprogramm - Andere
+# =========================================================
+class RestOtherPlayerSelect(discord.ui.Select):
+    def __init__(self, division: str, players: list[str], owner_id: int):
+        self.division = division
+        self.owner_id = owner_id
+
+        options = [discord.SelectOption(label=p, value=p) for p in players[:25]]
+
+        super().__init__(
+            placeholder="Spieler wählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        player = self.values[0]
+
+        try:
+            text = format_restprogramm_text(self.division, player)
+        except Exception as e:
+            text = f"Fehler beim Ermitteln des Restprogramms: {e}"
+
+        await interaction.response.edit_message(
+            content=text,
+            view=PlaceholderView(
+                owner_id=interaction.user.id,
+                back_view=RestOtherDivisionView(owner_id=interaction.user.id),
+                back_content="**Info → Restprogramm → Andere**\nWähle eine Division:"
+            )
+        )
+
+
+class RestOtherPlayerView(PlayerBaseView):
+    def __init__(self, owner_id: int, division: str, players: list[str]):
+        super().__init__(owner_id)
+        self.add_item(RestOtherPlayerSelect(division, players, owner_id))
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Info → Restprogramm → Andere**\nWähle eine Division:",
+            view=RestOtherDivisionView(owner_id=interaction.user.id)
+        )
+
+
+class RestOtherDivisionSelect(discord.ui.Select):
+    def __init__(self, owner_id: int):
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label="Division 1", value="1"),
+            discord.SelectOption(label="Division 2", value="2"),
+            discord.SelectOption(label="Division 3", value="3"),
+            discord.SelectOption(label="Division 4", value="4"),
+            discord.SelectOption(label="Division 5", value="5"),
+            discord.SelectOption(label="Division 6", value="6"),
+        ]
+        super().__init__(
+            placeholder="Division wählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        div_number = self.values[0]
+
+        try:
+            players = list_rest_players(div_number)
+        except Exception as e:
+            await interaction.response.edit_message(
+                content=f"❌ Fehler beim Laden der Spieler für Division {div_number}: {e}",
+                view=RestOtherDivisionView(owner_id=interaction.user.id)
+            )
+            return
+
+        if not players:
+            await interaction.response.edit_message(
+                content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
+                view=RestOtherDivisionView(owner_id=interaction.user.id)
+            )
+            return
+
+        await interaction.response.edit_message(
+            content=f"**Info → Restprogramm → Andere**\nDivision {div_number} gewählt. Bitte Spieler wählen:",
+            view=RestOtherPlayerView(
+                owner_id=interaction.user.id,
+                division=div_number,
+                players=players
+            )
+        )
+
+
+class RestOtherDivisionView(PlayerBaseView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(RestOtherDivisionSelect(owner_id))
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Info → Restprogramm**\nWähle einen Bereich:",
+            view=RestprogrammView(owner_id=interaction.user.id)
+        )
+
+
+# =========================================================
 # Restprogramm
 # =========================================================
 class RestprogrammView(PlayerBaseView):
@@ -406,8 +520,17 @@ class RestprogrammView(PlayerBaseView):
 
     @discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
     async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            text = "Nur auf dem Server verfügbar."
+        else:
+            try:
+                text = get_open_restprogramm_text_for_player(member.display_name.strip())
+            except Exception as e:
+                text = f"Fehler beim Abrufen deines Restprogramms: {e}"
+
         await interaction.response.edit_message(
-            content="**Info → Restprogramm → Eigenes**\nHier kommt später der Inhalt rein.",
+            content=f"**Info → Restprogramm → Eigenes**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=RestprogrammView(owner_id=interaction.user.id),
@@ -418,12 +541,8 @@ class RestprogrammView(PlayerBaseView):
     @discord.ui.button(label="Andere", style=discord.ButtonStyle.primary, row=0)
     async def andere_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Restprogramm → Andere**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=RestprogrammView(owner_id=interaction.user.id),
-                back_content="**Info → Restprogramm**\nWähle einen Bereich:"
-            )
+            content="**Info → Restprogramm → Andere**\nWähle eine Division:",
+            view=RestOtherDivisionView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
