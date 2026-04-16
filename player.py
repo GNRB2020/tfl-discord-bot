@@ -19,7 +19,7 @@ from asnyc import (
 from restinfo import (
     list_rest_players,
     format_restprogramm_text,
-    get_open_restprogramm_text_for_player,
+    get_open_restprogramm_text_for_name_candidates,
 )
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
@@ -374,7 +374,7 @@ class InfoQualifikationView(PlayerBaseView):
             try:
                 await interaction.response.defer()
                 text = await build_quali_overall_text(member)
-                await interaction.edit_original_response(
+                await interaction.edit_originalResponse(
                     content=f"**Info → Qualifikation → Gesamt**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
@@ -525,7 +525,12 @@ class RestprogrammView(PlayerBaseView):
             text = "Nur auf dem Server verfügbar."
         else:
             try:
-                text = get_open_restprogramm_text_for_player(member.display_name.strip())
+                name_candidates = [
+                    member.display_name,
+                    getattr(member, "global_name", None),
+                    member.name,
+                ]
+                text = get_open_restprogramm_text_for_name_candidates(name_candidates)
             except Exception as e:
                 text = f"Fehler beim Abrufen deines Restprogramms: {e}"
 
@@ -630,7 +635,7 @@ class ErgebnisseTabelleView(PlayerBaseView):
         self.add_item(discord.ui.Button(
             label="6. Div",
             style=discord.ButtonStyle.link,
-            url="https://tryforceleague.de/index.php/3-division-3",
+            url="https://tryforceleague.de/index.php/3-division-4",
             row=1
         ))
         self.add_item(discord.ui.Button(
