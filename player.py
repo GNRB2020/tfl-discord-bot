@@ -518,30 +518,36 @@ class RestprogrammView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
 
-    @discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
-    async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            text = "Nur auf dem Server verfügbar."
-        else:
-            try:
-                name_candidates = [
-                    member.display_name,
-                    getattr(member, "global_name", None),
-                    member.name,
-                ]
-                text = get_open_restprogramm_text_for_name_candidates(name_candidates)
-            except Exception as e:
-                text = f"Fehler beim Abrufen deines Restprogramms: {e}"
+@discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
+async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    member = interaction.user
 
-        await interaction.response.edit_message(
-            content=f"**Info → Restprogramm → Eigenes**\n{text}",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=RestprogrammView(owner_id=interaction.user.id),
-                back_content="**Info → Restprogramm**\nWähle einen Bereich:"
+    await interaction.response.defer()
+
+    if not isinstance(member, discord.Member):
+        text = "Nur auf dem Server verfügbar."
+    else:
+        try:
+            name_candidates = [
+                member.display_name,
+                getattr(member, "global_name", None),
+                member.name,
+            ]
+            text = await asyncio.to_thread(
+                get_open_restprogramm_text_for_name_candidates,
+                name_candidates
             )
+        except Exception as e:
+            text = f"Fehler beim Abrufen deines Restprogramms: {e}"
+
+    await interaction.edit_original_response(
+        content=f"**Info → Restprogramm → Eigenes**\n{text}",
+        view=PlaceholderView(
+            owner_id=interaction.user.id,
+            back_view=RestprogrammView(owner_id=interaction.user.id),
+            back_content="**Info → Restprogramm**\nWähle einen Bereich:"
         )
+    )
 
     @discord.ui.button(label="Andere", style=discord.ButtonStyle.primary, row=0)
     async def andere_button(self, interaction: discord.Interaction, button: discord.ui.Button):
