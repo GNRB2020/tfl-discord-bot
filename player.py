@@ -1,6 +1,9 @@
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 
 
 class PlayerBaseView(discord.ui.View):
@@ -52,6 +55,7 @@ class PlayerCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
         view = PlayerMenuView(owner_id=interaction.user.id)
         await interaction.response.send_message(
