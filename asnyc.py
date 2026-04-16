@@ -14,6 +14,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 # =========================================================
 
 GUILD_ID = 1275076189173579846
+LOG_CHANNEL_ID = 1494265084208222208
+ADMIN_ROLE_NAME = "Admin"
+
 QUALI_SHEET_NAME = "Quali"
 START_ROW = 4
 RUN_STALE_SECONDS = 15 * 60  # 15 Minuten
@@ -408,6 +411,12 @@ class QualiSubmitModal(discord.ui.Modal):
             self.cog.stop_state_tasks(self.state)
             self.cog.active_runs.pop(self.state.user_id, None)
 
+            await self.cog.send_quali_log(
+                runner_name,
+                self.state.quali_number,
+                final_time
+            )
+
             place_text = f"Platz: **{rank}/{total_played}**" if rank is not None else "Platz aktuell nicht verfügbar."
 
             await interaction.followup.send(
@@ -563,6 +572,27 @@ class QualiCog(commands.Cog):
         self.bot = bot
         self.active_runs: dict[int, QualiRunState] = {}
 
+    def is_admin_user(self, interaction: discord.Interaction) -> bool:
+        if not isinstance(interaction.user, discord.Member):
+            return False
+        return any(role.name == ADMIN_ROLE_NAME for role in interaction.user.roles)
+
+    async def send_quali_log(self, runner_name: str, quali_number: int, final_time: str):
+        channel = self.bot.get_channel(LOG_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(LOG_CHANNEL_ID)
+            except Exception:
+                return
+
+        try:
+            await channel.send(
+                f"**{runner_name}** hat **Qualifikation {quali_number}** "
+                f"mit einer Zeit von **{final_time}** beendet."
+            )
+        except Exception:
+            pass
+
     def cleanup_stale_run(self, user_id: int):
         active = self.active_runs.get(user_id)
         if active and not active.finished and active.is_stale():
@@ -688,8 +718,30 @@ class QualiCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            runner_name = get_runner_name(interaction)
             ws = await asyncio.to_thread(get_quali_worksheet)
+
+            if self.is_admin_user(interaction):
+                results = await asyncio.to_thread(get_quali_results, ws, quali_number)
+
+                if not results:
+                    text = f"**Stand Quali {quali_number}**\n\nNoch keine Ergebnisse vorhanden."
+                else:
+                    lines = [
+                        f"**Stand Quali {quali_number}**",
+                        "",
+                        f"Bereits gespielt: **{len(results)}**",
+                        ""
+                    ]
+
+                    for idx, (name, seconds) in enumerate(results, start=1):
+                        lines.append(f"**{idx}.** {name} — `{format_seconds_to_hms(seconds)}`")
+
+                    text = "\n".join(lines)
+
+                await interaction.followup.send(text, ephemeral=True)
+                return
+
+            runner_name = get_runner_name(interaction)
             total_played, rank = await asyncio.to_thread(
                 get_quali_stats_for_runner,
                 ws,
@@ -722,8 +774,30 @@ class QualiCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            runner_name = get_runner_name(interaction)
             ws = await asyncio.to_thread(get_quali_worksheet)
+
+            if self.is_admin_user(interaction):
+                results = await asyncio.to_thread(get_overall_results, ws)
+
+                if not results:
+                    text = "**Gesamtstand**\n\nNoch keine vollständigen Ergebnisse vorhanden."
+                else:
+                    lines = [
+                        "**Gesamtstand**",
+                        "",
+                        f"Beide Qualis abgeschlossen: **{len(results)}**",
+                        ""
+                    ]
+
+                    for idx, (name, total_seconds) in enumerate(results, start=1):
+                        lines.append(f"**{idx}.** {name} — `{format_seconds_to_hms(total_seconds)}`")
+
+                    text = "\n".join(lines)
+
+                await interaction.followup.send(text, ephemeral=True)
+                return
+
+            runner_name = get_runner_name(interaction)
             total_completed, rank = await asyncio.to_thread(
                 get_overall_stats_for_runner,
                 ws,
