@@ -1,5 +1,6 @@
 import discord
 from discord import app_commands
+from discord.ext import commands
 
 
 class PlayerBaseView(discord.ui.View):
@@ -46,12 +47,19 @@ class PlayerMenuView(PlayerBaseView):
         await interaction.response.send_message("Einstellungen folgen.", ephemeral=True)
 
 
-def register_player_commands(tree: app_commands.CommandTree):
-    @tree.command(name="player", description="Öffnet das Spielermenü")
-    async def player(interaction: discord.Interaction):
+class PlayerCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @app_commands.command(name="player", description="Öffnet das Spielermenü")
+    async def player(self, interaction: discord.Interaction):
         view = PlayerMenuView(owner_id=interaction.user.id)
         await interaction.response.send_message(
             "**Spielermenü**\nWähle einen Bereich:",
             view=view,
             ephemeral=True
         )
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(PlayerCog(bot))
