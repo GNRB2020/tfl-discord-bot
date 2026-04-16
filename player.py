@@ -3,6 +3,7 @@ import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
+from plan import PlanMenuView
 
 from signup import (
     get_signup_status_text_for_member,
@@ -130,15 +131,12 @@ class PlayerMenuView(PlayerBaseView):
             view=InfoMenuView(owner_id=interaction.user.id)
         )
 
-    @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
-    async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü → Spiel planen**\nHier kommt später die Navigation rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
-                back_content="**Spielermenü**\nWähle einen Bereich:"
-            )
+   @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
+   async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+       await interaction.response.edit_message(
+           content="**Spiel planen**\nWähle einen Bereich:",
+           view=PlanMenuView(owner_id=interaction.user.id)
+    )
         )
 
     @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
