@@ -22,6 +22,11 @@ from restinfo import (
     get_open_restprogramm_text_for_name_candidates,
 )
 
+from streichinfo import (
+    format_streichungen_text,
+    get_own_division_streich_text,
+)
+
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 
 
@@ -566,7 +571,58 @@ class RestprogrammView(PlayerBaseView):
             content="**Spielermenü → Info**\nWähle einen Bereich:",
             view=InfoMenuView(owner_id=interaction.user.id)
         )
+# =========================================================
+# Streichmodus - Andere Divisionen
+# =========================================================
+class StreichOtherDivisionSelect(discord.ui.Select):
+    def __init__(self, owner_id: int):
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label="Division 1", value="1"),
+            discord.SelectOption(label="Division 2", value="2"),
+            discord.SelectOption(label="Division 3", value="3"),
+            discord.SelectOption(label="Division 4", value="4"),
+            discord.SelectOption(label="Division 5", value="5"),
+            discord.SelectOption(label="Division 6", value="6"),
+        ]
+        super().__init__(
+            placeholder="Division wählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
 
+    async def callback(self, interaction: discord.Interaction):
+        div_number = self.values[0]
+
+        await interaction.response.defer()
+
+        try:
+            text = await asyncio.to_thread(format_streichungen_text, div_number)
+        except Exception as e:
+            text = f"❌ Fehler beim Lesen der Streichungen aus Division {div_number}: {e}"
+
+        await interaction.edit_original_response(
+            content=text,
+            view=PlaceholderView(
+                owner_id=interaction.user.id,
+                back_view=StreichOtherDivisionView(owner_id=interaction.user.id),
+                back_content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:"
+            )
+        )
+
+
+class StreichOtherDivisionView(PlayerBaseView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(StreichOtherDivisionSelect(owner_id))
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Info → Streichmodus**\nWähle einen Bereich:",
+            view=StreichmodusView(owner_id=interaction.user.id)
+        )
 
 # =========================================================
 # Streichmodus
@@ -577,8 +633,28 @@ class StreichmodusView(PlayerBaseView):
 
     @discord.ui.button(label="Eigene Division", style=discord.ButtonStyle.primary, row=0)
     async def eigene_division_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Info → Streichmodus → Eigene Division**\nHier kommt später der Inhalt rein.",
+        member = interaction.user
+
+        await interaction.response.defer()
+
+        if not isinstance(member, discord.Member):
+            text = "Nur auf dem Server verfügbar."
+        else:
+            try:
+                name_candidates = [
+                    member.display_name,
+                    getattr(member, "global_name", None),
+                    member.name,
+                ]
+                text = await asyncio.to_thread(
+                    get_own_division_streich_text,
+                    name_candidates
+                )
+            except Exception as e:
+                text = f"Fehler beim Abrufen des Streichmodus: {e}"
+
+        await interaction.edit_original_response(
+            content=f"**Info → Streichmodus → Eigene Division**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=StreichmodusView(owner_id=interaction.user.id),
@@ -589,12 +665,8 @@ class StreichmodusView(PlayerBaseView):
     @discord.ui.button(label="Andere Divisionen", style=discord.ButtonStyle.primary, row=0)
     async def andere_divisionen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Streichmodus → Andere Divisionen**\nHier kommt später der Inhalt rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=StreichmodusView(owner_id=interaction.user.id),
-                back_content="**Info → Streichmodus**\nWähle einen Bereich:"
-            )
+            content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:",
+            view=StreichOtherDivisionView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
