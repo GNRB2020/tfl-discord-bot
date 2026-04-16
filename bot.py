@@ -15,6 +15,9 @@ from datetime import datetime as dt, timedelta
 import aiohttp
 import sys
 import traceback
+from player import register_player_commands
+
+register_player_commands(tree)
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
