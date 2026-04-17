@@ -21,11 +21,6 @@ from schedule import (
     CupTerminModal,
 )
 
-from asyncplan import (
-    collect_requestable_matches_for_member,
-    AsyncRequestMatchListView,
-)
-
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 
 
@@ -237,15 +232,16 @@ class LeaguePlanMatchSelect(discord.ui.Select):
 
 
 class LeaguePlanListView(PlanBaseView):
-    def __init__(self, owner_id: int, matches: list[dict]):
+    def __init__(self, owner_id: int, matches: list[dict], player_cog=None):
         super().__init__(owner_id)
+        self.player_cog = player_cog
         self.add_item(LeaguePlanMatchSelect(matches))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spiel planen**\nWähle einen Bereich:",
-            view=PlanMenuView(owner_id=interaction.user.id),
+            view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
         )
 
 
@@ -273,8 +269,9 @@ class LeagueModeSelect(discord.ui.Select):
 
 
 class LeaguePlanDetailView(PlanBaseView):
-    def __init__(self, owner_id: int, match_data: dict, modes: list[str]):
+    def __init__(self, owner_id: int, match_data: dict, modes: list[str], player_cog=None):
         super().__init__(owner_id, timeout=600)
+        self.player_cog = player_cog
         self.match_data = match_data
         self.selected_mode: str | None = None
         self.date_str: str | None = None
@@ -350,7 +347,7 @@ class LeaguePlanDetailView(PlanBaseView):
                 content=f"✅ Event erstellt:\n**{title}**",
                 view=PlanPlaceholderView(
                     owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
+                    back_view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
                     back_content="**Spiel planen**\nWähle einen Bereich:",
                 ),
             )
@@ -359,7 +356,7 @@ class LeaguePlanDetailView(PlanBaseView):
                 content=f"❌ Event konnte nicht erstellt werden: {e}",
                 view=PlanPlaceholderView(
                     owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
+                    back_view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
                     back_content="**Spiel planen**\nWähle einen Bereich:",
                 ),
             )
@@ -368,7 +365,7 @@ class LeaguePlanDetailView(PlanBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spiel planen → League**\nWähle ein Spiel:",
-            view=PlanMenuView(owner_id=interaction.user.id),
+            view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
         )
 
 
@@ -397,15 +394,16 @@ class CupPlanMatchSelect(discord.ui.Select):
 
 
 class CupPlanListView(PlanBaseView):
-    def __init__(self, owner_id: int, matches: list[dict]):
+    def __init__(self, owner_id: int, matches: list[dict], player_cog=None):
         super().__init__(owner_id)
+        self.player_cog = player_cog
         self.add_item(CupPlanMatchSelect(matches))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spiel planen**\nWähle einen Bereich:",
-            view=PlanMenuView(owner_id=interaction.user.id),
+            view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
         )
 
 
@@ -413,8 +411,9 @@ class CupPlanListView(PlanBaseView):
 # PLAN MENU
 # =========================================================
 class PlanMenuView(PlanBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, player_cog=None):
         super().__init__(owner_id)
+        self.player_cog = player_cog
 
     @discord.ui.button(label="League", style=discord.ButtonStyle.primary, row=0)
     async def league_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -435,7 +434,7 @@ class PlanMenuView(PlanBaseView):
                 content=f"❌ Fehler beim Laden der League-Spiele: {e}",
                 view=PlanPlaceholderView(
                     owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
+                    back_view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
                     back_content="**Spiel planen**\nWähle einen Bereich:",
                 ),
             )
@@ -446,7 +445,7 @@ class PlanMenuView(PlanBaseView):
                 content="**Spiel planen → League**\nKeine offenen League-Spiele für dich gefunden.",
                 view=PlanPlaceholderView(
                     owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
+                    back_view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
                     back_content="**Spiel planen**\nWähle einen Bereich:",
                 ),
             )
@@ -454,7 +453,7 @@ class PlanMenuView(PlanBaseView):
 
         await interaction.edit_original_response(
             content="**Spiel planen → League**\nWähle ein Spiel:",
-            view=LeaguePlanListView(owner_id=interaction.user.id, matches=matches),
+            view=LeaguePlanListView(owner_id=interaction.user.id, matches=matches, player_cog=self.player_cog),
         )
 
     @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
@@ -476,7 +475,7 @@ class PlanMenuView(PlanBaseView):
                 content=f"❌ Fehler beim Laden der Cup-Spiele: {e}",
                 view=PlanPlaceholderView(
                     owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
+                    back_view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
                     back_content="**Spiel planen**\nWähle einen Bereich:",
                 ),
             )
@@ -487,7 +486,7 @@ class PlanMenuView(PlanBaseView):
                 content="**Spiel planen → Cup**\nKeine offenen Cup-Spiele für dich gefunden.",
                 view=PlanPlaceholderView(
                     owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
+                    back_view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.player_cog),
                     back_content="**Spiel planen**\nWähle einen Bereich:",
                 ),
             )
@@ -495,52 +494,7 @@ class PlanMenuView(PlanBaseView):
 
         await interaction.edit_original_response(
             content="**Spiel planen → Cup**\nWähle ein Spiel:",
-            view=CupPlanListView(owner_id=interaction.user.id, matches=matches),
-        )
-
-    @discord.ui.button(label="Async beantragen", style=discord.ButtonStyle.secondary, row=1)
-    async def async_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        try:
-            matches = await asyncio.to_thread(
-                collect_requestable_matches_for_member,
-                get_member_name_candidates(member),
-            )
-        except Exception as e:
-            await interaction.edit_original_response(
-                content=f"❌ Fehler beim Laden der Spiele für Async: {e}",
-                view=PlanPlaceholderView(
-                    owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
-                    back_content="**Spiel planen**\nWähle einen Bereich:",
-                ),
-            )
-            return
-
-        if not matches:
-            await interaction.edit_original_response(
-                content="**Spiel planen → Async beantragen**\nKeine offenen League- oder Cup-Spiele für dich gefunden.",
-                view=PlanPlaceholderView(
-                    owner_id=interaction.user.id,
-                    back_view=PlanMenuView(owner_id=interaction.user.id),
-                    back_content="**Spiel planen**\nWähle einen Bereich:",
-                ),
-            )
-            return
-
-        await interaction.edit_original_response(
-            content="**Spiel planen → Async beantragen**\nWähle ein Spiel:",
-            view=AsyncRequestMatchListView(
-                owner_id=interaction.user.id,
-                matches=matches,
-                requester_member=member,
-            ),
+            view=CupPlanListView(owner_id=interaction.user.id, matches=matches, player_cog=self.player_cog),
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=2)
@@ -549,5 +503,5 @@ class PlanMenuView(PlanBaseView):
 
         await interaction.response.edit_message(
             content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(owner_id=interaction.user.id),
+            view=PlayerMenuView(owner_id=interaction.user.id, cog=self.player_cog),
         )
