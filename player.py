@@ -12,6 +12,7 @@ from signup import (
     get_signup_status_text_for_member,
     get_league_signup_text,
     get_cup_signup_text,
+    get_worksheet as get_signup_worksheet,
 )
 
 from asnyc import (
@@ -83,6 +84,22 @@ def has_tfl_role(member: discord.Member) -> bool:
     if TFL_ROLE_ID == 0:
         return False
     return any(r.id == TFL_ROLE_ID for r in member.roles)
+
+
+def is_open_value(value: str) -> bool:
+    return (value or "").strip().lower() in {"open", "opened", "geöffnet", "geoeffnet"}
+
+
+def get_player_menu_feature_flags() -> dict:
+    ws = get_signup_worksheet()
+
+    saisonmeldung_value = ws.acell("D2").value or ""
+    qualifikation_value = ws.acell("G2").value or ""
+
+    return {
+        "seasonmeldung_open": is_open_value(saisonmeldung_value),
+        "qualifikation_open": is_open_value(qualifikation_value),
+    }
 
 
 async def build_quali_info_text(member: discord.Member, quali_number: int) -> str:
@@ -380,7 +397,12 @@ class ResultMenuView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=PlayerMenuView(
+                owner_id=interaction.user.id,
+                cog=self.cog,
+                qualifikation_open=self.cog.qualifikation_open,
+                saisonmeldung_open=self.cog.saisonmeldung_open,
+            )
         )
 
 
@@ -814,7 +836,12 @@ class AsyncRacesView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=PlayerMenuView(
+                owner_id=interaction.user.id,
+                cog=self.cog,
+                qualifikation_open=self.cog.qualifikation_open,
+                saisonmeldung_open=self.cog.saisonmeldung_open,
+            )
         )
 
 
@@ -822,67 +849,135 @@ class AsyncRacesView(PlayerBaseView):
 # Hauptmenü
 # =========================================================
 class PlayerMenuView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(
+        self,
+        owner_id: int,
+        cog: "PlayerCog",
+        qualifikation_open: bool,
+        saisonmeldung_open: bool,
+    ):
         super().__init__(owner_id)
         self.cog = cog
+        self.qualifikation_open = qualifikation_open
+        self.saisonmeldung_open = saisonmeldung_open
 
-    @discord.ui.button(label="Info", style=discord.ButtonStyle.secondary, row=0)
-    async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.add_item(PlayerInfoButton())
+        self.add_item(PlayerPlanButton())
+        self.add_item(PlayerResultButton())
+        self.add_item(PlayerAsyncRacesButton())
+
+        if self.qualifikation_open:
+            self.add_item(PlayerQualificationButton())
+
+        if self.saisonmeldung_open:
+            self.add_item(PlayerSeasonButton())
+
+        self.add_item(PlayerSettingsButton())
+
+
+class PlayerInfoButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Info", style=discord.ButtonStyle.secondary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PlayerMenuView):
+            return
+
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=InfoMenuView(owner_id=interaction.user.id, cog=view.cog)
         )
 
-    @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
-    async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+class PlayerPlanButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PlayerMenuView):
+            return
+
         await interaction.response.edit_message(
             content="**Spiel planen**\nWähle einen Bereich:",
-            view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.cog)
+            view=PlanMenuView(owner_id=interaction.user.id, player_cog=view.cog)
         )
 
-    @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
-    async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+class PlayerResultButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PlayerMenuView):
+            return
+
         await interaction.response.edit_message(
             content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
-            view=ResultMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=ResultMenuView(owner_id=interaction.user.id, cog=view.cog)
         )
 
-    @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
-    async def qualification_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü → Qualifikation**\nHier kommt später die Navigation rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog),
-                back_content="**Spielermenü**\nWähle einen Bereich:"
-            )
-        )
 
-    @discord.ui.button(label="Async-Races", style=discord.ButtonStyle.primary, row=1)
-    async def async_races_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+class PlayerAsyncRacesButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Async-Races", style=discord.ButtonStyle.primary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PlayerMenuView):
+            return
+
         await interaction.response.edit_message(
             content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
-            view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog)
+            view=AsyncRacesView(owner_id=interaction.user.id, cog=view.cog)
         )
 
-    @discord.ui.button(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=2)
-    async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü → Saisonmeldung**\nHier kommt später die Navigation rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog),
-                back_content="**Spielermenü**\nWähle einen Bereich:"
-            )
-        )
 
-    @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=2)
-    async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+class PlayerQualificationButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PlayerMenuView):
+            return
+
+        await view.cog.invoke_named_app_command(interaction, "quali")
+
+
+class PlayerSeasonButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=2)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PlayerMenuView):
+            return
+
+        await view.cog.invoke_named_app_command(interaction, "signup")
+
+
+class PlayerSettingsButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Einstellungen", style=discord.ButtonStyle.secondary, row=2)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, PlayerMenuView):
+            return
+
         await interaction.response.edit_message(
             content="**Spielermenü → Einstellungen**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=PlayerMenuView(
+                    owner_id=interaction.user.id,
+                    cog=view.cog,
+                    qualifikation_open=view.qualifikation_open,
+                    saisonmeldung_open=view.saisonmeldung_open,
+                ),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
         )
@@ -935,7 +1030,12 @@ class InfoMenuView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=PlayerMenuView(
+                owner_id=interaction.user.id,
+                cog=self.cog,
+                qualifikation_open=self.cog.qualifikation_open,
+                saisonmeldung_open=self.cog.saisonmeldung_open,
+            )
         )
 
 
@@ -1460,6 +1560,8 @@ class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.active_async_runs: dict[int, AsyncRunState] = {}
+        self.qualifikation_open = False
+        self.saisonmeldung_open = False
 
     def _get_app_command(self, name: str):
         guild_obj = discord.Object(id=GUILD_ID)
@@ -1469,6 +1571,11 @@ class PlayerCog(commands.Cog):
             return cmd
 
         return self.bot.tree.get_command(name)
+
+    async def refresh_menu_flags(self):
+        flags = await asyncio.to_thread(get_player_menu_feature_flags)
+        self.qualifikation_open = flags["qualifikation_open"]
+        self.saisonmeldung_open = flags["seasonmeldung_open"]
 
     async def invoke_named_app_command(self, interaction: discord.Interaction, command_name: str):
         cmd = self._get_app_command(command_name)
@@ -1851,7 +1958,6 @@ class PlayerCog(commands.Cog):
                 await interaction.followup.send("Ergebnischannel für Cup nicht gefunden.", ephemeral=True)
                 return
 
-            cup_round = division_or_round or "Unbekannte Runde"
             message = (
                 f"[TFL Cup] {now_str}\n"
                 f"{match_data['player1']} vs. {match_data['player2']} -> {ergebnis}\n"
@@ -1869,7 +1975,18 @@ class PlayerCog(commands.Cog):
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
-        view = PlayerMenuView(owner_id=interaction.user.id, cog=self)
+        try:
+            await self.refresh_menu_flags()
+        except Exception:
+            self.qualifikation_open = False
+            self.saisonmeldung_open = False
+
+        view = PlayerMenuView(
+            owner_id=interaction.user.id,
+            cog=self,
+            qualifikation_open=self.qualifikation_open,
+            saisonmeldung_open=self.saisonmeldung_open,
+        )
         await interaction.response.send_message(
             "**Spielermenü**\nWähle einen Bereich:",
             view=view,
