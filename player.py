@@ -45,10 +45,17 @@ from asyncplan import (
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
 TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
-RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
 
 LOG_CHANNEL_ID = 1494265084208222208
+LEAGUE_RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
+CUP_RESULTS_CHANNEL_ID = 1275081670688510002
+
+ASYNC_SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 ASYNC_WORKSHEET_GID = 539808866
+LEAGUE_SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
+CUP_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
+CUP_WORKSHEET_GID = 47251903
+
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 
 CREDS_FILE = (
@@ -56,7 +63,6 @@ CREDS_FILE = (
     or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
     or "credentials.json"
 ).strip()
-SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 ASYNC_START_TIMEOUT_SECONDS = 5 * 60
 
 
@@ -169,8 +175,24 @@ def get_gspread_client():
 
 def get_async_worksheet():
     client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID)
+    sheet = client.open_by_key(ASYNC_SPREADSHEET_ID)
     return sheet.get_worksheet_by_id(ASYNC_WORKSHEET_GID)
+
+
+def get_league_workbook():
+    client = get_gspread_client()
+    return client.open(LEAGUE_SPREADSHEET_TITLE)
+
+
+def get_league_division_ws(division_number: str):
+    wb = get_league_workbook()
+    return wb.worksheet(f"{division_number}.DIV")
+
+
+def get_cup_worksheet():
+    client = get_gspread_client()
+    sheet = client.open_by_key(CUP_SPREADSHEET_ID)
+    return sheet.get_worksheet_by_id(CUP_WORKSHEET_GID)
 
 
 def collect_playable_async_matches_for_member(name_candidates: list[str]) -> list[dict]:
@@ -183,13 +205,17 @@ def collect_playable_async_matches_for_member(name_candidates: list[str]) -> lis
         if row_idx == 1:
             continue
 
-        player1 = safe_cell(row, 1)   # B
-        vod1 = safe_cell(row, 3)      # D
-        time1 = safe_cell(row, 4)     # E
-        player2 = safe_cell(row, 5)   # F
-        vod2 = safe_cell(row, 6)      # G
-        time2 = safe_cell(row, 7)     # H
-        seed_url = safe_cell(row, 8)  # I
+        player1 = safe_cell(row, 1)    # B
+        vod1 = safe_cell(row, 3)       # D
+        time1 = safe_cell(row, 4)      # E
+        player2 = safe_cell(row, 5)    # F
+        vod2 = safe_cell(row, 6)       # G
+        time2 = safe_cell(row, 7)      # H
+        seed_url = safe_cell(row, 8)   # I
+        match_kind = safe_cell(row, 9) # J
+        division_or_round = safe_cell(row, 10)  # K
+        source_row_index = safe_cell(row, 11)   # L
+        selected_mode = safe_cell(row, 12)      # M
 
         if not player1 or not player2 or not seed_url:
             continue
@@ -220,6 +246,10 @@ def collect_playable_async_matches_for_member(name_candidates: list[str]) -> lis
             "time2": time2,
             "seed_url": seed_url,
             "requester_side": requester_side,
+            "match_kind": match_kind,
+            "division_or_round": division_or_round,
+            "source_row_index": source_row_index,
+            "selected_mode": selected_mode,
             "label": f"{player1} vs. {player2}",
         })
 
@@ -239,6 +269,10 @@ def read_async_match_by_row(row_idx: int) -> dict:
         "vod2": safe_cell(row, 6),      # G
         "time2": safe_cell(row, 7),     # H
         "seed_url": safe_cell(row, 8),  # I
+        "match_kind": safe_cell(row, 9),       # J
+        "division_or_round": safe_cell(row, 10),  # K
+        "source_row_index": safe_cell(row, 11),   # L
+        "selected_mode": safe_cell(row, 12),      # M
     }
 
 
@@ -263,6 +297,32 @@ def get_async_side_state(match_data: dict, side: int) -> tuple[str, str]:
 
 def get_async_opponent_side(side: int) -> int:
     return 2 if side == 1 else 1
+
+
+def parse_division_number_from_label(label: str) -> str:
+    cleaned = (label or "").strip().lower().replace("division", "div").replace(".", "")
+    for num in ["1", "2", "3", "4", "5", "6"]:
+        if f"div {num}" in cleaned or cleaned == num or cleaned.endswith(num):
+            return num
+    return cleaned[-1:] if cleaned else ""
+
+
+def batch_update_league_result(
+    ws,
+    row_index: int,
+    now_str: str,
+    mode_val: str,
+    ergebnis: str,
+    raceroom_val: str,
+    reporter_name: str,
+):
+    reqs = [
+        {"range": f"B{row_index}:C{row_index}", "values": [[now_str, mode_val]]},
+        {"range": f"E{row_index}:E{row_index}", "values": [[ergebnis]]},
+        {"range": f"G{row_index}:G{row_index}", "values": [[raceroom_val]]},
+        {"range": f"H{row_index}:H{row_index}", "values": [[reporter_name]]},
+    ]
+    ws.batch_update(reqs)
 
 
 # =========================================================
@@ -1703,25 +1763,108 @@ class PlayerCog(commands.Cog):
         else:
             ergebnis = "0:2"
 
-        channel = self.bot.get_channel(RESULTS_CHANNEL_ID)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(RESULTS_CHANNEL_ID)
-            except Exception:
-                channel = None
+        match_kind = (match_data.get("match_kind") or "").strip().lower()
+        division_or_round = (match_data.get("division_or_round") or "").strip()
+        selected_mode = (match_data.get("selected_mode") or "").strip() or "Async"
+        source_row_text = (match_data.get("source_row_index") or "").strip()
 
-        if channel is None:
-            await interaction.followup.send("Ergebnischannel nicht gefunden.", ephemeral=True)
+        try:
+            source_row = int(source_row_text)
+        except Exception:
+            await interaction.followup.send(
+                "Die Zielzeile für das Originalspiel fehlt im Async-Sheet.",
+                ephemeral=True
+            )
             return
 
         now_str = dt.now().strftime("%d.%m.%Y %H:%M")
-        out_lines = [
-            f"**[Async]** {now_str}",
-            f"**{match_data['player1']}** vs **{match_data['player2']}** → **{ergebnis}**",
-            "Modus: Async",
-            "Raceroom: Async Race",
-        ]
-        await channel.send("\n".join(out_lines))
+        reporter_name = str(interaction.user)
+        raceroom_val = "Async Race"
+
+        if match_kind == "league":
+            division_number = parse_division_number_from_label(division_or_round)
+            if division_number not in {"1", "2", "3", "4", "5", "6"}:
+                await interaction.followup.send(
+                    "Die Division konnte aus dem Async-Sheet nicht korrekt gelesen werden.",
+                    ephemeral=True
+                )
+                return
+
+            try:
+                ws = await asyncio.to_thread(get_league_division_ws, division_number)
+                await asyncio.to_thread(
+                    batch_update_league_result,
+                    ws,
+                    source_row,
+                    now_str,
+                    selected_mode,
+                    ergebnis,
+                    raceroom_val,
+                    reporter_name,
+                )
+            except Exception as e:
+                await interaction.followup.send(
+                    f"Fehler beim Schreiben ins Division-Sheet: {e}",
+                    ephemeral=True
+                )
+                return
+
+            channel = self.bot.get_channel(LEAGUE_RESULTS_CHANNEL_ID)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(LEAGUE_RESULTS_CHANNEL_ID)
+                except Exception:
+                    channel = None
+
+            if channel is None:
+                await interaction.followup.send("Ergebnischannel für League nicht gefunden.", ephemeral=True)
+                return
+
+            out_lines = [
+                f"**[Division {division_number}]** {now_str}",
+                f"**{match_data['player1']}** vs **{match_data['player2']}** → **{ergebnis}**",
+                f"Modus: {selected_mode}",
+                f"Raceroom: {raceroom_val}",
+            ]
+            await channel.send("\n".join(out_lines))
+            return
+
+        if match_kind == "cup":
+            try:
+                ws = await asyncio.to_thread(get_cup_worksheet)
+                await asyncio.to_thread(ws.update_cell, source_row, 3, ergebnis)
+            except Exception as e:
+                await interaction.followup.send(
+                    f"Fehler beim Schreiben ins Cup-Sheet: {e}",
+                    ephemeral=True
+                )
+                return
+
+            channel = self.bot.get_channel(CUP_RESULTS_CHANNEL_ID)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(CUP_RESULTS_CHANNEL_ID)
+                except Exception:
+                    channel = None
+
+            if channel is None:
+                await interaction.followup.send("Ergebnischannel für Cup nicht gefunden.", ephemeral=True)
+                return
+
+            cup_round = division_or_round or "Unbekannte Runde"
+            message = (
+                f"[TFL Cup] {now_str}\n"
+                f"{match_data['player1']} vs. {match_data['player2']} -> {ergebnis}\n"
+                f"Modus: {selected_mode}\n"
+                f"Raceroom: {raceroom_val}"
+            )
+            await channel.send(message)
+            return
+
+        await interaction.followup.send(
+            "Match-Typ im Async-Sheet unbekannt. Erwartet wurde league oder cup.",
+            ephemeral=True
+        )
 
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
