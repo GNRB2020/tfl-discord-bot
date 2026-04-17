@@ -49,7 +49,7 @@ def get_async_worksheet():
     raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
 
 
-def append_async_row(home_player: str, guest_player: str) -> int:
+def append_async_row(home_player: str, guest_player: str, seed_link: str) -> int:
     ws = get_async_worksheet()
     col_a = ws.col_values(1)
 
@@ -60,12 +60,12 @@ def append_async_row(home_player: str, guest_player: str) -> int:
         row_index += 1
 
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
-    reqs = [
-        {"range": f"A{row_index}:A{row_index}", "values": [[timestamp]]},
-        {"range": f"B{row_index}:B{row_index}", "values": [[home_player]]},
-        {"range": f"F{row_index}:F{row_index}", "values": [[guest_player]]},
-    ]
-    ws.batch_update(reqs)
+
+    ws.update_cell(row_index, 1, timestamp)      # A
+    ws.update_cell(row_index, 2, home_player)    # B
+    ws.update_cell(row_index, 6, guest_player)   # F
+    ws.update_cell(row_index, 9, seed_link)      # I
+
     return row_index
 
 
@@ -171,10 +171,6 @@ def get_requester_vs_opponent(match_data: dict, requester_member: discord.Member
         return p2, p1
 
     return p1, p2
-
-
-def safe_send_dm_text(user: discord.abc.User, text: str):
-    return user.send(text)
 
 
 # =========================================================
@@ -321,6 +317,13 @@ class AsyncRequestModeView(AsyncBaseView):
             )
             return
 
+        if opponent_member.id == self.requester_member.id:
+            await interaction.response.send_message(
+                "⚠️ Testmodus erkannt. Antragsteller und Gegner sind identisch. Es wird keine DM verschickt.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer()
 
         request_data = {
@@ -346,7 +349,7 @@ class AsyncRequestModeView(AsyncBaseView):
         )
 
         try:
-            dm = await opponent_member.send(
+            await opponent_member.send(
                 dm_text,
                 view=OpponentConsentView(request_data),
             )
@@ -362,14 +365,24 @@ class AsyncRequestModeView(AsyncBaseView):
                 f"✅ Async-Anfrage wurde an **{opponent_name}** per DM geschickt.\n"
                 f"Spielmodus: **{self.selected_mode}**"
             ),
-            view=AsyncRequestMatchListView(
-                owner_id=interaction.user.id,
-                matches=[],
-                requester_member=self.requester_member,
-            ),
+            view=AsyncRequestDoneView(owner_id=interaction.user.id),
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from plan import PlanMenuView
+
+        await interaction.response.edit_message(
+            content="**Spiel planen**\nWähle einen Bereich:",
+            view=PlanMenuView(owner_id=interaction.user.id),
+        )
+
+
+class AsyncRequestDoneView(AsyncBaseView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         from plan import PlanMenuView
 
@@ -491,6 +504,7 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
                 append_async_row,
                 data["player1"],
                 data["player2"],
+                seed,
             )
         except Exception as e:
             await interaction.edit_original_response(
@@ -503,11 +517,9 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
         opponent = await interaction.client.fetch_user(data["opponent_id"])
 
         dm_text = (
-            f"✅ Async wurde zugestimmt.\n"
+            f"✅ Dem Async wurde zugestimmt.\n"
             f"Spiel: {data['player1']} vs. {data['player2']}\n"
-            f"Spielmodus: {data['selected_mode']}\n"
-            f"Seed: {seed}\n"
-            f"Async-Sheet-Zeile: {row_index}"
+            f"Dem **{data['selected_mode']}** Seed wurde eurem Async Race hinterlegt."
         )
 
         for user in [requester, opponent]:
