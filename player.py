@@ -1,8 +1,12 @@
 import os
+import re
 import asyncio
+import gspread
 import discord
+from datetime import datetime as dt, timedelta
 from discord import app_commands
 from discord.ext import commands
+from oauth2client.service_account import ServiceAccountCredentials
 
 from signup import (
     get_signup_status_text_for_member,
@@ -30,6 +34,7 @@ from streichinfo import (
 from plan import (
     PlanMenuView,
     get_member_name_candidates,
+    normalize_name,
 )
 
 from asyncplan import (
@@ -38,11 +43,42 @@ from asyncplan import (
 )
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
+ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
+TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
+RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
+
+LOG_CHANNEL_ID = 1494265084208222208
+ASYNC_WORKSHEET_GID = 539808866
+TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
+
+CREDS_FILE = (
+    os.getenv("GOOGLE_CREDENTIALS_FILE")
+    or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+    or "credentials.json"
+).strip()
+SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
+ASYNC_START_TIMEOUT_SECONDS = 5 * 60
 
 
 # =========================================================
 # Hilfsfunktionen
 # =========================================================
+def has_admin_role(member: discord.Member) -> bool:
+    if not isinstance(member, discord.Member):
+        return False
+    if ADMIN_ROLE_ID == 0:
+        return False
+    return any(r.id == ADMIN_ROLE_ID for r in member.roles)
+
+
+def has_tfl_role(member: discord.Member) -> bool:
+    if not isinstance(member, discord.Member):
+        return False
+    if TFL_ROLE_ID == 0:
+        return False
+    return any(r.id == TFL_ROLE_ID for r in member.roles)
+
+
 async def build_quali_info_text(member: discord.Member, quali_number: int) -> str:
     runner_name = member.display_name.strip()
     ws = await asyncio.to_thread(get_quali_worksheet)
@@ -88,6 +124,145 @@ async def build_quali_overall_text(member: discord.Member) -> str:
         f"Beide Qualis abgeschlossen: **{total_completed}**\n"
         f"Dein aktueller Platz: **{rank}/{total_completed}**"
     )
+
+
+def format_seconds_to_hms(total_seconds: int) -> str:
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+
+def parse_hms_to_seconds(value: str) -> int:
+    h, m, s = map(int, value.split(":"))
+    return h * 3600 + m * 60 + s
+
+
+def safe_cell(values, idx: int) -> str:
+    if idx < len(values):
+        return str(values[idx]).strip()
+    return ""
+
+
+def is_filled(value) -> bool:
+    return str(value).strip() != ""
+
+
+def safe_time_to_seconds(value: str):
+    value = str(value).strip()
+    if not value or not TIME_RE.match(value):
+        return None
+    try:
+        return parse_hms_to_seconds(value)
+    except Exception:
+        return None
+
+
+def get_gspread_client():
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
+    return gspread.authorize(creds)
+
+
+def get_async_worksheet():
+    client = get_gspread_client()
+    sheet = client.open_by_key(SPREADSHEET_ID)
+    return sheet.get_worksheet_by_id(ASYNC_WORKSHEET_GID)
+
+
+def collect_playable_async_matches_for_member(name_candidates: list[str]) -> list[dict]:
+    ws = get_async_worksheet()
+    rows = ws.get_all_values()
+    targets = {normalize_name(x) for x in name_candidates if x}
+    out = []
+
+    for row_idx, row in enumerate(rows, start=1):
+        if row_idx == 1:
+            continue
+
+        player1 = safe_cell(row, 1)   # B
+        vod1 = safe_cell(row, 3)      # D
+        time1 = safe_cell(row, 4)     # E
+        player2 = safe_cell(row, 5)   # F
+        vod2 = safe_cell(row, 6)      # G
+        time2 = safe_cell(row, 7)     # H
+        seed_url = safe_cell(row, 8)  # I
+
+        if not player1 or not player2 or not seed_url:
+            continue
+
+        p1_match = normalize_name(player1) in targets
+        p2_match = normalize_name(player2) in targets
+
+        if not p1_match and not p2_match:
+            continue
+
+        if p1_match:
+            already_played = is_filled(vod1) or is_filled(time1)
+            requester_side = 1
+        else:
+            already_played = is_filled(vod2) or is_filled(time2)
+            requester_side = 2
+
+        if already_played:
+            continue
+
+        out.append({
+            "row_index": row_idx,
+            "player1": player1,
+            "player2": player2,
+            "vod1": vod1,
+            "time1": time1,
+            "vod2": vod2,
+            "time2": time2,
+            "seed_url": seed_url,
+            "requester_side": requester_side,
+            "label": f"{player1} vs. {player2}",
+        })
+
+    return out[:25]
+
+
+def read_async_match_by_row(row_idx: int) -> dict:
+    ws = get_async_worksheet()
+    row = ws.row_values(row_idx)
+
+    return {
+        "row_index": row_idx,
+        "player1": safe_cell(row, 1),   # B
+        "vod1": safe_cell(row, 3),      # D
+        "time1": safe_cell(row, 4),     # E
+        "player2": safe_cell(row, 5),   # F
+        "vod2": safe_cell(row, 6),      # G
+        "time2": safe_cell(row, 7),     # H
+        "seed_url": safe_cell(row, 8),  # I
+    }
+
+
+def write_async_result(row_idx: int, side: int, vod_value: str, race_time: str):
+    ws = get_async_worksheet()
+
+    if side == 1:
+        ws.update(f"D{row_idx}:E{row_idx}", [[vod_value, race_time]])
+    elif side == 2:
+        ws.update(f"G{row_idx}:H{row_idx}", [[vod_value, race_time]])
+    else:
+        raise ValueError("Ungültige Seite.")
+
+    return read_async_match_by_row(row_idx)
+
+
+def get_async_side_state(match_data: dict, side: int) -> tuple[str, str]:
+    if side == 1:
+        return match_data["vod1"], match_data["time1"]
+    return match_data["vod2"], match_data["time2"]
+
+
+def get_async_opponent_side(side: int) -> int:
+    return 2 if side == 1 else 1
 
 
 # =========================================================
@@ -150,6 +325,375 @@ class ResultMenuView(PlayerBaseView):
 
 
 # =========================================================
+# Async-Races State
+# =========================================================
+class AsyncRunState:
+    def __init__(
+        self,
+        user_id: int,
+        row_index: int,
+        requester_side: int,
+        player1: str,
+        player2: str,
+        seed_url: str,
+    ):
+        self.user_id = user_id
+        self.row_index = row_index
+        self.requester_side = requester_side
+        self.player1 = player1
+        self.player2 = player2
+        self.seed_url = seed_url
+
+        self.created_at = dt.utcnow()
+        self.seed_shown_at: dt | None = None
+        self.started_at: dt | None = None
+        self.finished_at: dt | None = None
+        self.locked_final_time: str | None = None
+        self.finished = False
+        self.cancelled = False
+
+        self.message: discord.Message | None = None
+        self.timeout_task: asyncio.Task | None = None
+
+    @property
+    def requester_name(self) -> str:
+        return self.player1 if self.requester_side == 1 else self.player2
+
+    @property
+    def opponent_name(self) -> str:
+        return self.player2 if self.requester_side == 1 else self.player1
+
+    def measured_time(self) -> str:
+        if not self.started_at:
+            return "00:00:00"
+        seconds = int((dt.utcnow() - self.started_at).total_seconds())
+        if seconds < 0:
+            seconds = 0
+        return format_seconds_to_hms(seconds)
+
+
+# =========================================================
+# Async spielen
+# =========================================================
+class AsyncPlaySelect(discord.ui.Select):
+    def __init__(self, matches: list[dict]):
+        self.matches = {str(i): m for i, m in enumerate(matches)}
+
+        options = [
+            discord.SelectOption(label=m["label"][:100], value=str(i))
+            for i, m in enumerate(matches[:25])
+        ]
+
+        super().__init__(
+            placeholder="Async-Spiel auswählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, AsyncPlaySelectView):
+            return
+
+        view.selected_match = self.matches[self.values[0]]
+
+        await interaction.response.edit_message(
+            content=(
+                "**Spielermenü → Async-Races → Async spielen**\n"
+                f"Ausgewählt: **{view.selected_match['player1']} vs. {view.selected_match['player2']}**\n\n"
+                "Bestätige mit **Spielen**."
+            ),
+            view=view
+        )
+
+
+class AsyncPlaySelectView(PlayerBaseView):
+    def __init__(self, owner_id: int, cog: "PlayerCog", matches: list[dict]):
+        super().__init__(owner_id, timeout=300)
+        self.cog = cog
+        self.matches = matches
+        self.selected_match: dict | None = None
+        self.add_item(AsyncPlaySelect(matches))
+
+    @discord.ui.button(label="Spielen", style=discord.ButtonStyle.success, row=1)
+    async def play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_match:
+            await interaction.response.send_message("Bitte zuerst ein Async-Spiel auswählen.", ephemeral=True)
+            return
+
+        active = self.cog.active_async_runs.get(interaction.user.id)
+        if active and not active.finished:
+            await interaction.response.send_message(
+                "Du hast bereits ein laufendes Async.",
+                ephemeral=True
+            )
+            return
+
+        state = AsyncRunState(
+            user_id=interaction.user.id,
+            row_index=self.selected_match["row_index"],
+            requester_side=self.selected_match["requester_side"],
+            player1=self.selected_match["player1"],
+            player2=self.selected_match["player2"],
+            seed_url=self.selected_match["seed_url"],
+        )
+        self.cog.active_async_runs[interaction.user.id] = state
+
+        hint_text = (
+            f"**Async spielen**\n\n"
+            f"Spiel: **{state.player1} vs. {state.player2}**\n\n"
+            f"Wenn du auf **Zum Seed** klickst, hast du **5 Minuten** Zeit zum Starten.\n"
+            f"Bereite dein Setup also vor, bevor du zum Seed gehst."
+        )
+
+        view = AsyncSeedView(owner_id=interaction.user.id, cog=self.cog, state=state)
+
+        await interaction.response.edit_message(content=hint_text, view=view)
+        state.message = await interaction.original_response()
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
+            view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog)
+        )
+
+
+class AsyncSeedView(PlayerBaseView):
+    def __init__(self, owner_id: int, cog: "PlayerCog", state: AsyncRunState):
+        super().__init__(owner_id, timeout=300)
+        self.cog = cog
+        self.state = state
+
+    @discord.ui.button(label="Zum Seed", style=discord.ButtonStyle.primary, row=0)
+    async def seed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = self.state
+
+        if state.finished:
+            await interaction.response.send_message("Dieses Async wurde bereits abgeschlossen.", ephemeral=True)
+            return
+
+        if state.cancelled:
+            await interaction.response.send_message("Dieses Async wurde bereits abgebrochen.", ephemeral=True)
+            return
+
+        if state.seed_shown_at is not None:
+            await interaction.response.send_message("Der Seed wurde bereits geöffnet.", ephemeral=True)
+            return
+
+        state.seed_shown_at = dt.utcnow()
+        deadline = state.seed_shown_at + timedelta(seconds=ASYNC_START_TIMEOUT_SECONDS)
+
+        content = (
+            f"**Async spielen – Seed geöffnet**\n\n"
+            f"Spiel: **{state.player1} vs. {state.player2}**\n"
+            f"Seed-Link: {state.seed_url}\n\n"
+            f"Du musst innerhalb von **5 Minuten** starten.\n"
+            f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
+            f"Noch verbleibend: <t:{int(deadline.timestamp())}:R>"
+        )
+
+        await interaction.response.edit_message(
+            content=content,
+            view=AsyncStartView(owner_id=interaction.user.id, cog=self.cog, state=state)
+        )
+        state.message = await interaction.original_response()
+        state.timeout_task = asyncio.create_task(self.cog.async_seed_start_timeout(state))
+
+
+class AsyncStartView(PlayerBaseView):
+    def __init__(self, owner_id: int, cog: "PlayerCog", state: AsyncRunState):
+        super().__init__(owner_id, timeout=300)
+        self.cog = cog
+        self.state = state
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success, row=0)
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = self.state
+
+        if state.finished:
+            await interaction.response.send_message("Dieses Async wurde bereits abgeschlossen.", ephemeral=True)
+            return
+
+        if state.seed_shown_at is None:
+            await interaction.response.send_message("Du musst zuerst den Seed öffnen.", ephemeral=True)
+            return
+
+        limit = state.seed_shown_at + timedelta(seconds=ASYNC_START_TIMEOUT_SECONDS)
+        if dt.utcnow() > limit:
+            await interaction.response.send_message(
+                "Das Startfenster ist bereits abgelaufen. Du erhältst ein FF.",
+                ephemeral=True
+            )
+            return
+
+        state.started_at = dt.utcnow()
+
+        if state.timeout_task:
+            state.timeout_task.cancel()
+            state.timeout_task = None
+
+        await interaction.response.edit_message(
+            content=(
+                f"**Async läuft**\n\n"
+                f"Spiel: **{state.player1} vs. {state.player2}**\n"
+                f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n\n"
+                f"Drücke am Ende **Finish** oder **Forfeit**."
+            ),
+            view=AsyncRunningView(owner_id=interaction.user.id, cog=self.cog, state=state)
+        )
+        state.message = await interaction.original_response()
+
+
+class AsyncSubmitModal(discord.ui.Modal):
+    def __init__(self, cog: "PlayerCog", state: AsyncRunState, forfeit: bool = False):
+        title = f"Async-Ergebnis · {state.locked_final_time or '00:00:00'}"
+        super().__init__(title=title)
+        self.cog = cog
+        self.state = state
+        self.forfeit = forfeit
+
+        self.vod_input = discord.ui.TextInput(
+            label="VoD-Link" if not forfeit else "Kommentar (optional)",
+            placeholder="https://..." if not forfeit else "Optional",
+            required=not forfeit
+        )
+        self.add_item(self.vod_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        state = self.state
+
+        if self.forfeit:
+            vod_value = "FF"
+            final_time = "03:00:00"
+        else:
+            vod_value = str(self.vod_input.value).strip()
+            if not vod_value:
+                await interaction.followup.send("VoD-Link ist Pflicht.", ephemeral=True)
+                return
+
+            if not state.locked_final_time:
+                await interaction.followup.send("Die Zielzeit konnte nicht gespeichert werden.", ephemeral=True)
+                return
+
+            final_time = state.locked_final_time
+
+        match_after_write = await asyncio.to_thread(
+            write_async_result,
+            state.row_index,
+            state.requester_side,
+            vod_value,
+            final_time
+        )
+
+        state.finished = True
+        state.finished_at = dt.utcnow()
+        self.cog.stop_async_state_tasks(state)
+        self.cog.active_async_runs.pop(state.user_id, None)
+
+        await self.cog.handle_async_finish(
+            interaction=interaction,
+            state=state,
+            match_data=match_after_write,
+            final_time=final_time,
+            vod_value=vod_value
+        )
+
+        await interaction.followup.send(
+            f"Ergebnis gespeichert.\n"
+            f"Spiel: **{state.player1} vs. {state.player2}**\n"
+            f"Zeit: **{final_time}**\n"
+            f"VoD: **{vod_value}**",
+            ephemeral=True
+        )
+
+
+class AsyncRunningView(PlayerBaseView):
+    def __init__(self, owner_id: int, cog: "PlayerCog", state: AsyncRunState):
+        super().__init__(owner_id, timeout=None)
+        self.cog = cog
+        self.state = state
+
+    @discord.ui.button(label="Finish", style=discord.ButtonStyle.success, row=0)
+    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.state.locked_final_time = self.state.measured_time()
+        self.cog.stop_async_state_tasks(self.state)
+        await interaction.response.send_modal(AsyncSubmitModal(self.cog, self.state, forfeit=False))
+
+    @discord.ui.button(label="Forfeit", style=discord.ButtonStyle.danger, row=0)
+    async def forfeit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.state.locked_final_time = "03:00:00"
+        self.cog.stop_async_state_tasks(self.state)
+        await interaction.response.send_modal(AsyncSubmitModal(self.cog, self.state, forfeit=True))
+
+
+class AsyncRejectModal(discord.ui.Modal, title="Ergebnis ablehnen"):
+    reason = discord.ui.TextInput(
+        label="Ablehnungsgrund",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=1000
+    )
+
+    def __init__(self, cog: "PlayerCog", match_data: dict):
+        super().__init__()
+        self.cog = cog
+        self.match_data = match_data
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "Nur die Spielleitung darf Ergebnisse ablehnen.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        await self.cog.notify_async_rejection(
+            interaction.guild,
+            self.match_data,
+            str(self.reason).strip()
+        )
+
+        await interaction.followup.send("Ablehnungsgrund wurde an beide Runner verschickt.", ephemeral=True)
+
+
+class AsyncResultReviewView(discord.ui.View):
+    def __init__(self, cog: "PlayerCog", match_data: dict):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.match_data = match_data
+
+    @discord.ui.button(label="Ergebnis bestätigen", style=discord.ButtonStyle.success, row=0)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "Nur die Spielleitung darf Ergebnisse bestätigen.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.confirm_async_result(interaction, self.match_data)
+        await interaction.followup.send("Async-Ergebnis bestätigt.", ephemeral=True)
+
+    @discord.ui.button(label="Ergebnis ablehnen", style=discord.ButtonStyle.danger, row=0)
+    async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "Nur die Spielleitung darf Ergebnisse ablehnen.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(AsyncRejectModal(self.cog, self.match_data))
+
+
+# =========================================================
 # Async-Races
 # =========================================================
 class AsyncRacesView(PlayerBaseView):
@@ -204,7 +748,7 @@ class AsyncRacesView(PlayerBaseView):
 
     @discord.ui.button(label="Async spielen", style=discord.ButtonStyle.success, row=0)
     async def async_play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.invoke_named_app_command(interaction, "quali")
+        await self.cog.async_play_menu(interaction)
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -855,6 +1399,7 @@ class ErgebnisseTabelleView(PlayerBaseView):
 class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.active_async_runs: dict[int, AsyncRunState] = {}
 
     def _get_app_command(self, name: str):
         guild_obj = discord.Object(id=GUILD_ID)
@@ -899,6 +1444,284 @@ class PlayerCog(commands.Cog):
                     f"Fehler beim Öffnen von `/{command_name}`: {e}",
                     ephemeral=True
                 )
+
+    def stop_async_state_tasks(self, state: AsyncRunState):
+        task = state.timeout_task
+        if task and not task.done():
+            task.cancel()
+        state.timeout_task = None
+
+    async def resolve_member_by_name(self, guild: discord.Guild | None, name: str):
+        if guild is None:
+            return None
+
+        target = normalize_name(name)
+
+        for member in guild.members:
+            candidates = [
+                member.display_name,
+                getattr(member, "global_name", None),
+                member.name,
+            ]
+            if any(normalize_name(c or "") == target for c in candidates if c):
+                return member
+
+        return None
+
+    async def async_play_menu(self, interaction: discord.Interaction):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        try:
+            matches = await asyncio.to_thread(
+                collect_playable_async_matches_for_member,
+                get_member_name_candidates(member),
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                content=f"❌ Fehler beim Laden der Asyncs: {e}",
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
+                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
+                )
+            )
+            return
+
+        if not matches:
+            await interaction.edit_original_response(
+                content="**Spielermenü → Async-Races → Async spielen**\nKeine genehmigten Asyncs für dich vorhanden.",
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
+                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
+                )
+            )
+            return
+
+        await interaction.edit_original_response(
+            content="**Spielermenü → Async-Races → Async spielen**\nWähle ein Spiel:",
+            view=AsyncPlaySelectView(owner_id=interaction.user.id, cog=self, matches=matches)
+        )
+
+    async def async_seed_start_timeout(self, state: AsyncRunState):
+        try:
+            await asyncio.sleep(ASYNC_START_TIMEOUT_SECONDS)
+
+            if state.finished or state.cancelled or state.started_at is not None:
+                return
+
+            match_after_write = await asyncio.to_thread(
+                write_async_result,
+                state.row_index,
+                state.requester_side,
+                "FF",
+                "03:00:00"
+            )
+
+            state.finished = True
+            state.finished_at = dt.utcnow()
+            state.locked_final_time = "03:00:00"
+            self.stop_async_state_tasks(state)
+            self.active_async_runs.pop(state.user_id, None)
+
+            await self.post_async_log_and_notifications(
+                guild=None,
+                match_data=match_after_write,
+                finisher_name=state.requester_name,
+                final_time="03:00:00",
+                first_finish_hint=False
+            )
+
+            if state.message:
+                try:
+                    await state.message.edit(
+                        content=(
+                            f"**Async beendet**\n"
+                            f"Spiel: **{state.player1} vs. {state.player2}**\n"
+                            f"Startfenster überschritten.\n"
+                            f"Ergebnis: **FF / 03:00:00**"
+                        ),
+                        view=None
+                    )
+                except Exception:
+                    pass
+
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def handle_async_finish(
+        self,
+        interaction: discord.Interaction,
+        state: AsyncRunState,
+        match_data: dict,
+        final_time: str,
+        vod_value: str,
+    ):
+        other_side = get_async_opponent_side(state.requester_side)
+        other_vod, other_time = get_async_side_state(match_data, other_side)
+        other_pending = (not is_filled(other_vod)) and (not is_filled(other_time))
+        first_finish_hint = other_pending
+
+        if state.message:
+            try:
+                await state.message.edit(
+                    content=(
+                        f"**Async abgeschlossen**\n"
+                        f"Spiel: **{state.player1} vs. {state.player2}**\n"
+                        f"Zeit: **{final_time}**\n"
+                        f"VoD: **{vod_value}**"
+                    ),
+                    view=None
+                )
+            except Exception:
+                pass
+
+        await self.post_async_log_and_notifications(
+            guild=interaction.guild,
+            match_data=match_data,
+            finisher_name=state.requester_name,
+            final_time=final_time,
+            first_finish_hint=first_finish_hint
+        )
+
+        if not other_pending:
+            await self.send_async_both_finished_dm(interaction.guild, match_data)
+
+    async def post_async_log_and_notifications(
+        self,
+        guild: discord.Guild | None,
+        match_data: dict,
+        finisher_name: str,
+        final_time: str,
+        first_finish_hint: bool,
+    ):
+        channel = self.bot.get_channel(LOG_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(LOG_CHANNEL_ID)
+            except Exception:
+                channel = None
+
+        player1 = match_data["player1"]
+        player2 = match_data["player2"]
+        vod1 = match_data["vod1"]
+        time1 = match_data["time1"]
+        vod2 = match_data["vod2"]
+        time2 = match_data["time2"]
+
+        both_done = is_filled(vod1) and is_filled(time1) and is_filled(vod2) and is_filled(time2)
+
+        if channel:
+            if both_done:
+                await channel.send(
+                    content=(
+                        f"**{finisher_name}** hat den Async vom Spiel zwischen **{player1}** und **{player2}** "
+                        f"mit einer Zeit von **{final_time}** beendet.\n"
+                        f"Beide Runner sind fertig.\n"
+                        f"**{player1}: {time1}**\n"
+                        f"**{player2}: {time2}**"
+                    ),
+                    view=AsyncResultReviewView(self, match_data)
+                )
+            else:
+                other_player = player2 if normalize_name(finisher_name) == normalize_name(player1) else player1
+                await channel.send(
+                    f"**{finisher_name}** hat den Async vom Spiel zwischen **{player1}** und **{player2}** "
+                    f"mit einer Zeit von **{final_time}** beendet.\n"
+                    f"**{other_player}** muss den Seed noch spielen."
+                )
+
+        opponent_name = player2 if normalize_name(finisher_name) == normalize_name(player1) else player1
+        opponent_member = await self.resolve_member_by_name(guild, opponent_name)
+
+        if opponent_member:
+            msg = f"Dein Gegner **{finisher_name}** hat den Async für **{player1} vs. {player2}** beendet."
+            if first_finish_hint:
+                msg += "\nDu kannst den Seed jetzt auch im Stream spielen."
+            try:
+                await opponent_member.send(msg)
+            except Exception:
+                pass
+
+    async def send_async_both_finished_dm(self, guild: discord.Guild | None, match_data: dict):
+        player1_member = await self.resolve_member_by_name(guild, match_data["player1"])
+        player2_member = await self.resolve_member_by_name(guild, match_data["player2"])
+
+        text = (
+            f"Der Async für **{match_data['player1']} vs. {match_data['player2']}** wurde von beiden Runnern abgeschlossen.\n\n"
+            f"{match_data['player1']}: **{match_data['time1']}**\n"
+            f"{match_data['player2']}: **{match_data['time2']}**\n\n"
+            f"Dies ist nur ein vorläufiges Ergebnis und muss noch von der Spielleitung geprüft und bestätigt werden."
+        )
+
+        for member in [player1_member, player2_member]:
+            if member:
+                try:
+                    await member.send(text)
+                except Exception:
+                    pass
+
+    async def notify_async_rejection(self, guild: discord.Guild | None, match_data: dict, reason: str):
+        members = [
+            await self.resolve_member_by_name(guild, match_data["player1"]),
+            await self.resolve_member_by_name(guild, match_data["player2"]),
+        ]
+
+        text = (
+            f"Das Ergebnis für den Async **{match_data['player1']} vs. {match_data['player2']}** wurde abgelehnt.\n\n"
+            f"Grund:\n{reason}"
+        )
+
+        for member in members:
+            if member:
+                try:
+                    await member.send(text)
+                except Exception:
+                    pass
+
+    async def confirm_async_result(self, interaction: discord.Interaction, match_data: dict):
+        p1_seconds = safe_time_to_seconds(match_data["time1"])
+        p2_seconds = safe_time_to_seconds(match_data["time2"])
+
+        if p1_seconds is None or p2_seconds is None:
+            await interaction.followup.send("Es liegen nicht für beide Runner gültige Zeiten vor.", ephemeral=True)
+            return
+
+        diff = abs(p1_seconds - p2_seconds)
+
+        if diff <= 5:
+            ergebnis = "1:1"
+        elif p1_seconds < p2_seconds:
+            ergebnis = "2:0"
+        else:
+            ergebnis = "0:2"
+
+        channel = self.bot.get_channel(RESULTS_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(RESULTS_CHANNEL_ID)
+            except Exception:
+                channel = None
+
+        if channel is None:
+            await interaction.followup.send("Ergebnischannel nicht gefunden.", ephemeral=True)
+            return
+
+        now_str = dt.now().strftime("%d.%m.%Y %H:%M")
+        out_lines = [
+            f"**[Async]** {now_str}",
+            f"**{match_data['player1']}** vs **{match_data['player2']}** → **{ergebnis}**",
+            "Modus: Async",
+            "Raceroom: Async Race",
+        ]
+        await channel.send("\n".join(out_lines))
 
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
