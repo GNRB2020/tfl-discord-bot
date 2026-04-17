@@ -27,7 +27,15 @@ from streichinfo import (
     get_own_division_streich_text,
 )
 
-from plan import PlanMenuView
+from plan import (
+    PlanMenuView,
+    get_member_name_candidates,
+)
+
+from asyncplan import (
+    collect_requestable_matches_for_member,
+    AsyncRequestMatchListView,
+)
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 
@@ -151,11 +159,52 @@ class AsyncRacesView(PlayerBaseView):
 
     @discord.ui.button(label="Async beantragen", style=discord.ButtonStyle.primary, row=0)
     async def async_request_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.open_async_request_menu(interaction)
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        try:
+            matches = await asyncio.to_thread(
+                collect_requestable_matches_for_member,
+                get_member_name_candidates(member),
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                content=f"❌ Fehler beim Laden der Spiele für Async: {e}",
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog),
+                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
+                ),
+            )
+            return
+
+        if not matches:
+            await interaction.edit_original_response(
+                content="**Spielermenü → Async-Races → Async beantragen**\nKeine offenen League- oder Cup-Spiele für dich gefunden.",
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog),
+                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
+                ),
+            )
+            return
+
+        await interaction.edit_original_response(
+            content="**Spielermenü → Async-Races → Async beantragen**\nWähle ein Spiel:",
+            view=AsyncRequestMatchListView(
+                owner_id=interaction.user.id,
+                matches=matches,
+                requester_member=member,
+            ),
+        )
 
     @discord.ui.button(label="Async spielen", style=discord.ButtonStyle.success, row=0)
     async def async_play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.open_async_play_menu(interaction)
+        await self.cog.invoke_named_app_command(interaction, "quali")
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -184,7 +233,7 @@ class PlayerMenuView(PlayerBaseView):
     async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spiel planen**\nWähle einen Bereich:",
-            view=PlanMenuView(owner_id=interaction.user.id)
+            view=PlanMenuView(owner_id=interaction.user.id, player_cog=self.cog)
         )
 
     @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
@@ -850,32 +899,6 @@ class PlayerCog(commands.Cog):
                     f"Fehler beim Öffnen von `/{command_name}`: {e}",
                     ephemeral=True
                 )
-
-    async def open_async_request_menu(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(
-            content=(
-                "**Spielermenü → Async-Races → Async beantragen**\n"
-                "Hier musst du jetzt die bisherige Funktion aus `Spiel planen` anschließen."
-            ),
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
-                back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
-            )
-        )
-
-    async def open_async_play_menu(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(
-            content=(
-                "**Spielermenü → Async-Races → Async spielen**\n"
-                "Hier musst du jetzt die bestehende Async-Spielen-Funktion anschließen."
-            ),
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
-                back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
-            )
-        )
 
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
