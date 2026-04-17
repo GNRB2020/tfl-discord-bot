@@ -118,17 +118,66 @@ class PlaceholderView(PlayerBaseView):
 
 
 # =========================================================
+# Ergebnis melden
+# =========================================================
+class ResultMenuView(PlayerBaseView):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
+        super().__init__(owner_id)
+        self.cog = cog
+
+    @discord.ui.button(label="League", style=discord.ButtonStyle.primary, row=0)
+    async def league_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.invoke_named_app_command(interaction, "result")
+
+    @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
+    async def cup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.invoke_named_app_command(interaction, "cupresult")
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü**\nWähle einen Bereich:",
+            view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog)
+        )
+
+
+# =========================================================
+# Async-Races
+# =========================================================
+class AsyncRacesView(PlayerBaseView):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
+        super().__init__(owner_id)
+        self.cog = cog
+
+    @discord.ui.button(label="Async beantragen", style=discord.ButtonStyle.primary, row=0)
+    async def async_request_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.open_async_request_menu(interaction)
+
+    @discord.ui.button(label="Async spielen", style=discord.ButtonStyle.success, row=0)
+    async def async_play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.open_async_play_menu(interaction)
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü**\nWähle einen Bereich:",
+            view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog)
+        )
+
+
+# =========================================================
 # Hauptmenü
 # =========================================================
 class PlayerMenuView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
+        self.cog = cog
 
     @discord.ui.button(label="Info", style=discord.ButtonStyle.secondary, row=0)
     async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id)
+            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
@@ -141,12 +190,8 @@ class PlayerMenuView(PlayerBaseView):
     @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
     async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Ergebnis melden**\nHier kommt später die Navigation rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
-                back_content="**Spielermenü**\nWähle einen Bereich:"
-            )
+            content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
+            view=ResultMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
@@ -155,29 +200,36 @@ class PlayerMenuView(PlayerBaseView):
             content="**Spielermenü → Qualifikation**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
+                back_view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
         )
 
-    @discord.ui.button(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Async-Races", style=discord.ButtonStyle.primary, row=1)
+    async def async_races_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
+            view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog)
+        )
+
+    @discord.ui.button(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=2)
     async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Saisonmeldung**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
+                back_view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
         )
 
-    @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=2)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Einstellungen**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
+                back_view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
         )
@@ -187,49 +239,50 @@ class PlayerMenuView(PlayerBaseView):
 # Info-Menü
 # =========================================================
 class InfoMenuView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
+        self.cog = cog
 
     @discord.ui.button(label="Meldestatus", style=discord.ButtonStyle.primary, row=0)
     async def meldestatus_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Meldestatus**\nWähle einen Bereich:",
-            view=MeldestatusView(owner_id=interaction.user.id)
+            view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.primary, row=0)
     async def qualifikation_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Qualifikation**\nWähle einen Bereich:",
-            view=InfoQualifikationView(owner_id=interaction.user.id)
+            view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Restprogramm", style=discord.ButtonStyle.primary, row=1)
     async def restprogramm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm**\nWähle einen Bereich:",
-            view=RestprogrammView(owner_id=interaction.user.id)
+            view=RestprogrammView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Streichmodus", style=discord.ButtonStyle.primary, row=1)
     async def streichmodus_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Streichmodus**\nWähle einen Bereich:",
-            view=StreichmodusView(owner_id=interaction.user.id)
+            view=StreichmodusView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Ergebnisse/Tabelle", style=discord.ButtonStyle.primary, row=2)
     async def ergebnisse_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Ergebnisse/Tabelle**\nWähle eine Liga oder den Cup:",
-            view=ErgebnisseTabelleView(owner_id=interaction.user.id)
+            view=ErgebnisseTabelleView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(owner_id=interaction.user.id)
+            view=PlayerMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -237,8 +290,9 @@ class InfoMenuView(PlayerBaseView):
 # Meldestatus
 # =========================================================
 class MeldestatusView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
+        self.cog = cog
 
     @discord.ui.button(label="Meiner", style=discord.ButtonStyle.primary, row=0)
     async def meiner_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -255,7 +309,7 @@ class MeldestatusView(PlayerBaseView):
             content=f"**Info → Meldestatus → Meiner**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=MeldestatusView(owner_id=interaction.user.id),
+                back_view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
         )
@@ -271,7 +325,7 @@ class MeldestatusView(PlayerBaseView):
             content=f"**Info → Meldestatus → League**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=MeldestatusView(owner_id=interaction.user.id),
+                back_view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
         )
@@ -287,7 +341,7 @@ class MeldestatusView(PlayerBaseView):
             content=f"**Info → Meldestatus → Cup**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=MeldestatusView(owner_id=interaction.user.id),
+                back_view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
         )
@@ -296,7 +350,7 @@ class MeldestatusView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id)
+            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -304,8 +358,9 @@ class MeldestatusView(PlayerBaseView):
 # Info -> Qualifikation
 # =========================================================
 class InfoQualifikationView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
+        self.cog = cog
 
     @discord.ui.button(label="Quali 1", style=discord.ButtonStyle.primary, row=0)
     async def quali1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -320,7 +375,7 @@ class InfoQualifikationView(PlayerBaseView):
                     content=f"**Info → Qualifikation → Quali 1**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
-                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
                         back_content="**Info → Qualifikation**\nWähle einen Bereich:"
                     )
                 )
@@ -332,7 +387,7 @@ class InfoQualifikationView(PlayerBaseView):
             content=f"**Info → Qualifikation → Quali 1**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
         )
@@ -350,7 +405,7 @@ class InfoQualifikationView(PlayerBaseView):
                     content=f"**Info → Qualifikation → Quali 2**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
-                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
                         back_content="**Info → Qualifikation**\nWähle einen Bereich:"
                     )
                 )
@@ -362,7 +417,7 @@ class InfoQualifikationView(PlayerBaseView):
             content=f"**Info → Qualifikation → Quali 2**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
         )
@@ -380,7 +435,7 @@ class InfoQualifikationView(PlayerBaseView):
                     content=f"**Info → Qualifikation → Gesamt**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
-                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
                         back_content="**Info → Qualifikation**\nWähle einen Bereich:"
                     )
                 )
@@ -392,7 +447,7 @@ class InfoQualifikationView(PlayerBaseView):
             content=f"**Info → Qualifikation → Gesamt**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=InfoQualifikationView(owner_id=interaction.user.id),
+                back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
         )
@@ -401,7 +456,7 @@ class InfoQualifikationView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id)
+            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -409,9 +464,10 @@ class InfoQualifikationView(PlayerBaseView):
 # Restprogramm - Andere
 # =========================================================
 class RestOtherPlayerSelect(discord.ui.Select):
-    def __init__(self, division: str, players: list[str], owner_id: int):
+    def __init__(self, division: str, players: list[str], owner_id: int, cog: "PlayerCog"):
         self.division = division
         self.owner_id = owner_id
+        self.cog = cog
 
         options = [discord.SelectOption(label=p, value=p) for p in players[:25]]
 
@@ -436,28 +492,30 @@ class RestOtherPlayerSelect(discord.ui.Select):
             content=text,
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=RestOtherDivisionView(owner_id=interaction.user.id),
+                back_view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Restprogramm → Andere**\nWähle eine Division:"
             )
         )
 
 
 class RestOtherPlayerView(PlayerBaseView):
-    def __init__(self, owner_id: int, division: str, players: list[str]):
+    def __init__(self, owner_id: int, division: str, players: list[str], cog: "PlayerCog"):
         super().__init__(owner_id)
-        self.add_item(RestOtherPlayerSelect(division, players, owner_id))
+        self.cog = cog
+        self.add_item(RestOtherPlayerSelect(division, players, owner_id, cog))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm → Andere**\nWähle eine Division:",
-            view=RestOtherDivisionView(owner_id=interaction.user.id)
+            view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
 class RestOtherDivisionSelect(discord.ui.Select):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         self.owner_id = owner_id
+        self.cog = cog
         options = [
             discord.SelectOption(label="Division 1", value="1"),
             discord.SelectOption(label="Division 2", value="2"),
@@ -483,14 +541,14 @@ class RestOtherDivisionSelect(discord.ui.Select):
         except Exception as e:
             await interaction.edit_original_response(
                 content=f"❌ Fehler beim Laden der Spieler für Division {div_number}: {e}",
-                view=RestOtherDivisionView(owner_id=interaction.user.id)
+                view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
             )
             return
 
         if not players:
             await interaction.edit_original_response(
                 content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
-                view=RestOtherDivisionView(owner_id=interaction.user.id)
+                view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
             )
             return
 
@@ -499,21 +557,23 @@ class RestOtherDivisionSelect(discord.ui.Select):
             view=RestOtherPlayerView(
                 owner_id=interaction.user.id,
                 division=div_number,
-                players=players
+                players=players,
+                cog=self.cog
             )
         )
 
 
 class RestOtherDivisionView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
-        self.add_item(RestOtherDivisionSelect(owner_id))
+        self.cog = cog
+        self.add_item(RestOtherDivisionSelect(owner_id, cog))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm**\nWähle einen Bereich:",
-            view=RestprogrammView(owner_id=interaction.user.id)
+            view=RestprogrammView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -521,8 +581,9 @@ class RestOtherDivisionView(PlayerBaseView):
 # Restprogramm
 # =========================================================
 class RestprogrammView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
+        self.cog = cog
 
     @discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
     async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -550,7 +611,7 @@ class RestprogrammView(PlayerBaseView):
             content=f"**Info → Restprogramm → Eigenes**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=RestprogrammView(owner_id=interaction.user.id),
+                back_view=RestprogrammView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Restprogramm**\nWähle einen Bereich:"
             )
         )
@@ -559,14 +620,14 @@ class RestprogrammView(PlayerBaseView):
     async def andere_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm → Andere**\nWähle eine Division:",
-            view=RestOtherDivisionView(owner_id=interaction.user.id)
+            view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id)
+            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -574,8 +635,9 @@ class RestprogrammView(PlayerBaseView):
 # Streichmodus - Andere Divisionen
 # =========================================================
 class StreichOtherDivisionSelect(discord.ui.Select):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         self.owner_id = owner_id
+        self.cog = cog
         options = [
             discord.SelectOption(label="Division 1", value="1"),
             discord.SelectOption(label="Division 2", value="2"),
@@ -605,22 +667,23 @@ class StreichOtherDivisionSelect(discord.ui.Select):
             content=text,
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=StreichOtherDivisionView(owner_id=interaction.user.id),
+                back_view=StreichOtherDivisionView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:"
             )
         )
 
 
 class StreichOtherDivisionView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
-        self.add_item(StreichOtherDivisionSelect(owner_id))
+        self.cog = cog
+        self.add_item(StreichOtherDivisionSelect(owner_id, cog))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Streichmodus**\nWähle einen Bereich:",
-            view=StreichmodusView(owner_id=interaction.user.id)
+            view=StreichmodusView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -628,8 +691,9 @@ class StreichOtherDivisionView(PlayerBaseView):
 # Streichmodus
 # =========================================================
 class StreichmodusView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
+        self.cog = cog
 
     @discord.ui.button(label="Eigene Division", style=discord.ButtonStyle.primary, row=0)
     async def eigene_division_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -657,7 +721,7 @@ class StreichmodusView(PlayerBaseView):
             content=f"**Info → Streichmodus → Eigene Division**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=StreichmodusView(owner_id=interaction.user.id),
+                back_view=StreichmodusView(owner_id=interaction.user.id, cog=self.cog),
                 back_content="**Info → Streichmodus**\nWähle einen Bereich:"
             )
         )
@@ -666,14 +730,14 @@ class StreichmodusView(PlayerBaseView):
     async def andere_divisionen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:",
-            view=StreichOtherDivisionView(owner_id=interaction.user.id)
+            view=StreichOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id)
+            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -681,8 +745,9 @@ class StreichmodusView(PlayerBaseView):
 # Ergebnisse / Tabelle mit Browser-Links
 # =========================================================
 class ErgebnisseTabelleView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, cog: "PlayerCog"):
         super().__init__(owner_id)
+        self.cog = cog
 
         self.add_item(discord.ui.Button(
             label="1. Div",
@@ -731,7 +796,7 @@ class ErgebnisseTabelleView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id)
+            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
         )
 
 
@@ -742,10 +807,80 @@ class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    def _get_app_command(self, name: str):
+        guild_obj = discord.Object(id=GUILD_ID)
+
+        cmd = self.bot.tree.get_command(name, guild=guild_obj)
+        if cmd is not None:
+            return cmd
+
+        return self.bot.tree.get_command(name)
+
+    async def invoke_named_app_command(self, interaction: discord.Interaction, command_name: str):
+        cmd = self._get_app_command(command_name)
+        if cmd is None:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    f"Command `/{command_name}` wurde nicht gefunden.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Command `/{command_name}` wurde nicht gefunden.",
+                    ephemeral=True
+                )
+            return
+
+        try:
+            binding = getattr(cmd, "binding", None)
+
+            if binding is not None:
+                await cmd.callback(binding, interaction)
+            else:
+                await cmd.callback(interaction)
+
+        except Exception as e:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    f"Fehler beim Öffnen von `/{command_name}`: {e}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Fehler beim Öffnen von `/{command_name}`: {e}",
+                    ephemeral=True
+                )
+
+    async def open_async_request_menu(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=(
+                "**Spielermenü → Async-Races → Async beantragen**\n"
+                "Hier musst du jetzt die bisherige Funktion aus `Spiel planen` anschließen."
+            ),
+            view=PlaceholderView(
+                owner_id=interaction.user.id,
+                back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
+                back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
+            )
+        )
+
+    async def open_async_play_menu(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=(
+                "**Spielermenü → Async-Races → Async spielen**\n"
+                "Hier musst du jetzt die bestehende Async-Spielen-Funktion anschließen."
+            ),
+            view=PlaceholderView(
+                owner_id=interaction.user.id,
+                back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
+                back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
+            )
+        )
+
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
-        view = PlayerMenuView(owner_id=interaction.user.id)
+        view = PlayerMenuView(owner_id=interaction.user.id, cog=self)
         await interaction.response.send_message(
             "**Spielermenü**\nWähle einen Bereich:",
             view=view,
