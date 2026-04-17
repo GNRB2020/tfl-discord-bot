@@ -29,6 +29,21 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Async-Sheet Spalten
+# A = Timestamp
+# B = Spieler 1
+# C = frei
+# D = VoD Spieler 1
+# E = Zeit Spieler 1
+# F = Spieler 2
+# G = VoD Spieler 2
+# H = Zeit Spieler 2
+# I = Seed
+# J = kind (league/cup)
+# K = division oder round
+# L = source_row_index
+# M = selected_mode
+
 
 # =========================================================
 # GOOGLE SHEETS
@@ -49,7 +64,15 @@ def get_async_worksheet():
     raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
 
 
-def append_async_row(home_player: str, guest_player: str, seed_link: str) -> int:
+def append_async_row(
+    home_player: str,
+    guest_player: str,
+    seed_link: str,
+    match_kind: str,
+    division_or_round: str,
+    source_row_index: int,
+    selected_mode: str,
+) -> int:
     ws = get_async_worksheet()
     col_a = ws.col_values(1)
 
@@ -61,10 +84,21 @@ def append_async_row(home_player: str, guest_player: str, seed_link: str) -> int
 
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    ws.update_cell(row_index, 1, timestamp)      # A
-    ws.update_cell(row_index, 2, home_player)    # B
-    ws.update_cell(row_index, 6, guest_player)   # F
-    ws.update_cell(row_index, 9, seed_link)      # I
+    ws.update(f"A{row_index}:M{row_index}", [[
+        timestamp,                 # A
+        home_player,               # B
+        "",                        # C
+        "",                        # D
+        "",                        # E
+        guest_player,              # F
+        "",                        # G
+        "",                        # H
+        seed_link,                 # I
+        match_kind,                # J
+        division_or_round,         # K
+        str(source_row_index),     # L
+        selected_mode,             # M
+    ]])
 
     return row_index
 
@@ -331,6 +365,7 @@ class AsyncRequestModeView(AsyncBaseView):
             "match_label": self.match_data["label"],
             "division": self.match_data.get("division"),
             "round": self.match_data.get("round"),
+            "source_row_index": self.match_data["row_index"],
             "player1": self.match_data["player1"],
             "player2": self.match_data["player2"],
             "requester_id": self.requester_member.id,
@@ -500,11 +535,16 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
         await interaction.response.defer()
 
         try:
+            division_or_round = data["division"] if data["match_kind"] == "league" else data["round"]
             row_index = await asyncio.to_thread(
                 append_async_row,
                 data["player1"],
                 data["player2"],
                 seed,
+                data["match_kind"],
+                division_or_round or "",
+                data["source_row_index"],
+                data["selected_mode"],
             )
         except Exception as e:
             await interaction.edit_original_response(
