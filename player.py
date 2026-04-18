@@ -1,9 +1,7 @@
 import os
-import re
 import asyncio
-import gspread
 import discord
-from datetime import datetime as dt, timedelta
+import gspread
 from discord import app_commands
 from discord.ext import commands
 from oauth2client.service_account import ServiceAccountCredentials
@@ -12,7 +10,12 @@ from signup import (
     get_signup_status_text_for_member,
     get_league_signup_text,
     get_cup_signup_text,
-    get_worksheet as get_signup_worksheet,
+    get_worksheet,
+    get_existing_signup_data,
+    normalize_yes_no,
+    find_name_row,
+    find_free_row,
+    write_row,
 )
 
 from asnyc import (
@@ -32,76 +35,23 @@ from streichinfo import (
     get_own_division_streich_text,
 )
 
-from plan import (
-    PlanMenuView,
-    get_member_name_candidates,
-    normalize_name,
-)
-
-from asyncplan import (
-    collect_requestable_matches_for_member,
-    AsyncRequestMatchListView,
-)
+from plan import PlanMenuView
+from matchcenter import get_runner_modes
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
-ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
-TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
 
-LOG_CHANNEL_ID = 1494265084208222208
-LEAGUE_RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
-CUP_RESULTS_CHANNEL_ID = 1275081670688510002
-
-ASYNC_SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
-ASYNC_WORKSHEET_GID = 539808866
-LEAGUE_SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
-CUP_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
-CUP_WORKSHEET_GID = 47251903
-
-TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
-
-CREDS_FILE = (
-    os.getenv("GOOGLE_CREDENTIALS_FILE")
-    or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
-    or "credentials.json"
-).strip()
-ASYNC_START_TIMEOUT_SECONDS = 5 * 60
+SETTINGS_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
+SETTINGS_STREICH_GID = 2118667264
+SETTINGS_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+SETTINGS_SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
 
 # =========================================================
 # Hilfsfunktionen
 # =========================================================
-def has_admin_role(member: discord.Member) -> bool:
-    if not isinstance(member, discord.Member):
-        return False
-    if ADMIN_ROLE_ID == 0:
-        return False
-    return any(r.id == ADMIN_ROLE_ID for r in member.roles)
-
-
-def has_tfl_role(member: discord.Member) -> bool:
-    if not isinstance(member, discord.Member):
-        return False
-    if TFL_ROLE_ID == 0:
-        return False
-    return any(r.id == TFL_ROLE_ID for r in member.roles)
-
-
-def is_open_value(value: str) -> bool:
-    return (value or "").strip().lower() in {"open", "opened", "geöffnet", "geoeffnet"}
-
-
-def get_player_menu_feature_flags() -> dict:
-    ws = get_signup_worksheet()
-
-    saisonmeldung_value = ws.acell("D2").value or ""
-    qualifikation_value = ws.acell("G2").value or ""
-
-    return {
-        "seasonmeldung_open": is_open_value(saisonmeldung_value),
-        "qualifikation_open": is_open_value(qualifikation_value),
-    }
-
-
 async def build_quali_info_text(member: discord.Member, quali_number: int) -> str:
     runner_name = member.display_name.strip()
     ws = await asyncio.to_thread(get_quali_worksheet)
@@ -149,197 +99,109 @@ async def build_quali_overall_text(member: discord.Member) -> str:
     )
 
 
-def format_seconds_to_hms(total_seconds: int) -> str:
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    return f"{hours:02}:{minutes:02}:{seconds:02}"
+def normalize_settings_name(value: str) -> str:
+    return (
+        (value or "")
+        .strip()
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
 
 
-def parse_hms_to_seconds(value: str) -> int:
-    h, m, s = map(int, value.split(":"))
-    return h * 3600 + m * 60 + s
+def ensure_signup_row_for_member(member: discord.Member) -> int:
+    ws = get_worksheet()
+    name = member.display_name.strip()
+
+    row = find_name_row(ws, name)
+    if row is not None:
+        return row
+
+    existing = get_existing_signup_data(ws, name)
+    row = find_free_row(ws)
+
+    write_row(
+        ws,
+        row,
+        name,
+        existing.get("twitch", ""),
+        existing.get("league", "Nein"),
+        existing.get("cup", "Nein"),
+        existing.get("restream", "Nein"),
+        existing.get("commentary", "Nein"),
+        existing.get("tracker", "Nein"),
+    )
+    return row
 
 
-def safe_cell(values, idx: int) -> str:
-    if idx < len(values):
-        return str(values[idx]).strip()
-    return ""
+def update_member_twitch(member: discord.Member, twitch_value: str):
+    ws = get_worksheet()
+    row = ensure_signup_row_for_member(member)
+    ws.update_cell(row, 2, twitch_value.strip())
 
 
-def is_filled(value) -> bool:
-    return str(value).strip() != ""
+def update_member_restream_settings(
+    member: discord.Member,
+    restream: str,
+    commentary: str,
+    tracker: str,
+):
+    ws = get_worksheet()
+    row = ensure_signup_row_for_member(member)
+
+    ws.update(
+        f"E{row}:G{row}",
+        [[
+            normalize_yes_no(restream),
+            normalize_yes_no(commentary),
+            normalize_yes_no(tracker),
+        ]]
+    )
 
 
-def safe_time_to_seconds(value: str):
-    value = str(value).strip()
-    if not value or not TIME_RE.match(value):
-        return None
-    try:
-        return parse_hms_to_seconds(value)
-    except Exception:
-        return None
-
-
-def get_gspread_client():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
+def get_settings_spreadsheet_client() -> gspread.Client:
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        SETTINGS_CREDS_FILE,
+        SETTINGS_SCOPE
+    )
     return gspread.authorize(creds)
 
 
-def get_async_worksheet():
-    client = get_gspread_client()
-    sheet = client.open_by_key(ASYNC_SPREADSHEET_ID)
-    return sheet.get_worksheet_by_id(ASYNC_WORKSHEET_GID)
+def get_streich_settings_worksheet():
+    client = get_settings_spreadsheet_client()
+    spreadsheet = client.open_by_key(SETTINGS_SPREADSHEET_ID)
+
+    for ws in spreadsheet.worksheets():
+        if ws.id == SETTINGS_STREICH_GID:
+            return ws
+
+    raise RuntimeError(f"Worksheet mit gid/id {SETTINGS_STREICH_GID} nicht gefunden.")
 
 
-def get_league_workbook():
-    client = get_gspread_client()
-    return client.open(LEAGUE_SPREADSHEET_TITLE)
-
-
-def get_league_division_ws(division_number: str):
-    wb = get_league_workbook()
-    return wb.worksheet(f"{division_number}.DIV")
-
-
-def get_cup_worksheet():
-    client = get_gspread_client()
-    sheet = client.open_by_key(CUP_SPREADSHEET_ID)
-    return sheet.get_worksheet_by_id(CUP_WORKSHEET_GID)
-
-
-def collect_playable_async_matches_for_member(name_candidates: list[str]) -> list[dict]:
-    ws = get_async_worksheet()
+def find_streich_row_for_member(ws, name_candidates: list[str]) -> int | None:
+    targets = {normalize_settings_name(x) for x in name_candidates if x}
     rows = ws.get_all_values()
-    targets = {normalize_name(x) for x in name_candidates if x}
-    out = []
 
-    for row_idx, row in enumerate(rows, start=1):
-        if row_idx == 1:
-            continue
+    for idx, row in enumerate(rows, start=1):
+        name_in_l = row[11].strip() if len(row) > 11 else ""
+        if normalize_settings_name(name_in_l) in targets:
+            return idx
 
-        player1 = safe_cell(row, 1)    # B
-        vod1 = safe_cell(row, 3)       # D
-        time1 = safe_cell(row, 4)      # E
-        player2 = safe_cell(row, 5)    # F
-        vod2 = safe_cell(row, 6)       # G
-        time2 = safe_cell(row, 7)      # H
-        seed_url = safe_cell(row, 8)   # I
-        match_kind = safe_cell(row, 9) # J
-        division_or_round = safe_cell(row, 10)  # K
-        source_row_index = safe_cell(row, 11)   # L
-        selected_mode = safe_cell(row, 12)      # M
-
-        if not player1 or not player2 or not seed_url:
-            continue
-
-        p1_match = normalize_name(player1) in targets
-        p2_match = normalize_name(player2) in targets
-
-        if not p1_match and not p2_match:
-            continue
-
-        if p1_match:
-            already_played = is_filled(vod1) or is_filled(time1)
-            requester_side = 1
-        else:
-            already_played = is_filled(vod2) or is_filled(time2)
-            requester_side = 2
-
-        if already_played:
-            continue
-
-        out.append({
-            "row_index": row_idx,
-            "player1": player1,
-            "player2": player2,
-            "vod1": vod1,
-            "time1": time1,
-            "vod2": vod2,
-            "time2": time2,
-            "seed_url": seed_url,
-            "requester_side": requester_side,
-            "match_kind": match_kind,
-            "division_or_round": division_or_round,
-            "source_row_index": source_row_index,
-            "selected_mode": selected_mode,
-            "label": f"{player1} vs. {player2}",
-        })
-
-    return out[:25]
+    return None
 
 
-def read_async_match_by_row(row_idx: int) -> dict:
-    ws = get_async_worksheet()
-    row = ws.row_values(row_idx)
+def set_member_streichmodi(name_candidates: list[str], mode_1: str, mode_2: str):
+    ws = get_streich_settings_worksheet()
+    row = find_streich_row_for_member(ws, name_candidates)
 
-    return {
-        "row_index": row_idx,
-        "player1": safe_cell(row, 1),   # B
-        "vod1": safe_cell(row, 3),      # D
-        "time1": safe_cell(row, 4),     # E
-        "player2": safe_cell(row, 5),   # F
-        "vod2": safe_cell(row, 6),      # G
-        "time2": safe_cell(row, 7),     # H
-        "seed_url": safe_cell(row, 8),  # I
-        "match_kind": safe_cell(row, 9),       # J
-        "division_or_round": safe_cell(row, 10),  # K
-        "source_row_index": safe_cell(row, 11),   # L
-        "selected_mode": safe_cell(row, 12),      # M
-    }
+    if row is None:
+        raise RuntimeError("Kein Eintrag für den Spieler in Spalte L gefunden.")
 
-
-def write_async_result(row_idx: int, side: int, vod_value: str, race_time: str):
-    ws = get_async_worksheet()
-
-    if side == 1:
-        ws.update(f"D{row_idx}:E{row_idx}", [[vod_value, race_time]])
-    elif side == 2:
-        ws.update(f"G{row_idx}:H{row_idx}", [[vod_value, race_time]])
-    else:
-        raise ValueError("Ungültige Seite.")
-
-    return read_async_match_by_row(row_idx)
-
-
-def get_async_side_state(match_data: dict, side: int) -> tuple[str, str]:
-    if side == 1:
-        return match_data["vod1"], match_data["time1"]
-    return match_data["vod2"], match_data["time2"]
-
-
-def get_async_opponent_side(side: int) -> int:
-    return 2 if side == 1 else 1
-
-
-def parse_division_number_from_label(label: str) -> str:
-    cleaned = (label or "").strip().lower().replace("division", "div").replace(".", "")
-    for num in ["1", "2", "3", "4", "5", "6"]:
-        if f"div {num}" in cleaned or cleaned == num or cleaned.endswith(num):
-            return num
-    return cleaned[-1:] if cleaned else ""
-
-
-def batch_update_league_result(
-    ws,
-    row_index: int,
-    now_str: str,
-    mode_val: str,
-    ergebnis: str,
-    raceroom_val: str,
-    reporter_name: str,
-):
-    reqs = [
-        {"range": f"B{row_index}:C{row_index}", "values": [[now_str, mode_val]]},
-        {"range": f"E{row_index}:E{row_index}", "values": [[ergebnis]]},
-        {"range": f"G{row_index}:G{row_index}", "values": [[raceroom_val]]},
-        {"range": f"H{row_index}:H{row_index}", "values": [[reporter_name]]},
-    ]
-    ws.batch_update(reqs)
+    ws.update(
+        f"M{row}:N{row}",
+        [[mode_1.strip(), mode_2.strip()]]
+    )
 
 
 # =========================================================
@@ -378,608 +240,64 @@ class PlaceholderView(PlayerBaseView):
 
 
 # =========================================================
-# Ergebnis melden
-# =========================================================
-class ResultMenuView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
-        super().__init__(owner_id)
-        self.cog = cog
-
-    @discord.ui.button(label="League", style=discord.ButtonStyle.primary, row=0)
-    async def league_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.invoke_named_app_command(interaction, "result")
-
-    @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
-    async def cup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.invoke_named_app_command(interaction, "cupresult")
-
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(
-                owner_id=interaction.user.id,
-                cog=self.cog,
-                qualifikation_open=self.cog.qualifikation_open,
-                saisonmeldung_open=self.cog.saisonmeldung_open,
-            )
-        )
-
-
-# =========================================================
-# Async-Races State
-# =========================================================
-class AsyncRunState:
-    def __init__(
-        self,
-        user_id: int,
-        row_index: int,
-        requester_side: int,
-        player1: str,
-        player2: str,
-        seed_url: str,
-    ):
-        self.user_id = user_id
-        self.row_index = row_index
-        self.requester_side = requester_side
-        self.player1 = player1
-        self.player2 = player2
-        self.seed_url = seed_url
-
-        self.created_at = dt.utcnow()
-        self.seed_shown_at: dt | None = None
-        self.started_at: dt | None = None
-        self.finished_at: dt | None = None
-        self.locked_final_time: str | None = None
-        self.finished = False
-        self.cancelled = False
-
-        self.message: discord.Message | None = None
-        self.timeout_task: asyncio.Task | None = None
-
-    @property
-    def requester_name(self) -> str:
-        return self.player1 if self.requester_side == 1 else self.player2
-
-    @property
-    def opponent_name(self) -> str:
-        return self.player2 if self.requester_side == 1 else self.player1
-
-    def measured_time(self) -> str:
-        if not self.started_at:
-            return "00:00:00"
-        seconds = int((dt.utcnow() - self.started_at).total_seconds())
-        if seconds < 0:
-            seconds = 0
-        return format_seconds_to_hms(seconds)
-
-
-# =========================================================
-# Async spielen
-# =========================================================
-class AsyncPlaySelect(discord.ui.Select):
-    def __init__(self, matches: list[dict]):
-        self.matches = {str(i): m for i, m in enumerate(matches)}
-
-        options = [
-            discord.SelectOption(label=m["label"][:100], value=str(i))
-            for i, m in enumerate(matches[:25])
-        ]
-
-        super().__init__(
-            placeholder="Async-Spiel auswählen …",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, AsyncPlaySelectView):
-            return
-
-        view.selected_match = self.matches[self.values[0]]
-
-        await interaction.response.edit_message(
-            content=(
-                "**Spielermenü → Async-Races → Async spielen**\n"
-                f"Ausgewählt: **{view.selected_match['player1']} vs. {view.selected_match['player2']}**\n\n"
-                "Bestätige mit **Spielen**."
-            ),
-            view=view
-        )
-
-
-class AsyncPlaySelectView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog", matches: list[dict]):
-        super().__init__(owner_id, timeout=300)
-        self.cog = cog
-        self.matches = matches
-        self.selected_match: dict | None = None
-        self.add_item(AsyncPlaySelect(matches))
-
-    @discord.ui.button(label="Spielen", style=discord.ButtonStyle.success, row=1)
-    async def play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.selected_match:
-            await interaction.response.send_message("Bitte zuerst ein Async-Spiel auswählen.", ephemeral=True)
-            return
-
-        active = self.cog.active_async_runs.get(interaction.user.id)
-        if active and not active.finished:
-            await interaction.response.send_message(
-                "Du hast bereits ein laufendes Async.",
-                ephemeral=True
-            )
-            return
-
-        state = AsyncRunState(
-            user_id=interaction.user.id,
-            row_index=self.selected_match["row_index"],
-            requester_side=self.selected_match["requester_side"],
-            player1=self.selected_match["player1"],
-            player2=self.selected_match["player2"],
-            seed_url=self.selected_match["seed_url"],
-        )
-        self.cog.active_async_runs[interaction.user.id] = state
-
-        hint_text = (
-            f"**Async spielen**\n\n"
-            f"Spiel: **{state.player1} vs. {state.player2}**\n\n"
-            f"Wenn du auf **Zum Seed** klickst, hast du **5 Minuten** Zeit zum Starten.\n"
-            f"Bereite dein Setup also vor, bevor du zum Seed gehst."
-        )
-
-        view = AsyncSeedView(owner_id=interaction.user.id, cog=self.cog, state=state)
-
-        await interaction.response.edit_message(content=hint_text, view=view)
-        state.message = await interaction.original_response()
-
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
-            view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog)
-        )
-
-
-class AsyncSeedView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog", state: AsyncRunState):
-        super().__init__(owner_id, timeout=300)
-        self.cog = cog
-        self.state = state
-
-    @discord.ui.button(label="Zum Seed", style=discord.ButtonStyle.primary, row=0)
-    async def seed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        state = self.state
-
-        if state.finished:
-            await interaction.response.send_message("Dieses Async wurde bereits abgeschlossen.", ephemeral=True)
-            return
-
-        if state.cancelled:
-            await interaction.response.send_message("Dieses Async wurde bereits abgebrochen.", ephemeral=True)
-            return
-
-        if state.seed_shown_at is not None:
-            await interaction.response.send_message("Der Seed wurde bereits geöffnet.", ephemeral=True)
-            return
-
-        state.seed_shown_at = dt.utcnow()
-        deadline = state.seed_shown_at + timedelta(seconds=ASYNC_START_TIMEOUT_SECONDS)
-
-        content = (
-            f"**Async spielen – Seed geöffnet**\n\n"
-            f"Spiel: **{state.player1} vs. {state.player2}**\n"
-            f"Seed-Link: {state.seed_url}\n\n"
-            f"Du musst innerhalb von **5 Minuten** starten.\n"
-            f"Startfenster endet um: <t:{int(deadline.timestamp())}:T>\n"
-            f"Noch verbleibend: <t:{int(deadline.timestamp())}:R>"
-        )
-
-        await interaction.response.edit_message(
-            content=content,
-            view=AsyncStartView(owner_id=interaction.user.id, cog=self.cog, state=state)
-        )
-        state.message = await interaction.original_response()
-        state.timeout_task = asyncio.create_task(self.cog.async_seed_start_timeout(state))
-
-
-class AsyncStartView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog", state: AsyncRunState):
-        super().__init__(owner_id, timeout=300)
-        self.cog = cog
-        self.state = state
-
-    @discord.ui.button(label="Start", style=discord.ButtonStyle.success, row=0)
-    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        state = self.state
-
-        if state.finished:
-            await interaction.response.send_message("Dieses Async wurde bereits abgeschlossen.", ephemeral=True)
-            return
-
-        if state.seed_shown_at is None:
-            await interaction.response.send_message("Du musst zuerst den Seed öffnen.", ephemeral=True)
-            return
-
-        limit = state.seed_shown_at + timedelta(seconds=ASYNC_START_TIMEOUT_SECONDS)
-        if dt.utcnow() > limit:
-            await interaction.response.send_message(
-                "Das Startfenster ist bereits abgelaufen. Du erhältst ein FF.",
-                ephemeral=True
-            )
-            return
-
-        state.started_at = dt.utcnow()
-
-        if state.timeout_task:
-            state.timeout_task.cancel()
-            state.timeout_task = None
-
-        await interaction.response.edit_message(
-            content=(
-                f"**Async läuft**\n\n"
-                f"Spiel: **{state.player1} vs. {state.player2}**\n"
-                f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n\n"
-                f"Drücke am Ende **Finish** oder **Forfeit**."
-            ),
-            view=AsyncRunningView(owner_id=interaction.user.id, cog=self.cog, state=state)
-        )
-        state.message = await interaction.original_response()
-
-
-class AsyncSubmitModal(discord.ui.Modal):
-    def __init__(self, cog: "PlayerCog", state: AsyncRunState, forfeit: bool = False):
-        title = f"Async-Ergebnis · {state.locked_final_time or '00:00:00'}"
-        super().__init__(title=title)
-        self.cog = cog
-        self.state = state
-        self.forfeit = forfeit
-
-        self.vod_input = discord.ui.TextInput(
-            label="VoD-Link" if not forfeit else "Kommentar (optional)",
-            placeholder="https://..." if not forfeit else "Optional",
-            required=not forfeit
-        )
-        self.add_item(self.vod_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        state = self.state
-
-        if self.forfeit:
-            vod_value = "FF"
-            final_time = "03:00:00"
-        else:
-            vod_value = str(self.vod_input.value).strip()
-            if not vod_value:
-                await interaction.followup.send("VoD-Link ist Pflicht.", ephemeral=True)
-                return
-
-            if not state.locked_final_time:
-                await interaction.followup.send("Die Zielzeit konnte nicht gespeichert werden.", ephemeral=True)
-                return
-
-            final_time = state.locked_final_time
-
-        match_after_write = await asyncio.to_thread(
-            write_async_result,
-            state.row_index,
-            state.requester_side,
-            vod_value,
-            final_time
-        )
-
-        state.finished = True
-        state.finished_at = dt.utcnow()
-        self.cog.stop_async_state_tasks(state)
-        self.cog.active_async_runs.pop(state.user_id, None)
-
-        await self.cog.handle_async_finish(
-            interaction=interaction,
-            state=state,
-            match_data=match_after_write,
-            final_time=final_time,
-            vod_value=vod_value
-        )
-
-        await interaction.followup.send(
-            f"Ergebnis gespeichert.\n"
-            f"Spiel: **{state.player1} vs. {state.player2}**\n"
-            f"Zeit: **{final_time}**\n"
-            f"VoD: **{vod_value}**",
-            ephemeral=True
-        )
-
-
-class AsyncRunningView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog", state: AsyncRunState):
-        super().__init__(owner_id, timeout=None)
-        self.cog = cog
-        self.state = state
-
-    @discord.ui.button(label="Finish", style=discord.ButtonStyle.success, row=0)
-    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.state.locked_final_time = self.state.measured_time()
-        self.cog.stop_async_state_tasks(self.state)
-        await interaction.response.send_modal(AsyncSubmitModal(self.cog, self.state, forfeit=False))
-
-    @discord.ui.button(label="Forfeit", style=discord.ButtonStyle.danger, row=0)
-    async def forfeit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.state.locked_final_time = "03:00:00"
-        self.cog.stop_async_state_tasks(self.state)
-        await interaction.response.send_modal(AsyncSubmitModal(self.cog, self.state, forfeit=True))
-
-
-class AsyncRejectModal(discord.ui.Modal, title="Ergebnis ablehnen"):
-    reason = discord.ui.TextInput(
-        label="Ablehnungsgrund",
-        required=True,
-        style=discord.TextStyle.paragraph,
-        max_length=1000
-    )
-
-    def __init__(self, cog: "PlayerCog", match_data: dict):
-        super().__init__()
-        self.cog = cog
-        self.match_data = match_data
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not isinstance(interaction.user, discord.Member) or not has_admin_role(interaction.user):
-            await interaction.response.send_message(
-                "Nur die Spielleitung darf Ergebnisse ablehnen.",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        await self.cog.notify_async_rejection(
-            interaction.guild,
-            self.match_data,
-            str(self.reason).strip()
-        )
-
-        await interaction.followup.send("Ablehnungsgrund wurde an beide Runner verschickt.", ephemeral=True)
-
-
-class AsyncResultReviewView(discord.ui.View):
-    def __init__(self, cog: "PlayerCog", match_data: dict):
-        super().__init__(timeout=None)
-        self.cog = cog
-        self.match_data = match_data
-
-    @discord.ui.button(label="Ergebnis bestätigen", style=discord.ButtonStyle.success, row=0)
-    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not isinstance(interaction.user, discord.Member) or not has_admin_role(interaction.user):
-            await interaction.response.send_message(
-                "Nur die Spielleitung darf Ergebnisse bestätigen.",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        await self.cog.confirm_async_result(interaction, self.match_data)
-        await interaction.followup.send("Async-Ergebnis bestätigt.", ephemeral=True)
-
-    @discord.ui.button(label="Ergebnis ablehnen", style=discord.ButtonStyle.danger, row=0)
-    async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not isinstance(interaction.user, discord.Member) or not has_admin_role(interaction.user):
-            await interaction.response.send_message(
-                "Nur die Spielleitung darf Ergebnisse ablehnen.",
-                ephemeral=True
-            )
-            return
-
-        await interaction.response.send_modal(AsyncRejectModal(self.cog, self.match_data))
-
-
-# =========================================================
-# Async-Races
-# =========================================================
-class AsyncRacesView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
-        super().__init__(owner_id)
-        self.cog = cog
-
-    @discord.ui.button(label="Async beantragen", style=discord.ButtonStyle.primary, row=0)
-    async def async_request_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        try:
-            matches = await asyncio.to_thread(
-                collect_requestable_matches_for_member,
-                get_member_name_candidates(member),
-            )
-        except Exception as e:
-            await interaction.edit_original_response(
-                content=f"❌ Fehler beim Laden der Spiele für Async: {e}",
-                view=PlaceholderView(
-                    owner_id=interaction.user.id,
-                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog),
-                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
-                ),
-            )
-            return
-
-        if not matches:
-            await interaction.edit_original_response(
-                content="**Spielermenü → Async-Races → Async beantragen**\nKeine offenen League- oder Cup-Spiele für dich gefunden.",
-                view=PlaceholderView(
-                    owner_id=interaction.user.id,
-                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self.cog),
-                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
-                ),
-            )
-            return
-
-        await interaction.edit_original_response(
-            content="**Spielermenü → Async-Races → Async beantragen**\nWähle ein Spiel:",
-            view=AsyncRequestMatchListView(
-                owner_id=interaction.user.id,
-                matches=matches,
-                requester_member=member,
-            ),
-        )
-
-    @discord.ui.button(label="Async spielen", style=discord.ButtonStyle.success, row=0)
-    async def async_play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.async_play_menu(interaction)
-
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(
-                owner_id=interaction.user.id,
-                cog=self.cog,
-                qualifikation_open=self.cog.qualifikation_open,
-                saisonmeldung_open=self.cog.saisonmeldung_open,
-            )
-        )
-
-
-# =========================================================
 # Hauptmenü
 # =========================================================
 class PlayerMenuView(PlayerBaseView):
-    def __init__(
-        self,
-        owner_id: int,
-        cog: "PlayerCog",
-        qualifikation_open: bool,
-        saisonmeldung_open: bool,
-    ):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
-        self.qualifikation_open = qualifikation_open
-        self.saisonmeldung_open = saisonmeldung_open
 
-        self.add_item(PlayerInfoButton())
-        self.add_item(PlayerPlanButton())
-        self.add_item(PlayerResultButton())
-        self.add_item(PlayerAsyncRacesButton())
-
-        if self.qualifikation_open:
-            self.add_item(PlayerQualificationButton())
-
-        if self.saisonmeldung_open:
-            self.add_item(PlayerSeasonButton())
-
-        self.add_item(PlayerSettingsButton())
-
-
-class PlayerInfoButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Info", style=discord.ButtonStyle.secondary, row=0)
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, PlayerMenuView):
-            return
-
+    @discord.ui.button(label="Info", style=discord.ButtonStyle.secondary, row=0)
+    async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id, cog=view.cog)
+            view=InfoMenuView(owner_id=interaction.user.id)
         )
 
-
-class PlayerPlanButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, PlayerMenuView):
-            return
-
+    @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
+    async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spiel planen**\nWähle einen Bereich:",
-            view=PlanMenuView(owner_id=interaction.user.id, player_cog=view.cog)
+            view=PlanMenuView(owner_id=interaction.user.id)
         )
 
-
-class PlayerResultButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, PlayerMenuView):
-            return
-
+    @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
+    async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
-            view=ResultMenuView(owner_id=interaction.user.id, cog=view.cog)
-        )
-
-
-class PlayerAsyncRacesButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Async-Races", style=discord.ButtonStyle.primary, row=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, PlayerMenuView):
-            return
-
-        await interaction.response.edit_message(
-            content="**Spielermenü → Async-Races**\nWähle einen Bereich:",
-            view=AsyncRacesView(owner_id=interaction.user.id, cog=view.cog)
-        )
-
-
-class PlayerQualificationButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, PlayerMenuView):
-            return
-
-        await view.cog.invoke_named_app_command(interaction, "quali")
-
-
-class PlayerSeasonButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=2)
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, PlayerMenuView):
-            return
-
-        await view.cog.invoke_named_app_command(interaction, "signup")
-
-
-class PlayerSettingsButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Einstellungen", style=discord.ButtonStyle.secondary, row=2)
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, PlayerMenuView):
-            return
-
-        await interaction.response.edit_message(
-            content="**Spielermenü → Einstellungen**\nHier kommt später die Navigation rein.",
+            content="**Spielermenü → Ergebnis melden**\nHier kommt später die Navigation rein.",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=PlayerMenuView(
-                    owner_id=interaction.user.id,
-                    cog=view.cog,
-                    qualifikation_open=view.qualifikation_open,
-                    saisonmeldung_open=view.saisonmeldung_open,
-                ),
+                back_view=PlayerMenuView(owner_id=interaction.user.id),
                 back_content="**Spielermenü**\nWähle einen Bereich:"
             )
+        )
+
+    @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
+    async def qualification_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü → Qualifikation**\nHier kommt später die Navigation rein.",
+            view=PlaceholderView(
+                owner_id=interaction.user.id,
+                back_view=PlayerMenuView(owner_id=interaction.user.id),
+                back_content="**Spielermenü**\nWähle einen Bereich:"
+            )
+        )
+
+    @discord.ui.button(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=1)
+    async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü → Saisonmeldung**\nHier kommt später die Navigation rein.",
+            view=PlaceholderView(
+                owner_id=interaction.user.id,
+                back_view=PlayerMenuView(owner_id=interaction.user.id),
+                back_content="**Spielermenü**\nWähle einen Bereich:"
+            )
+        )
+
+    @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=1)
+    async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü → Einstellungen**\nWähle einen Bereich:",
+            view=SettingsMenuView(owner_id=interaction.user.id)
         )
 
 
@@ -987,55 +305,49 @@ class PlayerSettingsButton(discord.ui.Button):
 # Info-Menü
 # =========================================================
 class InfoMenuView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
 
     @discord.ui.button(label="Meldestatus", style=discord.ButtonStyle.primary, row=0)
     async def meldestatus_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Meldestatus**\nWähle einen Bereich:",
-            view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog)
+            view=MeldestatusView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.primary, row=0)
     async def qualifikation_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Qualifikation**\nWähle einen Bereich:",
-            view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog)
+            view=InfoQualifikationView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Restprogramm", style=discord.ButtonStyle.primary, row=1)
     async def restprogramm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm**\nWähle einen Bereich:",
-            view=RestprogrammView(owner_id=interaction.user.id, cog=self.cog)
+            view=RestprogrammView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Streichmodus", style=discord.ButtonStyle.primary, row=1)
     async def streichmodus_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Streichmodus**\nWähle einen Bereich:",
-            view=StreichmodusView(owner_id=interaction.user.id, cog=self.cog)
+            view=StreichmodusView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Ergebnisse/Tabelle", style=discord.ButtonStyle.primary, row=2)
     async def ergebnisse_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Ergebnisse/Tabelle**\nWähle eine Liga oder den Cup:",
-            view=ErgebnisseTabelleView(owner_id=interaction.user.id, cog=self.cog)
+            view=ErgebnisseTabelleView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü**\nWähle einen Bereich:",
-            view=PlayerMenuView(
-                owner_id=interaction.user.id,
-                cog=self.cog,
-                qualifikation_open=self.cog.qualifikation_open,
-                saisonmeldung_open=self.cog.saisonmeldung_open,
-            )
+            view=PlayerMenuView(owner_id=interaction.user.id)
         )
 
 
@@ -1043,9 +355,8 @@ class InfoMenuView(PlayerBaseView):
 # Meldestatus
 # =========================================================
 class MeldestatusView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
 
     @discord.ui.button(label="Meiner", style=discord.ButtonStyle.primary, row=0)
     async def meiner_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1062,7 +373,7 @@ class MeldestatusView(PlayerBaseView):
             content=f"**Info → Meldestatus → Meiner**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=MeldestatusView(owner_id=interaction.user.id),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
         )
@@ -1078,7 +389,7 @@ class MeldestatusView(PlayerBaseView):
             content=f"**Info → Meldestatus → League**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=MeldestatusView(owner_id=interaction.user.id),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
         )
@@ -1094,7 +405,7 @@ class MeldestatusView(PlayerBaseView):
             content=f"**Info → Meldestatus → Cup**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=MeldestatusView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=MeldestatusView(owner_id=interaction.user.id),
                 back_content="**Info → Meldestatus**\nWähle einen Bereich:"
             )
         )
@@ -1103,7 +414,7 @@ class MeldestatusView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=InfoMenuView(owner_id=interaction.user.id)
         )
 
 
@@ -1111,9 +422,8 @@ class MeldestatusView(PlayerBaseView):
 # Info -> Qualifikation
 # =========================================================
 class InfoQualifikationView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
 
     @discord.ui.button(label="Quali 1", style=discord.ButtonStyle.primary, row=0)
     async def quali1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1128,7 +438,7 @@ class InfoQualifikationView(PlayerBaseView):
                     content=f"**Info → Qualifikation → Quali 1**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
-                        back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
                         back_content="**Info → Qualifikation**\nWähle einen Bereich:"
                     )
                 )
@@ -1140,7 +450,7 @@ class InfoQualifikationView(PlayerBaseView):
             content=f"**Info → Qualifikation → Quali 1**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=InfoQualifikationView(owner_id=interaction.user.id),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
         )
@@ -1158,7 +468,7 @@ class InfoQualifikationView(PlayerBaseView):
                     content=f"**Info → Qualifikation → Quali 2**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
-                        back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
                         back_content="**Info → Qualifikation**\nWähle einen Bereich:"
                     )
                 )
@@ -1170,7 +480,7 @@ class InfoQualifikationView(PlayerBaseView):
             content=f"**Info → Qualifikation → Quali 2**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=InfoQualifikationView(owner_id=interaction.user.id),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
         )
@@ -1188,7 +498,7 @@ class InfoQualifikationView(PlayerBaseView):
                     content=f"**Info → Qualifikation → Gesamt**\n{text}",
                     view=PlaceholderView(
                         owner_id=interaction.user.id,
-                        back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
+                        back_view=InfoQualifikationView(owner_id=interaction.user.id),
                         back_content="**Info → Qualifikation**\nWähle einen Bereich:"
                     )
                 )
@@ -1200,7 +510,7 @@ class InfoQualifikationView(PlayerBaseView):
             content=f"**Info → Qualifikation → Gesamt**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=InfoQualifikationView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=InfoQualifikationView(owner_id=interaction.user.id),
                 back_content="**Info → Qualifikation**\nWähle einen Bereich:"
             )
         )
@@ -1209,7 +519,7 @@ class InfoQualifikationView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=InfoMenuView(owner_id=interaction.user.id)
         )
 
 
@@ -1217,10 +527,9 @@ class InfoQualifikationView(PlayerBaseView):
 # Restprogramm - Andere
 # =========================================================
 class RestOtherPlayerSelect(discord.ui.Select):
-    def __init__(self, division: str, players: list[str], owner_id: int, cog: "PlayerCog"):
+    def __init__(self, division: str, players: list[str], owner_id: int):
         self.division = division
         self.owner_id = owner_id
-        self.cog = cog
 
         options = [discord.SelectOption(label=p, value=p) for p in players[:25]]
 
@@ -1245,30 +554,28 @@ class RestOtherPlayerSelect(discord.ui.Select):
             content=text,
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=RestOtherDivisionView(owner_id=interaction.user.id),
                 back_content="**Info → Restprogramm → Andere**\nWähle eine Division:"
             )
         )
 
 
 class RestOtherPlayerView(PlayerBaseView):
-    def __init__(self, owner_id: int, division: str, players: list[str], cog: "PlayerCog"):
+    def __init__(self, owner_id: int, division: str, players: list[str]):
         super().__init__(owner_id)
-        self.cog = cog
-        self.add_item(RestOtherPlayerSelect(division, players, owner_id, cog))
+        self.add_item(RestOtherPlayerSelect(division, players, owner_id))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm → Andere**\nWähle eine Division:",
-            view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
+            view=RestOtherDivisionView(owner_id=interaction.user.id)
         )
 
 
 class RestOtherDivisionSelect(discord.ui.Select):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         self.owner_id = owner_id
-        self.cog = cog
         options = [
             discord.SelectOption(label="Division 1", value="1"),
             discord.SelectOption(label="Division 2", value="2"),
@@ -1294,14 +601,14 @@ class RestOtherDivisionSelect(discord.ui.Select):
         except Exception as e:
             await interaction.edit_original_response(
                 content=f"❌ Fehler beim Laden der Spieler für Division {div_number}: {e}",
-                view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
+                view=RestOtherDivisionView(owner_id=interaction.user.id)
             )
             return
 
         if not players:
             await interaction.edit_original_response(
                 content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
-                view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
+                view=RestOtherDivisionView(owner_id=interaction.user.id)
             )
             return
 
@@ -1310,23 +617,21 @@ class RestOtherDivisionSelect(discord.ui.Select):
             view=RestOtherPlayerView(
                 owner_id=interaction.user.id,
                 division=div_number,
-                players=players,
-                cog=self.cog
+                players=players
             )
         )
 
 
 class RestOtherDivisionView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
-        self.add_item(RestOtherDivisionSelect(owner_id, cog))
+        self.add_item(RestOtherDivisionSelect(owner_id))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm**\nWähle einen Bereich:",
-            view=RestprogrammView(owner_id=interaction.user.id, cog=self.cog)
+            view=RestprogrammView(owner_id=interaction.user.id)
         )
 
 
@@ -1334,9 +639,8 @@ class RestOtherDivisionView(PlayerBaseView):
 # Restprogramm
 # =========================================================
 class RestprogrammView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
 
     @discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
     async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1364,7 +668,7 @@ class RestprogrammView(PlayerBaseView):
             content=f"**Info → Restprogramm → Eigenes**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=RestprogrammView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=RestprogrammView(owner_id=interaction.user.id),
                 back_content="**Info → Restprogramm**\nWähle einen Bereich:"
             )
         )
@@ -1373,14 +677,14 @@ class RestprogrammView(PlayerBaseView):
     async def andere_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Restprogramm → Andere**\nWähle eine Division:",
-            view=RestOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
+            view=RestOtherDivisionView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=InfoMenuView(owner_id=interaction.user.id)
         )
 
 
@@ -1388,9 +692,8 @@ class RestprogrammView(PlayerBaseView):
 # Streichmodus - Andere Divisionen
 # =========================================================
 class StreichOtherDivisionSelect(discord.ui.Select):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         self.owner_id = owner_id
-        self.cog = cog
         options = [
             discord.SelectOption(label="Division 1", value="1"),
             discord.SelectOption(label="Division 2", value="2"),
@@ -1420,23 +723,22 @@ class StreichOtherDivisionSelect(discord.ui.Select):
             content=text,
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=StreichOtherDivisionView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=StreichOtherDivisionView(owner_id=interaction.user.id),
                 back_content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:"
             )
         )
 
 
 class StreichOtherDivisionView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
-        self.add_item(StreichOtherDivisionSelect(owner_id, cog))
+        self.add_item(StreichOtherDivisionSelect(owner_id))
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Streichmodus**\nWähle einen Bereich:",
-            view=StreichmodusView(owner_id=interaction.user.id, cog=self.cog)
+            view=StreichmodusView(owner_id=interaction.user.id)
         )
 
 
@@ -1444,9 +746,8 @@ class StreichOtherDivisionView(PlayerBaseView):
 # Streichmodus
 # =========================================================
 class StreichmodusView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
 
     @discord.ui.button(label="Eigene Division", style=discord.ButtonStyle.primary, row=0)
     async def eigene_division_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1474,7 +775,7 @@ class StreichmodusView(PlayerBaseView):
             content=f"**Info → Streichmodus → Eigene Division**\n{text}",
             view=PlaceholderView(
                 owner_id=interaction.user.id,
-                back_view=StreichmodusView(owner_id=interaction.user.id, cog=self.cog),
+                back_view=StreichmodusView(owner_id=interaction.user.id),
                 back_content="**Info → Streichmodus**\nWähle einen Bereich:"
             )
         )
@@ -1483,14 +784,14 @@ class StreichmodusView(PlayerBaseView):
     async def andere_divisionen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:",
-            view=StreichOtherDivisionView(owner_id=interaction.user.id, cog=self.cog)
+            view=StreichOtherDivisionView(owner_id=interaction.user.id)
         )
 
     @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=InfoMenuView(owner_id=interaction.user.id)
         )
 
 
@@ -1498,9 +799,8 @@ class StreichmodusView(PlayerBaseView):
 # Ergebnisse / Tabelle mit Browser-Links
 # =========================================================
 class ErgebnisseTabelleView(PlayerBaseView):
-    def __init__(self, owner_id: int, cog: "PlayerCog"):
+    def __init__(self, owner_id: int):
         super().__init__(owner_id)
-        self.cog = cog
 
         self.add_item(discord.ui.Button(
             label="1. Div",
@@ -1549,7 +849,333 @@ class ErgebnisseTabelleView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
-            view=InfoMenuView(owner_id=interaction.user.id, cog=self.cog)
+            view=InfoMenuView(owner_id=interaction.user.id)
+        )
+
+
+# =========================================================
+# Einstellungen -> Twitch setzen
+# =========================================================
+class TwitchSettingsModal(discord.ui.Modal, title="Twitch setzen"):
+    twitch = discord.ui.TextInput(
+        label="Twitchkanal",
+        required=False,
+        max_length=100,
+    )
+
+    def __init__(self, owner_id: int, default_value: str = ""):
+        super().__init__()
+        self.owner_id = owner_id
+        self.twitch.default = default_value
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Dieses Menü gehört nicht dir.", ephemeral=True)
+            return
+
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        try:
+            await asyncio.to_thread(
+                update_member_twitch,
+                interaction.user,
+                str(self.twitch.value).strip(),
+            )
+
+            await interaction.response.send_message(
+                "✅ Twitch wurde gespeichert.",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Fehler beim Speichern des Twitchkanals: {e}",
+                ephemeral=True
+            )
+
+
+# =========================================================
+# Einstellungen -> Restream / Commentary / Tracker
+# =========================================================
+class SettingsToggleButton(discord.ui.Button):
+    def __init__(self, field_name: str, label_name: str, row: int):
+        super().__init__(
+            label=label_name,
+            style=discord.ButtonStyle.secondary,
+            row=row
+        )
+        self.field_name = field_name
+        self.label_name = label_name
+
+    def sync_state(self, view):
+        current_value = getattr(view, self.field_name, "Nein")
+        self.label = f"{self.label_name}: {current_value}"
+        self.style = (
+            discord.ButtonStyle.success
+            if current_value == "Ja"
+            else discord.ButtonStyle.secondary
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, RestreamSettingsView):
+            await interaction.response.send_message("Fehler: Ungültige View.", ephemeral=True)
+            return
+
+        current_value = getattr(view, self.field_name)
+        new_value = "Ja" if current_value == "Nein" else "Nein"
+        setattr(view, self.field_name, new_value)
+
+        self.sync_state(view)
+        await interaction.response.edit_message(
+            content=view.render_text(),
+            view=view
+        )
+
+
+class RestreamSettingsView(PlayerBaseView):
+    def __init__(self, owner_id: int, restream: str, commentary: str, tracker: str):
+        super().__init__(owner_id, timeout=600)
+
+        self.restream = normalize_yes_no(restream)
+        self.commentary = normalize_yes_no(commentary)
+        self.tracker = normalize_yes_no(tracker)
+
+        restream_btn = SettingsToggleButton("restream", "Restream", 0)
+        commentary_btn = SettingsToggleButton("commentary", "Commentary", 0)
+        tracker_btn = SettingsToggleButton("tracker", "Tracker", 0)
+
+        for btn in [restream_btn, commentary_btn, tracker_btn]:
+            btn.sync_state(self)
+            self.add_item(btn)
+
+    def render_text(self) -> str:
+        return (
+            "**Einstellungen → Restream**\n"
+            f"Restream: **{self.restream}**\n"
+            f"Commentary: **{self.commentary}**\n"
+            f"Tracker: **{self.tracker}**"
+        )
+
+    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=1)
+    async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        try:
+            await asyncio.to_thread(
+                update_member_restream_settings,
+                interaction.user,
+                self.restream,
+                self.commentary,
+                self.tracker,
+            )
+
+            await interaction.response.edit_message(
+                content="**Einstellungen → Restream**\n✅ Einstellungen gespeichert.",
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=SettingsMenuView(owner_id=interaction.user.id),
+                    back_content="**Spielermenü → Einstellungen**\nWähle einen Bereich:"
+                )
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Fehler beim Speichern der Einstellungen: {e}",
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü → Einstellungen**\nWähle einen Bereich:",
+            view=SettingsMenuView(owner_id=interaction.user.id)
+        )
+
+
+# =========================================================
+# Einstellungen -> Streichmodi setzen
+# =========================================================
+class StreichModeSelect(discord.ui.Select):
+    def __init__(self, field_name: str, modes: list[str], placeholder: str, row: int):
+        self.field_name = field_name
+        options = [discord.SelectOption(label=m[:100], value=m) for m in modes[:25]]
+
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=row,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, StreichSettingsView):
+            return
+
+        setattr(view, self.field_name, self.values[0])
+        await interaction.response.edit_message(
+            content=view.render_text(),
+            view=view,
+        )
+
+
+class StreichSettingsView(PlayerBaseView):
+    def __init__(self, owner_id: int, modes: list[str]):
+        super().__init__(owner_id, timeout=600)
+        self.mode_1: str | None = None
+        self.mode_2: str | None = None
+
+        self.add_item(StreichModeSelect("mode_1", modes, "Streichmodus 1 wählen …", 0))
+        self.add_item(StreichModeSelect("mode_2", modes, "Streichmodus 2 wählen …", 1))
+
+    def render_text(self) -> str:
+        return (
+            "**Einstellungen → Streichmodis setzen**\n"
+            f"Modus 1: **{self.mode_1 or '-'}**\n"
+            f"Modus 2: **{self.mode_2 or '-'}**"
+        )
+
+    @discord.ui.button(label="Absenden", style=discord.ButtonStyle.success, row=2)
+    async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        if not self.mode_1 or not self.mode_2:
+            await interaction.response.send_message(
+                "Bitte beide Streichmodi auswählen.",
+                ephemeral=True
+            )
+            return
+
+        name_candidates = [
+            interaction.user.display_name,
+            getattr(interaction.user, "global_name", None),
+            interaction.user.name,
+        ]
+
+        try:
+            await asyncio.to_thread(
+                set_member_streichmodi,
+                name_candidates,
+                self.mode_1,
+                self.mode_2,
+            )
+
+            await interaction.response.edit_message(
+                content=(
+                    "**Einstellungen → Streichmodis setzen**\n"
+                    "✅ Streichmodi gespeichert."
+                ),
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=SettingsMenuView(owner_id=interaction.user.id),
+                    back_content="**Spielermenü → Einstellungen**\nWähle einen Bereich:"
+                )
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Fehler beim Speichern der Streichmodi: {e}",
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü → Einstellungen**\nWähle einen Bereich:",
+            view=SettingsMenuView(owner_id=interaction.user.id)
+        )
+
+
+# =========================================================
+# Einstellungen-Menü
+# =========================================================
+class SettingsMenuView(PlayerBaseView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+
+    @discord.ui.button(label="Twitch setzen", style=discord.ButtonStyle.primary, row=0)
+    async def twitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        try:
+            ws = await asyncio.to_thread(get_worksheet)
+            existing = await asyncio.to_thread(
+                get_existing_signup_data,
+                ws,
+                interaction.user.display_name.strip()
+            )
+            twitch_default = existing.get("twitch", "")
+        except Exception:
+            twitch_default = ""
+
+        await interaction.response.send_modal(
+            TwitchSettingsModal(
+                owner_id=interaction.user.id,
+                default_value=twitch_default
+            )
+        )
+
+    @discord.ui.button(label="Restream", style=discord.ButtonStyle.primary, row=0)
+    async def restream_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        try:
+            ws = await asyncio.to_thread(get_worksheet)
+            existing = await asyncio.to_thread(
+                get_existing_signup_data,
+                ws,
+                interaction.user.display_name.strip()
+            )
+        except Exception:
+            existing = {
+                "restream": "Nein",
+                "commentary": "Nein",
+                "tracker": "Nein",
+            }
+
+        view = RestreamSettingsView(
+            owner_id=interaction.user.id,
+            restream=existing.get("restream", "Nein"),
+            commentary=existing.get("commentary", "Nein"),
+            tracker=existing.get("tracker", "Nein"),
+        )
+
+        await interaction.response.edit_message(
+            content=view.render_text(),
+            view=view,
+        )
+
+    @discord.ui.button(label="Streichmodis setzen", style=discord.ButtonStyle.primary, row=1)
+    async def streich_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            modes = await asyncio.to_thread(get_runner_modes)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Fehler beim Laden der Spielmodi: {e}",
+                ephemeral=True
+            )
+            return
+
+        view = StreichSettingsView(owner_id=interaction.user.id, modes=modes)
+        await interaction.response.edit_message(
+            content=view.render_text(),
+            view=view,
+        )
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü**\nWähle einen Bereich:",
+            view=PlayerMenuView(owner_id=interaction.user.id)
         )
 
 
@@ -1559,434 +1185,11 @@ class ErgebnisseTabelleView(PlayerBaseView):
 class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.active_async_runs: dict[int, AsyncRunState] = {}
-        self.qualifikation_open = False
-        self.saisonmeldung_open = False
-
-    def _get_app_command(self, name: str):
-        guild_obj = discord.Object(id=GUILD_ID)
-
-        cmd = self.bot.tree.get_command(name, guild=guild_obj)
-        if cmd is not None:
-            return cmd
-
-        return self.bot.tree.get_command(name)
-
-    async def refresh_menu_flags(self):
-        flags = await asyncio.to_thread(get_player_menu_feature_flags)
-        self.qualifikation_open = flags["qualifikation_open"]
-        self.saisonmeldung_open = flags["seasonmeldung_open"]
-
-    async def invoke_named_app_command(self, interaction: discord.Interaction, command_name: str):
-        cmd = self._get_app_command(command_name)
-        if cmd is None:
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    f"Command `/{command_name}` wurde nicht gefunden.",
-                    ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    f"Command `/{command_name}` wurde nicht gefunden.",
-                    ephemeral=True
-                )
-            return
-
-        try:
-            binding = getattr(cmd, "binding", None)
-
-            if binding is not None:
-                await cmd.callback(binding, interaction)
-            else:
-                await cmd.callback(interaction)
-
-        except Exception as e:
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    f"Fehler beim Öffnen von `/{command_name}`: {e}",
-                    ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    f"Fehler beim Öffnen von `/{command_name}`: {e}",
-                    ephemeral=True
-                )
-
-    def stop_async_state_tasks(self, state: AsyncRunState):
-        task = state.timeout_task
-        if task and not task.done():
-            task.cancel()
-        state.timeout_task = None
-
-    async def resolve_member_by_name(self, guild: discord.Guild | None, name: str):
-        if guild is None:
-            return None
-
-        target = normalize_name(name)
-
-        for member in guild.members:
-            candidates = [
-                member.display_name,
-                getattr(member, "global_name", None),
-                member.name,
-            ]
-            if any(normalize_name(c or "") == target for c in candidates if c):
-                return member
-
-        return None
-
-    async def async_play_menu(self, interaction: discord.Interaction):
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        try:
-            matches = await asyncio.to_thread(
-                collect_playable_async_matches_for_member,
-                get_member_name_candidates(member),
-            )
-        except Exception as e:
-            await interaction.edit_original_response(
-                content=f"❌ Fehler beim Laden der Asyncs: {e}",
-                view=PlaceholderView(
-                    owner_id=interaction.user.id,
-                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
-                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
-                )
-            )
-            return
-
-        if not matches:
-            await interaction.edit_original_response(
-                content="**Spielermenü → Async-Races → Async spielen**\nKeine genehmigten Asyncs für dich vorhanden.",
-                view=PlaceholderView(
-                    owner_id=interaction.user.id,
-                    back_view=AsyncRacesView(owner_id=interaction.user.id, cog=self),
-                    back_content="**Spielermenü → Async-Races**\nWähle einen Bereich:"
-                )
-            )
-            return
-
-        await interaction.edit_original_response(
-            content="**Spielermenü → Async-Races → Async spielen**\nWähle ein Spiel:",
-            view=AsyncPlaySelectView(owner_id=interaction.user.id, cog=self, matches=matches)
-        )
-
-    async def async_seed_start_timeout(self, state: AsyncRunState):
-        try:
-            await asyncio.sleep(ASYNC_START_TIMEOUT_SECONDS)
-
-            if state.finished or state.cancelled or state.started_at is not None:
-                return
-
-            match_after_write = await asyncio.to_thread(
-                write_async_result,
-                state.row_index,
-                state.requester_side,
-                "FF",
-                "03:00:00"
-            )
-
-            state.finished = True
-            state.finished_at = dt.utcnow()
-            state.locked_final_time = "03:00:00"
-            self.stop_async_state_tasks(state)
-            self.active_async_runs.pop(state.user_id, None)
-
-            await self.post_async_log_and_notifications(
-                guild=None,
-                match_data=match_after_write,
-                finisher_name=state.requester_name,
-                final_time="03:00:00",
-                first_finish_hint=False
-            )
-
-            if state.message:
-                try:
-                    await state.message.edit(
-                        content=(
-                            f"**Async beendet**\n"
-                            f"Spiel: **{state.player1} vs. {state.player2}**\n"
-                            f"Startfenster überschritten.\n"
-                            f"Ergebnis: **FF / 03:00:00**"
-                        ),
-                        view=None
-                    )
-                except Exception:
-                    pass
-
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-    async def handle_async_finish(
-        self,
-        interaction: discord.Interaction,
-        state: AsyncRunState,
-        match_data: dict,
-        final_time: str,
-        vod_value: str,
-    ):
-        other_side = get_async_opponent_side(state.requester_side)
-        other_vod, other_time = get_async_side_state(match_data, other_side)
-        other_pending = (not is_filled(other_vod)) and (not is_filled(other_time))
-        first_finish_hint = other_pending
-
-        if state.message:
-            try:
-                await state.message.edit(
-                    content=(
-                        f"**Async abgeschlossen**\n"
-                        f"Spiel: **{state.player1} vs. {state.player2}**\n"
-                        f"Zeit: **{final_time}**\n"
-                        f"VoD: **{vod_value}**"
-                    ),
-                    view=None
-                )
-            except Exception:
-                pass
-
-        await self.post_async_log_and_notifications(
-            guild=interaction.guild,
-            match_data=match_data,
-            finisher_name=state.requester_name,
-            final_time=final_time,
-            first_finish_hint=first_finish_hint
-        )
-
-        if not other_pending:
-            await self.send_async_both_finished_dm(interaction.guild, match_data)
-
-    async def post_async_log_and_notifications(
-        self,
-        guild: discord.Guild | None,
-        match_data: dict,
-        finisher_name: str,
-        final_time: str,
-        first_finish_hint: bool,
-    ):
-        channel = self.bot.get_channel(LOG_CHANNEL_ID)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(LOG_CHANNEL_ID)
-            except Exception:
-                channel = None
-
-        player1 = match_data["player1"]
-        player2 = match_data["player2"]
-        vod1 = match_data["vod1"]
-        time1 = match_data["time1"]
-        vod2 = match_data["vod2"]
-        time2 = match_data["time2"]
-
-        both_done = is_filled(vod1) and is_filled(time1) and is_filled(vod2) and is_filled(time2)
-
-        if channel:
-            if both_done:
-                await channel.send(
-                    content=(
-                        f"**{finisher_name}** hat den Async vom Spiel zwischen **{player1}** und **{player2}** "
-                        f"mit einer Zeit von **{final_time}** beendet.\n"
-                        f"Beide Runner sind fertig.\n"
-                        f"**{player1}: {time1}**\n"
-                        f"**{player2}: {time2}**"
-                    ),
-                    view=AsyncResultReviewView(self, match_data)
-                )
-            else:
-                other_player = player2 if normalize_name(finisher_name) == normalize_name(player1) else player1
-                await channel.send(
-                    f"**{finisher_name}** hat den Async vom Spiel zwischen **{player1}** und **{player2}** "
-                    f"mit einer Zeit von **{final_time}** beendet.\n"
-                    f"**{other_player}** muss den Seed noch spielen."
-                )
-
-        opponent_name = player2 if normalize_name(finisher_name) == normalize_name(player1) else player1
-        opponent_member = await self.resolve_member_by_name(guild, opponent_name)
-
-        if opponent_member:
-            msg = f"Dein Gegner **{finisher_name}** hat den Async für **{player1} vs. {player2}** beendet."
-            if first_finish_hint:
-                msg += "\nDu kannst den Seed jetzt auch im Stream spielen."
-            try:
-                await opponent_member.send(msg)
-            except Exception:
-                pass
-
-    async def send_async_both_finished_dm(self, guild: discord.Guild | None, match_data: dict):
-        player1_member = await self.resolve_member_by_name(guild, match_data["player1"])
-        player2_member = await self.resolve_member_by_name(guild, match_data["player2"])
-
-        text = (
-            f"Der Async für **{match_data['player1']} vs. {match_data['player2']}** wurde von beiden Runnern abgeschlossen.\n\n"
-            f"{match_data['player1']}: **{match_data['time1']}**\n"
-            f"{match_data['player2']}: **{match_data['time2']}**\n\n"
-            f"Dies ist nur ein vorläufiges Ergebnis und muss noch von der Spielleitung geprüft und bestätigt werden."
-        )
-
-        for member in [player1_member, player2_member]:
-            if member:
-                try:
-                    await member.send(text)
-                except Exception:
-                    pass
-
-    async def notify_async_rejection(self, guild: discord.Guild | None, match_data: dict, reason: str):
-        members = [
-            await self.resolve_member_by_name(guild, match_data["player1"]),
-            await self.resolve_member_by_name(guild, match_data["player2"]),
-        ]
-
-        text = (
-            f"Das Ergebnis für den Async **{match_data['player1']} vs. {match_data['player2']}** wurde abgelehnt.\n\n"
-            f"Grund:\n{reason}"
-        )
-
-        for member in members:
-            if member:
-                try:
-                    await member.send(text)
-                except Exception:
-                    pass
-
-    async def confirm_async_result(self, interaction: discord.Interaction, match_data: dict):
-        p1_seconds = safe_time_to_seconds(match_data["time1"])
-        p2_seconds = safe_time_to_seconds(match_data["time2"])
-
-        if p1_seconds is None or p2_seconds is None:
-            await interaction.followup.send("Es liegen nicht für beide Runner gültige Zeiten vor.", ephemeral=True)
-            return
-
-        diff = abs(p1_seconds - p2_seconds)
-
-        if diff <= 5:
-            ergebnis = "1:1"
-        elif p1_seconds < p2_seconds:
-            ergebnis = "2:0"
-        else:
-            ergebnis = "0:2"
-
-        match_kind = (match_data.get("match_kind") or "").strip().lower()
-        division_or_round = (match_data.get("division_or_round") or "").strip()
-        selected_mode = (match_data.get("selected_mode") or "").strip() or "Async"
-        source_row_text = (match_data.get("source_row_index") or "").strip()
-
-        try:
-            source_row = int(source_row_text)
-        except Exception:
-            await interaction.followup.send(
-                "Die Zielzeile für das Originalspiel fehlt im Async-Sheet.",
-                ephemeral=True
-            )
-            return
-
-        now_str = dt.now().strftime("%d.%m.%Y %H:%M")
-        reporter_name = str(interaction.user)
-        raceroom_val = "Async Race"
-
-        if match_kind == "league":
-            division_number = parse_division_number_from_label(division_or_round)
-            if division_number not in {"1", "2", "3", "4", "5", "6"}:
-                await interaction.followup.send(
-                    "Die Division konnte aus dem Async-Sheet nicht korrekt gelesen werden.",
-                    ephemeral=True
-                )
-                return
-
-            try:
-                ws = await asyncio.to_thread(get_league_division_ws, division_number)
-                await asyncio.to_thread(
-                    batch_update_league_result,
-                    ws,
-                    source_row,
-                    now_str,
-                    selected_mode,
-                    ergebnis,
-                    raceroom_val,
-                    reporter_name,
-                )
-            except Exception as e:
-                await interaction.followup.send(
-                    f"Fehler beim Schreiben ins Division-Sheet: {e}",
-                    ephemeral=True
-                )
-                return
-
-            channel = self.bot.get_channel(LEAGUE_RESULTS_CHANNEL_ID)
-            if channel is None:
-                try:
-                    channel = await self.bot.fetch_channel(LEAGUE_RESULTS_CHANNEL_ID)
-                except Exception:
-                    channel = None
-
-            if channel is None:
-                await interaction.followup.send("Ergebnischannel für League nicht gefunden.", ephemeral=True)
-                return
-
-            out_lines = [
-                f"**[Division {division_number}]** {now_str}",
-                f"**{match_data['player1']}** vs **{match_data['player2']}** → **{ergebnis}**",
-                f"Modus: {selected_mode}",
-                f"Raceroom: {raceroom_val}",
-            ]
-            await channel.send("\n".join(out_lines))
-            return
-
-        if match_kind == "cup":
-            try:
-                ws = await asyncio.to_thread(get_cup_worksheet)
-                await asyncio.to_thread(ws.update_cell, source_row, 3, ergebnis)
-            except Exception as e:
-                await interaction.followup.send(
-                    f"Fehler beim Schreiben ins Cup-Sheet: {e}",
-                    ephemeral=True
-                )
-                return
-
-            channel = self.bot.get_channel(CUP_RESULTS_CHANNEL_ID)
-            if channel is None:
-                try:
-                    channel = await self.bot.fetch_channel(CUP_RESULTS_CHANNEL_ID)
-                except Exception:
-                    channel = None
-
-            if channel is None:
-                await interaction.followup.send("Ergebnischannel für Cup nicht gefunden.", ephemeral=True)
-                return
-
-            message = (
-                f"[TFL Cup] {now_str}\n"
-                f"{match_data['player1']} vs. {match_data['player2']} -> {ergebnis}\n"
-                f"Modus: {selected_mode}\n"
-                f"Raceroom: {raceroom_val}"
-            )
-            await channel.send(message)
-            return
-
-        await interaction.followup.send(
-            "Match-Typ im Async-Sheet unbekannt. Erwartet wurde league oder cup.",
-            ephemeral=True
-        )
 
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
-        try:
-            await self.refresh_menu_flags()
-        except Exception:
-            self.qualifikation_open = False
-            self.saisonmeldung_open = False
-
-        view = PlayerMenuView(
-            owner_id=interaction.user.id,
-            cog=self,
-            qualifikation_open=self.qualifikation_open,
-            saisonmeldung_open=self.saisonmeldung_open,
-        )
+        view = PlayerMenuView(owner_id=interaction.user.id)
         await interaction.response.send_message(
             "**Spielermenü**\nWähle einen Bereich:",
             view=view,
