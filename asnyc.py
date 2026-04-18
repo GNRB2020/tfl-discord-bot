@@ -12,7 +12,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 # =========================================================
 # KONFIG
 # =========================================================
-
 GUILD_ID = 1275076189173579846
 LOG_CHANNEL_ID = 1494265084208222208
 ADMIN_ROLE_NAME = "Admin"
@@ -38,7 +37,6 @@ SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 # =========================================================
 # HILFSFUNKTIONEN
 # =========================================================
-
 def get_runner_name(interaction: discord.Interaction) -> str:
     if isinstance(interaction.user, discord.Member):
         return interaction.user.display_name.strip()
@@ -88,7 +86,6 @@ def safe_time_to_seconds(value: str):
 # =========================================================
 # GOOGLE SHEETS
 # =========================================================
-
 def get_gspread_client():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -281,7 +278,6 @@ def get_overall_stats_for_runner(ws, runner_name: str):
 # =========================================================
 # AKTIVE RUNS IM SPEICHER
 # =========================================================
-
 class QualiRunState:
     def __init__(self, user_id: int, runner_name: str, quali_number: int, seed_url: str):
         self.user_id = user_id
@@ -317,7 +313,6 @@ class QualiRunState:
 # =========================================================
 # MODAL
 # =========================================================
-
 class QualiSubmitModal(discord.ui.Modal):
     def __init__(self, cog, state: QualiRunState, forfeit: bool = False):
         super().__init__(title=f"Quali {state.quali_number} Ergebnis")
@@ -465,7 +460,6 @@ class QualiSubmitModal(discord.ui.Modal):
 # =========================================================
 # VIEWS
 # =========================================================
-
 class QualiSelectView(discord.ui.View):
     def __init__(self, cog, runner_name: str, q1_disabled: bool, q2_disabled: bool):
         super().__init__(timeout=300)
@@ -564,9 +558,23 @@ class QualiStandView(discord.ui.View):
 
 
 # =========================================================
+# HELFER FÜR PLAYER.PY
+# =========================================================
+async def open_quali_from_player(interaction: discord.Interaction):
+    cog = interaction.client.get_cog("QualiCog")
+    if cog is None or not isinstance(cog, QualiCog):
+        await interaction.response.send_message(
+            "Qualifikation ist aktuell nicht verfügbar.",
+            ephemeral=True
+        )
+        return
+
+    await cog.start_quali_flow(interaction, edit_existing=True)
+
+
+# =========================================================
 # COG
 # =========================================================
-
 class QualiCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -599,13 +607,11 @@ class QualiCog(commands.Cog):
             self.stop_state_tasks(active)
             self.active_runs.pop(user_id, None)
 
-    @app_commands.command(
-        name="quali",
-        description="Startet die Qualifikationsauswahl."
-    )
-    @app_commands.guilds(discord.Object(id=GUILD_ID))
-    async def quali(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+    async def start_quali_flow(self, interaction: discord.Interaction, edit_existing: bool = False):
+        if not edit_existing:
+            await interaction.response.defer(ephemeral=True)
+        else:
+            await interaction.response.defer()
 
         try:
             self.cleanup_stale_run(interaction.user.id)
@@ -616,10 +622,11 @@ class QualiCog(commands.Cog):
 
             active = self.active_runs.get(interaction.user.id)
             if active and not active.finished:
-                await interaction.followup.send(
-                    f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **/qualireset**.",
-                    ephemeral=True
-                )
+                text = f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **/qualireset**."
+                if edit_existing:
+                    await interaction.edit_original_response(content=text, view=None)
+                else:
+                    await interaction.followup.send(text, ephemeral=True)
                 return
 
             view = QualiSelectView(
@@ -637,13 +644,30 @@ class QualiCog(commands.Cog):
                 f"Nutze für dich selbst einen eigenen Timer oder orientiere dich an deiner Aufnahme."
             )
 
-            await interaction.followup.send(text, view=view, ephemeral=True)
+            if edit_existing:
+                await interaction.edit_original_response(content=text, view=view)
+            else:
+                await interaction.followup.send(text, view=view, ephemeral=True)
 
         except Exception as e:
-            await interaction.followup.send(
-                f"Fehler bei /quali: {e}",
-                ephemeral=True
-            )
+            if edit_existing:
+                await interaction.edit_original_response(
+                    content=f"Fehler bei Qualifikation: {e}",
+                    view=None
+                )
+            else:
+                await interaction.followup.send(
+                    f"Fehler bei /quali: {e}",
+                    ephemeral=True
+                )
+
+    @app_commands.command(
+        name="quali",
+        description="Startet die Qualifikationsauswahl."
+    )
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def quali(self, interaction: discord.Interaction):
+        await self.start_quali_flow(interaction, edit_existing=False)
 
     @app_commands.command(
         name="qualistand",
@@ -1043,6 +1067,5 @@ class QualiCog(commands.Cog):
 # =========================================================
 # SETUP
 # =========================================================
-
 async def setup(bot):
     await bot.add_cog(QualiCog(bot))
