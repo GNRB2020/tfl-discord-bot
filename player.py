@@ -16,12 +16,14 @@ from signup import (
     find_name_row,
     find_free_row,
     write_row,
+    open_signup_from_player,
 )
 
 from asnyc import (
     get_quali_worksheet,
     get_quali_stats_for_runner,
     get_overall_stats_for_runner,
+    open_quali_from_player,
 )
 
 from restinfo import (
@@ -273,25 +275,11 @@ class PlayerMenuView(PlayerBaseView):
 
     @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
     async def qualification_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü → Qualifikation**\nHier kommt später die Navigation rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
-                back_content="**Spielermenü**\nWähle einen Bereich:"
-            )
-        )
+        await open_quali_from_player(interaction)
 
     @discord.ui.button(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=1)
     async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="**Spielermenü → Saisonmeldung**\nHier kommt später die Navigation rein.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
-                back_content="**Spielermenü**\nWähle einen Bereich:"
-            )
-        )
+        await open_signup_from_player(interaction)
 
     @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=1)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -606,7 +594,7 @@ class RestOtherDivisionSelect(discord.ui.Select):
             return
 
         if not players:
-            await interaction.edit_original_response(
+            await interaction.edit_originalResponse(
                 content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
                 view=RestOtherDivisionView(owner_id=interaction.user.id)
             )
