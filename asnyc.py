@@ -33,10 +33,24 @@ TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
 SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 
+# Teilnahmeberechtigung aus Signup-Sheet
+SIGNUP_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
+SIGNUP_WORKSHEET_GID = 463142264
+
+NOT_ELIGIBLE_TEXT = (
+    "Du bist für die Qualifikation nicht teilnahmeberechtigt! "
+    "Nimm gerne an den Liveraces zur Quali (ohne Wertung) teil. "
+    "Und gib uns eine Nachricht im Adminlog Channel 1494265084208222208"
+)
+
 
 # =========================================================
 # HILFSFUNKTIONEN
 # =========================================================
+def normalize_name(value: str) -> str:
+    return (value or "").strip().lower()
+
+
 def get_runner_name(interaction: discord.Interaction) -> str:
     if isinstance(interaction.user, discord.Member):
         return interaction.user.display_name.strip()
@@ -99,6 +113,37 @@ def get_quali_worksheet():
     client = get_gspread_client()
     sheet = client.open_by_key(SPREADSHEET_ID)
     return sheet.worksheet(QUALI_SHEET_NAME)
+
+
+def get_signup_worksheet():
+    client = get_gspread_client()
+    sheet = client.open_by_key(SIGNUP_SPREADSHEET_ID)
+
+    for ws in sheet.worksheets():
+        if ws.id == SIGNUP_WORKSHEET_GID:
+            return ws
+
+    raise RuntimeError(
+        f"Worksheet mit gid/id {SIGNUP_WORKSHEET_GID} nicht gefunden."
+    )
+
+
+def is_runner_quali_eligible(runner_name: str) -> bool:
+    ws = get_signup_worksheet()
+    rows = ws.get_all_values()
+    target = normalize_name(runner_name)
+
+    for row in rows:
+        name_in_a = safe_cell(row, 0)   # A
+        allowed_in_i = safe_cell(row, 8)  # I
+
+        if not name_in_a:
+            continue
+
+        if normalize_name(name_in_a) == target:
+            return allowed_in_i.lower() == "ja"
+
+    return False
 
 
 def get_quali_seed(ws, quali_number: int) -> str:
@@ -617,6 +662,21 @@ class QualiCog(commands.Cog):
             self.cleanup_stale_run(interaction.user.id)
 
             runner_name = get_runner_name(interaction)
+
+            is_eligible = await asyncio.to_thread(is_runner_quali_eligible, runner_name)
+            if not is_eligible:
+                if edit_existing:
+                    await interaction.edit_original_response(
+                        content=NOT_ELIGIBLE_TEXT,
+                        view=None
+                    )
+                else:
+                    await interaction.followup.send(
+                        NOT_ELIGIBLE_TEXT,
+                        ephemeral=True
+                    )
+                return
+
             ws = await asyncio.to_thread(get_quali_worksheet)
             status = await asyncio.to_thread(read_runner_status, ws, runner_name)
 
