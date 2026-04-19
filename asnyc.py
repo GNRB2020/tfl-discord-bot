@@ -40,7 +40,6 @@ SIGNUP_WORKSHEET_GID = 463142264
 NOT_ELIGIBLE_TEXT = (
     "Du bist für die Qualifikation nicht teilnahmeberechtigt! "
     "Nimm gerne an den Liveraces zur Quali (ohne Wertung) teil. "
-    "Und gib uns eine Nachricht im Adminlog Channel 1494265084208222208"
 )
 
 
