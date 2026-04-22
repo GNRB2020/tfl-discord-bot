@@ -17,7 +17,6 @@ from matchcenter import (
 
 from schedule import load_open_matches as load_open_cup_matches
 
-
 ADMIN_LOG_CHANNEL_ID = 1494265084208222208
 
 ASYNC_SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
@@ -28,21 +27,6 @@ SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
-
-# Async-Sheet Spalten
-# A = Timestamp
-# B = Spieler 1
-# C = frei
-# D = VoD Spieler 1
-# E = Zeit Spieler 1
-# F = Spieler 2
-# G = VoD Spieler 2
-# H = Zeit Spieler 2
-# I = Seed
-# J = kind (league/cup)
-# K = division oder round
-# L = source_row_index
-# M = selected_mode
 
 
 # =========================================================
@@ -64,15 +48,7 @@ def get_async_worksheet():
     raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
 
 
-def append_async_row(
-    home_player: str,
-    guest_player: str,
-    seed_link: str,
-    match_kind: str,
-    division_or_round: str,
-    source_row_index: int,
-    selected_mode: str,
-) -> int:
+def append_async_row(home_player: str, guest_player: str, seed_link: str) -> int:
     ws = get_async_worksheet()
     col_a = ws.col_values(1)
 
@@ -84,21 +60,10 @@ def append_async_row(
 
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    ws.update(f"A{row_index}:M{row_index}", [[
-        timestamp,                 # A
-        home_player,               # B
-        "",                        # C
-        "",                        # D
-        "",                        # E
-        guest_player,              # F
-        "",                        # G
-        "",                        # H
-        seed_link,                 # I
-        match_kind,                # J
-        division_or_round,         # K
-        str(source_row_index),     # L
-        selected_mode,             # M
-    ]])
+    ws.update(f"A{row_index}", [[timestamp]])
+    ws.update(f"B{row_index}", [[home_player]])
+    ws.update(f"F{row_index}", [[guest_player]])
+    ws.update(f"I{row_index}", [[seed_link]])
 
     return row_index
 
@@ -365,7 +330,6 @@ class AsyncRequestModeView(AsyncBaseView):
             "match_label": self.match_data["label"],
             "division": self.match_data.get("division"),
             "round": self.match_data.get("round"),
-            "source_row_index": self.match_data["row_index"],
             "player1": self.match_data["player1"],
             "player2": self.match_data["player2"],
             "requester_id": self.requester_member.id,
@@ -535,16 +499,11 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
         await interaction.response.defer()
 
         try:
-            division_or_round = data["division"] if data["match_kind"] == "league" else data["round"]
             row_index = await asyncio.to_thread(
                 append_async_row,
                 data["player1"],
                 data["player2"],
                 seed,
-                data["match_kind"],
-                division_or_round or "",
-                data["source_row_index"],
-                data["selected_mode"],
             )
         except Exception as e:
             await interaction.edit_original_response(
@@ -558,8 +517,7 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
 
         dm_text = (
             f"✅ Dem Async wurde zugestimmt.\n"
-            f"Spiel: {data['player1']} vs. {data['player2']}\n"
-            f"Dem **{data['selected_mode']}** Seed wurde eurem Async Race hinterlegt."
+            f"Der **{data['selected_mode']}**-Seed wurde eurem Async Race hinterlegt."
         )
 
         for user in [requester, opponent]:
@@ -572,8 +530,8 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
             content=(
                 f"{interaction.message.content}\n\n"
                 f"**Status:** Zugestimmt\n"
-                f"**Seed gesetzt:** {seed}\n"
-                f"**Async-Sheet-Zeile:** {row_index}"
+                f"**Async-Sheet-Zeile:** {row_index}\n"
+                f"**Seed in Spalte I gespeichert**"
             ),
             view=None,
         )
@@ -591,3 +549,52 @@ class AdminDecisionView(discord.ui.View):
     @discord.ui.button(label="Zustimmen", style=discord.ButtonStyle.success)
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SeedLinkModal(self))
+
+
+# =========================================================
+# ENTRYPOINT FÜR PLAYER.PY
+# =========================================================
+async def open_async_request_from_player(interaction: discord.Interaction):
+    member = interaction.user
+    await interaction.response.defer()
+
+    if not isinstance(member, discord.Member):
+        await interaction.edit_original_response(
+            content="Nur auf dem Server verfügbar.",
+            view=None,
+        )
+        return
+
+    name_candidates = [
+        member.display_name,
+        getattr(member, "global_name", None),
+        member.name,
+    ]
+
+    try:
+        matches = await asyncio.to_thread(
+            collect_requestable_matches_for_member,
+            name_candidates,
+        )
+    except Exception as e:
+        await interaction.edit_original_response(
+            content=f"❌ Fehler beim Laden der beantragbaren Spiele: {e}",
+            view=None,
+        )
+        return
+
+    if not matches:
+        await interaction.edit_original_response(
+            content="Für dich wurden aktuell keine offenen League- oder Cup-Spiele gefunden.",
+            view=AsyncRequestDoneView(owner_id=interaction.user.id),
+        )
+        return
+
+    await interaction.edit_original_response(
+        content="**Spiel planen → Async beantragen**\nWähle das Spiel aus:",
+        view=AsyncRequestMatchListView(
+            owner_id=interaction.user.id,
+            matches=matches,
+            requester_member=member,
+        ),
+    )
