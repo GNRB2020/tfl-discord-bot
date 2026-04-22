@@ -14,7 +14,6 @@ from matchcenter import (
     DIV_COL_RIGHT,
     get_runner_modes,
 )
-
 from schedule import load_open_matches as load_open_cup_matches
 
 
@@ -30,9 +29,6 @@ SCOPE = [
 ]
 
 
-# =========================================================
-# UI
-# =========================================================
 def menu_embed(title: str, description: str) -> discord.Embed:
     return discord.Embed(
         title=title,
@@ -60,7 +56,15 @@ def get_async_worksheet():
     raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
 
 
-def append_async_row(home_player: str, guest_player: str, seed_link: str) -> int:
+def append_async_row(
+    home_player: str,
+    guest_player: str,
+    seed_link: str,
+    art: str,
+    source_row_index: int,
+    division: str,
+    mode: str,
+) -> int:
     ws = get_async_worksheet()
     col_a = ws.col_values(1)
 
@@ -76,6 +80,10 @@ def append_async_row(home_player: str, guest_player: str, seed_link: str) -> int
         {"range": f"B{row_index}:B{row_index}", "values": [[home_player]]},
         {"range": f"F{row_index}:F{row_index}", "values": [[guest_player]]},
         {"range": f"I{row_index}:I{row_index}", "values": [[seed_link]]},
+        {"range": f"J{row_index}:J{row_index}", "values": [[art]]},
+        {"range": f"K{row_index}:K{row_index}", "values": [[str(source_row_index)]]},
+        {"range": f"L{row_index}:L{row_index}", "values": [[division]]},
+        {"range": f"M{row_index}:M{row_index}", "values": [[mode]]},
     ]
     ws.batch_update(reqs)
     return row_index
@@ -97,7 +105,7 @@ def normalize_name(value: str) -> str:
 
 def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[dict]:
     targets = {normalize_name(x) for x in name_candidates if x}
-    out = []
+    out: list[dict] = []
 
     for division_label in [f"Div {i}" for i in range(1, 7)]:
         ws = get_div_ws_from_label(division_label)
@@ -336,6 +344,7 @@ class AsyncRequestModeView(AsyncBaseView):
             "match_label": self.match_data["label"],
             "division": self.match_data.get("division"),
             "round": self.match_data.get("round"),
+            "source_row_index": self.match_data["row_index"],
             "player1": self.match_data["player1"],
             "player2": self.match_data["player2"],
             "requester_id": self.requester_member.id,
@@ -528,6 +537,10 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
                 data["player1"],
                 data["player2"],
                 seed,
+                data["match_kind"],
+                data["source_row_index"],
+                data["division"] or "",
+                data["selected_mode"],
             )
         except Exception as e:
             await interaction.edit_original_response(
@@ -544,7 +557,7 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
         opponent = await interaction.client.fetch_user(data["opponent_id"])
 
         dm_text = (
-            f"Dem Async wurde zugestimmt.\n"
+            "Dem Async wurde zugestimmt.\n"
             f"Der **{data['selected_mode']}**-Seed wurde eurem Async Race hinterlegt."
         )
 
