@@ -9,6 +9,13 @@ from discord import app_commands
 from discord.ext import commands
 from oauth2client.service_account import ServiceAccountCredentials
 
+from matchcenter import (
+    write_league_result,
+    league_result_post_text,
+    send_result_post,
+    now_berlin_str,
+)
+
 # =========================================================
 # KONFIG
 # =========================================================
@@ -18,38 +25,19 @@ ADMIN_ROLE_NAME = "Admin"
 
 QUALI_SHEET_NAME = "Quali"
 START_ROW = 4
-RUN_STALE_SECONDS = 15 * 60  # 15 Minuten
-
-# B = Runner
-# D = Quali1 Async?/VoD/DNF
-# E = Quali1 Zeit
-# F = Quali2 Async?/VoD/DNF
-# G = Quali2 Zeit
-# D2 = Seed Quali 1
-# F2 = Seed Quali 2
+RUN_STALE_SECONDS = 15 * 60
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 
 CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json").strip()
 SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
-
-# Teilnahmeberechtigung aus Signup-Sheet
-SIGNUP_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
-SIGNUP_WORKSHEET_GID = 463142264
-
-NOT_ELIGIBLE_TEXT = (
-    "Du bist für die Qualifikation nicht teilnahmeberechtigt! "
-    "Nimm gerne an den Liveraces zur Quali (ohne Wertung) teil. "
-)
+ASYNC_WORKSHEET_GID = 539808866
+ASYNC_SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 
 
 # =========================================================
 # HILFSFUNKTIONEN
 # =========================================================
-def normalize_name(value: str) -> str:
-    return (value or "").strip().lower()
-
-
 def get_runner_name(interaction: discord.Interaction) -> str:
     if isinstance(interaction.user, discord.Member):
         return interaction.user.display_name.strip()
@@ -114,35 +102,15 @@ def get_quali_worksheet():
     return sheet.worksheet(QUALI_SHEET_NAME)
 
 
-def get_signup_worksheet():
+def get_async_worksheet():
     client = get_gspread_client()
-    sheet = client.open_by_key(SIGNUP_SPREADSHEET_ID)
+    spreadsheet = client.open_by_key(ASYNC_SPREADSHEET_ID)
 
-    for ws in sheet.worksheets():
-        if ws.id == SIGNUP_WORKSHEET_GID:
+    for ws in spreadsheet.worksheets():
+        if ws.id == ASYNC_WORKSHEET_GID:
             return ws
 
-    raise RuntimeError(
-        f"Worksheet mit gid/id {SIGNUP_WORKSHEET_GID} nicht gefunden."
-    )
-
-
-def is_runner_quali_eligible(runner_name: str) -> bool:
-    ws = get_signup_worksheet()
-    rows = ws.get_all_values()
-    target = normalize_name(runner_name)
-
-    for row in rows:
-        name_in_a = safe_cell(row, 0)   # A
-        allowed_in_i = safe_cell(row, 8)  # I
-
-        if not name_in_a:
-            continue
-
-        if normalize_name(name_in_a) == target:
-            return allowed_in_i.lower() == "ja"
-
-    return False
+    raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
 
 
 def get_quali_seed(ws, quali_number: int) -> str:
@@ -164,7 +132,7 @@ def find_existing_runner_row(ws, runner_name: str):
 
     for row_idx in range(START_ROW, len(all_values) + 1):
         row = all_values[row_idx - 1]
-        name_in_b = safe_cell(row, 1)  # B
+        name_in_b = safe_cell(row, 1)
         if name_in_b.lower() == runner_name.lower():
             return row_idx
 
@@ -180,7 +148,7 @@ def find_first_free_row(ws):
             return row_idx
 
         row = all_values[row_idx - 1]
-        name_in_b = safe_cell(row, 1)  # B
+        name_in_b = safe_cell(row, 1)
         if not name_in_b:
             return row_idx
 
@@ -212,10 +180,10 @@ def read_runner_status(ws, runner_name: str) -> dict:
 
     row = ws.row_values(row_idx)
 
-    q1_async = safe_cell(row, 3)   # D
-    q1_time = safe_cell(row, 4)    # E
-    q2_async = safe_cell(row, 5)   # F
-    q2_time = safe_cell(row, 6)    # G
+    q1_async = safe_cell(row, 3)
+    q1_time = safe_cell(row, 4)
+    q2_async = safe_cell(row, 5)
+    q2_time = safe_cell(row, 6)
 
     return {
         "row": row_idx,
@@ -247,16 +215,16 @@ def get_quali_results(ws, quali_number: int):
 
     for row_idx in range(START_ROW, len(all_values) + 1):
         row = all_values[row_idx - 1]
-        runner_name = safe_cell(row, 1)  # B
+        runner_name = safe_cell(row, 1)
         if not runner_name:
             continue
 
         if quali_number == 1:
-            async_value = safe_cell(row, 3)  # D
-            time_value = safe_cell(row, 4)   # E
+            async_value = safe_cell(row, 3)
+            time_value = safe_cell(row, 4)
         elif quali_number == 2:
-            async_value = safe_cell(row, 5)  # F
-            time_value = safe_cell(row, 6)   # G
+            async_value = safe_cell(row, 5)
+            time_value = safe_cell(row, 6)
         else:
             raise ValueError("Ungültige Quali-Nummer.")
 
@@ -287,14 +255,14 @@ def get_overall_results(ws):
 
     for row_idx in range(START_ROW, len(all_values) + 1):
         row = all_values[row_idx - 1]
-        runner_name = safe_cell(row, 1)  # B
+        runner_name = safe_cell(row, 1)
         if not runner_name:
             continue
 
-        q1_async = safe_cell(row, 3)  # D
-        q1_time = safe_cell(row, 4)   # E
-        q2_async = safe_cell(row, 5)  # F
-        q2_time = safe_cell(row, 6)   # G
+        q1_async = safe_cell(row, 3)
+        q1_time = safe_cell(row, 4)
+        q2_async = safe_cell(row, 5)
+        q2_time = safe_cell(row, 6)
 
         q1_seconds = safe_time_to_seconds(q1_time)
         q2_seconds = safe_time_to_seconds(q2_time)
@@ -317,6 +285,89 @@ def get_overall_stats_for_runner(ws, runner_name: str):
             break
 
     return total_completed, rank
+
+
+def get_async_open_entries_for_runner(ws, runner_name: str):
+    rows = ws.get_all_values()
+    target = runner_name.strip().lower()
+    entries = []
+
+    for row_idx, row in enumerate(rows[1:], start=2):
+        p1 = safe_cell(row, 1)
+        vod1 = safe_cell(row, 3)
+        time1 = safe_cell(row, 4)
+        p2 = safe_cell(row, 5)
+        vod2 = safe_cell(row, 6)
+        time2 = safe_cell(row, 7)
+        seed = safe_cell(row, 8)
+        art = safe_cell(row, 9)
+        source_row = safe_cell(row, 10)
+        div = safe_cell(row, 11)
+        mode = safe_cell(row, 12)
+
+        if not seed:
+            continue
+
+        side = None
+        if p1.lower() == target and not vod1 and not time1:
+            side = 1
+        elif p2.lower() == target and not vod2 and not time2:
+            side = 2
+
+        if side is None:
+            continue
+
+        entries.append({
+            "sheet_row": row_idx,
+            "player1": p1,
+            "player2": p2,
+            "seed": seed,
+            "art": art,
+            "source_row_index": int(source_row) if source_row.isdigit() else None,
+            "division": div,
+            "mode": mode,
+            "side": side,
+        })
+
+    return entries
+
+
+def write_async_runner_result(ws, sheet_row: int, side: int, vod_link: str, final_time: str):
+    if side == 1:
+        ws.update(f"D{sheet_row}:E{sheet_row}", [[vod_link, final_time]])
+    elif side == 2:
+        ws.update(f"G{sheet_row}:H{sheet_row}", [[vod_link, final_time]])
+    else:
+        raise ValueError("Ungültige Seite.")
+
+
+def read_async_entry(ws, sheet_row: int) -> dict:
+    row = ws.row_values(sheet_row)
+    return {
+        "player1": safe_cell(row, 1),
+        "vod1": safe_cell(row, 3),
+        "time1": safe_cell(row, 4),
+        "player2": safe_cell(row, 5),
+        "vod2": safe_cell(row, 6),
+        "time2": safe_cell(row, 7),
+        "seed": safe_cell(row, 8),
+        "art": safe_cell(row, 9),
+        "source_row_index": safe_cell(row, 10),
+        "division": safe_cell(row, 11),
+        "mode": safe_cell(row, 12),
+    }
+
+
+def build_league_async_result(time1: str, time2: str) -> str:
+    sec1 = parse_hms_to_seconds(time1)
+    sec2 = parse_hms_to_seconds(time2)
+    diff = abs(sec1 - sec2)
+
+    if diff < 5:
+        return "1:1"
+    if sec1 < sec2:
+        return "2:0"
+    return "0:2"
 
 
 # =========================================================
@@ -354,8 +405,33 @@ class QualiRunState:
         return False
 
 
+class AsyncRaceState:
+    def __init__(self, user_id: int, runner_name: str, entry: dict):
+        self.user_id = user_id
+        self.runner_name = runner_name
+        self.entry = entry
+
+        self.created_at = dt.utcnow()
+        self.seed_shown_at: dt | None = None
+        self.started_at: dt | None = None
+        self.finished_at: dt | None = None
+        self.locked_final_time: str | None = None
+        self.finished = False
+        self.cancelled = False
+
+        self.message: discord.Message | None = None
+
+    def measured_time(self) -> str:
+        if not self.started_at:
+            return "00:00:00"
+        seconds = int((dt.utcnow() - self.started_at).total_seconds())
+        if seconds < 0:
+            seconds = 0
+        return format_seconds_to_hms(seconds)
+
+
 # =========================================================
-# MODAL
+# MODALS
 # =========================================================
 class QualiSubmitModal(discord.ui.Modal):
     def __init__(self, cog, state: QualiRunState, forfeit: bool = False):
@@ -365,18 +441,17 @@ class QualiSubmitModal(discord.ui.Modal):
         self.forfeit = forfeit
 
         if not forfeit:
-            shown_time = state.locked_final_time or "Unbekannt"
             self.time_info = discord.ui.TextInput(
                 label="Erreichte Zeit",
-                default=shown_time,
-                required=True
+                default=state.locked_final_time or "Unbekannt",
+                required=True,
             )
             self.add_item(self.time_info)
 
         self.vod_input = discord.ui.TextInput(
             label="VoD-Link" if not forfeit else "Kommentar (optional)",
             placeholder="https://..." if not forfeit else "Optional",
-            required=not forfeit
+            required=not forfeit,
         )
         self.add_item(self.vod_input)
 
@@ -385,10 +460,7 @@ class QualiSubmitModal(discord.ui.Modal):
             await interaction.response.defer(ephemeral=True)
 
             if self.state.cancelled:
-                await interaction.followup.send(
-                    "Diese Quali wurde bereits abgebrochen.",
-                    ephemeral=True
-                )
+                await interaction.followup.send("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
                 return
 
             runner_name = self.state.runner_name
@@ -402,11 +474,10 @@ class QualiSubmitModal(discord.ui.Modal):
                 if not vod_link:
                     await interaction.followup.send("VoD-Link ist Pflicht.", ephemeral=True)
                     return
-
                 if not self.state.locked_final_time:
                     await interaction.followup.send(
                         "Die Zielzeit konnte nicht eindeutig gespeichert werden. Bitte erneut versuchen.",
-                        ephemeral=True
+                        ephemeral=True,
                     )
                     return
 
@@ -416,17 +487,11 @@ class QualiSubmitModal(discord.ui.Modal):
             status = await asyncio.to_thread(read_runner_status, ws, runner_name)
 
             if self.state.quali_number == 1 and status["q1_done"]:
-                await interaction.followup.send(
-                    "Quali 1 ist für dich bereits eingetragen.",
-                    ephemeral=True
-                )
+                await interaction.followup.send("Quali 1 ist für dich bereits eingetragen.", ephemeral=True)
                 return
 
             if self.state.quali_number == 2 and status["q2_done"]:
-                await interaction.followup.send(
-                    "Quali 2 ist für dich bereits eingetragen.",
-                    ephemeral=True
-                )
+                await interaction.followup.send("Quali 2 ist für dich bereits eingetragen.", ephemeral=True)
                 return
 
             row_idx = await asyncio.to_thread(
@@ -435,14 +500,14 @@ class QualiSubmitModal(discord.ui.Modal):
                 runner_name,
                 self.state.quali_number,
                 async_value,
-                final_time
+                final_time,
             )
 
             total_played, rank = await asyncio.to_thread(
                 get_quali_stats_for_runner,
                 ws,
                 runner_name,
-                self.state.quali_number
+                self.state.quali_number,
             )
 
             self.state.finished = True
@@ -450,11 +515,7 @@ class QualiSubmitModal(discord.ui.Modal):
             self.cog.stop_state_tasks(self.state)
             self.cog.active_runs.pop(self.state.user_id, None)
 
-            await self.cog.send_quali_log(
-                runner_name,
-                self.state.quali_number,
-                final_time
-            )
+            await self.cog.send_quali_log(runner_name, self.state.quali_number, final_time)
 
             place_text = f"Platz: **{rank}/{total_played}**" if rank is not None else "Platz aktuell nicht verfügbar."
 
@@ -467,7 +528,7 @@ class QualiSubmitModal(discord.ui.Modal):
                 f"Zeit: **{final_time}**\n"
                 f"Bereits gespielt: **{total_played}**\n"
                 f"{place_text}",
-                ephemeral=True
+                ephemeral=True,
             )
 
             if self.state.message:
@@ -480,7 +541,7 @@ class QualiSubmitModal(discord.ui.Modal):
                             f"Bereits gespielt: **{total_played}**\n"
                             f"{place_text}"
                         ),
-                        view=None
+                        view=None,
                     )
                 except Exception:
                     pass
@@ -488,17 +549,120 @@ class QualiSubmitModal(discord.ui.Modal):
         except Exception as e:
             try:
                 if interaction.response.is_done():
-                    await interaction.followup.send(
-                        f"Fehler beim Speichern: {e}",
-                        ephemeral=True
-                    )
+                    await interaction.followup.send(f"Fehler beim Speichern: {e}", ephemeral=True)
                 else:
-                    await interaction.response.send_message(
-                        f"Fehler beim Speichern: {e}",
-                        ephemeral=True
-                    )
+                    await interaction.response.send_message(f"Fehler beim Speichern: {e}", ephemeral=True)
             except Exception:
                 pass
+
+
+class AsyncSubmitModal(discord.ui.Modal):
+    def __init__(self, cog, state: AsyncRaceState):
+        super().__init__(title="Async Ergebnis")
+        self.cog = cog
+        self.state = state
+
+        self.vod_input = discord.ui.TextInput(
+            label="VoD-Link",
+            placeholder="https://...",
+            required=True,
+        )
+        self.add_item(self.vod_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            ws = await asyncio.to_thread(get_async_worksheet)
+
+            vod_link = str(self.vod_input.value).strip()
+            if not vod_link:
+                await interaction.edit_original_response(content="VoD-Link ist Pflicht.")
+                return
+
+            final_time = self.state.locked_final_time
+            if not final_time:
+                await interaction.edit_original_response(content="Keine Zielzeit vorhanden.")
+                return
+
+            await asyncio.to_thread(
+                write_async_runner_result,
+                ws,
+                self.state.entry["sheet_row"],
+                self.state.entry["side"],
+                vod_link,
+                final_time,
+            )
+
+            updated = await asyncio.to_thread(read_async_entry, ws, self.state.entry["sheet_row"])
+
+            result_info = ""
+            if updated["time1"] and updated["time2"] and updated["art"].lower() == "league":
+                if not updated["source_row_index"].isdigit():
+                    result_info = "\nBeide Zeiten vorhanden, aber Original-Zeile fehlt."
+                else:
+                    league_result = build_league_async_result(updated["time1"], updated["time2"])
+                    timestamp = now_berlin_str()
+                    division = updated["division"] or self.state.entry["division"] or ""
+                    source_row_index = int(updated["source_row_index"])
+                    mode = updated["mode"] or self.state.entry["mode"] or "Async"
+
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        write_league_result,
+                        source_row_index,
+                        mode,
+                        league_result,
+                        "Async",
+                        "Async",
+                        timestamp,
+                        division,
+                    )
+
+                    post_text = league_result_post_text(
+                        division,
+                        timestamp,
+                        updated["player1"],
+                        updated["player2"],
+                        league_result,
+                        mode,
+                        "Async",
+                    )
+                    if interaction.guild is not None:
+                        await send_result_post(interaction.guild, post_text)
+
+                    result_info = (
+                        "\n\nLeague-Ergebnis wurde übernommen:\n"
+                        f"**{updated['player1']} vs. {updated['player2']} → {league_result}**"
+                    )
+
+            self.state.finished = True
+            self.state.finished_at = dt.utcnow()
+
+            await interaction.edit_original_response(
+                content=(
+                    "Async-Ergebnis gespeichert.\n"
+                    f"Spiel: **{updated['player1']} vs. {updated['player2']}**\n"
+                    f"Zeit: **{final_time}**{result_info}"
+                )
+            )
+
+            if self.state.message:
+                try:
+                    await self.state.message.edit(
+                        content=(
+                            f"**Async abgeschlossen**\n"
+                            f"Spiel: **{updated['player1']} vs. {updated['player2']}**\n"
+                            f"Zeit: **{final_time}**"
+                        ),
+                        view=None,
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            await interaction.edit_original_response(content=f"Fehler beim Speichern: {e}")
 
 
 # =========================================================
@@ -555,7 +719,6 @@ class QualiRunningView(discord.ui.View):
         if self.state.finished:
             await interaction.response.send_message("Diese Quali ist bereits abgeschlossen.", ephemeral=True)
             return
-
         if self.state.cancelled:
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
@@ -571,7 +734,6 @@ class QualiRunningView(discord.ui.View):
         if self.state.finished:
             await interaction.response.send_message("Diese Quali ist bereits abgeschlossen.", ephemeral=True)
             return
-
         if self.state.cancelled:
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
@@ -601,19 +763,71 @@ class QualiStandView(discord.ui.View):
         await self.cog.send_overall_stand(interaction)
 
 
-# =========================================================
-# HELFER FÜR PLAYER.PY
-# =========================================================
-async def open_quali_from_player(interaction: discord.Interaction):
-    cog = interaction.client.get_cog("QualiCog")
-    if cog is None or not isinstance(cog, QualiCog):
-        await interaction.response.send_message(
-            "Qualifikation ist aktuell nicht verfügbar.",
-            ephemeral=True
-        )
-        return
+class AsyncSelectView(discord.ui.View):
+    def __init__(self, cog, runner_name: str, entries: list[dict]):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.runner_name = runner_name
+        self.add_item(AsyncEntrySelect(entries, cog))
 
-    await cog.start_quali_flow(interaction, edit_existing=True)
+
+class AsyncEntrySelect(discord.ui.Select):
+    def __init__(self, entries: list[dict], cog):
+        self.cog = cog
+        self.entry_map: dict[str, dict] = {}
+        options = []
+
+        for idx, entry in enumerate(entries):
+            value = str(idx)
+            self.entry_map[value] = entry
+            label = f"{entry['player1']} vs. {entry['player2']}"
+            desc = f"{entry['art']} | {entry['division']} | {entry['mode']}"[:100]
+            options.append(discord.SelectOption(label=label[:100], description=desc, value=value))
+
+        super().__init__(placeholder="Async auswählen", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        entry = self.entry_map[self.values[0]]
+        await self.cog.open_async_entry(interaction, entry)
+
+
+class AsyncSeedView(discord.ui.View):
+    def __init__(self, cog, state: AsyncRaceState):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.state = state
+
+    @discord.ui.button(label="Seed öffnen", style=discord.ButtonStyle.success)
+    async def seed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.reveal_async_seed(interaction, self.state)
+
+
+class AsyncStartView(discord.ui.View):
+    def __init__(self, cog, state: AsyncRaceState):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.state = state
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.start_async_race(interaction, self.state)
+
+
+class AsyncRunningView(discord.ui.View):
+    def __init__(self, cog, state: AsyncRaceState):
+        super().__init__(timeout=7200)
+        self.cog = cog
+        self.state = state
+
+    @discord.ui.button(label="Finish", style=discord.ButtonStyle.success)
+    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.state.finished:
+            await interaction.response.send_message("Dieses Async ist bereits abgeschlossen.", ephemeral=True)
+            return
+
+        self.state.locked_final_time = self.state.measured_time()
+        modal = AsyncSubmitModal(self.cog, self.state)
+        await interaction.response.send_modal(modal)
 
 
 # =========================================================
@@ -651,49 +865,27 @@ class QualiCog(commands.Cog):
             self.stop_state_tasks(active)
             self.active_runs.pop(user_id, None)
 
-    async def start_quali_flow(self, interaction: discord.Interaction, edit_existing: bool = False):
-        if not edit_existing:
-            await interaction.response.defer(ephemeral=True)
-        else:
-            await interaction.response.defer()
+    @app_commands.command(name="quali", description="Startet die Qualifikationsauswahl.")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def quali(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
 
         try:
             self.cleanup_stale_run(interaction.user.id)
 
             runner_name = get_runner_name(interaction)
-
-            is_eligible = await asyncio.to_thread(is_runner_quali_eligible, runner_name)
-            if not is_eligible:
-                if edit_existing:
-                    await interaction.edit_original_response(
-                        content=NOT_ELIGIBLE_TEXT,
-                        view=None
-                    )
-                else:
-                    await interaction.followup.send(
-                        NOT_ELIGIBLE_TEXT,
-                        ephemeral=True
-                    )
-                return
-
             ws = await asyncio.to_thread(get_quali_worksheet)
             status = await asyncio.to_thread(read_runner_status, ws, runner_name)
 
             active = self.active_runs.get(interaction.user.id)
             if active and not active.finished:
-                text = f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **/qualireset**."
-                if edit_existing:
-                    await interaction.edit_original_response(content=text, view=None)
-                else:
-                    await interaction.followup.send(text, ephemeral=True)
+                await interaction.followup.send(
+                    f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **/qualireset**.",
+                    ephemeral=True,
+                )
                 return
 
-            view = QualiSelectView(
-                cog=self,
-                runner_name=runner_name,
-                q1_disabled=status["q1_done"],
-                q2_disabled=status["q2_done"]
-            )
+            view = QualiSelectView(self, runner_name, status["q1_done"], status["q2_done"])
 
             text = (
                 f"**Qualifikationsauswahl für {runner_name}**\n\n"
@@ -703,55 +895,24 @@ class QualiCog(commands.Cog):
                 f"Nutze für dich selbst einen eigenen Timer oder orientiere dich an deiner Aufnahme."
             )
 
-            if edit_existing:
-                await interaction.edit_original_response(content=text, view=view)
-            else:
-                await interaction.followup.send(text, view=view, ephemeral=True)
+            await interaction.followup.send(text, view=view, ephemeral=True)
 
         except Exception as e:
-            if edit_existing:
-                await interaction.edit_original_response(
-                    content=f"Fehler bei Qualifikation: {e}",
-                    view=None
-                )
-            else:
-                await interaction.followup.send(
-                    f"Fehler bei /quali: {e}",
-                    ephemeral=True
-                )
+            await interaction.followup.send(f"Fehler bei /quali: {e}", ephemeral=True)
 
-    @app_commands.command(
-        name="quali",
-        description="Startet die Qualifikationsauswahl."
-    )
-    @app_commands.guilds(discord.Object(id=GUILD_ID))
-    async def quali(self, interaction: discord.Interaction):
-        await self.start_quali_flow(interaction, edit_existing=False)
-
-    @app_commands.command(
-        name="qualistand",
-        description="Zeigt deinen aktuellen Stand in Quali 1, Quali 2 oder Gesamt."
-    )
+    @app_commands.command(name="qualistand", description="Zeigt deinen aktuellen Stand in Quali 1, Quali 2 oder Gesamt.")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def qualistand(self, interaction: discord.Interaction):
         view = QualiStandView(self)
-        await interaction.response.send_message(
-            "**Welchen Stand möchtest du sehen?**",
-            view=view,
-            ephemeral=True
-        )
+        await interaction.response.send_message("**Welchen Stand möchtest du sehen?**", view=view, ephemeral=True)
 
-    @app_commands.command(
-        name="qualireset",
-        description="Setzt eine hängende Quali zurück."
-    )
+    @app_commands.command(name="qualireset", description="Setzt eine hängende Quali zurück.")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.checks.has_permissions(administrator=True)
     async def qualireset(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
         state = self.active_runs.pop(interaction.user.id, None)
-
         if not state:
             await interaction.followup.send("Keine aktive Quali gefunden.", ephemeral=True)
             return
@@ -762,10 +923,7 @@ class QualiCog(commands.Cog):
 
         if state.message:
             try:
-                await state.message.edit(
-                    content="**Quali abgebrochen und zurückgesetzt.**",
-                    view=None
-                )
+                await state.message.edit(content="**Quali abgebrochen und zurückgesetzt.**", view=None)
             except Exception:
                 pass
 
@@ -775,63 +933,34 @@ class QualiCog(commands.Cog):
     async def qualireset_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.errors.MissingPermissions):
             if interaction.response.is_done():
-                await interaction.followup.send(
-                    "Diesen Command dürfen nur Admins ausführen.",
-                    ephemeral=True
-                )
+                await interaction.followup.send("Diesen Command dürfen nur Admins ausführen.", ephemeral=True)
             else:
-                await interaction.response.send_message(
-                    "Diesen Command dürfen nur Admins ausführen.",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("Diesen Command dürfen nur Admins ausführen.", ephemeral=True)
             return
 
         if interaction.response.is_done():
-            await interaction.followup.send(
-                f"Fehler bei /qualireset: {error}",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"Fehler bei /qualireset: {error}", ephemeral=True)
         else:
-            await interaction.response.send_message(
-                f"Fehler bei /qualireset: {error}",
-                ephemeral=True
-            )
+            await interaction.response.send_message(f"Fehler bei /qualireset: {error}", ephemeral=True)
 
     async def send_quali_stand(self, interaction: discord.Interaction, quali_number: int):
         await interaction.response.defer(ephemeral=True)
-
         try:
             ws = await asyncio.to_thread(get_quali_worksheet)
-
             if self.is_admin_user(interaction):
                 results = await asyncio.to_thread(get_quali_results, ws, quali_number)
-
                 if not results:
                     text = f"**Stand Quali {quali_number}**\n\nNoch keine Ergebnisse vorhanden."
                 else:
-                    lines = [
-                        f"**Stand Quali {quali_number}**",
-                        "",
-                        f"Bereits gespielt: **{len(results)}**",
-                        ""
-                    ]
-
+                    lines = [f"**Stand Quali {quali_number}**", "", f"Bereits gespielt: **{len(results)}**", ""]
                     for idx, (name, seconds) in enumerate(results, start=1):
                         lines.append(f"**{idx}.** {name} — `{format_seconds_to_hms(seconds)}`")
-
                     text = "\n".join(lines)
-
                 await interaction.followup.send(text, ephemeral=True)
                 return
 
             runner_name = get_runner_name(interaction)
-            total_played, rank = await asyncio.to_thread(
-                get_quali_stats_for_runner,
-                ws,
-                runner_name,
-                quali_number
-            )
-
+            total_played, rank = await asyncio.to_thread(get_quali_stats_for_runner, ws, runner_name, quali_number)
             if rank is None:
                 text = (
                     f"**Stand Quali {quali_number}**\n\n"
@@ -844,49 +973,28 @@ class QualiCog(commands.Cog):
                     f"Bereits gespielt: **{total_played}**\n"
                     f"Dein aktueller Platz: **{rank}/{total_played}**"
                 )
-
             await interaction.followup.send(text, ephemeral=True)
-
         except Exception as e:
-            await interaction.followup.send(
-                f"Fehler bei Stand Quali {quali_number}: {e}",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"Fehler bei Stand Quali {quali_number}: {e}", ephemeral=True)
 
     async def send_overall_stand(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-
         try:
             ws = await asyncio.to_thread(get_quali_worksheet)
-
             if self.is_admin_user(interaction):
                 results = await asyncio.to_thread(get_overall_results, ws)
-
                 if not results:
                     text = "**Gesamtstand**\n\nNoch keine vollständigen Ergebnisse vorhanden."
                 else:
-                    lines = [
-                        "**Gesamtstand**",
-                        "",
-                        f"Beide Qualis abgeschlossen: **{len(results)}**",
-                        ""
-                    ]
-
+                    lines = ["**Gesamtstand**", "", f"Beide Qualis abgeschlossen: **{len(results)}**", ""]
                     for idx, (name, total_seconds) in enumerate(results, start=1):
                         lines.append(f"**{idx}.** {name} — `{format_seconds_to_hms(total_seconds)}`")
-
                     text = "\n".join(lines)
-
                 await interaction.followup.send(text, ephemeral=True)
                 return
 
             runner_name = get_runner_name(interaction)
-            total_completed, rank = await asyncio.to_thread(
-                get_overall_stats_for_runner,
-                ws,
-                runner_name
-            )
-
+            total_completed, rank = await asyncio.to_thread(get_overall_stats_for_runner, ws, runner_name)
             if rank is None:
                 text = (
                     f"**Gesamtstand**\n\n"
@@ -899,21 +1007,14 @@ class QualiCog(commands.Cog):
                     f"Beide Qualis abgeschlossen: **{total_completed}**\n"
                     f"Dein aktueller Platz: **{rank}/{total_completed}**"
                 )
-
             await interaction.followup.send(text, ephemeral=True)
-
         except Exception as e:
-            await interaction.followup.send(
-                f"Fehler beim Gesamtstand: {e}",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"Fehler beim Gesamtstand: {e}", ephemeral=True)
 
     async def open_quali_info(self, interaction: discord.Interaction, quali_number: int):
         await interaction.response.defer(ephemeral=True)
-
         try:
             self.cleanup_stale_run(interaction.user.id)
-
             runner_name = get_runner_name(interaction)
             ws = await asyncio.to_thread(get_quali_worksheet)
             status = await asyncio.to_thread(read_runner_status, ws, runner_name)
@@ -921,7 +1022,6 @@ class QualiCog(commands.Cog):
             if quali_number == 1 and status["q1_done"]:
                 await interaction.followup.send("Quali 1 ist für dich bereits eingetragen.", ephemeral=True)
                 return
-
             if quali_number == 2 and status["q2_done"]:
                 await interaction.followup.send("Quali 2 ist für dich bereits eingetragen.", ephemeral=True)
                 return
@@ -930,18 +1030,12 @@ class QualiCog(commands.Cog):
             if active and not active.finished:
                 await interaction.followup.send(
                     f"Du hast bereits eine laufende Quali {active.quali_number}. Nutze **/qualireset**.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
                 return
 
             seed_url = await asyncio.to_thread(get_quali_seed, ws, quali_number)
-
-            state = QualiRunState(
-                user_id=interaction.user.id,
-                runner_name=runner_name,
-                quali_number=quali_number,
-                seed_url=seed_url
-            )
+            state = QualiRunState(interaction.user.id, runner_name, quali_number, seed_url)
             self.active_runs[interaction.user.id] = state
 
             hint_text = (
@@ -957,36 +1051,27 @@ class QualiCog(commands.Cog):
             )
 
             view = QualiSeedView(self, state)
-
             await interaction.followup.send(hint_text, view=view, ephemeral=True)
             state.message = await interaction.original_response()
-
         except Exception as e:
-            await interaction.followup.send(
-                f"Fehler beim Öffnen der Quali: {e}",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"Fehler beim Öffnen der Quali: {e}", ephemeral=True)
 
     async def reveal_seed(self, interaction: discord.Interaction, state: QualiRunState):
         if state.finished:
             await interaction.response.send_message("Diese Quali ist bereits abgeschlossen.", ephemeral=True)
             return
-
         if state.cancelled:
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
-
         if state.seed_shown_at is not None:
             await interaction.response.send_message("Der Seed wurde bereits geöffnet.", ephemeral=True)
             return
-
         if interaction.user.id != state.user_id:
             await interaction.response.send_message("Das ist nicht deine Quali.", ephemeral=True)
             return
 
         state.seed_shown_at = dt.utcnow()
         deadline = state.seed_shown_at + timedelta(minutes=5)
-
         content = (
             f"**Quali {state.quali_number} – Seed geöffnet**\n\n"
             f"Seed-Link: {state.seed_url}\n\n"
@@ -996,46 +1081,34 @@ class QualiCog(commands.Cog):
             f"**Wichtig:** Sobald du auf **Start** drückst, läuft deine Zeit sofort los.\n"
             f"Während des Races gibt es **keinen Live-Timer im Discord**."
         )
-
         view = QualiStartView(self, state)
-
         await interaction.response.edit_message(content=content, view=view)
         state.message = await interaction.original_response()
-
         state.timeout_task = asyncio.create_task(self.seed_start_timeout(state))
 
     async def start_race(self, interaction: discord.Interaction, state: QualiRunState):
         if state.finished:
             await interaction.response.send_message("Diese Quali ist bereits abgeschlossen.", ephemeral=True)
             return
-
         if state.cancelled:
             await interaction.response.send_message("Diese Quali wurde bereits abgebrochen.", ephemeral=True)
             return
-
         if interaction.user.id != state.user_id:
             await interaction.response.send_message("Das ist nicht deine Quali.", ephemeral=True)
             return
-
         if state.seed_shown_at is None:
             await interaction.response.send_message("Du musst zuerst den Seed öffnen.", ephemeral=True)
             return
-
         if state.started_at is not None:
             await interaction.response.send_message("Das Race wurde bereits gestartet.", ephemeral=True)
             return
-
         limit = state.seed_shown_at + timedelta(minutes=5)
         if dt.utcnow() > limit:
-            await interaction.response.send_message(
-                "Das Startfenster ist bereits abgelaufen. Du erhältst ein FF.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("Das Startfenster ist bereits abgelaufen. Du erhältst ein FF.", ephemeral=True)
             return
 
         state.started_at = dt.utcnow()
         state.locked_final_time = None
-
         if state.timeout_task:
             state.timeout_task.cancel()
             state.timeout_task = None
@@ -1048,16 +1121,13 @@ class QualiCog(commands.Cog):
             f"Nutze deinen eigenen Timer bzw. deine Aufnahme als Referenz.\n\n"
             f"Drücke am Ende **Finish** oder **Forfeit**."
         )
-
         view = QualiRunningView(self, state)
-
         await interaction.response.edit_message(content=content, view=view)
         state.message = await interaction.original_response()
 
     async def seed_start_timeout(self, state: QualiRunState):
         try:
             await asyncio.sleep(300)
-
             if state.finished or state.cancelled or state.started_at is not None:
                 return
 
@@ -1067,26 +1137,12 @@ class QualiCog(commands.Cog):
             if state.quali_number == 1 and status["q1_done"]:
                 self.active_runs.pop(state.user_id, None)
                 return
-
             if state.quali_number == 2 and status["q2_done"]:
                 self.active_runs.pop(state.user_id, None)
                 return
 
-            await asyncio.to_thread(
-                write_quali_result,
-                ws,
-                state.runner_name,
-                state.quali_number,
-                "DNF",
-                "03:00:00"
-            )
-
-            total_played, rank = await asyncio.to_thread(
-                get_quali_stats_for_runner,
-                ws,
-                state.runner_name,
-                state.quali_number
-            )
+            await asyncio.to_thread(write_quali_result, ws, state.runner_name, state.quali_number, "DNF", "03:00:00")
+            total_played, rank = await asyncio.to_thread(get_quali_stats_for_runner, ws, state.runner_name, state.quali_number)
 
             state.finished = True
             state.finished_at = dt.utcnow()
@@ -1095,7 +1151,6 @@ class QualiCog(commands.Cog):
             self.active_runs.pop(state.user_id, None)
 
             place_text = f"Platz: **{rank}/{total_played}**" if rank is not None else "Platz aktuell nicht verfügbar."
-
             if state.message:
                 try:
                     await state.message.edit(
@@ -1106,21 +1161,103 @@ class QualiCog(commands.Cog):
                             f"Bereits gespielt: **{total_played}**\n"
                             f"{place_text}"
                         ),
-                        view=None
+                        view=None,
                     )
                 except Exception:
                     pass
-
         except asyncio.CancelledError:
             pass
         except Exception:
             pass
+
+    async def open_async_play_from_player(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            runner_name = get_runner_name(interaction)
+            ws = await asyncio.to_thread(get_async_worksheet)
+            entries = await asyncio.to_thread(get_async_open_entries_for_runner, ws, runner_name)
+
+            if not entries:
+                await interaction.edit_original_response(content="Für dich wurde kein offenes Async gefunden.")
+                return
+
+            view = AsyncSelectView(self, runner_name, entries)
+            await interaction.edit_original_response(content="**Async spielen**\nWähle dein offenes Async:", view=view)
+        except Exception as e:
+            await interaction.edit_original_response(content=f"Fehler beim Laden deiner Asyncs: {e}")
+
+    async def open_async_entry(self, interaction: discord.Interaction, entry: dict):
+        runner_name = get_runner_name(interaction)
+        state = AsyncRaceState(interaction.user.id, runner_name, entry)
+
+        text = (
+            f"**Async Race**\n\n"
+            f"Spiel: **{entry['player1']} vs. {entry['player2']}**\n"
+            f"Art: **{entry['art']}**\n"
+            f"Division: **{entry['division']}**\n"
+            f"Modus: **{entry['mode']}**\n\n"
+            f"Mit Klick auf **Seed öffnen** erhältst du den Async-Seed."
+        )
+        view = AsyncSeedView(self, state)
+        await interaction.response.edit_message(content=text, view=view)
+        state.message = await interaction.original_response()
+
+    async def reveal_async_seed(self, interaction: discord.Interaction, state: AsyncRaceState):
+        if interaction.user.id != state.user_id:
+            await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
+            return
+
+        state.seed_shown_at = dt.utcnow()
+        content = (
+            f"**Async Seed geöffnet**\n\n"
+            f"Spiel: **{state.entry['player1']} vs. {state.entry['player2']}**\n"
+            f"Seed-Link: {state.entry['seed']}\n\n"
+            f"Drücke **Start**, wenn du wirklich bereit bist."
+        )
+        view = AsyncStartView(self, state)
+        await interaction.response.edit_message(content=content, view=view)
+        state.message = await interaction.original_response()
+
+    async def start_async_race(self, interaction: discord.Interaction, state: AsyncRaceState):
+        if interaction.user.id != state.user_id:
+            await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
+            return
+
+        state.started_at = dt.utcnow()
+        content = (
+            f"**Async läuft**\n\n"
+            f"Spiel: **{state.entry['player1']} vs. {state.entry['player2']}**\n"
+            f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n\n"
+            f"Drücke am Ende **Finish**."
+        )
+        view = AsyncRunningView(self, state)
+        await interaction.response.edit_message(content=content, view=view)
+        state.message = await interaction.original_response()
 
     def stop_state_tasks(self, state: QualiRunState):
         task = state.timeout_task
         if task and not task.done():
             task.cancel()
         state.timeout_task = None
+
+
+# =========================================================
+# ÖFFNER FÜR PLAYER.PY
+# =========================================================
+async def open_quali_from_player(interaction: discord.Interaction):
+    cog = interaction.client.get_cog("QualiCog")
+    if cog is None:
+        await interaction.response.send_message("Qualifikation ist aktuell nicht verfügbar.", ephemeral=True)
+        return
+    await cog.quali(interaction)
+
+
+async def open_async_play_from_player(interaction: discord.Interaction):
+    cog = interaction.client.get_cog("QualiCog")
+    if cog is None:
+        await interaction.response.send_message("Async spielen ist aktuell nicht verfügbar.", ephemeral=True)
+        return
+    await cog.open_async_play_from_player(interaction)
 
 
 # =========================================================
