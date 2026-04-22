@@ -4,6 +4,14 @@ from asyncplan import open_async_request_from_player
 from matchcenter import LeagueScheduleView, CupScheduleView
 
 
+def menu_embed(title: str, description: str) -> discord.Embed:
+    return discord.Embed(
+        title=title,
+        description=description,
+        color=0x00FFCC,
+    )
+
+
 # =========================================================
 # BASIS
 # =========================================================
@@ -28,30 +36,32 @@ class PlanBaseView(discord.ui.View):
 class BackToPlanFromLeagueButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
-            label="Zurück",
-            style=discord.ButtonStyle.danger,
+            label="◀ Zurück",
+            style=discord.ButtonStyle.secondary,
             row=4,
         )
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content="**Spiel planen**\nWähle einen Bereich:",
+            embed=menu_embed("📅 Spiel planen", "Wähle einen Bereich."),
             view=PlanMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 class BackToPlanFromCupButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
-            label="Zurück",
-            style=discord.ButtonStyle.danger,
+            label="◀ Zurück",
+            style=discord.ButtonStyle.secondary,
             row=3,
         )
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content="**Spiel planen**\nWähle einen Bereich:",
+            embed=menu_embed("📅 Spiel planen", "Wähle einen Bereich."),
             view=PlanMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
@@ -63,7 +73,7 @@ class PlayerLeagueScheduleView(LeagueScheduleView):
         super().__init__(cog=None, author_id=author_id)
 
         old_back = None
-        for item in self.children:
+        for item in list(self.children):
             if isinstance(item, discord.ui.Button) and item.label == "Zurück":
                 old_back = item
                 break
@@ -79,7 +89,7 @@ class PlayerCupScheduleView(CupScheduleView):
         super().__init__(cog=None, author_id=author_id)
 
         old_back = None
-        for item in self.children:
+        for item in list(self.children):
             if isinstance(item, discord.ui.Button) and item.label == "Zurück":
                 old_back = item
                 break
@@ -88,22 +98,6 @@ class PlayerCupScheduleView(CupScheduleView):
             self.remove_item(old_back)
 
         self.add_item(BackToPlanFromCupButton())
-
-
-# =========================================================
-# PLATZHALTER
-# =========================================================
-class PlanPlaceholderView(PlanBaseView):
-    def __init__(self, owner_id: int, back_content: str):
-        super().__init__(owner_id)
-        self.back_content = back_content
-
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content=self.back_content,
-            view=PlanMenuView(owner_id=interaction.user.id),
-        )
 
 
 # =========================================================
@@ -121,6 +115,7 @@ class PlanMenuView(PlanBaseView):
         await interaction.response.edit_message(
             content=view.render_summary(),
             view=view,
+            embed=None,
         )
 
     @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
@@ -131,17 +126,19 @@ class PlanMenuView(PlanBaseView):
         await interaction.response.edit_message(
             content=view.render_summary(),
             view=view,
+            embed=None,
         )
 
     @discord.ui.button(label="Async beantragen", style=discord.ButtonStyle.success, row=1)
     async def async_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await open_async_request_from_player(interaction)
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=2)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         from player import PlayerMenuView
 
         await interaction.response.edit_message(
-            content="**Spielermenü**\nWähle einen Bereich:",
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
             view=PlayerMenuView(owner_id=interaction.user.id),
+            content=None,
         )
