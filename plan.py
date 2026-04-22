@@ -3,8 +3,11 @@ import discord
 from asyncplan import open_async_request_from_player
 
 
+from matchcenter import LeagueScheduleView, CupScheduleView
+
+
 class PlanBaseView(discord.ui.View):
-    def __init__(self, owner_id: int, timeout: float = 180):
+    def __init__(self, owner_id: int, timeout: float = 1800):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
 
@@ -24,30 +27,37 @@ class PlanMenuView(PlanBaseView):
 
     @discord.ui.button(label="League", style=discord.ButtonStyle.primary, row=0)
     async def league_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content=(
-                "**Spiel planen → League**\n"
-                "Der Async-Button ist wieder aktiv.\n"
-                "Den League-Termin-Flow kannst du jetzt separat wieder anbinden, falls du ihn bereits in `plan.py` erweitert hast."
-            ),
-            view=PlanPlaceholderView(
-                owner_id=interaction.user.id,
-                back_content="**Spiel planen**\nWähle einen Bereich:",
-            ),
-        )
+        cog = interaction.client.get_cog("MatchCenterCog")
+        if cog is None:
+            await interaction.response.edit_message(
+                content="League-Terminplanung ist aktuell nicht verfügbar.",
+                view=PlanPlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_content="**Spiel planen**\nWähle einen Bereich:",
+                ),
+            )
+            return
+
+        view = LeagueScheduleView(cog, interaction.user.id)
+        view.state.kind = "Termin League"
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
     @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
     async def cup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content=(
-                "**Spiel planen → Cup**\n"
-                "Den Cup-Termin-Flow kannst du jetzt separat wieder anbinden, falls du ihn bereits in `plan.py` erweitert hast."
-            ),
-            view=PlanPlaceholderView(
-                owner_id=interaction.user.id,
-                back_content="**Spiel planen**\nWähle einen Bereich:",
-            ),
-        )
+        cog = interaction.client.get_cog("MatchCenterCog")
+        if cog is None:
+            await interaction.response.edit_message(
+                content="Cup-Terminplanung ist aktuell nicht verfügbar.",
+                view=PlanPlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_content="**Spiel planen**\nWähle einen Bereich:",
+                ),
+            )
+            return
+
+        view = CupScheduleView(cog, interaction.user.id)
+        view.state.kind = "Termin Cup"
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
 
     @discord.ui.button(label="Async beantragen", style=discord.ButtonStyle.success, row=1)
     async def async_button(self, interaction: discord.Interaction, button: discord.ui.Button):
