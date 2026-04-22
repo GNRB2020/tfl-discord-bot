@@ -21,8 +21,8 @@ ADMIN_LOG_CHANNEL_ID = 1494265084208222208
 
 ASYNC_SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 ASYNC_WORKSHEET_GID = 539808866
-CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
+CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
@@ -40,6 +40,7 @@ def menu_embed(title: str, description: str) -> discord.Embed:
 # =========================================================
 # GOOGLE SHEETS
 # =========================================================
+
 def get_gspread_client() -> gspread.Client:
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
     return gspread.authorize(creds)
@@ -48,11 +49,9 @@ def get_gspread_client() -> gspread.Client:
 def get_async_worksheet():
     client = get_gspread_client()
     spreadsheet = client.open_by_key(ASYNC_SPREADSHEET_ID)
-
     for ws in spreadsheet.worksheets():
         if ws.id == ASYNC_WORKSHEET_GID:
             return ws
-
     raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
 
 
@@ -65,9 +64,24 @@ def append_async_row(
     division: str,
     mode: str,
 ) -> int:
+    """
+    Async-Sheet:
+    A = Timestamp
+    B = Player1
+    D = VoD1
+    E = Time1
+    F = Player2
+    G = VoD2
+    H = Time2
+    I = Seed
+    J = Art
+    K = Source Row Index
+    L = Division
+    M = Mode
+    """
     ws = get_async_worksheet()
-    col_a = ws.col_values(1)
 
+    col_a = ws.col_values(1)
     row_index = 1
     while row_index <= len(col_a):
         if not (col_a[row_index - 1] or "").strip():
@@ -75,6 +89,7 @@ def append_async_row(
         row_index += 1
 
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+
     reqs = [
         {"range": f"A{row_index}:A{row_index}", "values": [[timestamp]]},
         {"range": f"B{row_index}:B{row_index}", "values": [[home_player]]},
@@ -92,6 +107,7 @@ def append_async_row(
 # =========================================================
 # HELFER
 # =========================================================
+
 def normalize_name(value: str) -> str:
     return (
         (value or "")
@@ -107,6 +123,7 @@ def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[d
     targets = {normalize_name(x) for x in name_candidates if x}
     out: list[dict] = []
 
+    # League
     for division_label in [f"Div {i}" for i in range(1, 7)]:
         ws = get_div_ws_from_label(division_label)
         rows = ws.get_all_values()
@@ -123,7 +140,6 @@ def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[d
                 continue
             if marker.lower() != "vs":
                 continue
-
             if normalize_name(p1) not in targets and normalize_name(p2) not in targets:
                 continue
 
@@ -138,6 +154,7 @@ def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[d
                 }
             )
 
+    # Cup
     cup_matches = load_open_cup_matches()
     for match in cup_matches:
         p1 = match["player1"]
@@ -172,6 +189,7 @@ def find_member_by_sheet_name(guild: discord.Guild, player_name: str) -> discord
         for cand in candidates:
             if normalize_name(cand) == target:
                 return member
+
     return None
 
 
@@ -196,6 +214,7 @@ def get_requester_vs_opponent(match_data: dict, requester_member: discord.Member
 # =========================================================
 # BASIS
 # =========================================================
+
 class AsyncBaseView(discord.ui.View):
     def __init__(self, owner_id: int, timeout: float = 1800):
         super().__init__(timeout=timeout)
@@ -214,6 +233,7 @@ class AsyncBaseView(discord.ui.View):
 # =========================================================
 # MATCH AUSWAHL
 # =========================================================
+
 class AsyncRequestMatchSelect(discord.ui.Select):
     def __init__(self, matches: list[dict], requester_member: discord.Member):
         self.matches = {str(i): m for i, m in enumerate(matches)}
@@ -274,9 +294,11 @@ class AsyncRequestMatchListView(AsyncBaseView):
 # =========================================================
 # MODUS AUSWAHL
 # =========================================================
+
 class AsyncModeSelect(discord.ui.Select):
     def __init__(self, modes: list[str]):
         options = [discord.SelectOption(label=m[:100], value=m) for m in modes[:25]]
+
         super().__init__(
             placeholder="Spielmodus wählen …",
             min_values=1,
@@ -419,6 +441,7 @@ class AsyncRequestDoneView(AsyncBaseView):
 # =========================================================
 # GEGNER STIMMT ZU
 # =========================================================
+
 class OpponentConsentView(discord.ui.View):
     def __init__(self, request_data: dict):
         super().__init__(timeout=86400)
@@ -466,6 +489,7 @@ class OpponentConsentView(discord.ui.View):
 # =========================================================
 # ADMIN ENTSCHEIDUNG
 # =========================================================
+
 class DenyReasonModal(discord.ui.Modal, title="Async ablehnen"):
     reason = discord.ui.TextInput(
         label="Ablehnungsgrund",
@@ -483,6 +507,7 @@ class DenyReasonModal(discord.ui.Modal, title="Async ablehnen"):
         data = self.parent_view.request_data
         requester = await interaction.client.fetch_user(data["requester_id"])
         opponent = await interaction.client.fetch_user(data["opponent_id"])
+
         reason = str(self.reason).strip()
 
         dm_text = (
@@ -538,8 +563,8 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
                 data["player2"],
                 seed,
                 data["match_kind"],
-                data["source_row_index"],
-                data["division"] or "",
+                int(data["source_row_index"]),
+                data.get("division") or "",
                 data["selected_mode"],
             )
         except Exception as e:
@@ -557,8 +582,10 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
         opponent = await interaction.client.fetch_user(data["opponent_id"])
 
         dm_text = (
-            "Dem Async wurde zugestimmt.\n"
-            f"Der **{data['selected_mode']}**-Seed wurde eurem Async Race hinterlegt."
+            f"Dem Async wurde zugestimmt.\n"
+            f"Spiel: {data['player1']} vs. {data['player2']}\n"
+            f"Spielmodus: {data['selected_mode']}\n"
+            f"Seed: hinterlegt"
         )
 
         for user in [requester, opponent]:
@@ -572,7 +599,7 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
                 "⚡ Async beantragt",
                 (
                     f"Für das Spiel **{data['player1']} vs. {data['player2']}**\n"
-                    f"wurde der Async **zugestimmt**.\n\n"
+                    f"wurde dem Async **zugestimmt**.\n\n"
                     f"**Sheet-Zeile:** {row_index}\n"
                     f"**Seed gesetzt:** hinterlegt"
                 ),
@@ -599,8 +626,10 @@ class AdminDecisionView(discord.ui.View):
 # =========================================================
 # ÖFFNER FÜR PLAYER / PLAN
 # =========================================================
+
 async def open_async_request_from_player(interaction: discord.Interaction):
     member = interaction.user
+
     if not isinstance(member, discord.Member):
         await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
         return
@@ -613,10 +642,12 @@ async def open_async_request_from_player(interaction: discord.Interaction):
             getattr(member, "global_name", None),
             member.name,
         ]
+
         matches = await asyncio.to_thread(
             collect_requestable_matches_for_member,
             name_candidates,
         )
+
     except Exception as e:
         await interaction.edit_original_response(
             embed=menu_embed("⚡ Async → Beantragen", f"Fehler beim Laden der Spiele: {e}"),
