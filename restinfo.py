@@ -47,6 +47,9 @@ def normalize_name(value: str) -> str:
     )
 
 
+# =========================================================
+# RESTPROGRAMM
+# =========================================================
 def list_rest_players(div_number: str) -> list[str]:
     sheets_required()
     ws = WB.worksheet(f"{div_number}.DIV")
@@ -223,3 +226,98 @@ def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -
         "Für dich wurde kein passendes Restprogramm gefunden.\n"
         "Nutze bitte **Andere** und wähle Division + Spieler manuell."
     )
+
+
+# =========================================================
+# STREICHMODUS
+# =========================================================
+def list_streichungen(div_number: str):
+    sheets_required()
+    ws = WB.worksheet(f"{div_number}.DIV")
+    rows = ws.get_all_values()
+
+    entries = []
+    max_row_index = min(9, len(rows))  # Zeile 2-9 -> Index 1-8
+
+    for idx in range(1, max_row_index):
+        row = rows[idx]
+        spieler = _cell(row, 11)  # L
+        modus_m = _cell(row, 12)  # M
+        modus_n = _cell(row, 13)  # N
+
+        if spieler:
+            entries.append(
+                {
+                    "spieler": spieler,
+                    "modus_m": modus_m,
+                    "modus_n": modus_n,
+                }
+            )
+
+    return entries
+
+
+def get_streich_text_for_division(div_number: str) -> str:
+    entries = list_streichungen(div_number)
+
+    if not entries:
+        return f"Keine Streichmodi in Division {div_number} hinterlegt."
+
+    lines = [f"Streichmodi in Division {div_number}:", ""]
+
+    for entry in entries:
+        spieler = entry["spieler"]
+        parts = []
+
+        if entry["modus_m"]:
+            parts.append(entry["modus_m"])
+        if entry["modus_n"]:
+            parts.append(entry["modus_n"])
+
+        if parts:
+            lines.append(f"- **{spieler}**: " + " | ".join(parts))
+        else:
+            lines.append(f"- **{spieler}**")
+
+    return "\n".join(lines)
+
+
+def find_own_division_for_name_candidates(name_candidates: list[str]) -> str | None:
+    clean_candidates = []
+    seen = set()
+
+    for name in name_candidates:
+        if not name:
+            continue
+        norm = normalize_name(name)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        clean_candidates.append(name.strip())
+
+    for candidate in clean_candidates:
+        divisions = find_divisions_with_player(candidate)
+        if len(divisions) == 1:
+            return divisions[0]
+
+    return None
+
+
+def get_own_division_streich_text(name_candidates: list[str]) -> str:
+    div_number = find_own_division_for_name_candidates(name_candidates)
+
+    if not div_number:
+        tried = [x for x in name_candidates if x]
+        if tried:
+            return (
+                "Für dich konnte keine eindeutige Division gefunden werden.\n"
+                f"Verwendete Namensvarianten: {', '.join(f'`{x}`' for x in tried)}\n\n"
+                "Nutze bitte **Andere Divisionen**."
+            )
+
+        return (
+            "Für dich konnte keine eindeutige Division gefunden werden.\n"
+            "Nutze bitte **Andere Divisionen**."
+        )
+
+    return get_streich_text_for_division(div_number)
