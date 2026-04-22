@@ -1,8 +1,11 @@
 import os
 import asyncio
+
 import discord
+import gspread
 from discord import app_commands
 from discord.ext import commands
+from oauth2client.service_account import ServiceAccountCredentials
 
 import signup
 import asnyc
@@ -14,13 +17,114 @@ from matchcenter import (
     LeagueResultViewStep1,
     LeagueResultViewStep2,
     CupResultView,
+    get_runner_modes,
 )
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
+# =========================================================
+# STREICHMODUS SETTINGS SHEET
+# =========================================================
+STREICHMODUS_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
+STREICHMODUS_WORKSHEET_GID = 2118667264
+CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+
 
 # =========================================================
-# Hilfsfunktionen
+# UI HELFER
+# =========================================================
+def menu_embed(title: str, description: str) -> discord.Embed:
+    return discord.Embed(
+        title=title,
+        description=description,
+        color=0x00FFCC,
+    )
+
+
+def normalize_name(value: str) -> str:
+    return (
+        (value or "")
+        .strip()
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+
+
+# =========================================================
+# GOOGLE SHEETS FÜR STREICHMODI
+# =========================================================
+def get_gspread_client() -> gspread.Client:
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+    return gspread.authorize(creds)
+
+
+def get_streichmodus_worksheet():
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(STREICHMODUS_SPREADSHEET_ID)
+
+    for ws in spreadsheet.worksheets():
+        if ws.id == STREICHMODUS_WORKSHEET_GID:
+            return ws
+
+    raise RuntimeError(
+        f"Worksheet mit gid/id {STREICHMODUS_WORKSHEET_GID} nicht gefunden."
+    )
+
+
+def find_streichmodus_row_for_name_candidates(name_candidates: list[str]) -> int | None:
+    ws = get_streichmodus_worksheet()
+    values = ws.col_values(12)  # L
+
+    targets = {normalize_name(x) for x in name_candidates if x}
+
+    for idx, cell_value in enumerate(values, start=1):
+        if normalize_name(cell_value) in targets:
+            return idx
+
+    return None
+
+
+def load_current_streichmodi_for_name_candidates(name_candidates: list[str]) -> tuple[str, str]:
+    ws = get_streichmodus_worksheet()
+    row_index = find_streichmodus_row_for_name_candidates(name_candidates)
+
+    if row_index is None:
+        return "", ""
+
+    row = ws.row_values(row_index)
+    mode_1 = row[12].strip() if len(row) > 12 else ""  # M
+    mode_2 = row[13].strip() if len(row) > 13 else ""  # N
+    return mode_1, mode_2
+
+
+def write_streichmodi_for_name_candidates(
+    name_candidates: list[str],
+    mode_1: str,
+    mode_2: str,
+) -> int:
+    ws = get_streichmodus_worksheet()
+    row_index = find_streichmodus_row_for_name_candidates(name_candidates)
+
+    if row_index is None:
+        raise RuntimeError("Kein passender Name in Spalte L gefunden.")
+
+    reqs = [
+        {"range": f"M{row_index}:M{row_index}", "values": [[mode_1]]},
+        {"range": f"N{row_index}:N{row_index}", "values": [[mode_2]]},
+    ]
+    ws.batch_update(reqs)
+    return row_index
+
+
+# =========================================================
+# QUALI INFO
 # =========================================================
 async def build_quali_info_text(member: discord.Member, quali_number: int) -> str:
     runner_name = member.display_name.strip()
@@ -34,13 +138,11 @@ async def build_quali_info_text(member: discord.Member, quali_number: int) -> st
 
     if rank is None:
         return (
-            f"**Stand Quali {quali_number}**\n\n"
             f"Bereits gespielt: **{total_played}**\n"
             f"Du hast Quali {quali_number} aktuell noch nicht abgeschlossen."
         )
 
     return (
-        f"**Stand Quali {quali_number}**\n\n"
         f"Bereits gespielt: **{total_played}**\n"
         f"Dein aktueller Platz: **{rank}/{total_played}**"
     )
@@ -57,20 +159,18 @@ async def build_quali_overall_text(member: discord.Member) -> str:
 
     if rank is None:
         return (
-            f"**Gesamtstand**\n\n"
             f"Beide Qualis abgeschlossen: **{total_completed}**\n"
             f"Du bist aktuell noch nicht im Gesamtstand, weil dir mindestens eine Quali fehlt."
         )
 
     return (
-        f"**Gesamtstand**\n\n"
         f"Beide Qualis abgeschlossen: **{total_completed}**\n"
         f"Dein aktueller Platz: **{rank}/{total_completed}**"
     )
 
 
 # =========================================================
-# Basis-View
+# BASIS
 # =========================================================
 class PlayerBaseView(discord.ui.View):
     def __init__(self, owner_id: int, timeout: float = 1800):
@@ -87,48 +187,39 @@ class PlayerBaseView(discord.ui.View):
         return True
 
 
-# =========================================================
-# Allgemeine Detailansicht mit Zurück
-# =========================================================
 class PlaceholderView(PlayerBaseView):
-    def __init__(self, owner_id: int, back_view: discord.ui.View, back_content: str):
+    def __init__(self, owner_id: int, back_view: discord.ui.View, back_embed: discord.Embed):
         super().__init__(owner_id)
         self.back_view = back_view
-        self.back_content = back_content
+        self.back_embed = back_embed
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=0)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content=self.back_content,
+            embed=self.back_embed,
             view=self.back_view,
+            content=None,
         )
 
 
 # =========================================================
-# Ergebnis Wrapper
+# ERGEBNIS WRAPPER
 # =========================================================
 class BackToResultMenuFromLeagueStep1Button(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="Zurück",
-            style=discord.ButtonStyle.danger,
-            row=4,
-        )
+        super().__init__(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=4)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
+            embed=menu_embed("🏁 Ergebnis melden", "Wähle einen Bereich."),
             view=ResultMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 class BackToResultMenuFromLeagueStep2Button(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="Zurück",
-            style=discord.ButtonStyle.danger,
-            row=2,
-        )
+        super().__init__(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=2)
 
     async def callback(self, interaction: discord.Interaction):
         view = PlayerLeagueResultViewStep1(author_id=interaction.user.id)
@@ -137,31 +228,25 @@ class BackToResultMenuFromLeagueStep2Button(discord.ui.Button):
         await interaction.response.edit_message(
             content=view.render_summary(),
             view=view,
+            embed=None,
         )
 
 
 class BackToResultMenuFromCupButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="Zurück",
-            style=discord.ButtonStyle.danger,
-            row=3,
-        )
+        super().__init__(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=3)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
+            embed=menu_embed("🏁 Ergebnis melden", "Wähle einen Bereich."),
             view=ResultMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 class PlayerLeagueResultContinueButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="Weiter",
-            style=discord.ButtonStyle.primary,
-            row=4,
-        )
+        super().__init__(label="Weiter", style=discord.ButtonStyle.primary, row=4)
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
@@ -184,6 +269,7 @@ class PlayerLeagueResultContinueButton(discord.ui.Button):
         await interaction.response.edit_message(
             content=next_view.render_summary(),
             view=next_view,
+            embed=None,
         )
 
 
@@ -242,41 +328,192 @@ class PlayerCupResultView(CupResultView):
 
 
 # =========================================================
-# Hauptmenü
+# STREICHMODI SETZEN
+# =========================================================
+class StreichmodusSelect(discord.ui.Select):
+    def __init__(self, slot: int, modes: list[str], selected_value: str | None = None):
+        self.slot = slot
+
+        options = []
+        if not selected_value:
+            options.append(
+                discord.SelectOption(
+                    label="Bitte wählen",
+                    value="",
+                    default=True,
+                )
+            )
+
+        for mode in modes[:25]:
+            options.append(
+                discord.SelectOption(
+                    label=mode[:100],
+                    value=mode,
+                    default=(mode == selected_value),
+                )
+            )
+
+        super().__init__(
+            placeholder=f"Streichmodus {slot} wählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=slot - 1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, StreichmodusSettingView):
+            return
+
+        if self.slot == 1:
+            view.mode_1 = self.values[0]
+        else:
+            view.mode_2 = self.values[0]
+
+        new_view = StreichmodusSettingView(
+            owner_id=view.owner_id,
+            modes=view.modes,
+            mode_1=view.mode_1,
+            mode_2=view.mode_2,
+        )
+
+        await interaction.response.edit_message(
+            embed=new_view.build_embed(),
+            view=new_view,
+            content=None,
+        )
+
+
+class StreichmodusSettingView(PlayerBaseView):
+    def __init__(
+        self,
+        owner_id: int,
+        modes: list[str],
+        mode_1: str = "",
+        mode_2: str = "",
+    ):
+        super().__init__(owner_id)
+        self.modes = modes
+        self.mode_1 = mode_1
+        self.mode_2 = mode_2
+
+        self.add_item(StreichmodusSelect(1, self.modes, self.mode_1))
+        self.add_item(StreichmodusSelect(2, self.modes, self.mode_2))
+
+    def build_embed(self) -> discord.Embed:
+        text = (
+            "Wähle zwei Streichmodi.\n\n"
+            f"**Modus 1:** {self.mode_1 or '-'}\n"
+            f"**Modus 2:** {self.mode_2 or '-'}"
+        )
+        return menu_embed("⚙️ Einstellungen → Streichmodis setzen", text)
+
+    @discord.ui.button(label="Speichern", style=discord.ButtonStyle.success, row=2)
+    async def save_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
+
+        if not self.mode_1 or not self.mode_2:
+            await interaction.response.send_message(
+                "Bitte beide Streichmodi auswählen.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+
+        try:
+            name_candidates = [
+                member.display_name,
+                getattr(member, "global_name", None),
+                member.name,
+            ]
+            row_index = await asyncio.to_thread(
+                write_streichmodi_for_name_candidates,
+                name_candidates,
+                self.mode_1,
+                self.mode_2,
+            )
+
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "⚙️ Einstellungen → Streichmodis setzen",
+                    (
+                        "Streichmodi gespeichert.\n\n"
+                        f"**Modus 1:** {self.mode_1}\n"
+                        f"**Modus 2:** {self.mode_2}\n"
+                        f"**Sheet-Zeile:** {row_index}"
+                    ),
+                ),
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=SettingsMenuView(owner_id=interaction.user.id),
+                    back_embed=menu_embed("⚙️ Einstellungen", "Wähle einen Bereich."),
+                ),
+                content=None,
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "⚙️ Einstellungen → Streichmodis setzen",
+                    f"Fehler beim Speichern: {e}",
+                ),
+                view=self,
+                content=None,
+            )
+
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("⚙️ Einstellungen", "Wähle einen Bereich."),
+            view=SettingsMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+# =========================================================
+# HAUPTMENÜ
 # =========================================================
 class PlayerMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
 
-    @discord.ui.button(label="Info", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="ℹ️ Info", style=discord.ButtonStyle.secondary, row=0)
     async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Info**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Info", "Wähle einen Bereich."),
             view=InfoMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
-    @discord.ui.button(label="Spiel planen", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="📅 Spiel planen", style=discord.ButtonStyle.primary, row=0)
     async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spiel planen**\nWähle einen Bereich:",
+            embed=menu_embed("📅 Spiel planen", "Wähle einen Bereich."),
             view=PlanMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
-    @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="🏁 Ergebnis melden", style=discord.ButtonStyle.success, row=0)
     async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
+            embed=menu_embed("🏁 Ergebnis melden", "Wähle einen Bereich."),
             view=ResultMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
-    @discord.ui.button(label="Async", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="⚡ Async", style=discord.ButtonStyle.primary, row=1)
     async def async_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Async**\nWähle einen Bereich:",
+            embed=menu_embed("⚡ Async", "Wähle einen Bereich."),
             view=AsyncMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
-    @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="🏆 Qualifikation", style=discord.ButtonStyle.primary, row=1)
     async def qualification_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if hasattr(asnyc, "open_quali_from_player"):
             await asnyc.open_quali_from_player(interaction)
@@ -287,7 +524,7 @@ class PlayerMenuView(PlayerBaseView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Saisonmeldung", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="📝 Saisonmeldung", style=discord.ButtonStyle.primary, row=1)
     async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if hasattr(signup, "open_signup_from_player"):
             await signup.open_signup_from_player(interaction)
@@ -298,16 +535,17 @@ class PlayerMenuView(PlayerBaseView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="⚙️ Einstellungen", style=discord.ButtonStyle.secondary, row=2)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Einstellungen**\nWähle einen Bereich:",
+            embed=menu_embed("⚙️ Einstellungen", "Wähle einen Bereich."),
             view=SettingsMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Async-Menü
+# ASYNC MENÜ
 # =========================================================
 class AsyncMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
@@ -328,16 +566,17 @@ class AsyncMenuView(PlayerBaseView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü**\nWähle einen Bereich:",
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
             view=PlayerMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Ergebnis-Menü
+# ERGEBNIS MENÜ
 # =========================================================
 class ResultMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
@@ -351,6 +590,7 @@ class ResultMenuView(PlayerBaseView):
         await interaction.response.edit_message(
             content=view.render_summary(),
             view=view,
+            embed=None,
         )
 
     @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
@@ -361,18 +601,20 @@ class ResultMenuView(PlayerBaseView):
         await interaction.response.edit_message(
             content=view.render_summary(),
             view=view,
+            embed=None,
         )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü**\nWähle einen Bereich:",
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
             view=PlayerMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Info-Menü
+# INFO MENÜ
 # =========================================================
 class InfoMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
@@ -381,48 +623,54 @@ class InfoMenuView(PlayerBaseView):
     @discord.ui.button(label="Meldestatus", style=discord.ButtonStyle.primary, row=0)
     async def meldestatus_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Meldestatus**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Meldestatus", "Wähle einen Bereich."),
             view=MeldestatusView(owner_id=interaction.user.id),
+            content=None,
         )
 
     @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.primary, row=0)
     async def qualifikation_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Qualifikation**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Qualifikation", "Wähle einen Bereich."),
             view=InfoQualifikationView(owner_id=interaction.user.id),
+            content=None,
         )
 
     @discord.ui.button(label="Restprogramm", style=discord.ButtonStyle.primary, row=1)
     async def restprogramm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Restprogramm**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Restprogramm", "Wähle einen Bereich."),
             view=RestprogrammView(owner_id=interaction.user.id),
+            content=None,
         )
 
     @discord.ui.button(label="Streichmodus", style=discord.ButtonStyle.primary, row=1)
     async def streichmodus_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Streichmodus**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Streichmodus", "Wähle einen Bereich."),
             view=StreichmodusView(owner_id=interaction.user.id),
+            content=None,
         )
 
     @discord.ui.button(label="Ergebnisse/Tabelle", style=discord.ButtonStyle.primary, row=2)
     async def ergebnisse_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Ergebnisse/Tabelle**\nWähle eine Liga oder den Cup:",
+            embed=menu_embed("ℹ️ Ergebnisse/Tabelle", "Wähle eine Liga oder den Cup."),
             view=ErgebnisseTabelleView(owner_id=interaction.user.id),
+            content=None,
         )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü**\nWähle einen Bereich:",
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
             view=PlayerMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Meldestatus
+# MELDESTATUS
 # =========================================================
 class MeldestatusView(PlayerBaseView):
     def __init__(self, owner_id: int):
@@ -440,12 +688,13 @@ class MeldestatusView(PlayerBaseView):
                 text = f"Fehler beim Abrufen deines Eintrags: {e}"
 
         await interaction.response.edit_message(
-            content=f"**Info → Meldestatus → Meiner**\n{text}",
+            embed=menu_embed("ℹ️ Meldestatus → Meiner", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=MeldestatusView(owner_id=interaction.user.id),
-                back_content="**Info → Meldestatus**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Meldestatus", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
     @discord.ui.button(label="League", style=discord.ButtonStyle.primary, row=0)
@@ -456,12 +705,13 @@ class MeldestatusView(PlayerBaseView):
             text = f"Fehler beim Abrufen der League-Anmeldungen: {e}"
 
         await interaction.response.edit_message(
-            content=f"**Info → Meldestatus → League**\n{text}",
+            embed=menu_embed("ℹ️ Meldestatus → League", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=MeldestatusView(owner_id=interaction.user.id),
-                back_content="**Info → Meldestatus**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Meldestatus", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
     @discord.ui.button(label="Cup", style=discord.ButtonStyle.primary, row=0)
@@ -472,24 +722,26 @@ class MeldestatusView(PlayerBaseView):
             text = f"Fehler beim Abrufen der Cup-Anmeldungen: {e}"
 
         await interaction.response.edit_message(
-            content=f"**Info → Meldestatus → Cup**\n{text}",
+            embed=menu_embed("ℹ️ Meldestatus → Cup", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=MeldestatusView(owner_id=interaction.user.id),
-                back_content="**Info → Meldestatus**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Meldestatus", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Info**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Info", "Wähle einen Bereich."),
             view=InfoMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Info -> Qualifikation
+# INFO → QUALIFIKATION
 # =========================================================
 class InfoQualifikationView(PlayerBaseView):
     def __init__(self, owner_id: int):
@@ -509,12 +761,13 @@ class InfoQualifikationView(PlayerBaseView):
                 text = f"Fehler bei Quali 1: {e}"
 
         await interaction.edit_original_response(
-            content=f"**Info → Qualifikation → Quali 1**\n{text}",
+            embed=menu_embed("ℹ️ Qualifikation → Quali 1", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=InfoQualifikationView(owner_id=interaction.user.id),
-                back_content="**Info → Qualifikation**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Qualifikation", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
     @discord.ui.button(label="Quali 2", style=discord.ButtonStyle.primary, row=0)
@@ -531,12 +784,13 @@ class InfoQualifikationView(PlayerBaseView):
                 text = f"Fehler bei Quali 2: {e}"
 
         await interaction.edit_original_response(
-            content=f"**Info → Qualifikation → Quali 2**\n{text}",
+            embed=menu_embed("ℹ️ Qualifikation → Quali 2", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=InfoQualifikationView(owner_id=interaction.user.id),
-                back_content="**Info → Qualifikation**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Qualifikation", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
     @discord.ui.button(label="Gesamt", style=discord.ButtonStyle.primary, row=0)
@@ -553,24 +807,26 @@ class InfoQualifikationView(PlayerBaseView):
                 text = f"Fehler beim Gesamtstand: {e}"
 
         await interaction.edit_original_response(
-            content=f"**Info → Qualifikation → Gesamt**\n{text}",
+            embed=menu_embed("ℹ️ Qualifikation → Gesamt", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=InfoQualifikationView(owner_id=interaction.user.id),
-                back_content="**Info → Qualifikation**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Qualifikation", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Info**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Info", "Wähle einen Bereich."),
             view=InfoMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Restprogramm
+# RESTPROGRAMM
 # =========================================================
 class RestOtherPlayerSelect(discord.ui.Select):
     def __init__(self, division: str, players: list[str], owner_id: int):
@@ -592,12 +848,13 @@ class RestOtherPlayerSelect(discord.ui.Select):
             text = f"Fehler beim Ermitteln des Restprogramms: {e}"
 
         await interaction.response.edit_message(
-            content=text,
+            embed=menu_embed("ℹ️ Restprogramm → Andere", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=RestOtherDivisionView(owner_id=interaction.user.id),
-                back_content="**Info → Restprogramm → Andere**\nWähle eine Division:",
+                back_embed=menu_embed("ℹ️ Restprogramm → Andere", "Wähle eine Division."),
             ),
+            content=None,
         )
 
 
@@ -606,11 +863,12 @@ class RestOtherPlayerView(PlayerBaseView):
         super().__init__(owner_id)
         self.add_item(RestOtherPlayerSelect(division, players, owner_id))
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Restprogramm → Andere**\nWähle eine Division:",
+            embed=menu_embed("ℹ️ Restprogramm → Andere", "Wähle eine Division."),
             view=RestOtherDivisionView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
@@ -639,25 +897,37 @@ class RestOtherDivisionSelect(discord.ui.Select):
             players = restinfo.list_rest_players(div_number)
         except Exception as e:
             await interaction.response.edit_message(
-                content=f"❌ Fehler beim Laden der Spieler für Division {div_number}: {e}",
+                embed=menu_embed(
+                    "ℹ️ Restprogramm → Andere",
+                    f"Fehler beim Laden der Spieler für Division {div_number}: {e}",
+                ),
                 view=RestOtherDivisionView(owner_id=interaction.user.id),
+                content=None,
             )
             return
 
         if not players:
             await interaction.response.edit_message(
-                content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
+                embed=menu_embed(
+                    "ℹ️ Restprogramm → Andere",
+                    f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
+                ),
                 view=RestOtherDivisionView(owner_id=interaction.user.id),
+                content=None,
             )
             return
 
         await interaction.response.edit_message(
-            content=f"**Info → Restprogramm → Andere**\nDivision {div_number} gewählt. Bitte Spieler wählen:",
+            embed=menu_embed(
+                "ℹ️ Restprogramm → Andere",
+                f"**Division {div_number}**\nWähle einen Spieler.",
+            ),
             view=RestOtherPlayerView(
                 owner_id=interaction.user.id,
                 division=div_number,
                 players=players,
             ),
+            content=None,
         )
 
 
@@ -666,11 +936,12 @@ class RestOtherDivisionView(PlayerBaseView):
         super().__init__(owner_id)
         self.add_item(RestOtherDivisionSelect(owner_id))
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Restprogramm**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Restprogramm", "Wähle einen Bereich."),
             view=RestprogrammView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
@@ -700,31 +971,34 @@ class RestprogrammView(PlayerBaseView):
                 text = f"Fehler beim Abrufen deines Restprogramms: {e}"
 
         await interaction.edit_original_response(
-            content=f"**Info → Restprogramm → Eigenes**\n{text}",
+            embed=menu_embed("ℹ️ Restprogramm → Eigenes", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=RestprogrammView(owner_id=interaction.user.id),
-                back_content="**Info → Restprogramm**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Restprogramm", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
     @discord.ui.button(label="Andere", style=discord.ButtonStyle.primary, row=0)
     async def andere_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Restprogramm → Andere**\nWähle eine Division:",
+            embed=menu_embed("ℹ️ Restprogramm → Andere", "Wähle eine Division."),
             view=RestOtherDivisionView(owner_id=interaction.user.id),
+            content=None,
         )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Info**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Info", "Wähle einen Bereich."),
             view=InfoMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Streichmodus
+# STREICHMODUS INFO
 # =========================================================
 class StreichOtherDivisionSelect(discord.ui.Select):
     def __init__(self, owner_id: int):
@@ -752,12 +1026,13 @@ class StreichOtherDivisionSelect(discord.ui.Select):
             text = f"Fehler beim Abrufen des Streichmodus: {e}"
 
         await interaction.response.edit_message(
-            content=f"**Info → Streichmodus → Andere Divisionen**\n{text}",
+            embed=menu_embed("ℹ️ Streichmodus → Andere Divisionen", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=StreichOtherDivisionView(owner_id=interaction.user.id),
-                back_content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:",
+                back_embed=menu_embed("ℹ️ Streichmodus → Andere Divisionen", "Wähle eine Division."),
             ),
+            content=None,
         )
 
 
@@ -766,11 +1041,12 @@ class StreichOtherDivisionView(PlayerBaseView):
         super().__init__(owner_id)
         self.add_item(StreichOtherDivisionSelect(owner_id))
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Streichmodus**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Streichmodus", "Wähle einen Bereich."),
             view=StreichmodusView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
@@ -800,31 +1076,34 @@ class StreichmodusView(PlayerBaseView):
                 text = f"Fehler beim Abrufen des Streichmodus: {e}"
 
         await interaction.edit_original_response(
-            content=f"**Info → Streichmodus → Eigene Division**\n{text}",
+            embed=menu_embed("ℹ️ Streichmodus → Eigene Division", text),
             view=PlaceholderView(
                 owner_id=interaction.user.id,
                 back_view=StreichmodusView(owner_id=interaction.user.id),
-                back_content="**Info → Streichmodus**\nWähle einen Bereich:",
+                back_embed=menu_embed("ℹ️ Streichmodus", "Wähle einen Bereich."),
             ),
+            content=None,
         )
 
     @discord.ui.button(label="Andere Divisionen", style=discord.ButtonStyle.primary, row=0)
     async def andere_divisionen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Info → Streichmodus → Andere Divisionen**\nWähle eine Division:",
+            embed=menu_embed("ℹ️ Streichmodus → Andere Divisionen", "Wähle eine Division."),
             view=StreichOtherDivisionView(owner_id=interaction.user.id),
+            content=None,
         )
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Info**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Info", "Wähle einen Bereich."),
             view=InfoMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Ergebnisse / Tabelle
+# ERGEBNISSE / TABELLE
 # =========================================================
 class ErgebnisseTabelleView(PlayerBaseView):
     def __init__(self, owner_id: int):
@@ -873,16 +1152,17 @@ class ErgebnisseTabelleView(PlayerBaseView):
             row=2,
         ))
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Info**\nWähle einen Bereich:",
+            embed=menu_embed("ℹ️ Info", "Wähle einen Bereich."),
             view=InfoMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Einstellungen
+# EINSTELLUNGEN
 # =========================================================
 class SettingsMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
@@ -899,7 +1179,7 @@ class SettingsMenuView(PlayerBaseView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Restream", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Restream/Commentary/Tracker", style=discord.ButtonStyle.primary, row=0)
     async def restream_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if hasattr(signup, "open_signup_from_player"):
             await signup.open_signup_from_player(interaction)
@@ -910,23 +1190,68 @@ class SettingsMenuView(PlayerBaseView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Streichmodis setzen", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Streichmodis setzen", style=discord.ButtonStyle.success, row=1)
     async def streich_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Streichmodis setzen ist aktuell nicht verfügbar.",
-            ephemeral=True,
-        )
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
 
-    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=2)
+        await interaction.response.defer()
+
+        try:
+            modes = await asyncio.to_thread(get_runner_modes)
+            if not modes:
+                modes = ["Standard"]
+
+            name_candidates = [
+                member.display_name,
+                getattr(member, "global_name", None),
+                member.name,
+            ]
+            current_mode_1, current_mode_2 = await asyncio.to_thread(
+                load_current_streichmodi_for_name_candidates,
+                name_candidates,
+            )
+
+            view = StreichmodusSettingView(
+                owner_id=interaction.user.id,
+                modes=modes,
+                mode_1=current_mode_1,
+                mode_2=current_mode_2,
+            )
+
+            await interaction.edit_original_response(
+                embed=view.build_embed(),
+                view=view,
+                content=None,
+            )
+
+        except Exception as e:
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "⚙️ Einstellungen → Streichmodis setzen",
+                    f"Fehler beim Laden: {e}",
+                ),
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=SettingsMenuView(owner_id=interaction.user.id),
+                    back_embed=menu_embed("⚙️ Einstellungen", "Wähle einen Bereich."),
+                ),
+                content=None,
+            )
+
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=2)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü**\nWähle einen Bereich:",
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
             view=PlayerMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
 
 # =========================================================
-# Cog
+# COG
 # =========================================================
 class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -937,7 +1262,7 @@ class PlayerCog(commands.Cog):
     async def player(self, interaction: discord.Interaction):
         view = PlayerMenuView(owner_id=interaction.user.id)
         await interaction.response.send_message(
-            "**Spielermenü**\nWähle einen Bereich:",
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
             view=view,
             ephemeral=True,
         )
