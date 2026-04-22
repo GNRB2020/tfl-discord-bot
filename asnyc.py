@@ -765,18 +765,7 @@ class QualiSelectView(discord.ui.View):
     async def q2_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.open_quali_seed(interaction, self.runner_name, 2)
 
-    @discord.ui.button(label="Stand Quali 1", style=discord.ButtonStyle.secondary, row=1)
-    async def stand_q1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_quali_stand(interaction, 1)
-
-    @discord.ui.button(label="Stand Quali 2", style=discord.ButtonStyle.secondary, row=1)
-    async def stand_q2_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_quali_stand(interaction, 2)
-
-    @discord.ui.button(label="Gesamtstand", style=discord.ButtonStyle.secondary, row=1)
-    async def stand_total_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_overall_stand(interaction)
-
+   
 
 class QualiSeedView(discord.ui.View):
     def __init__(self, cog, state: QualiRunState):
