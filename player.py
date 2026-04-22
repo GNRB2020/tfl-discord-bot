@@ -9,6 +9,8 @@ import asnyc
 import restinfo
 
 from plan import PlanMenuView
+from asyncplan import open_async_request_from_player
+from matchcenter import LeagueResultViewStep1, CupResultView
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
@@ -67,7 +69,7 @@ async def build_quali_overall_text(member: discord.Member) -> str:
 # Basis-View
 # =========================================================
 class PlayerBaseView(discord.ui.View):
-    def __init__(self, owner_id: int, timeout: float = 180):
+    def __init__(self, owner_id: int, timeout: float = 900):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
 
@@ -122,12 +124,8 @@ class PlayerMenuView(PlayerBaseView):
     @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=0)
     async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="**Spielermenü → Ergebnis melden**\nNutze aktuell weiter das Matchcenter bzw. den bestehenden Ergebnis-Flow.",
-            view=PlaceholderView(
-                owner_id=interaction.user.id,
-                back_view=PlayerMenuView(owner_id=interaction.user.id),
-                back_content="**Spielermenü**\nWähle einen Bereich:",
-            ),
+            content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
+            view=ResultMenuView(owner_id=interaction.user.id),
         )
 
     @discord.ui.button(label="Qualifikation", style=discord.ButtonStyle.secondary, row=1)
@@ -155,6 +153,10 @@ class PlayerMenuView(PlayerBaseView):
             content="**Spielermenü → Einstellungen**\nWähle einen Bereich:",
             view=SettingsMenuView(owner_id=interaction.user.id),
         )
+
+    @discord.ui.button(label="Async", style=discord.ButtonStyle.primary, row=2)
+    async def async_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_async_request_from_player(interaction)
 
 
 # =========================================================
@@ -629,6 +631,57 @@ class ErgebnisseTabelleView(PlayerBaseView):
         await interaction.response.edit_message(
             content="**Spielermenü → Info**\nWähle einen Bereich:",
             view=InfoMenuView(owner_id=interaction.user.id),
+        )
+
+
+# =========================================================
+# Ergebnis-Menü
+# =========================================================
+class ResultMenuView(PlayerBaseView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+
+    @discord.ui.button(label="League", style=discord.ButtonStyle.success, row=0)
+    async def league_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = interaction.client.get_cog("MatchCenterCog")
+        if cog is None:
+            await interaction.response.edit_message(
+                content="League-Ergebnismeldung ist aktuell nicht verfügbar.",
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=ResultMenuView(owner_id=interaction.user.id),
+                    back_content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
+                ),
+            )
+            return
+
+        view = LeagueResultViewStep1(cog, interaction.user.id)
+        view.state.kind = "Ergebnis League"
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
+
+    @discord.ui.button(label="Cup", style=discord.ButtonStyle.success, row=0)
+    async def cup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = interaction.client.get_cog("MatchCenterCog")
+        if cog is None:
+            await interaction.response.edit_message(
+                content="Cup-Ergebnismeldung ist aktuell nicht verfügbar.",
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=ResultMenuView(owner_id=interaction.user.id),
+                    back_content="**Spielermenü → Ergebnis melden**\nWähle einen Bereich:",
+                ),
+            )
+            return
+
+        view = CupResultView(cog, interaction.user.id)
+        view.state.kind = "Ergebnis Cup"
+        await interaction.response.edit_message(content=view.render_summary(), view=view)
+
+    @discord.ui.button(label="Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="**Spielermenü**\nWähle einen Bereich:",
+            view=PlayerMenuView(owner_id=interaction.user.id),
         )
 
 
