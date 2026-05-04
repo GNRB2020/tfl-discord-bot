@@ -1344,9 +1344,38 @@ def _get_div_ws(div_number: str):
     return WB.worksheet(ws_name)
 
 
-def spielplan_read_players(div_number: str):
+def spielplan_read_players(div_number: str) -> list[str]:
     ws = _get_div_ws(div_number)
-    return _collect_players_from_div_ws(ws)
+
+    # 8er Staffel: L2:L9
+    # 9er Staffel: L2:L10
+    values = ws.get("L2:L10")
+
+    players = []
+    seen = set()
+
+    for row in values:
+        if not row:
+            continue
+
+        name = row[0].strip()
+        if not name:
+            continue
+
+        key = name.lower()
+        if key in seen:
+            continue
+
+        seen.add(key)
+        players.append(name)
+
+    if len(players) not in (8, 9):
+        raise RuntimeError(
+            f"Für Division {div_number} müssen genau 8 oder 9 Spieler in Spalte L stehen "
+            f"(8er: L2:L9, 9er: L2:L10). Gefunden: {len(players)}."
+        )
+
+    return players
 
 
 def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
