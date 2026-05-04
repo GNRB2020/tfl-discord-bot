@@ -331,25 +331,32 @@ class PlayerCupResultView(CupResultView):
 # STREICHMODI SETZEN
 # =========================================================
 class StreichmodusSelect(discord.ui.Select):
+    EMPTY_VALUE = "__none__"
+
     def __init__(self, slot: int, modes: list[str], selected_value: str | None = None):
         self.slot = slot
 
         options = []
+
         if not selected_value:
             options.append(
                 discord.SelectOption(
                     label="Bitte wählen",
-                    value="",
+                    value=self.EMPTY_VALUE,
                     default=True,
                 )
             )
 
         for mode in modes[:25]:
+            clean_mode = (mode or "").strip()
+            if not clean_mode:
+                continue
+
             options.append(
                 discord.SelectOption(
-                    label=mode[:100],
-                    value=mode,
-                    default=(mode == selected_value),
+                    label=clean_mode[:100],
+                    value=clean_mode[:100],
+                    default=(clean_mode == selected_value),
                 )
             )
 
@@ -366,10 +373,14 @@ class StreichmodusSelect(discord.ui.Select):
         if not isinstance(view, StreichmodusSettingView):
             return
 
+        selected = self.values[0]
+        if selected == self.EMPTY_VALUE:
+            selected = ""
+
         if self.slot == 1:
-            view.mode_1 = self.values[0]
+            view.mode_1 = selected
         else:
-            view.mode_2 = self.values[0]
+            view.mode_2 = selected
 
         new_view = StreichmodusSettingView(
             owner_id=view.owner_id,
