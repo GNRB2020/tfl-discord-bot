@@ -1,11 +1,11 @@
 import os
 import asyncio
+import re
+import unicodedata
 
 import discord
-import gspread
 from discord import app_commands
 from discord.ext import commands
-from oauth2client.service_account import ServiceAccountCredentials
 
 import signup
 import asnyc
@@ -22,18 +22,6 @@ from matchcenter import (
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
-# =========================================================
-# STREICHMODUS SETTINGS SHEET
-# =========================================================
-STREICHMODUS_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
-STREICHMODUS_WORKSHEET_GID = 2118667264
-CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-
-SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
-
 
 # =========================================================
 # UI HELFER
@@ -47,55 +35,59 @@ def menu_embed(title: str, description: str) -> discord.Embed:
 
 
 def normalize_name(value: str) -> str:
-    return (
-        (value or "")
-        .strip()
-        .lower()
-        .replace("_", "")
-        .replace("-", "")
-        .replace(" ", "")
-    )
+    """
+    Normalisiert Discord-/Sheet-Namen robust.
+    Beispiele:
+    GNRB, .gnrb, G-N-R-B, G_N_R_B, G N R B -> gnrb
+    """
+    value = unicodedata.normalize("NFKC", value or "")
+    value = value.lower().strip()
+    return re.sub(r"[^a-z0-9äöüß]", "", value)
 
 
 # =========================================================
 # GOOGLE SHEETS FÜR STREICHMODI
 # =========================================================
-def get_gspread_client() -> gspread.Client:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    return gspread.authorize(creds)
+def get_name_candidates(member: discord.Member) -> list[str]:
+    """
+    Alle sinnvollen Discord-Namensvarianten für den Vergleich mit Spalte L.
+    """
+    return [
+        member.display_name,
+        getattr(member, "global_name", None),
+        member.name,
+        str(member),
+    ]
 
 
-def get_streichmodus_worksheet():
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(STREICHMODUS_SPREADSHEET_ID)
+def get_division_worksheet_for_name_candidates(name_candidates: list[str]):
+    """
+    Sucht den Spieler in allen Division-Tabs 1.DIV bis 6.DIV in Spalte L.
+    Gibt (worksheet, row_index, division_number) zurück.
 
-    for ws in spreadsheet.worksheets():
-        if ws.id == STREICHMODUS_WORKSHEET_GID:
-            return ws
-
-    raise RuntimeError(
-        f"Worksheet mit gid/id {STREICHMODUS_WORKSHEET_GID} nicht gefunden."
-    )
-
-
-def find_streichmodus_row_for_name_candidates(name_candidates: list[str]) -> int | None:
-    ws = get_streichmodus_worksheet()
-    values = ws.col_values(12)  # L
-
+    row_index ist die echte Google-Sheet-Zeile, also 1-basiert.
+    """
     targets = {normalize_name(x) for x in name_candidates if x}
+    targets.discard("")
 
-    for idx, cell_value in enumerate(values, start=1):
-        if normalize_name(cell_value) in targets:
-            return idx
+    if not targets:
+        return None, None, None
 
-    return None
+    for div_number in range(1, 7):
+        ws = restinfo.WB.worksheet(f"{div_number}.DIV")
+        values = ws.col_values(12)  # Spalte L
+
+        for idx, cell_value in enumerate(values, start=1):
+            if normalize_name(cell_value) in targets:
+                return ws, idx, div_number
+
+    return None, None, None
 
 
 def load_current_streichmodi_for_name_candidates(name_candidates: list[str]) -> tuple[str, str]:
-    ws = get_streichmodus_worksheet()
-    row_index = find_streichmodus_row_for_name_candidates(name_candidates)
+    ws, row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
 
-    if row_index is None:
+    if ws is None or row_index is None:
         return "", ""
 
     row = ws.row_values(row_index)
@@ -108,19 +100,31 @@ def write_streichmodi_for_name_candidates(
     name_candidates: list[str],
     mode_1: str,
     mode_2: str,
-) -> int:
-    ws = get_streichmodus_worksheet()
-    row_index = find_streichmodus_row_for_name_candidates(name_candidates)
+) -> tuple[int, int]:
+    """
+    Schreibt die Streichmodi in die eigene Division des Spielers.
 
-    if row_index is None:
-        raise RuntimeError("Kein passender Name in Spalte L gefunden.")
+    Spalte L: Spielername
+    Spalte M: Streichmodus 1
+    Spalte N: Streichmodus 2
+
+    Rückgabe: (row_index, div_number)
+    """
+    ws, row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
+
+    if ws is None or row_index is None or div_number is None:
+        normalized = sorted({normalize_name(x) for x in name_candidates if x})
+        raise RuntimeError(
+            "Kein passender Name in Spalte L der Divisionen 1.DIV bis 6.DIV gefunden. "
+            f"Gesucht: {', '.join(normalized) or '-'}"
+        )
 
     reqs = [
         {"range": f"M{row_index}:M{row_index}", "values": [[mode_1]]},
         {"range": f"N{row_index}:N{row_index}", "values": [[mode_2]]},
     ]
     ws.batch_update(reqs)
-    return row_index
+    return row_index, div_number
 
 
 # =========================================================
@@ -437,12 +441,8 @@ class StreichmodusSettingView(PlayerBaseView):
         await interaction.response.defer()
 
         try:
-            name_candidates = [
-                member.display_name,
-                getattr(member, "global_name", None),
-                member.name,
-            ]
-            row_index = await asyncio.to_thread(
+            name_candidates = get_name_candidates(member)
+            row_index, div_number = await asyncio.to_thread(
                 write_streichmodi_for_name_candidates,
                 name_candidates,
                 self.mode_1,
@@ -454,6 +454,7 @@ class StreichmodusSettingView(PlayerBaseView):
                     "⚙️ Einstellungen → Streichmodis setzen",
                     (
                         "Streichmodi gespeichert.\n\n"
+                        f"**Division:** {div_number}.DIV\n"
                         f"**Modus 1:** {self.mode_1}\n"
                         f"**Modus 2:** {self.mode_2}\n"
                         f"**Sheet-Zeile:** {row_index}"
@@ -969,11 +970,7 @@ class RestprogrammView(PlayerBaseView):
             text = "Nur auf dem Server verfügbar."
         else:
             try:
-                name_candidates = [
-                    member.display_name,
-                    getattr(member, "global_name", None),
-                    member.name,
-                ]
+                name_candidates = get_name_candidates(member)
                 text = await asyncio.to_thread(
                     restinfo.get_open_restprogramm_text_for_name_candidates,
                     name_candidates,
@@ -1074,11 +1071,7 @@ class StreichmodusView(PlayerBaseView):
             text = "Nur auf dem Server verfügbar."
         else:
             try:
-                name_candidates = [
-                    member.display_name,
-                    getattr(member, "global_name", None),
-                    member.name,
-                ]
+                name_candidates = get_name_candidates(member)
                 text = await asyncio.to_thread(
                     restinfo.get_own_division_streich_text,
                     name_candidates,
@@ -1215,11 +1208,7 @@ class SettingsMenuView(PlayerBaseView):
             if not modes:
                 modes = ["Standard"]
 
-            name_candidates = [
-                member.display_name,
-                getattr(member, "global_name", None),
-                member.name,
-            ]
+            name_candidates = get_name_candidates(member)
             current_mode_1, current_mode_2 = await asyncio.to_thread(
                 load_current_streichmodi_for_name_candidates,
                 name_candidates,
