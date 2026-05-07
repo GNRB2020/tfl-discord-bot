@@ -52,28 +52,47 @@ print("DEBUG Intents:", intents)
 
 class TFLBot(commands.Bot):
     async def setup_hook(self):
-        await self.load_extension("signup")
-        print("✅ signup.py geladen")
+        guild = discord.Object(id=GUILD_ID)
 
-        await self.load_extension("schedule")
-        print("✅ schedule.py geladen")
+        extensions = [
+            "signup",
+            "schedule",
+            "ladder",
+            "matchcenter",
+            "asnyc",
+            "player",
+        ]
 
-        await self.load_extension("ladder")
-        print("✅ ladder.py geladen")
-
-        await self.load_extension("matchcenter")
-        print("✅ matchcenter.py geladen")
-        
-        await self.load_extension("asnyc")
-        print("✅ asnyc.py geladen")
-
-        await self.load_extension("player")
-        print("✅ player.py geladen")
+        for ext in extensions:
+            try:
+                await self.load_extension(ext)
+                print(f"✅ {ext}.py geladen")
+            except Exception:
+                print(f"❌ FEHLER beim Laden von {ext}.py:")
+                traceback.print_exc()
 
         print(
-            "TREE NACH EXTENSION LOAD:",
-            [cmd.name for cmd in self.tree.get_commands(guild=discord.Object(id=GUILD_ID))]
+            "TREE GLOBAL VOR COPY:",
+            [cmd.name for cmd in self.tree.get_commands()]
         )
+
+        print(
+            "TREE GUILD VOR COPY:",
+            [cmd.name for cmd in self.tree.get_commands(guild=guild)]
+        )
+
+        self.tree.copy_global_to(guild=guild)
+
+        print(
+            "TREE GUILD NACH COPY:",
+            [cmd.name for cmd in self.tree.get_commands(guild=guild)]
+        )
+
+        synced = await self.tree.sync(guild=guild)
+
+        print("✅ Slash Commands synchronisiert:")
+        for cmd in synced:
+            print(f" - /{cmd.name}")
         
 
 client = TFLBot(command_prefix="!", intents=intents)
