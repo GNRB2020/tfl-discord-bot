@@ -58,6 +58,9 @@ class TFLBot(commands.Bot):
         await self.load_extension("schedule")
         print("✅ schedule.py geladen")
 
+        await self.load_extension("ladder")
+        print("✅ ladder.py geladen")
+
         await self.load_extension("matchcenter")
         print("✅ matchcenter.py geladen")
         
@@ -66,7 +69,11 @@ class TFLBot(commands.Bot):
 
         await self.load_extension("player")
         print("✅ player.py geladen")
-        print("TREE NACH PLAYER LOAD:", [cmd.name for cmd in self.tree.get_commands(guild=discord.Object(id=GUILD_ID))])
+
+        print(
+            "TREE NACH EXTENSION LOAD:",
+            [cmd.name for cmd in self.tree.get_commands(guild=discord.Object(id=GUILD_ID))]
+        )
         
 
 client = TFLBot(command_prefix="!", intents=intents)
