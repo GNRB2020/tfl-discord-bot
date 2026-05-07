@@ -16,15 +16,15 @@ from oauth2client.service_account import ServiceAccountCredentials
 TFNL_SPREADSHEET_ID = os.getenv(
     "TFNL_SPREADSHEET_ID",
     "1TamFbS5cRCcgSJFoQEohXdv03tVhk0VynvleeiVBQsM",
-)
+).strip()
 
 CREDS_FILE = os.getenv(
-    "GOOGLE_SERVICE_ACCOUNT_FILE",
-    "credentials.json",
-)
+    "GOOGLE_CREDENTIALS_FILE",
+    os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
+).strip()
 
 TFNL_SCHEDULE_CHANNEL_ID = int(
-    os.getenv("TFNL_SCHEDULE_CHANNEL_ID", "1502031472574337204")
+    os.getenv("TFNL_SCHEDULE_CHANNEL_ID", "1502031472574337204").strip()
 )
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
@@ -33,6 +33,10 @@ SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
+
+print("DEBUG TFNL_SPREADSHEET_ID =", repr(TFNL_SPREADSHEET_ID))
+print("DEBUG TFNL CREDS_FILE =", repr(CREDS_FILE))
+print("DEBUG TFNL_SCHEDULE_CHANNEL_ID =", TFNL_SCHEDULE_CHANNEL_ID)
 
 
 # =========================================================
@@ -59,9 +63,9 @@ def load_schedule_rows():
 # HELPERS
 # =========================================================
 
-def parse_german_date(value: str):
+def parse_german_date(value):
     """
-    Erwartet Datum im Format DD.MM.YYYY
+    Erwartet Datum im Format DD.MM.YYYY.
     """
     if not value:
         return None
@@ -161,37 +165,43 @@ class LadderCog(commands.Cog):
             try:
                 channel = await self.bot.fetch_channel(TFNL_SCHEDULE_CHANNEL_ID)
             except Exception as e:
-                print(f"[TFNL] Konnte Schedule-Channel nicht laden: {e}")
+                print(f"[TFNL] Konnte Schedule-Channel nicht laden: {repr(e)}")
                 return
 
-        embed = build_schedule_embed(days=5)
+        try:
+            embed = build_schedule_embed(days=5)
+        except Exception as e:
+            print(f"[TFNL] Konnte Schedule-Embed nicht bauen: {repr(e)}")
+            return
 
-        # 1. Versuch: vorhandene Nachricht aktualisieren
+        # 1. Vorhandene Bot-Nachricht aktualisieren
         if self.last_schedule_message_id:
             try:
                 old_message = await channel.fetch_message(self.last_schedule_message_id)
                 await old_message.edit(embed=embed)
                 return
-            except Exception:
+            except Exception as e:
+                print(f"[TFNL] Alte Schedule-Nachricht konnte nicht editiert werden: {repr(e)}")
                 self.last_schedule_message_id = None
 
-        # 2. Alte Bot-Nachrichten im Channel entfernen
+        # 2. Alte Bot-Nachrichten im Channel löschen
         try:
             async for message in channel.history(limit=25):
-                if message.author == self.bot.user:
+                if self.bot.user and message.author.id == self.bot.user.id:
                     try:
                         await message.delete()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[TFNL] Alte Bot-Nachricht konnte nicht gelöscht werden: {repr(e)}")
         except Exception as e:
-            print(f"[TFNL] Konnte alte Schedule-Nachrichten nicht löschen: {e}")
+            print(f"[TFNL] Konnte Channel-History nicht lesen: {repr(e)}")
 
         # 3. Neue Plan-Nachricht senden
         try:
             new_message = await channel.send(embed=embed)
             self.last_schedule_message_id = new_message.id
+            print("[TFNL] Spielplan im Channel aktualisiert.")
         except Exception as e:
-            print(f"[TFNL] Konnte Schedule nicht senden: {e}")
+            print(f"[TFNL] Konnte Schedule nicht senden: {repr(e)}")
 
     @tasks.loop(minutes=5)
     async def update_schedule_channel(self):
@@ -212,7 +222,7 @@ class LadderCog(commands.Cog):
             embed = build_schedule_embed(days=5)
         except Exception as e:
             await interaction.followup.send(
-                f"Fehler beim Lesen des TFNL-Sheets:\n```{e}```",
+                f"Fehler beim Lesen des TFNL-Sheets:\n```{repr(e)}```",
                 ephemeral=True,
             )
             return
@@ -230,7 +240,7 @@ class LadderCog(commands.Cog):
             await self.publish_schedule_to_channel()
         except Exception as e:
             await interaction.followup.send(
-                f"Fehler beim Aktualisieren des Plan-Channels:\n```{e}```",
+                f"Fehler beim Aktualisieren des Plan-Channels:\n```{repr(e)}```",
                 ephemeral=True,
             )
             return
