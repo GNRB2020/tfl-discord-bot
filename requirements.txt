@@ -5,4 +5,7 @@ oauth2client
 flask
 pytz
 aiohttp>=3.9
+pyz3r
+PyYAML
+aiohttp
 # rebuild
