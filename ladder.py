@@ -2860,6 +2860,91 @@ class LadderCog(commands.Cog):
 
         raise error
 
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="ladder_seed_test",
+        description="Testet die Seed-Erzeugung für einen bestimmten TFNL-Modus.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.choices(
+        modus=[
+            app_commands.Choice(name="Casual Boots", value="Casual Boots"),
+            app_commands.Choice(name="Open", value="Open"),
+            app_commands.Choice(name="Inverted", value="Inverted"),
+            app_commands.Choice(name="Open AD Boots", value="Open AD Boots"),
+            app_commands.Choice(name="Invrosia", value="Invrosia"),
+            app_commands.Choice(name="Ambrosia", value="Ambrosia"),
+            app_commands.Choice(name="Ludicrous Speed", value="Ludicrous Speed"),
+            app_commands.Choice(name="Hard Standard", value="Hard Standard"),
+            app_commands.Choice(name="Standard", value="Standard"),
+            app_commands.Choice(name="TFL Hard Standard", value="TFL Hard Standard"),
+            app_commands.Choice(name="Keysanity", value="Keysanity"),
+            app_commands.Choice(name="AD Keysanity Mit Boots", value="AD Keysanity Mit Boots"),
+            app_commands.Choice(name="AD Keys", value="AD Keys"),
+            app_commands.Choice(name="MC Boss", value="MC Boss"),
+            app_commands.Choice(name="Influkeys", value="Influkeys"),
+            app_commands.Choice(name="Crosskeys", value="Crosskeys"),
+        ]
+    )
+    async def ladder_seed_test(
+        self,
+        interaction: discord.Interaction,
+        modus: app_commands.Choice[str],
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        mode_name = normalize_text(modus.value)
+        preset_key = get_preset_key_for_mode(mode_name)
+
+        if not preset_key:
+            await interaction.followup.send(
+                f"Kein Seed-Mapping für Modus `{mode_name}` gefunden.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            seed_url = await generate_alttpr_seed_from_preset(preset_key)
+        except Exception as e:
+            await interaction.followup.send(
+                "**Seed-Test fehlgeschlagen.**\n\n"
+                f"Modus: `{mode_name}`\n"
+                f"Preset: `{preset_key}`\n\n"
+                f"Fehler:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "**Seed-Test erfolgreich.**\n\n"
+            f"Modus: `{mode_name}`\n"
+            f"Preset: `{preset_key}`\n"
+            f"Seed: {seed_url}\n\n"
+            "Es wurde nichts ins Sheet geschrieben und keine DM verschickt.",
+            ephemeral=True,
+        )
+
+    @ladder_seed_test.error
+    async def ladder_seed_test_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LadderCog(bot))
