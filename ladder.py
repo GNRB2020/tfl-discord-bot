@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -46,6 +47,7 @@ BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 SCHEDULE_SHEET_NAME = "Schedule"
 SIGNUP_SHEET_NAME = "Signup"
+SCHEDULE_ANNOUNCEMENT_COL = "Signup Announcement Sent"
 
 SIGNUP_HEADERS = [
     "Slot ID",
@@ -162,7 +164,7 @@ def find_schedule_row(slot_id: str):
     return None, None
 
 
-def update_schedule_channel_id(slot_id: str, channel_id: int):
+def update_schedule_cell(slot_id: str, column_name: str, value: str):
     sheet = get_schedule_sheet()
     row_index, row = find_schedule_row(slot_id)
 
@@ -172,11 +174,19 @@ def update_schedule_channel_id(slot_id: str, channel_id: int):
     headers = sheet.row_values(1)
 
     try:
-        col_index = headers.index("Slot Channel ID") + 1
+        col_index = headers.index(column_name) + 1
     except ValueError:
         return
 
-    sheet.update_cell(row_index, col_index, str(channel_id))
+    sheet.update_cell(row_index, col_index, value)
+
+
+def update_schedule_channel_id(slot_id: str, channel_id: int):
+    update_schedule_cell(slot_id, "Slot Channel ID", str(channel_id))
+
+
+def update_schedule_announcement_sent(slot_id: str):
+    update_schedule_cell(slot_id, SCHEDULE_ANNOUNCEMENT_COL, "Ja")
 
 
 # =========================================================
@@ -237,6 +247,11 @@ def is_registration_open(row: dict) -> bool:
         return False
 
     return start <= now < end
+
+
+def signup_announcement_already_sent(row: dict) -> bool:
+    value = normalize_text(row.get(SCHEDULE_ANNOUNCEMENT_COL)).lower()
+    return value in ("ja", "yes", "true", "1")
 
 
 def sanitize_channel_name(value: str) -> str:
@@ -374,11 +389,14 @@ def build_signup_embed(open_slots: list[dict]) -> discord.Embed:
             "Early öffnet um `18:15 Uhr`.\n"
             "Late öffnet um `20:15 Uhr`."
         )
+
+        title = "TFNL-Anmeldung"
     else:
         description = "\n\n".join(build_signup_line(row) for row in open_slots)
+        title = "TFNL-Anmeldung geöffnet"
 
     embed = discord.Embed(
-        title="TFNL-Anmeldung",
+        title=title,
         description=description,
         color=discord.Color.dark_teal(),
     )
@@ -502,6 +520,45 @@ class LadderCog(commands.Cog):
         except Exception as e:
             print(f"[TFNL] Konnte Schedule nicht senden: {repr(e)}")
 
+    async def send_signup_announcements(self, open_slots: list[dict], signup_channel: discord.TextChannel):
+        for row in open_slots:
+            slot_id = normalize_text(row.get("Slot ID"))
+
+            if not slot_id:
+                continue
+
+            if signup_announcement_already_sent(row):
+                continue
+
+            datum = normalize_text(row.get("Datum"))
+            slot = normalize_text(row.get("Slot"))
+            startzeit = normalize_text(row.get("Startzeit"))
+            anmeldeschluss = normalize_text(row.get("Anmeldeschluss"))
+            modus = normalize_text(row.get("Modus"))
+
+            role_mention = f"<@&{TFNL_LADDER_ROLE_ID}>"
+
+            try:
+                ping_message = await signup_channel.send(
+                    f"{role_mention} **TFNL-Anmeldung geöffnet**\n"
+                    f"**{datum} | {slot} | {startzeit} Uhr** — {modus}\n"
+                    f"Anmeldeschluss: `{anmeldeschluss} Uhr`"
+                )
+
+                update_schedule_announcement_sent(slot_id)
+
+                async def delete_later(message: discord.Message):
+                    await asyncio.sleep(60)
+                    try:
+                        await message.delete()
+                    except Exception as e:
+                        print(f"[TFNL] Signup-Ping konnte nicht gelöscht werden: {repr(e)}")
+
+                self.bot.loop.create_task(delete_later(ping_message))
+
+            except Exception as e:
+                print(f"[TFNL] Signup-Announcement konnte nicht gesendet werden: {repr(e)}")
+
     async def publish_signup_to_channel(self):
         try:
             channel = await self.get_text_channel(TFNL_SIGNUP_CHANNEL_ID)
@@ -516,6 +573,8 @@ class LadderCog(commands.Cog):
         except Exception as e:
             print(f"[TFNL] Konnte Signup-Embed nicht bauen: {repr(e)}")
             return
+
+        await self.send_signup_announcements(open_slots, channel)
 
         if self.last_signup_message_id:
             try:
@@ -630,6 +689,7 @@ class LadderCog(commands.Cog):
 
         try:
             slot_channel = await self.get_or_create_slot_channel(schedule_row)
+
             await slot_channel.set_permissions(
                 member,
                 view_channel=True,
