@@ -2,6 +2,7 @@ import os
 import re
 import random
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,10 @@ import aiohttp
 import discord
 import gspread
 import pyz3r
+try:
+    from pyz3r.customizer import customizer as pyz3r_customizer
+except Exception:
+    pyz3r_customizer = None
 import yaml
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -672,28 +677,289 @@ async def fetch_yaml_url(url: str) -> dict:
             return data
 
 
+def ensure_list_value(values, required_value: str) -> list:
+    if not isinstance(values, list):
+        values = []
+
+    if required_value not in values:
+        values.insert(0, required_value)
+
+    return values
+
+
+def force_quickswap_flags(settings: dict):
+    """
+    Hinweis:
+    Quick Swap ist bei pyz3r primär eine ROM-Patch-Option.
+    Der Bot erzeugt aktuell nur Seed-Links und patched keine ROM.
+    Diese Flags bleiben trotzdem bewusst gesetzt, damit sie bei unterstützten
+    API-/Preset-Pfaden nicht verloren gehen.
+    """
+    settings["quickswap"] = True
+    settings["quick_swap"] = True
+    settings["quickSwap"] = True
+
+
+def force_tfnl_mode_settings(canonical_mode: str, raw_settings: dict, customizer_enabled: bool) -> dict:
+    settings = deepcopy(raw_settings)
+
+    if canonical_mode == "casual boots":
+        settings["mode"] = "standard"
+        settings["weapons"] = "assured"
+        settings["eq"] = ensure_list_value(settings.get("eq"), "PegasusBoots")
+
+        # SahasrahBot Casual Boots startet zusätzlich mit 3 BossHeartContainern.
+        # Falls das YAML beschädigt/unvollständig geladen wird, ergänzen wir mindestens die Boots hart.
+        if "BossHeartContainer" not in settings["eq"]:
+            settings["eq"].extend(
+                [
+                    "BossHeartContainer",
+                    "BossHeartContainer",
+                    "BossHeartContainer",
+                ]
+            )
+
+        settings["tournament"] = True
+        settings["spoilers"] = "off"
+
+    elif canonical_mode == "open":
+        settings["mode"] = "open"
+        settings["entrances"] = "none"
+        settings["tournament"] = True
+        settings["spoilers"] = False
+
+    elif canonical_mode == "crosskeys":
+        settings["mode"] = "open"
+        settings["entrances"] = "crossed"
+        settings["dungeon_items"] = "full"
+        settings["accessibility"] = "locations"
+        settings["tournament"] = True
+        settings["spoilers"] = False
+
+    else:
+        settings["tournament"] = True
+        settings["spoilers"] = settings.get("spoilers", False)
+
+    force_quickswap_flags(settings)
+
+    return settings
+
+
+def validate_tfnl_seed_settings(
+    canonical_mode: str,
+    preset_key: str,
+    customizer_enabled: bool,
+    raw_settings: dict,
+):
+    if canonical_mode == "casual boots":
+        if preset_key != "casualboots":
+            raise RuntimeError(
+                f"Casual Boots muss Preset `casualboots` verwenden, erhalten: `{preset_key}`"
+            )
+
+        if not customizer_enabled:
+            raise RuntimeError(
+                "Casual Boots muss als Customizer-Preset erzeugt werden. "
+                "Sonst werden Startboots nicht zuverlässig gesetzt."
+            )
+
+        eq = raw_settings.get("eq")
+
+        if not isinstance(eq, list) or "PegasusBoots" not in eq:
+            raise RuntimeError(
+                "Casual Boots wurde abgebrochen: `PegasusBoots` fehlt im Start-Equipment."
+            )
+
+        if normalize_mode_name(raw_settings.get("mode")) != "standard":
+            raise RuntimeError(
+                f"Casual Boots wurde abgebrochen: mode ist nicht `standard`, sondern `{raw_settings.get('mode')}`."
+            )
+
+    if canonical_mode == "open":
+        if normalize_mode_name(raw_settings.get("mode")) != "open":
+            raise RuntimeError(
+                f"Open wurde abgebrochen: mode ist nicht `open`, sondern `{raw_settings.get('mode')}`."
+            )
+
+        if normalize_mode_name(raw_settings.get("entrances")) not in ("none", ""):
+            raise RuntimeError(
+                f"Open wurde abgebrochen: entrances ist nicht `none`, sondern `{raw_settings.get('entrances')}`."
+            )
+
+    if canonical_mode == "crosskeys":
+        if normalize_mode_name(raw_settings.get("mode")) != "open":
+            raise RuntimeError(
+                f"Crosskeys wurde abgebrochen: mode ist nicht `open`, sondern `{raw_settings.get('mode')}`."
+            )
+
+        if normalize_mode_name(raw_settings.get("entrances")) != "crossed":
+            raise RuntimeError(
+                f"Crosskeys wurde abgebrochen: entrances ist nicht `crossed`, sondern `{raw_settings.get('entrances')}`."
+            )
+
+        if normalize_mode_name(raw_settings.get("dungeon_items")) != "full":
+            raise RuntimeError(
+                f"Crosskeys wurde abgebrochen: dungeon_items ist nicht `full`, sondern `{raw_settings.get('dungeon_items')}`."
+            )
+
+
+def build_seed_diagnostics(
+    mode_name: str,
+    preset_key: str,
+    preset_url: str,
+    customizer_enabled: bool,
+    raw_settings: dict,
+) -> dict:
+    return {
+        "mode": mode_name,
+        "canonical_mode": get_canonical_mode_name(mode_name),
+        "preset_key": preset_key,
+        "preset_url": preset_url,
+        "customizer": customizer_enabled,
+        "mode_setting": raw_settings.get("mode"),
+        "entrances": raw_settings.get("entrances"),
+        "dungeon_items": raw_settings.get("dungeon_items"),
+        "accessibility": raw_settings.get("accessibility"),
+        "eq": raw_settings.get("eq") if isinstance(raw_settings.get("eq"), list) else [],
+        "has_pegasus_boots": "PegasusBoots" in raw_settings.get("eq", []),
+        "quickswap_flags_set": True,
+    }
+
+
+async def generate_alttpr_seed_for_mode(mode_name: str) -> tuple[str, dict]:
+    canonical_mode = get_canonical_mode_name(mode_name)
+    preset_key = get_preset_key_for_mode(canonical_mode)
+
+    if not preset_key:
+        raise RuntimeError(f"Kein Seed-Mapping für Modus `{mode_name}` gefunden.")
+
+    preset_url = build_sahasrahbot_preset_url(preset_key)
+    preset_data = await fetch_yaml_url(preset_url)
+
+    raw_settings = preset_data.get("settings")
+    customizer_enabled = bool(preset_data.get("customizer", False))
+
+    if not isinstance(raw_settings, dict):
+        raise RuntimeError(f"Preset enthält keine gültigen settings: {preset_key}")
+
+    raw_settings = force_tfnl_mode_settings(
+        canonical_mode=canonical_mode,
+        raw_settings=raw_settings,
+        customizer_enabled=customizer_enabled,
+    )
+
+    validate_tfnl_seed_settings(
+        canonical_mode=canonical_mode,
+        preset_key=preset_key,
+        customizer_enabled=customizer_enabled,
+        raw_settings=raw_settings,
+    )
+
+    diagnostics = build_seed_diagnostics(
+        mode_name=mode_name,
+        preset_key=preset_key,
+        preset_url=preset_url,
+        customizer_enabled=customizer_enabled,
+        raw_settings=raw_settings,
+    )
+
+    if customizer_enabled:
+        if pyz3r_customizer is None:
+            raise RuntimeError(
+                "pyz3r.customizer konnte nicht importiert werden. "
+                "Customizer-Presets wie Casual Boots können so nicht sicher erzeugt werden."
+            )
+
+        converted_settings = pyz3r_customizer.convert2settings(
+            customizer_save=raw_settings,
+            tournament=True,
+        )
+
+        if not isinstance(converted_settings, dict):
+            raise RuntimeError("pyz3r.customizer.convert2settings hat keine gültigen Settings geliefert.")
+
+        converted_settings["tournament"] = True
+        converted_settings["spoilers"] = "off"
+        force_quickswap_flags(converted_settings)
+
+        # Wichtig:
+        # Customizer-Seeds müssen über pyz3r.alttpr(customizer=True, ...)
+        # erzeugt werden. ALTTPR.generate(...) kann Customizer-Startitems
+        # je nach pyz3r-Version wie normale Randomizer-Settings behandeln.
+        if not hasattr(pyz3r, "alttpr"):
+            raise RuntimeError(
+                "pyz3r.alttpr ist nicht verfügbar. "
+                "Customizer-Seeds können mit dieser pyz3r-Version nicht sicher erzeugt werden."
+            )
+
+        seed = await pyz3r.alttpr(
+            customizer=True,
+            settings=converted_settings,
+        )
+
+    else:
+        normal_settings = deepcopy(raw_settings)
+        normal_settings["tournament"] = True
+        normal_settings["spoilers"] = False
+        force_quickswap_flags(normal_settings)
+
+        seed = await pyz3r.ALTTPR.generate(settings=normal_settings)
+
+    seed_url = str(getattr(seed, "url", "") or "").strip()
+
+    if not seed_url:
+        raise RuntimeError(f"ALTTPR hat keine Seed URL geliefert: {preset_key}")
+
+    return seed_url, diagnostics
+
+
 async def generate_alttpr_seed_from_preset(preset_key: str) -> str:
+    """
+    Kompatibilitätsfunktion für alte Aufrufe.
+    Neue TFNL-Seed-Erzeugung sollte generate_alttpr_seed_for_mode(mode_name) verwenden,
+    damit modus-spezifische Validierungen greifen.
+    """
     preset_url = build_sahasrahbot_preset_url(preset_key)
     preset_data = await fetch_yaml_url(preset_url)
 
     settings = preset_data.get("settings")
-    customizer = bool(preset_data.get("customizer", False))
+    customizer_enabled = bool(preset_data.get("customizer", False))
 
     if not isinstance(settings, dict):
         raise RuntimeError(f"Preset enthält keine gültigen settings: {preset_key}")
 
-    if customizer:
-        settings = pyz3r.customizer.convert2settings(
+    settings = deepcopy(settings)
+    settings["tournament"] = True
+    settings["spoilers"] = settings.get("spoilers", False)
+    force_quickswap_flags(settings)
+
+    if customizer_enabled:
+        if pyz3r_customizer is None:
+            raise RuntimeError(
+                "pyz3r.customizer konnte nicht importiert werden. "
+                "Customizer-Preset kann nicht sicher erzeugt werden."
+            )
+
+        converted_settings = pyz3r_customizer.convert2settings(
             customizer_save=settings,
             tournament=True,
         )
+        force_quickswap_flags(converted_settings)
+
+        if not hasattr(pyz3r, "alttpr"):
+            raise RuntimeError(
+                "pyz3r.alttpr ist nicht verfügbar. "
+                "Customizer-Preset kann nicht sicher erzeugt werden."
+            )
+
+        seed = await pyz3r.alttpr(
+            customizer=True,
+            settings=converted_settings,
+        )
     else:
-        settings["tournament"] = True
-        settings["spoilers"] = False
+        seed = await pyz3r.ALTTPR.generate(settings=settings)
 
-    seed = await pyz3r.ALTTPR.generate(settings=settings)
-
-    seed_url = str(seed.url or "").strip()
+    seed_url = str(getattr(seed, "url", "") or "").strip()
 
     if not seed_url:
         raise RuntimeError(f"ALTTPR hat keine Seed URL geliefert: {preset_key}")
@@ -745,14 +1011,17 @@ def build_slot_line(row: dict) -> str:
 
 
 def build_signup_line(row: dict) -> str:
+    slot_id = normalize_text(row.get("Slot ID"))
     datum = normalize_text(row.get("Datum"))
     slot = normalize_text(row.get("Slot"))
     startzeit = normalize_text(row.get("Startzeit"))
     anmeldeschluss = normalize_text(row.get("Anmeldeschluss"))
     modus = normalize_text(row.get("Modus"))
+    signup_count = get_signup_count_for_slot(slot_id) if slot_id else 0
 
     return (
         f"**{datum} | {slot} | {startzeit} Uhr** — {modus}\n"
+        f"Angemeldet: `{signup_count}`\n"
         f"Anmeldeschluss: `{anmeldeschluss} Uhr`"
     )
 
@@ -874,6 +1143,25 @@ def get_signup_participants_for_slot(slot_id: str) -> list[dict]:
     return participants
 
 
+def get_signup_count_for_slot(slot_id: str) -> int:
+    rows = load_signup_rows()
+    signed_up_ids = set()
+
+    for row in rows:
+        if normalize_text(row.get("Slot ID")) != slot_id:
+            continue
+
+        if normalize_text(row.get("Status")).lower() != "signed_up":
+            continue
+
+        discord_id = normalize_text(row.get("Discord ID"))
+
+        if discord_id:
+            signed_up_ids.add(discord_id)
+
+    return len(signed_up_ids)
+
+
 def user_already_signed_up(slot_id: str, user_id: int) -> bool:
     rows = load_signup_rows()
 
@@ -883,6 +1171,27 @@ def user_already_signed_up(slot_id: str, user_id: int) -> bool:
             and normalize_text(row.get("Discord ID")) == str(user_id)
             and normalize_text(row.get("Status")).lower() == "signed_up"
         ):
+            return True
+
+    return False
+
+
+def cancel_signup(slot_id: str, user_id: int) -> bool:
+    sheet = get_signup_sheet()
+    rows = sheet.get_all_records()
+
+    status_col = get_header_index(sheet, SIGNUP_SHEET_NAME, "Status")
+
+    if not status_col:
+        return False
+
+    for row_index, row in enumerate(rows, start=2):
+        if (
+            normalize_text(row.get("Slot ID")) == slot_id
+            and normalize_text(row.get("Discord ID")) == str(user_id)
+            and normalize_text(row.get("Status")).lower() == "signed_up"
+        ):
+            sheet.update_cell(row_index, status_col, "cancelled")
             return True
 
     return False
@@ -1598,22 +1907,32 @@ class SignupView(discord.ui.View):
     def __init__(self, open_slots: list[dict]):
         super().__init__(timeout=None)
 
-        for row in open_slots[:25]:
+        for row in open_slots[:12]:
             slot_id = normalize_text(row.get("Slot ID"))
             slot = normalize_text(row.get("Slot"))
             startzeit = normalize_text(row.get("Startzeit"))
             modus = normalize_text(row.get("Modus"))
+            signup_count = get_signup_count_for_slot(slot_id) if slot_id else 0
 
             if not slot_id:
                 continue
 
-            label = f"{slot} {startzeit} | {modus}"
+            label_signup = f"Anmelden | {slot} {startzeit} | {modus} ({signup_count})"
+            label_cancel = f"Abmelden | {slot} {startzeit}"
 
             self.add_item(
                 discord.ui.Button(
-                    label=label,
+                    label=label_signup[:80],
                     style=discord.ButtonStyle.success,
                     custom_id=f"tfnl_signup:{slot_id}",
+                )
+            )
+
+            self.add_item(
+                discord.ui.Button(
+                    label=label_cancel[:80],
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"tfnl_unsubscribe:{slot_id}",
                 )
             )
 
@@ -1710,6 +2029,10 @@ class LadderCog(commands.Cog):
         try:
             if action == "tfnl_signup" and len(parts) == 2:
                 await self.handle_signup(interaction, parts[1])
+                return
+
+            if action == "tfnl_unsubscribe" and len(parts) == 2:
+                await self.handle_unsubscribe(interaction, parts[1])
                 return
 
             if action == "tfnl_finish" and len(parts) == 3:
@@ -2061,6 +2384,83 @@ class LadderCog(commands.Cog):
 
         await self.publish_signup_to_channel()
 
+    async def handle_unsubscribe(self, interaction: discord.Interaction, slot_id: str):
+        await interaction.response.defer(ephemeral=True)
+
+        member = interaction.user
+
+        if not isinstance(member, discord.Member):
+            await interaction.followup.send(
+                "Abmeldung fehlgeschlagen: Mitglied konnte nicht erkannt werden.",
+                ephemeral=True,
+            )
+            return
+
+        _, schedule_row = find_schedule_row(slot_id)
+
+        if not schedule_row:
+            await interaction.followup.send(
+                "Abmeldung fehlgeschlagen: Slot wurde im Schedule nicht gefunden.",
+                ephemeral=True,
+            )
+            return
+
+        if not is_registration_open(schedule_row):
+            await interaction.followup.send(
+                "Abmeldung nicht möglich: Die Anmeldung für diesen Slot ist bereits geschlossen.",
+                ephemeral=True,
+            )
+            return
+
+        if not user_already_signed_up(slot_id, member.id):
+            await interaction.followup.send(
+                "Du bist für diesen Slot aktuell nicht angemeldet.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            cancelled = cancel_signup(slot_id, member.id)
+        except Exception as e:
+            await interaction.followup.send(
+                f"Abmeldung fehlgeschlagen: Sheet konnte nicht aktualisiert werden.\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        if not cancelled:
+            await interaction.followup.send(
+                "Abmeldung fehlgeschlagen: Aktive Anmeldung wurde nicht gefunden.",
+                ephemeral=True,
+            )
+            return
+
+        channel_id = normalize_text(schedule_row.get("Slot Channel ID"))
+
+        if channel_id:
+            try:
+                slot_channel = self.bot.get_channel(int(channel_id))
+
+                if slot_channel is None:
+                    slot_channel = await self.bot.fetch_channel(int(channel_id))
+
+                await slot_channel.set_permissions(member, overwrite=None)
+                await slot_channel.send(
+                    f"{member.mention} hat sich von diesem TFNL-Slot abgemeldet."
+                )
+            except Exception as e:
+                await self.log_tfnl(
+                    f"Abmeldung gespeichert, aber Channel-Rechte konnten nicht entfernt werden: "
+                    f"Slot `{slot_id}`, User `{member.id}` — {repr(e)}"
+                )
+
+        await interaction.followup.send(
+            "Du wurdest von diesem Slot abgemeldet.",
+            ephemeral=True,
+        )
+
+        await self.publish_signup_to_channel()
+
     async def get_or_create_slot_channel(self, schedule_row: dict):
         guild = self.bot.get_guild(GUILD_ID)
 
@@ -2138,14 +2538,22 @@ class LadderCog(commands.Cog):
 
         try:
             await self.log_tfnl(
-                f"Erzeuge ALTTPR-Seed für Slot `{slot_id}` / Modus `{mode_name}` / Preset `{preset_key}` ..."
+                f"Erzeuge ALTTPR-Seed für Slot `{slot_id}` / Modus `{mode_name}` / "
+                f"Preset `{preset_key}` / YAML `{build_sahasrahbot_preset_url(preset_key)}` ..."
             )
 
-            seed_url = await generate_alttpr_seed_from_preset(preset_key)
+            seed_url, diagnostics = await generate_alttpr_seed_for_mode(mode_name)
+
+            await self.log_tfnl(
+                f"Seed-Validierung OK für Slot `{slot_id}` / Modus `{mode_name}` / "
+                f"Preset `{diagnostics['preset_key']}` / "
+                f"Customizer `{diagnostics['customizer']}` / "
+                f"PegasusBoots `{diagnostics['has_pegasus_boots']}`"
+            )
 
         except Exception as e:
             await self.log_tfnl(
-                f"Seed-Erzeugung fehlgeschlagen für Slot `{slot_id}` / Modus `{mode_name}` / Preset `{preset_key}` — {repr(e)}"
+                f"Seed-Erzeugung abgebrochen für Slot `{slot_id}` / Modus `{mode_name}` / Preset `{preset_key}` — {repr(e)}"
             )
             return ""
 
@@ -2305,6 +2713,22 @@ class LadderCog(commands.Cog):
                 )
                 return
 
+            current_time = normalize_text(match_row.get(f"Zeit Spieler {player_no}"))
+
+            if current_time.upper() == "FF":
+                await interaction.followup.send(
+                    "Für dich wurde bereits ein Forfeit eingetragen. Das kann nicht per Finish überschrieben werden.",
+                    ephemeral=True,
+                )
+                return
+
+            if current_time:
+                await interaction.followup.send(
+                    f"Für dich ist bereits `{current_time}` eingetragen. Nutze zuerst `Undo Finish`, falls das ein Fehlklick war.",
+                    ephemeral=True,
+                )
+                return
+
             slot_id = normalize_text(match_row.get("Slot ID"))
             _, schedule_row = find_schedule_row(slot_id)
 
@@ -2366,6 +2790,22 @@ class LadderCog(commands.Cog):
                 )
                 return
 
+            current_time = normalize_text(match_row.get(f"Zeit Spieler {player_no}"))
+
+            if current_time.upper() == "FF":
+                await interaction.followup.send(
+                    "Ein Forfeit kann nicht per Undo zurückgenommen werden.",
+                    ephemeral=True,
+                )
+                return
+
+            if not current_time:
+                await interaction.followup.send(
+                    "Es ist keine Finish-Zeit eingetragen, die zurückgenommen werden kann.",
+                    ephemeral=True,
+                )
+                return
+
             update_match_cells(
                 match_id,
                 {
@@ -2399,6 +2839,22 @@ class LadderCog(commands.Cog):
 
             if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
                 await interaction.followup.send("Das Ergebnis wurde bereits veröffentlicht.", ephemeral=True)
+                return
+
+            current_time = normalize_text(match_row.get(f"Zeit Spieler {player_no}"))
+
+            if current_time.upper() == "FF":
+                await interaction.followup.send(
+                    "Für dich wurde bereits ein Forfeit eingetragen.",
+                    ephemeral=True,
+                )
+                return
+
+            if current_time:
+                await interaction.followup.send(
+                    f"Für dich ist bereits `{current_time}` eingetragen. Ein nachträglicher Forfeit ist nicht möglich.",
+                    ephemeral=True,
+                )
                 return
 
             update_match_cells(
@@ -2904,21 +3360,34 @@ class LadderCog(commands.Cog):
             return
 
         try:
-            seed_url = await generate_alttpr_seed_from_preset(preset_key)
+            seed_url, diagnostics = await generate_alttpr_seed_for_mode(mode_name)
         except Exception as e:
             await interaction.followup.send(
                 "**Seed-Test fehlgeschlagen.**\n\n"
                 f"Modus: `{mode_name}`\n"
-                f"Preset: `{preset_key}`\n\n"
+                f"Preset: `{preset_key}`\n"
+                f"YAML: `{build_sahasrahbot_preset_url(preset_key)}`\n\n"
                 f"Fehler:\n```{repr(e)}```",
                 ephemeral=True,
             )
             return
 
+        eq_preview = diagnostics.get("eq") or []
+        eq_text = ", ".join(eq_preview[:8]) if eq_preview else "-"
+
         await interaction.followup.send(
             "**Seed-Test erfolgreich.**\n\n"
             f"Modus: `{mode_name}`\n"
-            f"Preset: `{preset_key}`\n"
+            f"Canonical: `{diagnostics['canonical_mode']}`\n"
+            f"Preset: `{diagnostics['preset_key']}`\n"
+            f"YAML: `{diagnostics['preset_url']}`\n"
+            f"Customizer: `{diagnostics['customizer']}`\n"
+            f"Mode-Setting: `{diagnostics['mode_setting']}`\n"
+            f"Entrances: `{diagnostics['entrances']}`\n"
+            f"Dungeon Items: `{diagnostics['dungeon_items']}`\n"
+            f"PegasusBoots im Preset: `{diagnostics['has_pegasus_boots']}`\n"
+            f"Start-Equipment: `{eq_text}`\n"
+            f"Quick-Swap-Flags: `gesetzt`\n"
             f"Seed: {seed_url}\n\n"
             "Es wurde nichts ins Sheet geschrieben und keine DM verschickt.",
             ephemeral=True,
