@@ -1,5 +1,6 @@
 import os
 import re
+import random
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -47,6 +48,8 @@ BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 SCHEDULE_SHEET_NAME = "Schedule"
 SIGNUP_SHEET_NAME = "Signup"
+MATCHES_SHEET_NAME = "Matches"
+
 SCHEDULE_ANNOUNCEMENT_COL = "Signup Announcement Sent"
 
 SIGNUP_HEADERS = [
@@ -56,6 +59,31 @@ SIGNUP_HEADERS = [
     "Angemeldet um",
     "DM geprüft",
     "Status",
+]
+
+MATCHES_HEADERS = [
+    "Match ID",
+    "Slot ID",
+    "Matchtyp",
+    "Spieler 1 Discord ID",
+    "Spieler 1 Name",
+    "Spieler 2 Discord ID",
+    "Spieler 2 Name",
+    "Spieler 3 Discord ID",
+    "Spieler 3 Name",
+    "Seed URL",
+    "Startzeit",
+    "Zeit Spieler 1",
+    "Zeit Spieler 2",
+    "Zeit Spieler 3",
+    "Ergebnis Spieler 1",
+    "Ergebnis Spieler 2",
+    "Ergebnis Spieler 3",
+    "Punkte Spieler 1",
+    "Punkte Spieler 2",
+    "Punkte Spieler 3",
+    "Status",
+    "Veröffentlicht",
 ]
 
 SCOPE = [
@@ -86,7 +114,7 @@ def get_or_create_worksheet(
     title: str,
     headers: list[str],
     rows: int = 1000,
-    cols: int = 20,
+    cols: int = 30,
 ):
     try:
         sheet = spreadsheet.worksheet(title)
@@ -117,6 +145,17 @@ def get_signup_sheet():
     )
 
 
+def get_matches_sheet():
+    spreadsheet = get_tfnl_spreadsheet()
+    return get_or_create_worksheet(
+        spreadsheet=spreadsheet,
+        title=MATCHES_SHEET_NAME,
+        headers=MATCHES_HEADERS,
+        rows=1000,
+        cols=len(MATCHES_HEADERS),
+    )
+
+
 def load_schedule_rows():
     sheet = get_schedule_sheet()
     return sheet.get_all_records()
@@ -138,6 +177,11 @@ def load_signup_rows():
     return sheet.get_all_records()
 
 
+def load_matches_rows():
+    sheet = get_matches_sheet()
+    return sheet.get_all_records()
+
+
 def append_signup(slot_id: str, user_id: int, display_name: str):
     sheet = get_signup_sheet()
 
@@ -154,6 +198,14 @@ def append_signup(slot_id: str, user_id: int, display_name: str):
         ],
         value_input_option="USER_ENTERED",
     )
+
+
+def append_matches(match_rows: list[list]):
+    if not match_rows:
+        return
+
+    sheet = get_matches_sheet()
+    sheet.append_rows(match_rows, value_input_option="USER_ENTERED")
 
 
 def find_schedule_row(slot_id: str):
@@ -179,6 +231,10 @@ def update_schedule_cell(slot_id: str, column_name: str, value: str):
         return
 
     sheet.update_cell(row_index, col_index, value)
+
+
+def update_schedule_status(slot_id: str, status: str):
+    update_schedule_cell(slot_id, "Status", status)
 
 
 def update_schedule_channel_id(slot_id: str, channel_id: int):
@@ -247,6 +303,16 @@ def is_registration_open(row: dict) -> bool:
         return False
 
     return start <= now < end
+
+
+def is_registration_due_for_pairing(row: dict) -> bool:
+    now = datetime.now(BERLIN_TZ)
+    deadline = build_datetime(row.get("Datum"), row.get("Anmeldeschluss"))
+
+    if not deadline:
+        return False
+
+    return now >= deadline
 
 
 def signup_announcement_already_sent(row: dict) -> bool:
@@ -343,6 +409,38 @@ def get_open_signup_slots():
     return open_slots
 
 
+def get_signup_participants_for_slot(slot_id: str) -> list[dict]:
+    rows = load_signup_rows()
+
+    participants = []
+    seen = set()
+
+    for row in rows:
+        row_slot_id = normalize_text(row.get("Slot ID"))
+        discord_id = normalize_text(row.get("Discord ID"))
+        status = normalize_text(row.get("Status")).lower()
+
+        if row_slot_id != slot_id:
+            continue
+
+        if status != "signed_up":
+            continue
+
+        if not discord_id or discord_id in seen:
+            continue
+
+        seen.add(discord_id)
+
+        participants.append(
+            {
+                "discord_id": discord_id,
+                "name": normalize_text(row.get("Discord Display Name")),
+            }
+        )
+
+    return participants
+
+
 def user_already_signed_up(slot_id: str, user_id: int) -> bool:
     rows = load_signup_rows()
 
@@ -355,6 +453,143 @@ def user_already_signed_up(slot_id: str, user_id: int) -> bool:
             return True
 
     return False
+
+
+def matches_already_created(slot_id: str) -> bool:
+    rows = load_matches_rows()
+
+    for row in rows:
+        if normalize_text(row.get("Slot ID")) == slot_id:
+            return True
+
+    return False
+
+
+def get_last_opponents() -> dict[str, set[str]]:
+    rows = load_matches_rows()
+
+    last_opponents: dict[str, set[str]] = {}
+
+    for row in rows:
+        players = [
+            normalize_text(row.get("Spieler 1 Discord ID")),
+            normalize_text(row.get("Spieler 2 Discord ID")),
+            normalize_text(row.get("Spieler 3 Discord ID")),
+        ]
+        players = [p for p in players if p]
+
+        for player_id in players:
+            opponents = set(p for p in players if p != player_id)
+            if opponents:
+                last_opponents[player_id] = opponents
+
+    return last_opponents
+
+
+def calculate_pairing_score(groups: list[list[dict]], last_opponents: dict[str, set[str]]) -> int:
+    score = 0
+
+    for group in groups:
+        ids = [p["discord_id"] for p in group]
+
+        for player_id in ids:
+            previous = last_opponents.get(player_id, set())
+            for other_id in ids:
+                if other_id != player_id and other_id in previous:
+                    score += 1
+
+    return score
+
+
+def create_pairings(participants: list[dict]) -> list[list[dict]]:
+    count = len(participants)
+
+    if count < 2:
+        return []
+
+    if count == 3:
+        return [participants]
+
+    last_opponents = get_last_opponents()
+
+    best_groups = None
+    best_score = None
+
+    attempts = 100
+
+    for _ in range(attempts):
+        shuffled = participants[:]
+        random.shuffle(shuffled)
+
+        groups = []
+
+        if len(shuffled) % 2 == 1:
+            three_way = shuffled[-3:]
+            rest = shuffled[:-3]
+        else:
+            three_way = None
+            rest = shuffled
+
+        for index in range(0, len(rest), 2):
+            groups.append(rest[index:index + 2])
+
+        if three_way:
+            groups.append(three_way)
+
+        score = calculate_pairing_score(groups, last_opponents)
+
+        if best_score is None or score < best_score:
+            best_score = score
+            best_groups = groups
+
+        if score == 0:
+            break
+
+    return best_groups or []
+
+
+def build_match_rows(slot_id: str, schedule_row: dict, pairings: list[list[dict]]) -> list[list]:
+    rows = []
+
+    startzeit = normalize_text(schedule_row.get("Startzeit"))
+    seed_url = normalize_text(schedule_row.get("Seed URL"))
+
+    for index, group in enumerate(pairings, start=1):
+        match_id = f"{slot_id}-M{index:02d}"
+        matchtyp = "3way" if len(group) == 3 else "1on1"
+
+        p1 = group[0]
+        p2 = group[1]
+        p3 = group[2] if len(group) == 3 else {"discord_id": "", "name": ""}
+
+        rows.append(
+            [
+                match_id,
+                slot_id,
+                matchtyp,
+                p1["discord_id"],
+                p1["name"],
+                p2["discord_id"],
+                p2["name"],
+                p3["discord_id"],
+                p3["name"],
+                seed_url,
+                startzeit,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "created",
+                "Nein",
+            ]
+        )
+
+    return rows
 
 
 def build_schedule_embed(days: int = 5) -> discord.Embed:
@@ -465,9 +700,13 @@ class LadderCog(commands.Cog):
         if not self.update_signup_channel.is_running():
             self.update_signup_channel.start()
 
+        if not self.process_ladder_slots.is_running():
+            self.process_ladder_slots.start()
+
     def cog_unload(self):
         self.update_schedule_channel.cancel()
         self.update_signup_channel.cancel()
+        self.process_ladder_slots.cancel()
 
     # =====================================================
     # CHANNEL HELPERS
@@ -547,14 +786,25 @@ class LadderCog(commands.Cog):
 
                 update_schedule_announcement_sent(slot_id)
 
-                async def delete_later(message: discord.Message):
-                    await asyncio.sleep(60)
+                delete_at = build_datetime(row.get("Datum"), row.get("Anmeldeschluss"))
+
+                async def delete_at_registration_close(message: discord.Message, target_time: datetime | None):
+                    if target_time is None:
+                        return
+
+                    now = datetime.now(BERLIN_TZ)
+                    seconds_until_close = max(0, (target_time - now).total_seconds())
+
+                    await asyncio.sleep(seconds_until_close)
+
                     try:
                         await message.delete()
                     except Exception as e:
-                        print(f"[TFNL] Signup-Ping konnte nicht gelöscht werden: {repr(e)}")
+                        print(f"[TFNL] Signup-Ping konnte nach Anmeldeschluss nicht gelöscht werden: {repr(e)}")
 
-                self.bot.loop.create_task(delete_later(ping_message))
+                self.bot.loop.create_task(
+                    delete_at_registration_close(ping_message, delete_at)
+                )
 
             except Exception as e:
                 print(f"[TFNL] Signup-Announcement konnte nicht gesendet werden: {repr(e)}")
@@ -767,6 +1017,80 @@ class LadderCog(commands.Cog):
         return channel
 
     # =====================================================
+    # PAIRING LOGIC
+    # =====================================================
+
+    async def process_schedule_states(self):
+        rows_with_index = load_schedule_rows_with_index()
+
+        for row_index, row in rows_with_index:
+            slot_id = normalize_text(row.get("Slot ID"))
+            status = normalize_text(row.get("Status")).lower()
+
+            if not slot_id:
+                continue
+
+            if status in ("paired", "cancelled", "finished"):
+                continue
+
+            if is_registration_open(row) and status != "registration_open":
+                update_schedule_status(slot_id, "registration_open")
+                continue
+
+            if is_registration_due_for_pairing(row) and status in ("planned", "registration_open", ""):
+                await self.close_registration_and_pair(row)
+
+    async def close_registration_and_pair(self, schedule_row: dict):
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
+
+        if not slot_id:
+            return
+
+        if matches_already_created(slot_id):
+            update_schedule_status(slot_id, "paired")
+            return
+
+        participants = get_signup_participants_for_slot(slot_id)
+
+        try:
+            slot_channel = await self.get_or_create_slot_channel(schedule_row)
+        except Exception as e:
+            slot_channel = None
+            print(f"[TFNL] Slot-Channel konnte beim Pairing nicht geladen/erstellt werden: {repr(e)}")
+
+        if len(participants) < 2:
+            update_schedule_status(slot_id, "cancelled")
+
+            if slot_channel:
+                await slot_channel.send(
+                    "**Anmeldung geschlossen.**\n"
+                    "Der Slot wurde abgesagt, da weniger als 2 Spieler angemeldet sind."
+                )
+
+            print(f"[TFNL] Slot {slot_id} cancelled: weniger als 2 Teilnehmer.")
+            await self.publish_schedule_to_channel()
+            await self.publish_signup_to_channel()
+            return
+
+        pairings = create_pairings(participants)
+        match_rows = build_match_rows(slot_id, schedule_row, pairings)
+
+        append_matches(match_rows)
+        update_schedule_status(slot_id, "paired")
+
+        if slot_channel:
+            await slot_channel.send(
+                "**Anmeldung geschlossen.**\n"
+                "Die Paarungen wurden geheim ausgelost.\n"
+                "Ihr erhaltet die weiteren Informationen später per DM."
+            )
+
+        print(f"[TFNL] Slot {slot_id} paired: {len(match_rows)} Match(es) erstellt.")
+
+        await self.publish_schedule_to_channel()
+        await self.publish_signup_to_channel()
+
+    # =====================================================
     # TASKS
     # =====================================================
 
@@ -787,6 +1111,17 @@ class LadderCog(commands.Cog):
     async def before_update_signup_channel(self):
         await self.bot.wait_until_ready()
         await self.publish_signup_to_channel()
+
+    @tasks.loop(minutes=1)
+    async def process_ladder_slots(self):
+        try:
+            await self.process_schedule_states()
+        except Exception as e:
+            print(f"[TFNL] Fehler in process_ladder_slots: {repr(e)}")
+
+    @process_ladder_slots.before_loop
+    async def before_process_ladder_slots(self):
+        await self.bot.wait_until_ready()
 
     # =====================================================
     # COMMANDS
