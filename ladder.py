@@ -5,8 +5,11 @@ import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import discord
 import gspread
+import pyz3r
+import yaml
 from discord import app_commands
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
@@ -56,6 +59,10 @@ MATCHES_SHEET_NAME = "Matches"
 PLAYERS_SHEET_NAME = "Players"
 
 SCHEDULE_ANNOUNCEMENT_COL = "Signup Announcement Sent"
+
+SAHASRAHBOT_PRESET_BASE_URL = (
+    "https://raw.githubusercontent.com/tcprescott/sahasrahbot/master/presets/alttpr"
+)
 
 SIGNUP_HEADERS = [
     "Slot ID",
@@ -110,6 +117,64 @@ SCOPE = [
 ]
 
 HEADER_CACHE = {}
+
+
+# =========================================================
+# MODE / PRESET MAPPING
+# =========================================================
+
+TFNL_MODE_PRESETS = {
+    "casual boots": "casualboots",
+    "open": "open",
+    "inverted": "inverted",
+    "open ad boots": "adboots",
+    "invrosia": "invrosia",
+    "ambrosia": "ambrosia",
+    "ludicrous speed": "ludicrousspeed",
+    "hard standard": "standhard",
+    "standard": "standard",
+    "tfl hard standard": "mormacil/harder_standard",
+    "keysanity": "keysanity",
+    "ad keysanity mit boots": "adkeys_boots",
+    "ad keys": "adkeys",
+    "mc boss": "phoenix-aut/mcboss",
+    "influkeys": "alttprleague/influkeys",
+    "crosskeys": "crosskeys",
+}
+
+TFNL_MODE_ALIASES = {
+    "casualboots": "casual boots",
+    "boots": "casual boots",
+
+    "ad boots": "open ad boots",
+    "open adboots": "open ad boots",
+    "adboots": "open ad boots",
+
+    "ludi": "ludicrous speed",
+    "ludicrousspeed": "ludicrous speed",
+
+    "hardstandard": "hard standard",
+    "hard std": "hard standard",
+    "standhard": "hard standard",
+
+    "tfl hard": "tfl hard standard",
+    "harder standard": "tfl hard standard",
+    "mormacil/harder_standard": "tfl hard standard",
+
+    "adkeys boots": "ad keysanity mit boots",
+    "adkeys mit boots": "ad keysanity mit boots",
+    "ad keys boots": "ad keysanity mit boots",
+    "adkeys_boots": "ad keysanity mit boots",
+
+    "adkeys": "ad keys",
+
+    "xkeys": "crosskeys",
+    "cross keys": "crosskeys",
+
+    "mcboss": "mc boss",
+    "phoenix-aut/mcboss": "mc boss",
+}
+
 
 print("DEBUG TFNL_SPREADSHEET_ID =", repr(TFNL_SPREADSHEET_ID))
 print("DEBUG TFNL CREDS_FILE =", repr(CREDS_FILE))
@@ -481,6 +546,70 @@ def timecode_to_seconds(value: str):
         return None
 
     return h * 3600 + m * 60 + s
+
+
+# =========================================================
+# MODE / SEED HELPERS
+# =========================================================
+
+def normalize_mode_name(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def get_preset_key_for_mode(mode_name: str) -> str | None:
+    normalized = normalize_mode_name(mode_name)
+    canonical = TFNL_MODE_ALIASES.get(normalized, normalized)
+    return TFNL_MODE_PRESETS.get(canonical)
+
+
+def build_sahasrahbot_preset_url(preset_key: str) -> str:
+    return f"{SAHASRAHBOT_PRESET_BASE_URL}/{preset_key}.yaml"
+
+
+async def fetch_yaml_url(url: str) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=30) as response:
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Preset konnte nicht geladen werden: HTTP {response.status} | {url}"
+                )
+
+            text = await response.text()
+            data = yaml.safe_load(text)
+
+            if not isinstance(data, dict):
+                raise RuntimeError(f"Preset YAML ist ungültig: {url}")
+
+            return data
+
+
+async def generate_alttpr_seed_from_preset(preset_key: str) -> str:
+    preset_url = build_sahasrahbot_preset_url(preset_key)
+    preset_data = await fetch_yaml_url(preset_url)
+
+    settings = preset_data.get("settings")
+    customizer = bool(preset_data.get("customizer", False))
+
+    if not isinstance(settings, dict):
+        raise RuntimeError(f"Preset enthält keine gültigen settings: {preset_key}")
+
+    if customizer:
+        settings = pyz3r.customizer.convert2settings(
+            customizer_save=settings,
+            tournament=True,
+        )
+    else:
+        settings["tournament"] = True
+        settings["spoilers"] = False
+
+    seed = await pyz3r.ALTTPR.generate(settings=settings)
+
+    seed_url = str(seed.url or "").strip()
+
+    if not seed_url:
+        raise RuntimeError(f"ALTTPR hat keine Seed URL geliefert: {preset_key}")
+
+    return seed_url
 
 
 # =========================================================
@@ -1561,19 +1690,74 @@ class LadderCog(commands.Cog):
         return channel
 
     # =====================================================
-    # RACE FLOW
+    # SEED / RACE FLOW
     # =====================================================
+
+    async def ensure_seed_url_for_slot(self, schedule_row: dict) -> str:
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
+        current_seed_url = get_seed_url(schedule_row)
+
+        if current_seed_url:
+            return current_seed_url
+
+        mode_name = normalize_text(schedule_row.get("Modus"))
+        preset_key = get_preset_key_for_mode(mode_name)
+
+        if not preset_key:
+            await self.log_tfnl(
+                f"Kein Seed-Mapping für Slot `{slot_id}` / Modus `{mode_name}` gefunden. "
+                "Bitte gültigen Modus verwenden oder Seed URL manuell eintragen."
+            )
+            return ""
+
+        try:
+            await self.log_tfnl(
+                f"Erzeuge ALTTPR-Seed für Slot `{slot_id}` / Modus `{mode_name}` / Preset `{preset_key}` ..."
+            )
+
+            seed_url = await generate_alttpr_seed_from_preset(preset_key)
+
+        except Exception as e:
+            await self.log_tfnl(
+                f"Seed-Erzeugung fehlgeschlagen für Slot `{slot_id}` / Modus `{mode_name}` / Preset `{preset_key}` — {repr(e)}"
+            )
+            return ""
+
+        update_schedule_cell(slot_id, "Seed URL", seed_url)
+
+        matches = get_matches_for_slot(slot_id)
+
+        for match in matches:
+            match_id = normalize_text(match.get("Match ID"))
+
+            if match_id:
+                update_match_cell(match_id, "Seed URL", seed_url)
+
+        await self.log_tfnl(
+            f"Seed erzeugt für Slot `{slot_id}`: {seed_url}"
+        )
+
+        return seed_url
 
     async def send_seed_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
-        seed_url = get_seed_url(schedule_row)
+
+        seed_url = await self.ensure_seed_url_for_slot(schedule_row)
 
         if not seed_url:
-            await self.log_tfnl(f"Seed URL fehlt für Slot `{slot_id}`. Seed-DMs wurden nicht gesendet.")
+            await self.log_tfnl(
+                f"Seed URL fehlt weiterhin für Slot `{slot_id}`. Seed-DMs wurden nicht gesendet."
+            )
             return False
 
         matches = get_matches_for_slot(slot_id)
         sent_to = set()
+
+        if not matches:
+            await self.log_tfnl(
+                f"Keine Matches für Slot `{slot_id}` gefunden. Seed-DMs wurden nicht gesendet."
+            )
+            return False
 
         for match in matches:
             for player in get_match_players(match):
@@ -1599,6 +1783,8 @@ class LadderCog(commands.Cog):
                     )
 
         update_schedule_status(slot_id, "seed_sent")
+        await self.publish_schedule_to_channel()
+
         return True
 
     async def send_countdown_dms(self, schedule_row: dict):
