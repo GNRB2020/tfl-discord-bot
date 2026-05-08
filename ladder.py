@@ -12,12 +12,26 @@ import gspread
 import pyz3r
 
 try:
-    import pyz3r.customizer as pyz3r_customizer
+    from pyz3r import alttpr as pyz3r_alttpr
+except Exception:
+    pyz3r_alttpr = None
+
+if not callable(pyz3r_alttpr):
+    try:
+        from pyz3r.alttpr import alttpr as pyz3r_alttpr
+    except Exception:
+        pyz3r_alttpr = None
+
+try:
+    from pyz3r.customizer import customizer as pyz3r_customizer
 except Exception:
     try:
-        from pyz3r import customizer as pyz3r_customizer
+        import pyz3r.customizer as pyz3r_customizer
     except Exception:
-        pyz3r_customizer = None
+        try:
+            from pyz3r import customizer as pyz3r_customizer
+        except Exception:
+            pyz3r_customizer = None
 
 import yaml
 from discord import app_commands
@@ -705,6 +719,37 @@ def force_quickswap_flags(settings: dict):
     settings["quickSwap"] = True
 
 
+def get_customizer_converter():
+    if pyz3r_customizer is None:
+        return None
+
+    if hasattr(pyz3r_customizer, "convert2settings"):
+        return pyz3r_customizer.convert2settings
+
+    nested = getattr(pyz3r_customizer, "customizer", None)
+
+    if nested is not None and hasattr(nested, "convert2settings"):
+        return nested.convert2settings
+
+    return None
+
+
+async def create_pyz3r_seed(customizer_enabled: bool, settings: dict):
+    if customizer_enabled:
+        if pyz3r_alttpr is None or not callable(pyz3r_alttpr):
+            raise RuntimeError(
+                "pyz3r.alttpr ist nicht als Callable verfügbar. "
+                "Customizer-Seeds können mit dieser pyz3r-Installation nicht erzeugt werden."
+            )
+
+        return await pyz3r_alttpr(
+            customizer=True,
+            settings=settings,
+        )
+
+    return await pyz3r.ALTTPR.generate(settings=settings)
+
+
 def force_tfnl_mode_settings(canonical_mode: str, raw_settings: dict, customizer_enabled: bool) -> dict:
     settings = deepcopy(raw_settings)
 
@@ -829,7 +874,8 @@ def build_seed_diagnostics(
         "has_pegasus_boots": "PegasusBoots" in raw_settings.get("eq", []),
         "quickswap_flags_set": True,
         "pyz3r_customizer_available": pyz3r_customizer is not None,
-        "pyz3r_alttpr_available": hasattr(pyz3r, "alttpr"),
+        "pyz3r_customizer_converter_available": get_customizer_converter() is not None,
+        "pyz3r_alttpr_available": pyz3r_alttpr is not None and callable(pyz3r_alttpr),
     }
 
 
@@ -871,7 +917,7 @@ async def generate_alttpr_seed_for_mode(mode_name: str) -> tuple[str, dict]:
     )
 
     if customizer_enabled:
-        if not hasattr(pyz3r, "alttpr"):
+        if pyz3r_alttpr is None or not callable(pyz3r_alttpr):
             raise RuntimeError(
                 "pyz3r.alttpr ist nicht verfügbar. "
                 "Customizer-Seeds können mit dieser pyz3r-Version nicht erzeugt werden."
@@ -889,8 +935,10 @@ async def generate_alttpr_seed_for_mode(mode_name: str) -> tuple[str, dict]:
         # Wir versuchen zuerst die Konvertierung. Falls das Modul oder die Funktion fehlt,
         # wird bewusst der direkte Customizer-Pfad genutzt. Es darf hier nicht auf Open
         # zurückfallen.
-        if pyz3r_customizer is not None and hasattr(pyz3r_customizer, "convert2settings"):
-            converted_settings = pyz3r_customizer.convert2settings(
+        converter = get_customizer_converter()
+
+        if converter is not None:
+            converted_settings = converter(
                 customizer_save=customizer_settings,
                 tournament=True,
             )
@@ -902,13 +950,13 @@ async def generate_alttpr_seed_for_mode(mode_name: str) -> tuple[str, dict]:
             converted_settings["spoilers"] = "off"
             force_quickswap_flags(converted_settings)
 
-            seed = await pyz3r.alttpr(
-                customizer=True,
+            seed = await create_pyz3r_seed(
+                customizer_enabled=True,
                 settings=converted_settings,
             )
         else:
-            seed = await pyz3r.alttpr(
-                customizer=True,
+            seed = await create_pyz3r_seed(
+                customizer_enabled=True,
                 settings=customizer_settings,
             )
 
@@ -949,7 +997,7 @@ async def generate_alttpr_seed_from_preset(preset_key: str) -> str:
     force_quickswap_flags(settings)
 
     if customizer_enabled:
-        if not hasattr(pyz3r, "alttpr"):
+        if pyz3r_alttpr is None or not callable(pyz3r_alttpr):
             raise RuntimeError(
                 "pyz3r.alttpr ist nicht verfügbar. "
                 "Customizer-Preset kann nicht erzeugt werden."
@@ -960,8 +1008,10 @@ async def generate_alttpr_seed_from_preset(preset_key: str) -> str:
         customizer_settings["spoilers"] = "off"
         force_quickswap_flags(customizer_settings)
 
-        if pyz3r_customizer is not None and hasattr(pyz3r_customizer, "convert2settings"):
-            converted_settings = pyz3r_customizer.convert2settings(
+        converter = get_customizer_converter()
+
+        if converter is not None:
+            converted_settings = converter(
                 customizer_save=customizer_settings,
                 tournament=True,
             )
@@ -973,13 +1023,13 @@ async def generate_alttpr_seed_from_preset(preset_key: str) -> str:
             converted_settings["spoilers"] = "off"
             force_quickswap_flags(converted_settings)
 
-            seed = await pyz3r.alttpr(
-                customizer=True,
+            seed = await create_pyz3r_seed(
+                customizer_enabled=True,
                 settings=converted_settings,
             )
         else:
-            seed = await pyz3r.alttpr(
-                customizer=True,
+            seed = await create_pyz3r_seed(
+                customizer_enabled=True,
                 settings=customizer_settings,
             )
     else:
@@ -3414,6 +3464,9 @@ class LadderCog(commands.Cog):
             f"PegasusBoots im Preset: `{diagnostics['has_pegasus_boots']}`\n"
             f"Start-Equipment: `{eq_text}`\n"
             f"Quick-Swap-Flags: `gesetzt`\n"
+            f"pyz3r.customizer: `{diagnostics.get('pyz3r_customizer_available')}`\n"
+            f"pyz3r.customizer.convert2settings: `{diagnostics.get('pyz3r_customizer_converter_available')}`\n"
+            f"pyz3r.alttpr callable: `{diagnostics.get('pyz3r_alttpr_available')}`\n"
             f"Seed: {seed_url}\n\n"
             "Es wurde nichts ins Sheet geschrieben und keine DM verschickt.",
             ephemeral=True,
