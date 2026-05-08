@@ -1001,6 +1001,44 @@ def build_slot_line(row: dict) -> str:
     return f"**{datum} | {slot} | {startzeit} Uhr** — {modus} `[{status}]`"
 
 
+def build_discord_table(headers: list[str], rows: list[list], max_col_width: int = 24) -> str:
+    string_rows = []
+
+    for row in rows:
+        string_row = []
+        for value in row:
+            text = normalize_text(value).replace("\n", " / ")
+            if len(text) > max_col_width:
+                text = text[: max_col_width - 1] + "…"
+            string_row.append(text)
+        string_rows.append(string_row)
+
+    widths = []
+    for index, header in enumerate(headers):
+        values = [normalize_text(header)]
+        for row in string_rows:
+            if index < len(row):
+                values.append(row[index])
+        widths.append(min(max(len(value) for value in values), max_col_width))
+
+    def format_row(row_values: list[str]) -> str:
+        cells = []
+        for index, width in enumerate(widths):
+            value = row_values[index] if index < len(row_values) else ""
+            if len(value) > width:
+                value = value[: width - 1] + "…"
+            cells.append(value.ljust(width))
+        return " | ".join(cells).rstrip()
+
+    separator = "-+-".join("-" * width for width in widths)
+    lines = [format_row(headers), separator]
+
+    for row in string_rows:
+        lines.append(format_row(row))
+
+    return "```text\n" + "\n".join(lines) + "\n```"
+
+
 def build_signup_line(row: dict) -> str:
     slot_id = normalize_text(row.get("Slot ID"))
     datum = normalize_text(row.get("Datum"))
@@ -1009,12 +1047,10 @@ def build_signup_line(row: dict) -> str:
     anmeldeschluss = normalize_text(row.get("Anmeldeschluss"))
     modus = normalize_text(row.get("Modus"))
     signup_count = get_signup_count_for_slot(slot_id) if slot_id else 0
-    signup_names = format_signup_names_for_slot(slot_id) if slot_id else "_Noch niemand angemeldet._"
 
     return (
         f"**{datum} | {slot} | {startzeit} Uhr** — {modus}\n"
         f"Angemeldet: `{signup_count}`\n"
-        f"Spieler: {signup_names}\n"
         f"Anmeldeschluss: `{anmeldeschluss} Uhr`"
     )
 
@@ -1031,6 +1067,11 @@ def get_upcoming_schedule(days: int = 5):
         slot_date = parse_german_date(row.get("Datum"))
 
         if not slot_date:
+            continue
+
+        status = normalize_text(row.get("Status")).lower()
+
+        if status in ("completed", "archived", "cancelled"):
             continue
 
         if today <= slot_date <= end_date:
@@ -1061,9 +1102,25 @@ def build_schedule_embed(days: int = 5) -> discord.Embed:
     upcoming = get_upcoming_schedule(days=days)
 
     if not upcoming:
-        description = f"Keine TFNL-Slots in den nächsten {days} Tagen gefunden."
+        description = f"Keine offenen TFNL-Slots in den nächsten {days} Tagen gefunden."
     else:
-        description = "\n".join(build_slot_line(row) for row in upcoming)
+        table_rows = []
+        for row in upcoming:
+            table_rows.append(
+                [
+                    normalize_text(row.get("Datum")),
+                    normalize_text(row.get("Slot")),
+                    normalize_text(row.get("Startzeit")),
+                    normalize_text(row.get("Modus")),
+                    normalize_text(row.get("Status")) or "planned",
+                ]
+            )
+
+        description = build_discord_table(
+            ["Datum", "Slot", "Start", "Modus", "Status"],
+            table_rows,
+            max_col_width=18,
+        )
 
     now = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
 
@@ -1073,7 +1130,7 @@ def build_schedule_embed(days: int = 5) -> discord.Embed:
         color=discord.Color.dark_teal(),
     )
 
-    embed.set_footer(text=f"Try Force Nachteulen Ladder | Aktualisiert: {now} Uhr")
+    embed.set_footer(text=f"Beendete Slots werden ausgeblendet | Aktualisiert: {now} Uhr")
     return embed
 
 
@@ -1088,11 +1145,67 @@ def build_signup_embed(open_slots: list[dict]) -> discord.Embed:
         )
         title = "TFNL-Anmeldung"
     else:
-        description = "\n\n".join(build_signup_line(row) for row in open_slots)
+        table_rows = []
+        for row in open_slots:
+            slot_id = normalize_text(row.get("Slot ID"))
+            table_rows.append(
+                [
+                    normalize_text(row.get("Datum")),
+                    normalize_text(row.get("Slot")),
+                    normalize_text(row.get("Startzeit")),
+                    normalize_text(row.get("Modus")),
+                    get_signup_count_for_slot(slot_id) if slot_id else 0,
+                    normalize_text(row.get("Anmeldeschluss")),
+                ]
+            )
+
+        description = build_discord_table(
+            ["Datum", "Slot", "Start", "Modus", "Anz", "Bis"],
+            table_rows,
+            max_col_width=16,
+        )
+        description += "\nNutze die Buttons unter dieser Nachricht zum An- oder Abmelden."
         title = "TFNL-Anmeldung geöffnet"
 
     embed = discord.Embed(
         title=title,
+        description=description,
+        color=discord.Color.dark_teal(),
+    )
+
+    embed.set_footer(text=f"Aktualisiert: {now} Uhr")
+    return embed
+
+
+def build_signup_status_embed(open_slots: list[dict]) -> discord.Embed:
+    now = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+
+    if not open_slots:
+        description = "Keine offene Anmeldung."
+    else:
+        sections = []
+        for row in open_slots:
+            slot_id = normalize_text(row.get("Slot ID"))
+            datum = normalize_text(row.get("Datum"))
+            slot = normalize_text(row.get("Slot"))
+            startzeit = normalize_text(row.get("Startzeit"))
+            modus = normalize_text(row.get("Modus"))
+            names = get_signup_names_for_slot(slot_id)
+
+            section_lines = [f"**{datum} | {slot} | {startzeit} Uhr — {modus}**"]
+
+            if not names:
+                section_lines.append("_Noch niemand angemeldet._")
+            else:
+                player_rows = [[index, name] for index, name in enumerate(names, start=1)]
+                section_lines.append(build_discord_table(["#", "Spieler"], player_rows, max_col_width=30))
+
+            sections.append("\n".join(section_lines))
+
+        description = "\n\n".join(sections)
+
+    embed = discord.Embed(
+        title="Aktuell angemeldete Spieler",
         description=description,
         color=discord.Color.dark_teal(),
     )
@@ -1601,20 +1714,29 @@ def build_slot_overview_message(schedule_row: dict) -> str:
     if not results:
         lines.append("Keine Ergebnisse gefunden.")
     else:
+        table_rows = []
         for index, result in enumerate(results, start=1):
-            lines.append(
-                f"{index}. **{result['name']}** — `{result['time']}` — "
-                f"{result['result']} ({result['points']} Punkte)"
+            table_rows.append(
+                [
+                    index,
+                    result["name"],
+                    result["time"],
+                    result["result"],
+                    result["points"],
+                ]
             )
 
-    lines.extend(
-        [
-            "",
-            "Der Channel wird 60 Minuten nach Abschluss gelöscht.",
-        ]
-    )
+        lines.append(
+            build_discord_table(
+                ["#", "Spieler", "Zeit", "Ergebnis", "Pkt"],
+                table_rows,
+                max_col_width=20,
+            )
+        )
 
+    lines.extend(["", "Der Channel wird 60 Minuten nach Abschluss gelöscht."])
     return "\n".join(lines)
+
 
 
 def int_value(value) -> int:
@@ -1751,47 +1873,39 @@ def build_standings_messages() -> list[str]:
 
     timestamp = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
 
-    header = [
-        "**TFNL Gesamttabelle**",
-        f"Stand: `{timestamp} Uhr`",
-        "",
-    ]
-
     if not rows:
-        return ["\n".join(header + ["Noch keine Einträge."])]
+        return [
+            "**TFNL Gesamttabelle**\n"
+            f"Stand: `{timestamp} Uhr`\n\n"
+            "Noch keine Einträge."
+        ]
 
-    lines = header[:]
-
+    table_rows = []
     for index, row in enumerate(rows, start=1):
-        name = normalize_text(row.get("Discord Display Name"))
-        points = int_value(row.get("Punkte"))
-        starts = int_value(row.get("Starts"))
-        wins = int_value(row.get("Siege"))
-        draws = int_value(row.get("Remis"))
-        losses = int_value(row.get("Niederlagen"))
-        forfeits = int_value(row.get("Forfeits"))
-
-        lines.append(
-            f"{index}. **{name}** — {points} Pkt | {starts} Starts | "
-            f"{wins}S / {draws}R / {losses}N | FF: {forfeits}"
+        table_rows.append(
+            [
+                index,
+                normalize_text(row.get("Discord Display Name")),
+                int_value(row.get("Punkte")),
+                int_value(row.get("Starts")),
+                int_value(row.get("Siege")),
+                int_value(row.get("Remis")),
+                int_value(row.get("Niederlagen")),
+                int_value(row.get("Forfeits")),
+            ]
         )
 
-    messages = []
-    current = ""
+    table = build_discord_table(
+        ["#", "Spieler", "Pkt", "St", "S", "R", "N", "FF"],
+        table_rows,
+        max_col_width=18,
+    )
 
-    for line in lines:
-        candidate = f"{current}\n{line}" if current else line
-
-        if len(candidate) > 1900:
-            messages.append(current)
-            current = line
-        else:
-            current = candidate
-
-    if current:
-        messages.append(current)
-
-    return messages
+    return [
+        "**TFNL Gesamttabelle**\n"
+        f"Stand: `{timestamp} Uhr`\n"
+        f"{table}"
+    ]
 
 
 # =========================================================
@@ -1888,51 +2002,44 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
     rows = build_mode_standings(mode_name)
     timestamp = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
 
-    header = [
-        f"**TFNL Modus-Tabelle: {mode_name}**",
-        f"Stand: `{timestamp} Uhr`",
-        "",
-    ]
-
     if not rows:
         return [
-            "\n".join(
-                header + [
-                    "Keine abgeschlossenen Ergebnisse für diesen Modus gefunden."
-                ]
-            )
+            f"**TFNL Modus-Tabelle: {mode_name}**\n"
+            f"Stand: `{timestamp} Uhr`\n\n"
+            "Keine abgeschlossenen Ergebnisse für diesen Modus gefunden."
         ]
 
-    lines = header[:]
-
+    table_rows = []
     for index, row in enumerate(rows, start=1):
         best = seconds_to_timecode(row["best_seconds"]) if row["best_seconds"] is not None else "-"
         avg = seconds_to_timecode(row["avg_seconds"]) if row["avg_seconds"] is not None else "-"
 
-        lines.append(
-            f"{index}. **{row['name']}** — {row['points']} Pkt | "
-            f"{row['starts']} Starts | "
-            f"{row['wins']}S / {row['draws']}R / {row['losses']}N | "
-            f"FF: {row['forfeits']} | "
-            f"Best: `{best}` | Ø: `{avg}`"
+        table_rows.append(
+            [
+                index,
+                row["name"],
+                row["points"],
+                row["starts"],
+                row["wins"],
+                row["draws"],
+                row["losses"],
+                row["forfeits"],
+                best,
+                avg,
+            ]
         )
 
-    messages = []
-    current = ""
+    table = build_discord_table(
+        ["#", "Spieler", "Pkt", "St", "S", "R", "N", "FF", "Best", "Ø"],
+        table_rows,
+        max_col_width=16,
+    )
 
-    for line in lines:
-        candidate = f"{current}\n{line}" if current else line
-
-        if len(candidate) > 1900:
-            messages.append(current)
-            current = line
-        else:
-            current = candidate
-
-    if current:
-        messages.append(current)
-
-    return messages
+    return [
+        f"**TFNL Modus-Tabelle: {mode_name}**\n"
+        f"Stand: `{timestamp} Uhr`\n"
+        f"{table}"
+    ]
 
 
 # =========================================================
@@ -2029,6 +2136,7 @@ class LadderCog(commands.Cog):
         self.bot = bot
         self.last_schedule_message_id = None
         self.last_signup_message_id = None
+        self.last_signup_status_message_id = None
 
         if not self.update_schedule_channel.is_running():
             self.update_schedule_channel.start()
@@ -2173,9 +2281,10 @@ class LadderCog(commands.Cog):
         try:
             open_slots = get_open_signup_slots()
             embed = build_signup_embed(open_slots)
+            status_embed = build_signup_status_embed(open_slots)
             view = SignupView(open_slots) if open_slots else None
         except Exception as e:
-            print(f"[TFNL] Konnte Signup-Embed nicht bauen: {repr(e)}")
+            print(f"[TFNL] Konnte Signup-Embeds nicht bauen: {repr(e)}")
             return
 
         await self.send_signup_announcements(open_slots, channel)
@@ -2184,9 +2293,22 @@ class LadderCog(commands.Cog):
             try:
                 old_message = await channel.fetch_message(self.last_signup_message_id)
                 await old_message.edit(embed=embed, view=view)
+
+                if self.last_signup_status_message_id:
+                    try:
+                        old_status_message = await channel.fetch_message(self.last_signup_status_message_id)
+                        await old_status_message.edit(embed=status_embed, view=None)
+                        return
+                    except Exception:
+                        self.last_signup_status_message_id = None
+
+                status_message = await channel.send(embed=status_embed)
+                self.last_signup_status_message_id = status_message.id
                 return
+
             except Exception:
                 self.last_signup_message_id = None
+                self.last_signup_status_message_id = None
 
         try:
             async for message in channel.history(limit=25):
@@ -2201,6 +2323,10 @@ class LadderCog(commands.Cog):
         try:
             new_message = await channel.send(embed=embed, view=view)
             self.last_signup_message_id = new_message.id
+
+            status_message = await channel.send(embed=status_embed)
+            self.last_signup_status_message_id = status_message.id
+
             print("[TFNL] Anmeldung im Channel aktualisiert.")
         except Exception as e:
             print(f"[TFNL] Konnte Signup nicht senden: {repr(e)}")
