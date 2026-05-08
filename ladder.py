@@ -1346,21 +1346,35 @@ def build_match_rows(slot_id: str, schedule_row: dict, pairings: list[list[dict]
     return rows
 
 
-def is_slot_complete(slot_id: str) -> bool:
+def get_slot_completion_blockers(slot_id: str) -> list[str]:
     matches = get_matches_for_slot(slot_id)
+    blockers = []
 
     if not matches:
-        return False
+        return [f"Keine Matches für Slot `{slot_id}` gefunden."]
 
     for match in matches:
-        if normalize_text(match.get("Veröffentlicht")).lower() != "ja":
-            return False
+        match_id = normalize_text(match.get("Match ID")) or "unbekannt"
+        published = normalize_text(match.get("Veröffentlicht"))
+
+        if published.lower() != "ja":
+            blockers.append(
+                f"Match `{match_id}` ist nicht veröffentlicht. Veröffentlicht=`{published or '-'}'"
+            )
 
         for player in get_match_players(match):
-            if not normalize_text(match.get(player["time_col"])):
-                return False
+            time_value = normalize_text(match.get(player["time_col"]))
 
-    return True
+            if not time_value:
+                blockers.append(
+                    f"Match `{match_id}`: `{player['name']}` hat keine Zeit/kein FF."
+                )
+
+    return blockers
+
+
+def is_slot_complete(slot_id: str) -> bool:
+    return len(get_slot_completion_blockers(slot_id)) == 0
 
 
 # =========================================================
@@ -2901,42 +2915,86 @@ class LadderCog(commands.Cog):
 
             await self.complete_slot_if_ready(slot_id)
 
-    async def complete_slot_if_ready(self, slot_id: str):
+    async def complete_slot_if_ready(self, slot_id: str, force: bool = False, debug: bool = False) -> bool:
         _, schedule_row = find_schedule_row(slot_id)
 
         if not schedule_row:
-            return
+            if debug:
+                await self.log_tfnl(f"Slotabschluss übersprungen: Slot `{slot_id}` nicht im Schedule gefunden.")
+            return False
 
         status = normalize_text(schedule_row.get("Status")).lower()
 
-        if status in ("completed", "archived", "cancelled"):
-            return
+        if status in ("archived", "cancelled"):
+            if debug:
+                await self.log_tfnl(
+                    f"Slotabschluss übersprungen: Slot `{slot_id}` hat Status `{status}`."
+                )
+            return False
+
+        if status == "completed" and not force:
+            if debug:
+                await self.log_tfnl(
+                    f"Slotabschluss übersprungen: Slot `{slot_id}` ist bereits completed."
+                )
+            return False
 
         completed_at_existing = normalize_text(schedule_row.get(SCHEDULE_COMPLETED_AT_COL))
 
-        if completed_at_existing:
-            return
+        if completed_at_existing and not force:
+            if debug:
+                await self.log_tfnl(
+                    f"Slotabschluss übersprungen: Slot `{slot_id}` hat bereits Completed At `{completed_at_existing}`."
+                )
+            return False
 
-        if not is_slot_complete(slot_id):
-            return
+        blockers = get_slot_completion_blockers(slot_id)
 
-        completed_at = set_schedule_completed(slot_id)
+        if blockers:
+            if debug:
+                preview = "\n".join(f"- {blocker}" for blocker in blockers[:10])
+
+                if len(blockers) > 10:
+                    preview += f"\n- ... plus {len(blockers) - 10} weitere Blocker"
+
+                await self.log_tfnl(
+                    f"Slot `{slot_id}` noch nicht complete:\n{preview}"
+                )
+            return False
 
         _, updated_schedule_row = find_schedule_row(slot_id)
 
         if not updated_schedule_row:
             updated_schedule_row = schedule_row
 
+        # Erst posten, dann completed setzen.
+        # Dadurch kann ein fehlgeschlagener Post später erneut versucht werden.
         try:
             slot_channel = await self.get_or_create_slot_channel(updated_schedule_row)
             await slot_channel.send(build_slot_overview_message(updated_schedule_row))
         except Exception as e:
-            await self.log_tfnl(f"Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}")
+            await self.log_tfnl(
+                f"Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}"
+            )
+            return False
 
-        await self.publish_standings_to_channel()
+        try:
+            await self.publish_standings_to_channel()
+        except Exception as e:
+            await self.log_tfnl(
+                f"Gesamttabelle konnte beim Slotabschluss nicht gepostet werden: `{slot_id}` — {repr(e)}"
+            )
 
         slot_mode = normalize_text(updated_schedule_row.get("Modus"))
-        await self.publish_mode_standings_to_channel(slot_mode, clear_existing=False)
+
+        try:
+            await self.publish_mode_standings_to_channel(slot_mode, clear_existing=False)
+        except Exception as e:
+            await self.log_tfnl(
+                f"Modus-Tabelle konnte beim Slotabschluss nicht gepostet werden: `{slot_id}` / `{slot_mode}` — {repr(e)}"
+            )
+
+        completed_at = set_schedule_completed(slot_id)
 
         await self.publish_schedule_to_channel()
         await self.publish_signup_to_channel()
@@ -2944,6 +3002,8 @@ class LadderCog(commands.Cog):
         await self.log_tfnl(
             f"Slot `{slot_id}` completed um `{completed_at}`. Channel-Löschung in 60 Minuten."
         )
+
+        return True
 
     async def finalize_slot(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
@@ -3043,9 +3103,14 @@ class LadderCog(commands.Cog):
                 await self.send_start_dms(row)
                 continue
 
-            if status == "running" and is_slot_end_due(row):
-                await self.finalize_slot(row)
-                continue
+            if status == "running":
+                if is_slot_complete(slot_id):
+                    await self.complete_slot_if_ready(slot_id, debug=True)
+                    continue
+
+                if is_slot_end_due(row):
+                    await self.finalize_slot(row)
+                    continue
 
     async def close_registration_and_pair(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
@@ -3389,6 +3454,90 @@ class LadderCog(commands.Cog):
 
     @ladder_seed_test.error
     async def ladder_seed_test_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="ladder_force_complete",
+        description="Erzwingt den Abschluss eines vollständigen TFNL-Slots.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ladder_force_complete(
+        self,
+        interaction: discord.Interaction,
+        slot_id: str,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        normalized_slot_id = normalize_text(slot_id)
+
+        if not normalized_slot_id:
+            await interaction.followup.send(
+                "Slot ID fehlt.",
+                ephemeral=True,
+            )
+            return
+
+        _, schedule_row = find_schedule_row(normalized_slot_id)
+
+        if not schedule_row:
+            await interaction.followup.send(
+                f"Slot `{normalized_slot_id}` wurde im Schedule nicht gefunden.",
+                ephemeral=True,
+            )
+            return
+
+        blockers = get_slot_completion_blockers(normalized_slot_id)
+
+        if blockers:
+            preview = "\n".join(f"- {blocker}" for blocker in blockers[:15])
+
+            if len(blockers) > 15:
+                preview += f"\n- ... plus {len(blockers) - 15} weitere Blocker"
+
+            await interaction.followup.send(
+                f"Slot `{normalized_slot_id}` ist noch nicht vollständig:\n```{preview}```",
+                ephemeral=True,
+            )
+            return
+
+        completed = await self.complete_slot_if_ready(
+            normalized_slot_id,
+            force=True,
+            debug=True,
+        )
+
+        if completed:
+            await interaction.followup.send(
+                f"Slot `{normalized_slot_id}` wurde abgeschlossen und die Gesamtübersicht wurde gepostet.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"Slot `{normalized_slot_id}` konnte nicht abgeschlossen werden. Details stehen im TFNL-Log.",
+                ephemeral=True,
+            )
+
+    @ladder_force_complete.error
+    async def ladder_force_complete_error(
         self,
         interaction: discord.Interaction,
         error: app_commands.AppCommandError,
