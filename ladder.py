@@ -1009,10 +1009,12 @@ def build_signup_line(row: dict) -> str:
     anmeldeschluss = normalize_text(row.get("Anmeldeschluss"))
     modus = normalize_text(row.get("Modus"))
     signup_count = get_signup_count_for_slot(slot_id) if slot_id else 0
+    signup_names = format_signup_names_for_slot(slot_id) if slot_id else "_Noch niemand angemeldet._"
 
     return (
         f"**{datum} | {slot} | {startzeit} Uhr** — {modus}\n"
         f"Angemeldet: `{signup_count}`\n"
+        f"Spieler: {signup_names}\n"
         f"Anmeldeschluss: `{anmeldeschluss} Uhr`"
     )
 
@@ -1151,6 +1153,35 @@ def get_signup_count_for_slot(slot_id: str) -> int:
             signed_up_ids.add(discord_id)
 
     return len(signed_up_ids)
+
+
+def get_signup_names_for_slot(slot_id: str) -> list[str]:
+    rows = load_signup_rows()
+    names_by_id = {}
+
+    for row in rows:
+        if normalize_text(row.get("Slot ID")) != slot_id:
+            continue
+
+        if normalize_text(row.get("Status")).lower() != "signed_up":
+            continue
+
+        discord_id = normalize_text(row.get("Discord ID"))
+        display_name = normalize_text(row.get("Discord Display Name"))
+
+        if discord_id and display_name:
+            names_by_id[discord_id] = display_name
+
+    return sorted(names_by_id.values(), key=lambda name: name.lower())
+
+
+def format_signup_names_for_slot(slot_id: str) -> str:
+    names = get_signup_names_for_slot(slot_id)
+
+    if not names:
+        return "_Noch niemand angemeldet._"
+
+    return ", ".join(names)
 
 
 def user_already_signed_up(slot_id: str, user_id: int) -> bool:
