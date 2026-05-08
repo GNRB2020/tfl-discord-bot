@@ -10,10 +10,15 @@ import aiohttp
 import discord
 import gspread
 import pyz3r
+
 try:
-    from pyz3r.customizer import customizer as pyz3r_customizer
+    import pyz3r.customizer as pyz3r_customizer
 except Exception:
-    pyz3r_customizer = None
+    try:
+        from pyz3r import customizer as pyz3r_customizer
+    except Exception:
+        pyz3r_customizer = None
+
 import yaml
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -823,6 +828,8 @@ def build_seed_diagnostics(
         "eq": raw_settings.get("eq") if isinstance(raw_settings.get("eq"), list) else [],
         "has_pegasus_boots": "PegasusBoots" in raw_settings.get("eq", []),
         "quickswap_flags_set": True,
+        "pyz3r_customizer_available": pyz3r_customizer is not None,
+        "pyz3r_alttpr_available": hasattr(pyz3r, "alttpr"),
     }
 
 
@@ -864,38 +871,46 @@ async def generate_alttpr_seed_for_mode(mode_name: str) -> tuple[str, dict]:
     )
 
     if customizer_enabled:
-        if pyz3r_customizer is None:
-            raise RuntimeError(
-                "pyz3r.customizer konnte nicht importiert werden. "
-                "Customizer-Presets wie Casual Boots können so nicht sicher erzeugt werden."
-            )
-
-        converted_settings = pyz3r_customizer.convert2settings(
-            customizer_save=raw_settings,
-            tournament=True,
-        )
-
-        if not isinstance(converted_settings, dict):
-            raise RuntimeError("pyz3r.customizer.convert2settings hat keine gültigen Settings geliefert.")
-
-        converted_settings["tournament"] = True
-        converted_settings["spoilers"] = "off"
-        force_quickswap_flags(converted_settings)
-
-        # Wichtig:
-        # Customizer-Seeds müssen über pyz3r.alttpr(customizer=True, ...)
-        # erzeugt werden. ALTTPR.generate(...) kann Customizer-Startitems
-        # je nach pyz3r-Version wie normale Randomizer-Settings behandeln.
         if not hasattr(pyz3r, "alttpr"):
             raise RuntimeError(
                 "pyz3r.alttpr ist nicht verfügbar. "
-                "Customizer-Seeds können mit dieser pyz3r-Version nicht sicher erzeugt werden."
+                "Customizer-Seeds können mit dieser pyz3r-Version nicht erzeugt werden."
             )
 
-        seed = await pyz3r.alttpr(
-            customizer=True,
-            settings=converted_settings,
-        )
+        customizer_settings = deepcopy(raw_settings)
+        customizer_settings["tournament"] = True
+        customizer_settings["spoilers"] = "off"
+        force_quickswap_flags(customizer_settings)
+
+        # pyz3r-Versionen unterscheiden sich:
+        # - einige Versionen liefern pyz3r.customizer.convert2settings(...)
+        # - andere können Customizer-Saves direkt über pyz3r.alttpr(customizer=True, settings=...) verarbeiten
+        #
+        # Wir versuchen zuerst die Konvertierung. Falls das Modul oder die Funktion fehlt,
+        # wird bewusst der direkte Customizer-Pfad genutzt. Es darf hier nicht auf Open
+        # zurückfallen.
+        if pyz3r_customizer is not None and hasattr(pyz3r_customizer, "convert2settings"):
+            converted_settings = pyz3r_customizer.convert2settings(
+                customizer_save=customizer_settings,
+                tournament=True,
+            )
+
+            if not isinstance(converted_settings, dict):
+                raise RuntimeError("pyz3r.customizer.convert2settings hat keine gültigen Settings geliefert.")
+
+            converted_settings["tournament"] = True
+            converted_settings["spoilers"] = "off"
+            force_quickswap_flags(converted_settings)
+
+            seed = await pyz3r.alttpr(
+                customizer=True,
+                settings=converted_settings,
+            )
+        else:
+            seed = await pyz3r.alttpr(
+                customizer=True,
+                settings=customizer_settings,
+            )
 
     else:
         normal_settings = deepcopy(raw_settings)
@@ -934,28 +949,39 @@ async def generate_alttpr_seed_from_preset(preset_key: str) -> str:
     force_quickswap_flags(settings)
 
     if customizer_enabled:
-        if pyz3r_customizer is None:
-            raise RuntimeError(
-                "pyz3r.customizer konnte nicht importiert werden. "
-                "Customizer-Preset kann nicht sicher erzeugt werden."
-            )
-
-        converted_settings = pyz3r_customizer.convert2settings(
-            customizer_save=settings,
-            tournament=True,
-        )
-        force_quickswap_flags(converted_settings)
-
         if not hasattr(pyz3r, "alttpr"):
             raise RuntimeError(
                 "pyz3r.alttpr ist nicht verfügbar. "
-                "Customizer-Preset kann nicht sicher erzeugt werden."
+                "Customizer-Preset kann nicht erzeugt werden."
             )
 
-        seed = await pyz3r.alttpr(
-            customizer=True,
-            settings=converted_settings,
-        )
+        customizer_settings = deepcopy(settings)
+        customizer_settings["tournament"] = True
+        customizer_settings["spoilers"] = "off"
+        force_quickswap_flags(customizer_settings)
+
+        if pyz3r_customizer is not None and hasattr(pyz3r_customizer, "convert2settings"):
+            converted_settings = pyz3r_customizer.convert2settings(
+                customizer_save=customizer_settings,
+                tournament=True,
+            )
+
+            if not isinstance(converted_settings, dict):
+                raise RuntimeError("pyz3r.customizer.convert2settings hat keine gültigen Settings geliefert.")
+
+            converted_settings["tournament"] = True
+            converted_settings["spoilers"] = "off"
+            force_quickswap_flags(converted_settings)
+
+            seed = await pyz3r.alttpr(
+                customizer=True,
+                settings=converted_settings,
+            )
+        else:
+            seed = await pyz3r.alttpr(
+                customizer=True,
+                settings=customizer_settings,
+            )
     else:
         seed = await pyz3r.ALTTPR.generate(settings=settings)
 
