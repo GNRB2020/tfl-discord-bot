@@ -109,6 +109,8 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+HEADER_CACHE = {}
+
 print("DEBUG TFNL_SPREADSHEET_ID =", repr(TFNL_SPREADSHEET_ID))
 print("DEBUG TFNL CREDS_FILE =", repr(CREDS_FILE))
 print("DEBUG TFNL_SCHEDULE_CHANNEL_ID =", TFNL_SCHEDULE_CHANNEL_ID)
@@ -144,8 +146,23 @@ def get_or_create_worksheet(
 
     if existing_headers != headers:
         sheet.update("A1", [headers])
+        HEADER_CACHE[title] = headers
+    else:
+        HEADER_CACHE[title] = existing_headers
 
     return sheet
+
+
+def get_header_index(sheet, sheet_name: str, column_name: str):
+    if sheet_name not in HEADER_CACHE:
+        HEADER_CACHE[sheet_name] = sheet.row_values(1)
+
+    headers = HEADER_CACHE[sheet_name]
+
+    try:
+        return headers.index(column_name) + 1
+    except ValueError:
+        return None
 
 
 def get_schedule_sheet():
@@ -261,31 +278,16 @@ def update_schedule_cell(slot_id: str, column_name: str, value: str):
     if not row_index:
         return
 
-    headers = sheet.row_values(1)
+    col_index = get_header_index(sheet, SCHEDULE_SHEET_NAME, column_name)
 
-    try:
-        col_index = headers.index(column_name) + 1
-    except ValueError:
+    if not col_index:
         return
 
     sheet.update_cell(row_index, col_index, value)
 
 
 def update_match_cell(match_id: str, column_name: str, value: str):
-    sheet = get_matches_sheet()
-    row_index, _ = find_match_row(match_id)
-
-    if not row_index:
-        return
-
-    headers = sheet.row_values(1)
-
-    try:
-        col_index = headers.index(column_name) + 1
-    except ValueError:
-        return
-
-    sheet.update_cell(row_index, col_index, value)
+    update_match_cells(match_id, {column_name: value})
 
 
 def update_match_cells(match_id: str, values: dict[str, str]):
@@ -295,15 +297,23 @@ def update_match_cells(match_id: str, values: dict[str, str]):
     if not row_index:
         return
 
-    headers = sheet.row_values(1)
+    requests = []
 
     for column_name, value in values.items():
-        try:
-            col_index = headers.index(column_name) + 1
-        except ValueError:
+        col_index = get_header_index(sheet, MATCHES_SHEET_NAME, column_name)
+
+        if not col_index:
             continue
 
-        sheet.update_cell(row_index, col_index, value)
+        requests.append(
+            {
+                "range": gspread.utils.rowcol_to_a1(row_index, col_index),
+                "values": [[value]],
+            }
+        )
+
+    if requests:
+        sheet.batch_update(requests, value_input_option="USER_ENTERED")
 
 
 def update_schedule_status(slot_id: str, status: str):
@@ -482,6 +492,14 @@ def signup_announcement_already_sent(row: dict) -> bool:
     return value in ("ja", "yes", "true", "1")
 
 
+def get_seed_url(row: dict) -> str:
+    for key in ("Seed URL", "Seed url", "Seed Url", "SeedURL", "Seed"):
+        value = normalize_text(row.get(key))
+        if value:
+            return value
+    return ""
+
+
 def sanitize_channel_name(value: str) -> str:
     value = value.lower()
     value = value.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
@@ -654,7 +672,6 @@ def user_already_signed_up(slot_id: str, user_id: int) -> bool:
 
 def matches_already_created(slot_id: str) -> bool:
     rows = load_matches_rows()
-
     return any(normalize_text(row.get("Slot ID")) == slot_id for row in rows)
 
 
@@ -771,7 +788,7 @@ def create_pairings(participants: list[dict]) -> list[list[dict]]:
 def build_match_rows(slot_id: str, schedule_row: dict, pairings: list[list[dict]]) -> list[list]:
     rows = []
     startzeit = normalize_text(schedule_row.get("Startzeit"))
-    seed_url = normalize_text(schedule_row.get("Seed URL"))
+    seed_url = get_seed_url(schedule_row)
 
     for index, group in enumerate(pairings, start=1):
         match_id = f"{slot_id}-M{index:02d}"
@@ -917,7 +934,7 @@ def build_result_message(match_row: dict) -> str:
     players = get_match_players(match_row)
 
     lines = [
-        f"**TFNL-Ergebnis veröffentlicht**",
+        "**TFNL-Ergebnis veröffentlicht**",
         f"`{match_id}` — `{matchtyp}`",
         "",
     ]
@@ -1082,7 +1099,7 @@ class SignupSlotButton(discord.ui.Button):
         cog = interaction.client.get_cog("LadderCog")
 
         if cog is None:
-            await interaction.response.send_message("TFNL-Modul ist nicht geladen.")
+            await interaction.response.send_message("TFNL-Modul ist nicht geladen.", ephemeral=True)
             return
 
         await cog.handle_signup(interaction, self.slot_id)
@@ -1126,7 +1143,7 @@ class FinishButton(discord.ui.Button):
         cog = interaction.client.get_cog("LadderCog")
 
         if cog is None:
-            await interaction.response.send_message("TFNL-Modul ist nicht geladen.")
+            await interaction.response.send_message("TFNL-Modul ist nicht geladen.", ephemeral=True)
             return
 
         await cog.handle_finish(interaction, self.match_id, self.player_no)
@@ -1148,6 +1165,7 @@ class ForfeitButton(discord.ui.Button):
         await interaction.response.send_message(
             "Forfeit wirklich eintragen?",
             view=view,
+            ephemeral=True,
         )
 
 
@@ -1171,7 +1189,7 @@ class ConfirmForfeitButton(discord.ui.Button):
         cog = interaction.client.get_cog("LadderCog")
 
         if cog is None:
-            await interaction.response.send_message("TFNL-Modul ist nicht geladen.")
+            await interaction.response.send_message("TFNL-Modul ist nicht geladen.", ephemeral=True)
             return
 
         await cog.handle_forfeit(interaction, self.match_id, self.player_no)
@@ -1197,7 +1215,7 @@ class UndoFinishButton(discord.ui.Button):
         cog = interaction.client.get_cog("LadderCog")
 
         if cog is None:
-            await interaction.response.send_message("TFNL-Modul ist nicht geladen.")
+            await interaction.response.send_message("TFNL-Modul ist nicht geladen.", ephemeral=True)
             return
 
         await cog.handle_undo_finish(interaction, self.match_id, self.player_no)
@@ -1548,7 +1566,7 @@ class LadderCog(commands.Cog):
 
     async def send_seed_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
-        seed_url = normalize_text(schedule_row.get("Seed URL"))
+        seed_url = get_seed_url(schedule_row)
 
         if not seed_url:
             await self.log_tfnl(f"Seed URL fehlt für Slot `{slot_id}`. Seed-DMs wurden nicht gesendet.")
@@ -1592,11 +1610,23 @@ class LadderCog(commands.Cog):
             try:
                 message = await user.send("TFNL-Race startet in `60` Sekunden.")
 
-                for remaining in [45, 30, 15, 10, 5, 4, 3, 2, 1]:
-                    await asyncio.sleep(max(1, 60 - remaining if remaining == 45 else 1))
+                countdown_steps = [
+                    (30, 30),
+                    (10, 20),
+                    (5, 5),
+                    (4, 1),
+                    (3, 1),
+                    (2, 1),
+                    (1, 1),
+                ]
+
+                for remaining, wait_seconds in countdown_steps:
+                    await asyncio.sleep(wait_seconds)
 
                     try:
-                        await message.edit(content=f"TFNL-Race startet in `{remaining}` Sekunden.")
+                        await message.edit(
+                            content=f"TFNL-Race startet in `{remaining}` Sekunden."
+                        )
                     except Exception:
                         pass
 
@@ -1627,6 +1657,8 @@ class LadderCog(commands.Cog):
         for match in matches:
             match_id = normalize_text(match.get("Match ID"))
 
+            update_match_cell(match_id, "Status", "running")
+
             for player in get_match_players(match):
                 try:
                     user = await self.bot.fetch_user(int(player["discord_id"]))
@@ -1645,90 +1677,135 @@ class LadderCog(commands.Cog):
         update_schedule_status(slot_id, "running")
 
     async def handle_finish(self, interaction: discord.Interaction, match_id: str, player_no: int):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
-        _, match_row = find_match_row(match_id)
+        try:
+            _, match_row = find_match_row(match_id)
 
-        if not match_row:
-            await interaction.followup.send("Match wurde nicht gefunden.")
-            return
+            if not match_row:
+                await interaction.followup.send("Match wurde nicht gefunden.", ephemeral=True)
+                return
 
-        if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
-            await interaction.followup.send("Das Ergebnis wurde bereits veröffentlicht. Undo ist nicht mehr möglich.")
-            return
+            if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
+                await interaction.followup.send(
+                    "Das Ergebnis wurde bereits veröffentlicht. Undo ist nicht mehr möglich.",
+                    ephemeral=True,
+                )
+                return
 
-        slot_id = normalize_text(match_row.get("Slot ID"))
-        _, schedule_row = find_schedule_row(slot_id)
+            slot_id = normalize_text(match_row.get("Slot ID"))
+            _, schedule_row = find_schedule_row(slot_id)
 
-        if not schedule_row:
-            await interaction.followup.send("Slot wurde nicht gefunden.")
-            return
+            if not schedule_row:
+                await interaction.followup.send("Slot wurde nicht gefunden.", ephemeral=True)
+                return
 
-        start_dt = get_slot_start_dt(schedule_row)
+            start_dt = get_slot_start_dt(schedule_row)
 
-        if not start_dt:
-            await interaction.followup.send("Startzeit konnte nicht gelesen werden.")
-            return
+            if not start_dt:
+                await interaction.followup.send("Startzeit konnte nicht gelesen werden.", ephemeral=True)
+                return
 
-        now = datetime.now(BERLIN_TZ)
-        elapsed = int((now - start_dt).total_seconds())
+            now = datetime.now(BERLIN_TZ)
+            elapsed = int((now - start_dt).total_seconds())
 
-        if elapsed < 0:
-            elapsed = 0
+            if elapsed < 0:
+                elapsed = 0
 
-        time_value = seconds_to_timecode(elapsed)
+            time_value = seconds_to_timecode(elapsed)
 
-        update_match_cell(match_id, f"Zeit Spieler {player_no}", time_value)
-        update_match_cell(match_id, "Status", "partial_result")
+            update_match_cells(
+                match_id,
+                {
+                    f"Zeit Spieler {player_no}": time_value,
+                    "Status": "partial_result",
+                },
+            )
 
-        await interaction.followup.send(
-            f"Finish eingetragen: `{time_value}`\n"
-            "Falls das ein Fehlklick war, kannst du den Finish zurücknehmen.",
-            view=UndoFinishView(match_id, player_no),
-        )
+            await interaction.followup.send(
+                f"Finish eingetragen: `{time_value}`\n"
+                "Falls das ein Fehlklick war, kannst du den Finish zurücknehmen.",
+                view=UndoFinishView(match_id, player_no),
+                ephemeral=True,
+            )
 
-        await self.evaluate_match_if_complete(match_id)
+            await self.evaluate_match_if_complete(match_id)
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Finish:\n```{repr(e)}```",
+                ephemeral=True,
+            )
 
     async def handle_undo_finish(self, interaction: discord.Interaction, match_id: str, player_no: int):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
-        _, match_row = find_match_row(match_id)
+        try:
+            _, match_row = find_match_row(match_id)
 
-        if not match_row:
-            await interaction.followup.send("Match wurde nicht gefunden.")
-            return
+            if not match_row:
+                await interaction.followup.send("Match wurde nicht gefunden.", ephemeral=True)
+                return
 
-        if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
-            await interaction.followup.send("Das Ergebnis wurde bereits veröffentlicht. Undo ist nicht mehr möglich.")
-            return
+            if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
+                await interaction.followup.send(
+                    "Das Ergebnis wurde bereits veröffentlicht. Undo ist nicht mehr möglich.",
+                    ephemeral=True,
+                )
+                return
 
-        update_match_cell(match_id, f"Zeit Spieler {player_no}", "")
-        update_match_cell(match_id, "Status", "running")
+            update_match_cells(
+                match_id,
+                {
+                    f"Zeit Spieler {player_no}": "",
+                    "Status": "running",
+                },
+            )
 
-        await interaction.followup.send(
-            "Finish wurde zurückgenommen. Die Zeitmessung läuft weiter.",
-            view=RaceControlView(match_id, player_no),
-        )
+            await interaction.followup.send(
+                "Finish wurde zurückgenommen. Die Zeitmessung läuft weiter.\n"
+                "Du kannst erneut finishen oder forfeiten.",
+                view=RaceControlView(match_id, player_no),
+                ephemeral=True,
+            )
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Undo Finish:\n```{repr(e)}```",
+                ephemeral=True,
+            )
 
     async def handle_forfeit(self, interaction: discord.Interaction, match_id: str, player_no: int):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
-        _, match_row = find_match_row(match_id)
+        try:
+            _, match_row = find_match_row(match_id)
 
-        if not match_row:
-            await interaction.followup.send("Match wurde nicht gefunden.")
-            return
+            if not match_row:
+                await interaction.followup.send("Match wurde nicht gefunden.", ephemeral=True)
+                return
 
-        if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
-            await interaction.followup.send("Das Ergebnis wurde bereits veröffentlicht.")
-            return
+            if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
+                await interaction.followup.send("Das Ergebnis wurde bereits veröffentlicht.", ephemeral=True)
+                return
 
-        update_match_cell(match_id, f"Zeit Spieler {player_no}", "FF")
-        update_match_cell(match_id, "Status", "partial_result")
+            update_match_cells(
+                match_id,
+                {
+                    f"Zeit Spieler {player_no}": "FF",
+                    "Status": "partial_result",
+                },
+            )
 
-        await interaction.followup.send("Forfeit wurde eingetragen: `FF`.")
+            await interaction.followup.send("Forfeit wurde eingetragen: `FF`.", ephemeral=True)
 
-        await self.evaluate_match_if_complete(match_id)
+            await self.evaluate_match_if_complete(match_id)
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Forfeit:\n```{repr(e)}```",
+                ephemeral=True,
+            )
 
     async def evaluate_match_if_complete(self, match_id: str):
         _, match_row = find_match_row(match_id)
@@ -1774,12 +1851,16 @@ class LadderCog(commands.Cog):
                 continue
 
             players = get_match_players(match)
+            values = {}
 
             for player in players:
                 current_time = normalize_text(match.get(player["time_col"]))
 
                 if not current_time:
-                    update_match_cell(match_id, player["time_col"], "FF")
+                    values[player["time_col"]] = "FF"
+
+            if values:
+                update_match_cells(match_id, values)
 
             await self.evaluate_match_if_complete(match_id)
 
@@ -1840,7 +1921,13 @@ class LadderCog(commands.Cog):
                     await self.delete_slot_channel_if_due(row)
                 continue
 
-            if is_registration_open(row) and status not in ("registration_open", "paired", "seed_sent", "countdown_sent", "running"):
+            if is_registration_open(row) and status not in (
+                "registration_open",
+                "paired",
+                "seed_sent",
+                "countdown_sent",
+                "running",
+            ):
                 update_schedule_status(slot_id, "registration_open")
                 continue
 
@@ -1927,7 +2014,7 @@ class LadderCog(commands.Cog):
         await self.bot.wait_until_ready()
         await self.publish_schedule_to_channel()
 
-    @tasks.loop(minutes=1)
+    @tasks.loop(minutes=2)
     async def update_signup_channel(self):
         await self.publish_signup_to_channel()
 
