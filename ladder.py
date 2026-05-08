@@ -641,9 +641,13 @@ def normalize_mode_name(value: str) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
-def get_preset_key_for_mode(mode_name: str) -> str | None:
+def get_canonical_mode_name(mode_name: str) -> str:
     normalized = normalize_mode_name(mode_name)
-    canonical = TFNL_MODE_ALIASES.get(normalized, normalized)
+    return TFNL_MODE_ALIASES.get(normalized, normalized)
+
+
+def get_preset_key_for_mode(mode_name: str) -> str | None:
+    canonical = get_canonical_mode_name(mode_name)
     return TFNL_MODE_PRESETS.get(canonical)
 
 
@@ -1446,6 +1450,147 @@ def build_standings_messages() -> list[str]:
 
 
 # =========================================================
+# MODE STANDINGS
+# =========================================================
+
+def get_schedule_mode_map() -> dict[str, str]:
+    rows = load_schedule_rows()
+
+    return {
+        normalize_text(row.get("Slot ID")): normalize_text(row.get("Modus"))
+        for row in rows
+        if normalize_text(row.get("Slot ID"))
+    }
+
+
+def build_mode_standings(mode_name: str) -> list[dict]:
+    requested_mode = get_canonical_mode_name(mode_name)
+    schedule_modes = get_schedule_mode_map()
+    matches = load_matches_rows()
+
+    standings = {}
+
+    for match in matches:
+        slot_id = normalize_text(match.get("Slot ID"))
+        match_mode = schedule_modes.get(slot_id, "")
+
+        if get_canonical_mode_name(match_mode) != requested_mode:
+            continue
+
+        if normalize_text(match.get("Veröffentlicht")).lower() != "ja":
+            continue
+
+        for player in get_match_players(match):
+            player_id = player["discord_id"]
+            player_name = player["name"]
+            time_value = normalize_text(match.get(player["time_col"]))
+            result_text = normalize_text(match.get(player["result_col"]))
+            points = int_value(match.get(player["points_col"]))
+            seconds = timecode_to_seconds(time_value)
+
+            if not player_id:
+                continue
+
+            if player_id not in standings:
+                standings[player_id] = {
+                    "discord_id": player_id,
+                    "name": player_name,
+                    "points": 0,
+                    "starts": 0,
+                    "wins": 0,
+                    "draws": 0,
+                    "losses": 0,
+                    "forfeits": 0,
+                    "finished_seconds": [],
+                }
+
+            row = standings[player_id]
+
+            row["name"] = player_name
+            row["points"] += points
+            row["starts"] += 1
+            row["wins"] += 1 if result_text == "Sieg" else 0
+            row["draws"] += 1 if result_text == "Remis" else 0
+            row["losses"] += 1 if result_text == "Niederlage" else 0
+            row["forfeits"] += 1 if time_value.upper() == "FF" else 0
+
+            if seconds is not None:
+                row["finished_seconds"].append(seconds)
+
+    rows = list(standings.values())
+
+    for row in rows:
+        finished = row["finished_seconds"]
+
+        row["best_seconds"] = min(finished) if finished else None
+        row["avg_seconds"] = int(sum(finished) / len(finished)) if finished else None
+
+    rows.sort(
+        key=lambda r: (
+            -r["points"],
+            -r["wins"],
+            -r["draws"],
+            r["forfeits"],
+            r["best_seconds"] if r["best_seconds"] is not None else 9999999,
+            r["name"].lower(),
+        )
+    )
+
+    return rows
+
+
+def build_mode_standings_messages(mode_name: str) -> list[str]:
+    rows = build_mode_standings(mode_name)
+    timestamp = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+
+    header = [
+        f"**TFNL Modus-Tabelle: {mode_name}**",
+        f"Stand: `{timestamp} Uhr`",
+        "",
+    ]
+
+    if not rows:
+        return [
+            "\n".join(
+                header + [
+                    "Keine abgeschlossenen Ergebnisse für diesen Modus gefunden."
+                ]
+            )
+        ]
+
+    lines = header[:]
+
+    for index, row in enumerate(rows, start=1):
+        best = seconds_to_timecode(row["best_seconds"]) if row["best_seconds"] is not None else "-"
+        avg = seconds_to_timecode(row["avg_seconds"]) if row["avg_seconds"] is not None else "-"
+
+        lines.append(
+            f"{index}. **{row['name']}** — {row['points']} Pkt | "
+            f"{row['starts']} Starts | "
+            f"{row['wins']}S / {row['draws']}R / {row['losses']}N | "
+            f"FF: {row['forfeits']} | "
+            f"Best: `{best}` | Ø: `{avg}`"
+        )
+
+    messages = []
+    current = ""
+
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+
+        if len(candidate) > 1900:
+            messages.append(current)
+            current = line
+        else:
+            current = candidate
+
+    if current:
+        messages.append(current)
+
+    return messages
+
+
+# =========================================================
 # DISCORD VIEWS
 # =========================================================
 
@@ -1529,7 +1674,6 @@ class LadderCog(commands.Cog):
         self.bot = bot
         self.last_schedule_message_id = None
         self.last_signup_message_id = None
-        self.last_standings_message_ids = []
 
         if not self.update_schedule_channel.is_running():
             self.update_schedule_channel.start()
@@ -1727,6 +1871,35 @@ class LadderCog(commands.Cog):
 
         except Exception as e:
             await self.log_tfnl(f"Gesamttabelle konnte nicht gepostet werden: {repr(e)}")
+
+    async def publish_mode_standings_to_channel(self, mode_name: str, clear_existing: bool = False):
+        try:
+            channel = await self.get_text_channel(TFNL_STANDINGS_CHANNEL_ID)
+        except Exception as e:
+            await self.log_tfnl(f"Konnte Standings-Channel für Modus-Tabelle nicht laden: {repr(e)}")
+            return
+
+        if clear_existing:
+            try:
+                async for message in channel.history(limit=50):
+                    if self.bot.user and message.author.id == self.bot.user.id:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        try:
+            messages = build_mode_standings_messages(mode_name)
+
+            for message in messages:
+                await channel.send(message)
+
+        except Exception as e:
+            await self.log_tfnl(
+                f"Modus-Tabelle `{mode_name}` konnte nicht gepostet werden: {repr(e)}"
+            )
 
     async def send_signup_announcements(self, open_slots: list[dict], signup_channel: discord.TextChannel):
         for row in open_slots:
@@ -2314,6 +2487,10 @@ class LadderCog(commands.Cog):
             await self.log_tfnl(f"Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}")
 
         await self.publish_standings_to_channel()
+
+        slot_mode = normalize_text(updated_schedule_row.get("Modus"))
+        await self.publish_mode_standings_to_channel(slot_mode, clear_existing=False)
+
         await self.publish_schedule_to_channel()
         await self.publish_signup_to_channel()
 
@@ -2578,6 +2755,7 @@ class LadderCog(commands.Cog):
         name="ladder_standings_update",
         description="Postet die aktuelle TFNL-Gesamttabelle neu.",
     )
+    @app_commands.checks.has_permissions(administrator=True)
     async def ladder_standings_update(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -2594,6 +2772,93 @@ class LadderCog(commands.Cog):
             "TFNL-Gesamttabelle wurde aktualisiert.",
             ephemeral=True,
         )
+
+    @ladder_standings_update.error
+    async def ladder_standings_update_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="ladder_mode_standings",
+        description="Postet die TFNL-Tabelle für einen bestimmten Modus.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.choices(
+        modus=[
+            app_commands.Choice(name="Casual Boots", value="Casual Boots"),
+            app_commands.Choice(name="Open", value="Open"),
+            app_commands.Choice(name="Inverted", value="Inverted"),
+            app_commands.Choice(name="Open AD Boots", value="Open AD Boots"),
+            app_commands.Choice(name="Invrosia", value="Invrosia"),
+            app_commands.Choice(name="Ambrosia", value="Ambrosia"),
+            app_commands.Choice(name="Ludicrous Speed", value="Ludicrous Speed"),
+            app_commands.Choice(name="Hard Standard", value="Hard Standard"),
+            app_commands.Choice(name="Standard", value="Standard"),
+            app_commands.Choice(name="TFL Hard Standard", value="TFL Hard Standard"),
+            app_commands.Choice(name="Keysanity", value="Keysanity"),
+            app_commands.Choice(name="AD Keysanity Mit Boots", value="AD Keysanity Mit Boots"),
+            app_commands.Choice(name="AD Keys", value="AD Keys"),
+            app_commands.Choice(name="MC Boss", value="MC Boss"),
+            app_commands.Choice(name="Influkeys", value="Influkeys"),
+            app_commands.Choice(name="Crosskeys", value="Crosskeys"),
+        ]
+    )
+    async def ladder_mode_standings(
+        self,
+        interaction: discord.Interaction,
+        modus: app_commands.Choice[str],
+    ):
+        await interaction.response.defer(ephemeral=False)
+
+        try:
+            messages = build_mode_standings_messages(modus.value)
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Erstellen der Modus-Tabelle:\n```{repr(e)}```",
+                ephemeral=False,
+            )
+            return
+
+        for message in messages:
+            await interaction.followup.send(message, ephemeral=False)
+
+    @ladder_mode_standings.error
+    async def ladder_mode_standings_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
 
 
 async def setup(bot: commands.Bot):
