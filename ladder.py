@@ -128,6 +128,35 @@ SCOPE = [
 ]
 
 HEADER_CACHE = {}
+WORKSHEET_CACHE = {}
+SHEET_READ_CACHE = {}
+SHEET_READ_CACHE_TTL_SECONDS = int(
+    os.getenv("TFNL_SHEET_CACHE_TTL_SECONDS", "15").strip()
+)
+
+
+def invalidate_sheet_cache(sheet_name: str | None = None):
+    if sheet_name is None:
+        SHEET_READ_CACHE.clear()
+        return
+
+    SHEET_READ_CACHE.pop(sheet_name, None)
+
+
+def get_cached_records(sheet_name: str, sheet_getter, ttl_seconds: int = SHEET_READ_CACHE_TTL_SECONDS):
+    now = datetime.now(BERLIN_TZ).timestamp()
+    cached = SHEET_READ_CACHE.get(sheet_name)
+
+    if cached:
+        cached_at, rows = cached
+
+        if now - cached_at <= ttl_seconds:
+            return deepcopy(rows)
+
+    rows = sheet_getter().get_all_records()
+    SHEET_READ_CACHE[sheet_name] = (now, deepcopy(rows))
+    return rows
+
 
 
 # =========================================================
@@ -232,6 +261,11 @@ def get_or_create_worksheet(
     rows: int = 1000,
     cols: int = 30,
 ):
+    cached_sheet = WORKSHEET_CACHE.get(title)
+
+    if cached_sheet is not None:
+        return cached_sheet
+
     try:
         sheet = spreadsheet.worksheet(title)
     except gspread.WorksheetNotFound:
@@ -245,6 +279,7 @@ def get_or_create_worksheet(
     else:
         HEADER_CACHE[title] = existing_headers
 
+    WORKSHEET_CACHE[title] = sheet
     return sheet
 
 
@@ -261,12 +296,18 @@ def get_header_index(sheet, sheet_name: str, column_name: str):
 
 
 def get_schedule_sheet():
+    cached_sheet = WORKSHEET_CACHE.get(SCHEDULE_SHEET_NAME)
+
+    if cached_sheet is not None:
+        return cached_sheet
+
     spreadsheet = get_tfnl_spreadsheet()
     sheet = spreadsheet.worksheet(SCHEDULE_SHEET_NAME)
 
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_ANNOUNCEMENT_COL)
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_COMPLETED_AT_COL)
 
+    WORKSHEET_CACHE[SCHEDULE_SHEET_NAME] = sheet
     return sheet
 
 
@@ -304,33 +345,33 @@ def get_players_sheet():
 
 
 def load_schedule_rows():
-    return get_schedule_sheet().get_all_records()
+    return get_cached_records(SCHEDULE_SHEET_NAME, get_schedule_sheet)
 
 
 def load_schedule_rows_with_index():
-    rows = get_schedule_sheet().get_all_records()
+    rows = load_schedule_rows()
     return [(index, row) for index, row in enumerate(rows, start=2)]
 
 
 def load_signup_rows():
-    return get_signup_sheet().get_all_records()
+    return get_cached_records(SIGNUP_SHEET_NAME, get_signup_sheet)
 
 
 def load_matches_rows():
-    return get_matches_sheet().get_all_records()
+    return get_cached_records(MATCHES_SHEET_NAME, get_matches_sheet)
 
 
 def load_matches_rows_with_index():
-    rows = get_matches_sheet().get_all_records()
+    rows = load_matches_rows()
     return [(index, row) for index, row in enumerate(rows, start=2)]
 
 
 def load_players_rows():
-    return get_players_sheet().get_all_records()
+    return get_cached_records(PLAYERS_SHEET_NAME, get_players_sheet)
 
 
 def load_players_rows_with_index():
-    rows = get_players_sheet().get_all_records()
+    rows = load_players_rows()
     return [(index, row) for index, row in enumerate(rows, start=2)]
 
 
@@ -348,11 +389,13 @@ def append_signup(slot_id: str, user_id: int, display_name: str):
         ],
         value_input_option="USER_ENTERED",
     )
+    invalidate_sheet_cache(SIGNUP_SHEET_NAME)
 
 
 def append_matches(match_rows: list[list]):
     if match_rows:
         get_matches_sheet().append_rows(match_rows, value_input_option="USER_ENTERED")
+        invalidate_sheet_cache(MATCHES_SHEET_NAME)
 
 
 def find_schedule_row(slot_id: str):
@@ -384,6 +427,7 @@ def update_schedule_cell(slot_id: str, column_name: str, value: str):
         return
 
     sheet.update_cell(row_index, col_index, value)
+    invalidate_sheet_cache(SCHEDULE_SHEET_NAME)
 
 
 def update_schedule_cells(slot_id: str, values: dict[str, str]):
@@ -410,6 +454,7 @@ def update_schedule_cells(slot_id: str, values: dict[str, str]):
 
     if requests:
         sheet.batch_update(requests, value_input_option="USER_ENTERED")
+        invalidate_sheet_cache(SCHEDULE_SHEET_NAME)
 
 
 def update_schedule_cell_by_row(row_index: int, column_name: str, value: str):
@@ -420,6 +465,7 @@ def update_schedule_cell_by_row(row_index: int, column_name: str, value: str):
         return
 
     sheet.update_cell(row_index, col_index, value)
+    invalidate_sheet_cache(SCHEDULE_SHEET_NAME)
 
 
 def normalize_slot_id_part(value: str) -> str:
@@ -513,6 +559,7 @@ def update_match_cells(match_id: str, values: dict[str, str]):
 
     if requests:
         sheet.batch_update(requests, value_input_option="USER_ENTERED")
+        invalidate_sheet_cache(MATCHES_SHEET_NAME)
 
 
 def update_schedule_status(slot_id: str, status: str):
@@ -1392,7 +1439,7 @@ def user_already_signed_up(slot_id: str, user_id: int) -> bool:
 
 def cancel_signup(slot_id: str, user_id: int) -> bool:
     sheet = get_signup_sheet()
-    rows = sheet.get_all_records()
+    rows = load_signup_rows()
 
     status_col = get_header_index(sheet, SIGNUP_SHEET_NAME, "Status")
 
@@ -1406,6 +1453,7 @@ def cancel_signup(slot_id: str, user_id: int) -> bool:
             and normalize_text(row.get("Status")).lower() == "signed_up"
         ):
             sheet.update_cell(row_index, status_col, "cancelled")
+            invalidate_sheet_cache(SIGNUP_SHEET_NAME)
             return True
 
     return False
@@ -1921,6 +1969,7 @@ def update_players_from_match(match_row: dict):
             ]
 
             players_sheet.update(f"A{row_index}:J{row_index}", [values])
+            invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
         else:
             players_sheet.append_row(
@@ -1938,13 +1987,14 @@ def update_players_from_match(match_row: dict):
                 ],
                 value_input_option="USER_ENTERED",
             )
+            invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
     sort_players_sheet()
 
 
 def sort_players_sheet():
     sheet = get_players_sheet()
-    rows = sheet.get_all_records()
+    rows = load_players_rows()
 
     if not rows:
         return
@@ -2344,6 +2394,7 @@ class LadderCog(commands.Cog):
         self.last_signup_message_id = None
         self.last_signup_status_message_id = None
         self.last_race_participants_message_id = None
+        self.last_slot_id_check_at = None
 
         if not self.update_schedule_channel.is_running():
             self.update_schedule_channel.start()
@@ -3280,6 +3331,22 @@ class LadderCog(commands.Cog):
                 f"Ergebnis konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: {repr(e)}"
             )
 
+    async def publish_slot_overview_to_results_channel(self, schedule_row: dict):
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
+
+        try:
+            channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
+        except Exception as e:
+            await self.log_tfnl(f"Ergebnis-Channel konnte für Slotübersicht nicht geladen werden: {repr(e)}")
+            return
+
+        try:
+            await channel.send(build_slot_overview_message(schedule_row))
+        except Exception as e:
+            await self.log_tfnl(
+                f"Slot-Gesamtübersicht konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: `{slot_id}` — {repr(e)}"
+            )
+
     async def post_slot_runners_to_channel(self, schedule_row: dict):
         try:
             slot_channel = await self.get_or_create_slot_channel(schedule_row)
@@ -3381,12 +3448,20 @@ class LadderCog(commands.Cog):
         # Dadurch kann ein fehlgeschlagener Post später erneut versucht werden.
         try:
             slot_channel = await self.get_or_create_slot_channel(updated_schedule_row)
-            await slot_channel.send(build_slot_overview_message(updated_schedule_row))
+            slot_overview_message = build_slot_overview_message(updated_schedule_row)
+            await slot_channel.send(slot_overview_message)
         except Exception as e:
             await self.log_tfnl(
                 f"Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}"
             )
             return False
+
+        try:
+            await self.publish_slot_overview_to_results_channel(updated_schedule_row)
+        except Exception as e:
+            await self.log_tfnl(
+                f"Öffentliche Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}"
+            )
 
         try:
             await self.publish_standings_to_channel()
@@ -3470,20 +3545,24 @@ class LadderCog(commands.Cog):
     # =====================================================
 
     async def process_schedule_states(self):
-        unique_changes = ensure_unique_schedule_slot_ids()
+        now_ts = datetime.now(BERLIN_TZ).timestamp()
 
-        if unique_changes:
-            change_lines = []
+        if self.last_slot_id_check_at is None or now_ts - self.last_slot_id_check_at >= 300:
+            self.last_slot_id_check_at = now_ts
+            unique_changes = ensure_unique_schedule_slot_ids()
 
-            for change in unique_changes:
-                change_lines.append(
-                    f"Zeile {change['row_index']}: `{change['old_slot_id'] or '-'} ` → `{change['new_slot_id']}` "
-                    f"({change['datum']} {change['slot']} {change['startzeit']})"
+            if unique_changes:
+                change_lines = []
+
+                for change in unique_changes:
+                    change_lines.append(
+                        f"Zeile {change['row_index']}: `{change['old_slot_id'] or '-'} ` → `{change['new_slot_id']}` "
+                        f"({change['datum']} {change['slot']} {change['startzeit']})"
+                    )
+
+                await self.log_tfnl(
+                    "Doppelte/leere Slot IDs automatisch korrigiert:\n" + "\n".join(change_lines[:15])
                 )
-
-            await self.log_tfnl(
-                "Doppelte/leere Slot IDs automatisch korrigiert:\n" + "\n".join(change_lines[:15])
-            )
 
         rows_with_index = load_schedule_rows_with_index()
 
@@ -3705,7 +3784,17 @@ class LadderCog(commands.Cog):
         try:
             await self.process_schedule_states()
         except Exception as e:
-            await self.log_tfnl(f"Fehler in process_ladder_slots: {repr(e)}")
+            error_text = repr(e)
+
+            if "Quota exceeded" in error_text or "[429]" in error_text:
+                await self.log_tfnl(
+                    f"Google-Sheets-Quota erreicht. Bot pausiert Sheet-Reads kurz und versucht es danach erneut: {error_text}"
+                )
+                invalidate_sheet_cache()
+                await asyncio.sleep(30)
+                return
+
+            await self.log_tfnl(f"Fehler in process_ladder_slots: {error_text}")
 
     @process_ladder_slots.before_loop
     async def before_process_ladder_slots(self):
