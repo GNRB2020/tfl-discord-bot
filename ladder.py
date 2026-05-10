@@ -56,7 +56,12 @@ TFNL_STANDINGS_CHANNEL_ID = int(
     os.getenv("TFNL_STANDINGS_CHANNEL_ID", "1502236644290465892").strip()
 )
 
+TFNL_RESULTS_CHANNEL_ID = int(
+    os.getenv("TFNL_RESULTS_CHANNEL_ID", "1503146168589353001").strip()
+)
+
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
+TFNL_LOOP_INTERVAL_SECONDS = 5
 
 SCHEDULE_SHEET_NAME = "Schedule"
 SIGNUP_SHEET_NAME = "Signup"
@@ -407,6 +412,79 @@ def update_schedule_cells(slot_id: str, values: dict[str, str]):
         sheet.batch_update(requests, value_input_option="USER_ENTERED")
 
 
+def update_schedule_cell_by_row(row_index: int, column_name: str, value: str):
+    sheet = get_schedule_sheet()
+    col_index = get_header_index(sheet, SCHEDULE_SHEET_NAME, column_name)
+
+    if not col_index:
+        return
+
+    sheet.update_cell(row_index, col_index, value)
+
+
+def normalize_slot_id_part(value: str) -> str:
+    value = normalize_text(value).upper()
+    value = re.sub(r"[^A-Z0-9]+", "-", value)
+    value = re.sub(r"-+", "-", value).strip("-")
+    return value or "SLOT"
+
+
+def build_base_slot_id(row: dict) -> str:
+    parsed_date = parse_german_date(row.get("Datum"))
+    date_part = parsed_date.isoformat() if parsed_date else normalize_slot_id_part(row.get("Datum"))
+    slot_part = normalize_slot_id_part(row.get("Slot"))
+    start_part = normalize_slot_id_part(normalize_text(row.get("Startzeit")).replace(":", ""))
+
+    if start_part:
+        return f"TFNL-{date_part}-{slot_part}-{start_part}"
+
+    return f"TFNL-{date_part}-{slot_part}"
+
+
+def make_unique_slot_id(row: dict, used_slot_ids: set[str]) -> str:
+    base = build_base_slot_id(row)
+    candidate = base
+    counter = 2
+
+    while candidate in used_slot_ids:
+        candidate = f"{base}-{counter}"
+        counter += 1
+
+    return candidate
+
+
+def ensure_unique_schedule_slot_ids() -> list[dict]:
+    rows_with_index = load_schedule_rows_with_index()
+    used_slot_ids = set()
+    changes = []
+
+    for row_index, row in rows_with_index:
+        current_slot_id = normalize_text(row.get("Slot ID"))
+
+        if current_slot_id and current_slot_id not in used_slot_ids:
+            used_slot_ids.add(current_slot_id)
+            continue
+
+        old_slot_id = current_slot_id or ""
+        new_slot_id = make_unique_slot_id(row, used_slot_ids)
+        used_slot_ids.add(new_slot_id)
+
+        update_schedule_cell_by_row(row_index, "Slot ID", new_slot_id)
+
+        changes.append(
+            {
+                "row_index": row_index,
+                "old_slot_id": old_slot_id,
+                "new_slot_id": new_slot_id,
+                "datum": normalize_text(row.get("Datum")),
+                "slot": normalize_text(row.get("Slot")),
+                "startzeit": normalize_text(row.get("Startzeit")),
+            }
+        )
+
+    return changes
+
+
 def update_match_cell(match_id: str, column_name: str, value: str):
     update_match_cells(match_id, {column_name: value})
 
@@ -576,7 +654,8 @@ def is_countdown_due(row: dict) -> bool:
     if not start:
         return False
 
-    return datetime.now(BERLIN_TZ) >= start - timedelta(seconds=60)
+    # Countdown-Task früh genug vorbereiten, läuft intern exakt auf Startzeit -5 Sekunden.
+    return datetime.now(BERLIN_TZ) >= start - timedelta(seconds=15)
 
 
 def is_start_due(row: dict) -> bool:
@@ -1643,6 +1722,50 @@ def build_result_message(match_row: dict) -> str:
     return "\n".join(lines)
 
 
+def build_public_result_message(match_row: dict, schedule_row: dict | None = None) -> str:
+    slot_id = normalize_text(match_row.get("Slot ID"))
+
+    if schedule_row is None:
+        _, schedule_row = find_schedule_row(slot_id)
+
+    datum = normalize_text(schedule_row.get("Datum")) if schedule_row else ""
+    slot = normalize_text(schedule_row.get("Slot")) if schedule_row else ""
+    startzeit = normalize_text(schedule_row.get("Startzeit")) if schedule_row else ""
+    modus = normalize_text(schedule_row.get("Modus")) if schedule_row else ""
+
+    header = [
+        "**TFNL Ladder Ergebnis**",
+        f"Slot: `{datum} | {slot} | {startzeit} Uhr`",
+        f"Modus: `{modus}`",
+        "",
+    ]
+
+    return "\n".join(header) + build_result_message(match_row)
+
+
+def build_slot_runner_message(schedule_row: dict) -> str:
+    slot_id = normalize_text(schedule_row.get("Slot ID"))
+    datum = normalize_text(schedule_row.get("Datum"))
+    slot = normalize_text(schedule_row.get("Slot"))
+    startzeit = normalize_text(schedule_row.get("Startzeit"))
+    modus = normalize_text(schedule_row.get("Modus"))
+    names = get_signup_names_for_slot(slot_id)
+
+    lines = [
+        "**Teilnehmer dieses TFNL-Slots**",
+        f"`{datum} | {slot} | {startzeit} Uhr | {modus}`",
+        "",
+    ]
+
+    if not names:
+        lines.append("Keine Teilnehmer gefunden.")
+    else:
+        rows = [[index, name] for index, name in enumerate(names, start=1)]
+        lines.append(build_discord_table(["#", "Runner"], rows, max_col_width=32))
+
+    return "\n".join(lines)
+
+
 def apply_result_to_match(match_id: str, result: dict[int, tuple[str, int]]):
     values = {}
 
@@ -2041,6 +2164,89 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
         f"{table}"
     ]
 
+def get_visible_race_slots_for_signup_channel() -> list[dict]:
+    rows = load_schedule_rows()
+    visible_statuses = {
+        "registration_open",
+        "paired",
+        "seed_sent",
+        "countdown_sent",
+        "running",
+    }
+
+    visible_rows = []
+
+    for row in rows:
+        status = normalize_text(row.get("Status")).lower()
+
+        if status not in visible_statuses:
+            continue
+
+        slot_id = normalize_text(row.get("Slot ID"))
+
+        if not slot_id:
+            continue
+
+        visible_rows.append(row)
+
+    today = datetime.now(BERLIN_TZ).date()
+
+    visible_rows.sort(
+        key=lambda r: (
+            parse_german_date(r.get("Datum")) or today,
+            normalize_text(r.get("Startzeit")),
+            normalize_text(r.get("Slot ID")),
+        )
+    )
+
+    return visible_rows
+
+
+def build_public_race_participants_embed() -> discord.Embed:
+    now = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+    slots = get_visible_race_slots_for_signup_channel()
+
+    if not slots:
+        description = "Aktuell keine offene oder laufende Ladder-Anmeldung."
+    else:
+        sections = []
+
+        for row in slots:
+            slot_id = normalize_text(row.get("Slot ID"))
+            datum = normalize_text(row.get("Datum"))
+            slot = normalize_text(row.get("Slot"))
+            startzeit = normalize_text(row.get("Startzeit"))
+            modus = normalize_text(row.get("Modus"))
+            status = normalize_text(row.get("Status")) or "planned"
+            names = get_signup_names_for_slot(slot_id)
+
+            section_lines = [
+                f"**{datum} | {slot} | {startzeit} Uhr — {modus}**",
+                f"Status: `{status}`",
+            ]
+
+            if not names:
+                section_lines.append("_Noch niemand angemeldet._")
+            else:
+                player_rows = [[index, name] for index, name in enumerate(names, start=1)]
+                section_lines.append(
+                    build_discord_table(["#", "Runner"], player_rows, max_col_width=30)
+                )
+
+            sections.append("\n".join(section_lines))
+
+        description = "\n\n".join(sections)
+
+    embed = discord.Embed(
+        title="TFNL – Teilnehmer laufender Slots",
+        description=description,
+        color=discord.Color.dark_teal(),
+    )
+
+    embed.set_footer(text=f"Bleibt bis Slot-Ende sichtbar | Aktualisiert: {now} Uhr")
+    return embed
+
+
 
 # =========================================================
 # DISCORD VIEWS
@@ -2137,6 +2343,7 @@ class LadderCog(commands.Cog):
         self.last_schedule_message_id = None
         self.last_signup_message_id = None
         self.last_signup_status_message_id = None
+        self.last_race_participants_message_id = None
 
         if not self.update_schedule_channel.is_running():
             self.update_schedule_channel.start()
@@ -2281,7 +2488,7 @@ class LadderCog(commands.Cog):
         try:
             open_slots = get_open_signup_slots()
             embed = build_signup_embed(open_slots)
-            status_embed = build_signup_status_embed(open_slots)
+            status_embed = build_public_race_participants_embed()
             view = SignupView(open_slots) if open_slots else None
         except Exception as e:
             print(f"[TFNL] Konnte Signup-Embeds nicht bauen: {repr(e)}")
@@ -2785,35 +2992,49 @@ class LadderCog(commands.Cog):
 
     async def send_countdown_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
+        start_dt = get_slot_start_dt(schedule_row)
+
+        if not start_dt:
+            await self.log_tfnl(f"Countdown nicht möglich: Startzeit fehlt für Slot `{slot_id}`.")
+            return
+
         matches = get_matches_for_slot(slot_id)
         sent_to = set()
 
-        async def countdown(user: discord.User):
+        async def sleep_until(target: datetime):
+            delay = (target - datetime.now(BERLIN_TZ)).total_seconds()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+        async def countdown(user: discord.User, player_id: str):
             try:
-                message = await user.send("TFNL-Race startet in `60` Sekunden.")
+                countdown_start = start_dt - timedelta(seconds=5)
+                await sleep_until(countdown_start)
 
-                countdown_steps = [
-                    (30, 30),
-                    (10, 20),
-                    (5, 5),
-                    (4, 1),
-                    (3, 1),
-                    (2, 1),
-                    (1, 1),
-                ]
+                now = datetime.now(BERLIN_TZ)
+                remaining = max(1, min(5, int((start_dt - now).total_seconds()) + 1))
 
-                for remaining, wait_seconds in countdown_steps:
-                    await asyncio.sleep(wait_seconds)
+                message = await user.send(f"TFNL-Race startet in `{remaining}`...")
+
+                for value in range(remaining - 1, 0, -1):
+                    await sleep_until(start_dt - timedelta(seconds=value))
 
                     try:
-                        await message.edit(
-                            content=f"TFNL-Race startet in `{remaining}` Sekunden."
-                        )
+                        await message.edit(content=f"TFNL-Race startet in `{value}`...")
                     except Exception:
-                        pass
+                        await user.send(f"TFNL-Race startet in `{value}`...")
+
+                await sleep_until(start_dt)
+
+                try:
+                    await message.edit(content="**TFNL-Race startet jetzt.**")
+                except Exception:
+                    await user.send("**TFNL-Race startet jetzt.**")
 
             except Exception as e:
-                await self.log_tfnl(f"Countdown-DM fehlgeschlagen: {repr(e)}")
+                await self.log_tfnl(
+                    f"Countdown-DM fehlgeschlagen: Slot `{slot_id}`, Spieler `{player_id}` — {repr(e)}"
+                )
 
         for match in matches:
             for player in get_match_players(match):
@@ -2824,13 +3045,14 @@ class LadderCog(commands.Cog):
 
                 try:
                     user = await self.bot.fetch_user(int(player["discord_id"]))
-                    self.bot.loop.create_task(countdown(user))
+                    self.bot.loop.create_task(countdown(user, player["discord_id"]))
                 except Exception as e:
                     await self.log_tfnl(
                         f"Countdown-DM konnte nicht vorbereitet werden: Spieler `{player['discord_id']}` — {repr(e)}"
                     )
 
         update_schedule_status(slot_id, "countdown_sent")
+        await self.publish_schedule_to_channel()
 
     async def send_start_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
@@ -2857,6 +3079,13 @@ class LadderCog(commands.Cog):
                     )
 
         update_schedule_status(slot_id, "running")
+
+        try:
+            await self.post_slot_runners_to_channel(schedule_row)
+        except Exception:
+            pass
+
+        await self.publish_schedule_to_channel()
 
     async def handle_finish(self, interaction: discord.Interaction, match_id: str, player_no: int):
         await interaction.response.defer(ephemeral=True)
@@ -3037,6 +3266,28 @@ class LadderCog(commands.Cog):
                 ephemeral=True,
             )
 
+    async def publish_result_to_results_channel(self, match_row: dict, schedule_row: dict | None = None):
+        try:
+            channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
+        except Exception as e:
+            await self.log_tfnl(f"Ergebnis-Channel konnte nicht geladen werden: {repr(e)}")
+            return
+
+        try:
+            await channel.send(build_public_result_message(match_row, schedule_row))
+        except Exception as e:
+            await self.log_tfnl(
+                f"Ergebnis konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: {repr(e)}"
+            )
+
+    async def post_slot_runners_to_channel(self, schedule_row: dict):
+        try:
+            slot_channel = await self.get_or_create_slot_channel(schedule_row)
+            await slot_channel.send(build_slot_runner_message(schedule_row))
+        except Exception as e:
+            slot_id = normalize_text(schedule_row.get("Slot ID"))
+            await self.log_tfnl(f"Teilnehmerliste konnte nicht gepostet werden: `{slot_id}` — {repr(e)}")
+
     async def evaluate_match_if_complete(self, match_id: str):
         _, match_row = find_match_row(match_id)
 
@@ -3069,6 +3320,8 @@ class LadderCog(commands.Cog):
                 await slot_channel.send(build_result_message(updated_match))
             except Exception as e:
                 await self.log_tfnl(f"Ergebnispost fehlgeschlagen für `{match_id}` — {repr(e)}")
+
+            await self.publish_result_to_results_channel(updated_match, schedule_row)
 
             await self.complete_slot_if_ready(slot_id)
 
@@ -3217,6 +3470,21 @@ class LadderCog(commands.Cog):
     # =====================================================
 
     async def process_schedule_states(self):
+        unique_changes = ensure_unique_schedule_slot_ids()
+
+        if unique_changes:
+            change_lines = []
+
+            for change in unique_changes:
+                change_lines.append(
+                    f"Zeile {change['row_index']}: `{change['old_slot_id'] or '-'} ` → `{change['new_slot_id']}` "
+                    f"({change['datum']} {change['slot']} {change['startzeit']})"
+                )
+
+            await self.log_tfnl(
+                "Doppelte/leere Slot IDs automatisch korrigiert:\n" + "\n".join(change_lines[:15])
+            )
+
         rows_with_index = load_schedule_rows_with_index()
 
         for _, row in rows_with_index:
@@ -3250,14 +3518,17 @@ class LadderCog(commands.Cog):
 
             if status == "paired" and is_seed_due(row):
                 await self.send_seed_dms(row)
+                await self.publish_signup_to_channel()
                 continue
 
             if status == "seed_sent" and is_countdown_due(row):
                 await self.send_countdown_dms(row)
+                await self.publish_signup_to_channel()
                 continue
 
             if status == "countdown_sent" and is_start_due(row):
                 await self.send_start_dms(row)
+                await self.publish_signup_to_channel()
                 continue
 
             if status == "running":
@@ -3313,11 +3584,99 @@ class LadderCog(commands.Cog):
                 "Die Paarungen wurden geheim ausgelost.\n"
                 "Ihr erhaltet die weiteren Informationen später per DM."
             )
+            await slot_channel.send(build_slot_runner_message(schedule_row))
 
         await self.log_tfnl(f"Slot `{slot_id}` paired: {len(match_rows)} Match(es) erstellt.")
 
         await self.publish_schedule_to_channel()
         await self.publish_signup_to_channel()
+
+    async def archive_slot_channel_now(self, schedule_row: dict) -> bool:
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
+        channel_id = normalize_text(schedule_row.get("Slot Channel ID"))
+
+        if not channel_id:
+            update_schedule_status(slot_id, "archived")
+            await self.publish_schedule_to_channel()
+            await self.log_tfnl(f"Slot `{slot_id}` manuell archiviert. Kein Slot Channel ID vorhanden.")
+            return True
+
+        try:
+            channel = self.bot.get_channel(int(channel_id))
+
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(channel_id))
+
+            await channel.delete(reason="TFNL Slot manuell archiviert")
+        except Exception as e:
+            await self.log_tfnl(f"Slot-Channel konnte manuell nicht gelöscht werden: `{slot_id}` — {repr(e)}")
+            return False
+
+        update_schedule_status(slot_id, "archived")
+        await self.publish_schedule_to_channel()
+        await self.log_tfnl(f"Slot `{slot_id}` manuell archiviert und Channel gelöscht.")
+        return True
+
+    async def run_manual_process_step(self, step: str, slot_id: str) -> tuple[bool, str]:
+        step = normalize_text(step).lower()
+        slot_id = normalize_text(slot_id)
+
+        _, schedule_row = find_schedule_row(slot_id)
+
+        if not schedule_row:
+            return False, f"Slot `{slot_id}` wurde im Schedule nicht gefunden."
+
+        if step in ("open", "open_signup", "registration_open", "anmeldung"):
+            update_schedule_status(slot_id, "registration_open")
+            await self.publish_schedule_to_channel()
+            await self.publish_signup_to_channel()
+            return True, f"Anmeldung für Slot `{slot_id}` wurde manuell geöffnet."
+
+        if step in ("pair", "pairing", "close_registration", "paaren"):
+            await self.close_registration_and_pair(schedule_row)
+            return True, f"Pairing/Anmeldeschluss für Slot `{slot_id}` wurde manuell angestoßen."
+
+        if step in ("seed", "seed_dm", "seed_dms"):
+            ok = await self.send_seed_dms(schedule_row)
+            return ok, f"Seed-DMs für Slot `{slot_id}` wurden {'gesendet' if ok else 'nicht gesendet'}."
+
+        if step in ("countdown", "countdown_dm", "countdown_dms"):
+            await self.send_countdown_dms(schedule_row)
+            return True, f"Countdown-DMs für Slot `{slot_id}` wurden manuell angestoßen."
+
+        if step in ("start", "start_dm", "start_dms"):
+            await self.send_start_dms(schedule_row)
+            await self.publish_schedule_to_channel()
+            return True, f"Start-DMs für Slot `{slot_id}` wurden manuell gesendet."
+
+        if step in ("finalize", "ff", "slot_end", "ende"):
+            await self.finalize_slot(schedule_row)
+            return True, f"Slot-Ende/FF-Finalisierung für Slot `{slot_id}` wurde manuell angestoßen."
+
+        if step in ("complete", "abschluss", "overview", "gesamt"):
+            ok = await self.complete_slot_if_ready(slot_id, force=True, debug=True)
+            return ok, f"Slotabschluss für Slot `{slot_id}` wurde {'durchgeführt' if ok else 'nicht durchgeführt'}."
+
+        if step in ("archive", "archivieren", "delete_channel", "channel_delete"):
+            ok = await self.archive_slot_channel_now(schedule_row)
+            return ok, f"Archivierung für Slot `{slot_id}` wurde {'durchgeführt' if ok else 'nicht durchgeführt'}."
+
+        if step in ("schedule", "publish_schedule"):
+            await self.publish_schedule_to_channel()
+            return True, "Spielplan wurde neu gepostet/aktualisiert."
+
+        if step in ("signup", "publish_signup"):
+            await self.publish_signup_to_channel()
+            return True, "Anmeldung wurde neu gepostet/aktualisiert."
+
+        if step in ("standings", "ranking", "rankings"):
+            await self.publish_standings_to_channel()
+            return True, "Gesamtranking wurde neu gepostet/aktualisiert."
+
+        return False, (
+            "Unbekannter Schritt. Erlaubt: `open_signup`, `pair`, `seed`, `countdown`, "
+            "`start`, `finalize`, `complete`, `archive`, `schedule`, `signup`, `standings`."
+        )
 
     # =====================================================
     # TASKS
@@ -3341,7 +3700,7 @@ class LadderCog(commands.Cog):
         await self.bot.wait_until_ready()
         await self.publish_signup_to_channel()
 
-    @tasks.loop(minutes=1)
+    @tasks.loop(seconds=TFNL_LOOP_INTERVAL_SECONDS)
     async def process_ladder_slots(self):
         try:
             await self.process_schedule_states()
@@ -3695,6 +4054,108 @@ class LadderCog(commands.Cog):
 
     @ladder_force_complete.error
     async def ladder_force_complete_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="ladder_slotids_fix",
+        description="Prüft und korrigiert doppelte/leere TFNL-Slot-IDs im Schedule.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ladder_slotids_fix(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        changes = ensure_unique_schedule_slot_ids()
+
+        if not changes:
+            await interaction.followup.send(
+                "Alle Slot IDs im Schedule sind eindeutig.",
+                ephemeral=True,
+            )
+            return
+
+        lines = []
+
+        for change in changes:
+            lines.append(
+                f"Zeile {change['row_index']}: `{change['old_slot_id'] or '-'} ` → `{change['new_slot_id']}` "
+                f"({change['datum']} {change['slot']} {change['startzeit']})"
+            )
+
+        await self.publish_schedule_to_channel()
+        await self.publish_signup_to_channel()
+
+        await interaction.followup.send(
+            "Folgende Slot IDs wurden korrigiert:\n" + "\n".join(lines[:20]),
+            ephemeral=True,
+        )
+
+    @ladder_slotids_fix.error
+    async def ladder_slotids_fix_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="ladder_step",
+        description="Stößt einen einzelnen TFNL-Prozessschritt für einen Slot manuell an.",
+    )
+    @app_commands.describe(
+        slot_id="Exakte Slot ID aus dem Schedule",
+        step="open_signup, pair, seed, countdown, start, finalize, complete, archive, schedule, signup, standings",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ladder_step(
+        self,
+        interaction: discord.Interaction,
+        slot_id: str,
+        step: str,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        ok, message = await self.run_manual_process_step(step, slot_id)
+
+        await interaction.followup.send(
+            f"{'OK' if ok else 'NICHT OK'}: {message}",
+            ephemeral=True,
+        )
+
+    @ladder_step.error
+    async def ladder_step_error(
         self,
         interaction: discord.Interaction,
         error: app_commands.AppCommandError,
