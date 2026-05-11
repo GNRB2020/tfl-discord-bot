@@ -70,6 +70,7 @@ PLAYERS_SHEET_NAME = "Players"
 
 SCHEDULE_ANNOUNCEMENT_COL = "Signup Announcement Sent"
 SCHEDULE_COMPLETED_AT_COL = "Completed At"
+SCHEDULE_PRESTART_DM_COL = "Prestart DM Sent"
 
 SAHASRAHBOT_PRESET_BASE_URL = (
     "https://raw.githubusercontent.com/tcprescott/sahasrahbot/master/presets/alttpr"
@@ -306,6 +307,7 @@ def get_schedule_sheet():
 
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_ANNOUNCEMENT_COL)
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_COMPLETED_AT_COL)
+    ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_PRESTART_DM_COL)
 
     WORKSHEET_CACHE[SCHEDULE_SHEET_NAME] = sheet
     return sheet
@@ -695,14 +697,28 @@ def is_seed_due(row: dict) -> bool:
     return datetime.now(BERLIN_TZ) >= start - timedelta(minutes=5)
 
 
+def is_prestart_dm_due(row: dict) -> bool:
+    start = get_slot_start_dt(row)
+
+    if not start:
+        return False
+
+    return datetime.now(BERLIN_TZ) >= start - timedelta(minutes=1)
+
+
+def was_prestart_dm_sent(row: dict) -> bool:
+    return normalize_text(row.get(SCHEDULE_PRESTART_DM_COL)).lower() == "ja"
+
+
 def is_countdown_due(row: dict) -> bool:
     start = get_slot_start_dt(row)
 
     if not start:
         return False
 
-    # Countdown-Task früh genug vorbereiten, läuft intern exakt auf Startzeit -5 Sekunden.
-    return datetime.now(BERLIN_TZ) >= start - timedelta(seconds=15)
+    # Countdown-Tasks werden bewusst früh vorbereitet.
+    # Die Task schläft intern bis exakt Startzeit -5 Sekunden.
+    return datetime.now(BERLIN_TZ) >= start - timedelta(seconds=70)
 
 
 def is_start_due(row: dict) -> bool:
@@ -3029,7 +3045,9 @@ class LadderCog(commands.Cog):
                         f"Modus: `{normalize_text(schedule_row.get('Modus'))}`\n"
                         f"Startzeit: `{normalize_text(schedule_row.get('Startzeit'))} Uhr`\n"
                         f"Seed-Link: {seed_url}\n\n"
-                        "Die Paarungen bleiben geheim bis zum Ergebnis."
+                        "Die Paarungen bleiben geheim bis zum Ergebnis.\n"
+                        "Eine weitere DM kommt ungefähr 1 Minute vor Start.\n"
+                        "Direkt vor Start folgt ein kurzer Countdown von 5 bis 1."
                     )
                 except Exception as e:
                     await self.log_tfnl(
@@ -3041,46 +3059,104 @@ class LadderCog(commands.Cog):
 
         return True
 
+    async def send_prestart_dms(self, schedule_row: dict):
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
+        start_dt = get_slot_start_dt(schedule_row)
+
+        if not start_dt:
+            await self.log_tfnl(f"1-Minuten-DM nicht möglich: Startzeit fehlt für Slot `{slot_id}`.")
+            return False
+
+        if was_prestart_dm_sent(schedule_row):
+            return True
+
+        matches = get_matches_for_slot(slot_id)
+        sent_to = set()
+
+        if not matches:
+            await self.log_tfnl(
+                f"1-Minuten-DM nicht möglich: Keine Matches für Slot `{slot_id}` gefunden."
+            )
+            return False
+
+        for match in matches:
+            for player in get_match_players(match):
+                player_id = player["discord_id"]
+
+                if player_id in sent_to:
+                    continue
+
+                sent_to.add(player_id)
+
+                try:
+                    user = await self.bot.fetch_user(int(player_id))
+                    await user.send(
+                        "**TFNL Race startet in ungefähr 1 Minute.**\n\n"
+                        f"Slot: `{normalize_text(schedule_row.get('Slot'))}`\n"
+                        f"Modus: `{normalize_text(schedule_row.get('Modus'))}`\n"
+                        f"Startzeit: `{normalize_text(schedule_row.get('Startzeit'))} Uhr`\n\n"
+                        "Der kurze Countdown folgt direkt vor dem Start.\n"
+                        "Sobald der Countdown abgelaufen ist, ist das Race gestartet."
+                    )
+                except Exception as e:
+                    await self.log_tfnl(
+                        f"1-Minuten-DM konnte nicht gesendet werden: Slot `{slot_id}`, Spieler `{player_id}` — {repr(e)}"
+                    )
+
+        update_schedule_cell(slot_id, SCHEDULE_PRESTART_DM_COL, "Ja")
+        return True
+
     async def send_countdown_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
         start_dt = get_slot_start_dt(schedule_row)
 
         if not start_dt:
             await self.log_tfnl(f"Countdown nicht möglich: Startzeit fehlt für Slot `{slot_id}`.")
-            return
+            return False
 
         matches = get_matches_for_slot(slot_id)
         sent_to = set()
+
+        if not matches:
+            await self.log_tfnl(f"Countdown nicht möglich: Keine Matches für Slot `{slot_id}` gefunden.")
+            return False
 
         async def sleep_until(target: datetime):
             delay = (target - datetime.now(BERLIN_TZ)).total_seconds()
             if delay > 0:
                 await asyncio.sleep(delay)
 
+        async def send_or_edit_countdown(user: discord.User, message, content: str):
+            if message is None:
+                return await user.send(content)
+
+            try:
+                await message.edit(content=content)
+                return message
+            except Exception:
+                return await user.send(content)
+
         async def countdown(user: discord.User, player_id: str):
             try:
-                countdown_start = start_dt - timedelta(seconds=5)
-                await sleep_until(countdown_start)
+                # Muss vor Startzeit -5 Sekunden vorbereitet worden sein.
+                # Falls Discord/API kurz hängt, wird trotzdem bis zur Startmeldung durchgezogen.
+                message = None
 
-                now = datetime.now(BERLIN_TZ)
-                remaining = max(1, min(5, int((start_dt - now).total_seconds()) + 1))
-
-                message = await user.send(f"TFNL-Race startet in `{remaining}`...")
-
-                for value in range(remaining - 1, 0, -1):
+                for value in range(5, 0, -1):
                     await sleep_until(start_dt - timedelta(seconds=value))
-
-                    try:
-                        await message.edit(content=f"TFNL-Race startet in `{value}`...")
-                    except Exception:
-                        await user.send(f"TFNL-Race startet in `{value}`...")
+                    message = await send_or_edit_countdown(
+                        user,
+                        message,
+                        f"**TFNL Countdown**\nRace startet in `{value}`..."
+                    )
 
                 await sleep_until(start_dt)
 
-                try:
-                    await message.edit(content="**TFNL-Race startet jetzt.**")
-                except Exception:
-                    await user.send("**TFNL-Race startet jetzt.**")
+                await send_or_edit_countdown(
+                    user,
+                    message,
+                    "**TFNL Countdown abgelaufen – das Race ist gestartet.**"
+                )
 
             except Exception as e:
                 await self.log_tfnl(
@@ -3089,21 +3165,24 @@ class LadderCog(commands.Cog):
 
         for match in matches:
             for player in get_match_players(match):
-                if player["discord_id"] in sent_to:
+                player_id = player["discord_id"]
+
+                if player_id in sent_to:
                     continue
 
-                sent_to.add(player["discord_id"])
+                sent_to.add(player_id)
 
                 try:
-                    user = await self.bot.fetch_user(int(player["discord_id"]))
-                    self.bot.loop.create_task(countdown(user, player["discord_id"]))
+                    user = await self.bot.fetch_user(int(player_id))
+                    self.bot.loop.create_task(countdown(user, player_id))
                 except Exception as e:
                     await self.log_tfnl(
-                        f"Countdown-DM konnte nicht vorbereitet werden: Spieler `{player['discord_id']}` — {repr(e)}"
+                        f"Countdown-DM konnte nicht vorbereitet werden: Spieler `{player_id}` — {repr(e)}"
                     )
 
         update_schedule_status(slot_id, "countdown_sent")
         await self.publish_schedule_to_channel()
+        return True
 
     async def send_start_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
@@ -3600,6 +3679,10 @@ class LadderCog(commands.Cog):
                 await self.publish_signup_to_channel()
                 continue
 
+            if status in ("seed_sent", "countdown_sent") and is_prestart_dm_due(row) and not was_prestart_dm_sent(row):
+                await self.send_prestart_dms(row)
+                await self.publish_signup_to_channel()
+
             if status == "seed_sent" and is_countdown_due(row):
                 await self.send_countdown_dms(row)
                 await self.publish_signup_to_channel()
@@ -3719,9 +3802,13 @@ class LadderCog(commands.Cog):
             ok = await self.send_seed_dms(schedule_row)
             return ok, f"Seed-DMs für Slot `{slot_id}` wurden {'gesendet' if ok else 'nicht gesendet'}."
 
+        if step in ("prestart", "prestart_dm", "one_minute_dm", "minute_dm"):
+            ok = await self.send_prestart_dms(schedule_row)
+            return ok, f"1-Minuten-DMs für Slot `{slot_id}` wurden {'gesendet' if ok else 'nicht gesendet'}."
+
         if step in ("countdown", "countdown_dm", "countdown_dms"):
             await self.send_countdown_dms(schedule_row)
-            return True, f"Countdown-DMs für Slot `{slot_id}` wurden manuell angestoßen."
+            return True, f"Countdown-DMs für Slot `{slot_id}` wurden manuell vorbereitet."
 
         if step in ("start", "start_dm", "start_dms"):
             await self.send_start_dms(schedule_row)
@@ -4225,7 +4312,7 @@ class LadderCog(commands.Cog):
     )
     @app_commands.describe(
         slot_id="Exakte Slot ID aus dem Schedule",
-        step="open_signup, pair, seed, countdown, start, finalize, complete, archive, schedule, signup, standings",
+        step="open_signup, pair, seed, prestart, countdown, start, finalize, complete, archive, schedule, signup, standings",
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def ladder_step(
