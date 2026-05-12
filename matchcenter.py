@@ -569,6 +569,88 @@ async def send_result_post(guild: discord.Guild, text: str):
         await channel.send(text)
 
 
+def normalize_discord_lookup_name(value: str) -> str:
+    value = clean_text(value or "").lower()
+    return re.sub(r"[^a-z0-9äöüß]", "", value)
+
+
+async def find_member_by_player_name(guild: discord.Guild, player_name: str) -> discord.Member | None:
+    target = normalize_discord_lookup_name(player_name)
+
+    if not target:
+        return None
+
+    for member in guild.members:
+        candidates = [
+            member.display_name,
+            member.name,
+            getattr(member, "global_name", None),
+        ]
+
+        for candidate in candidates:
+            if normalize_discord_lookup_name(candidate or "") == target:
+                return member
+
+    return None
+
+
+async def send_schedule_dm_to_other_player(
+    guild: discord.Guild,
+    creator: discord.Member | discord.User,
+    player1: str,
+    player2: str,
+    area: str,
+    info: str,
+    mode: str,
+    date_str: str,
+    time_str: str,
+    event_url: str,
+):
+    if guild is None:
+        print("⚠️ Keine DM gesendet: guild fehlt")
+        return
+
+    creator_id = creator.id
+    members = []
+
+    for player_name in [player1, player2]:
+        member = await find_member_by_player_name(guild, player_name)
+
+        if member is None:
+            print(f"⚠️ Keine DM gesendet: Spieler nicht gefunden: {player_name}")
+            continue
+
+        if member.id == creator_id:
+            continue
+
+        members.append(member)
+
+    if not members:
+        print("⚠️ Keine DM gesendet: Kein anderer Spieler gefunden")
+        return
+
+    dm_text = (
+        "📅 **Neuer Spieltermin eingetragen**\n\n"
+        f"**Bereich:** {area}\n"
+        f"**Info:** {info}\n"
+        f"**Spiel:** {player1} vs. {player2}\n"
+        f"**Modus:** {mode}\n"
+        f"**Datum:** {date_str}\n"
+        f"**Uhrzeit:** {time_str}\n"
+        f"**Eingetragen von:** {creator.display_name}\n"
+        f"**Event:** {event_url}"
+    )
+
+    for member in members:
+        try:
+            await member.send(dm_text)
+            print(f"✅ Termin-DM gesendet an {member.display_name}")
+        except discord.Forbidden:
+            print(f"⚠️ DM blockiert/deaktiviert bei {member.display_name}")
+        except Exception as e:
+            print(f"⚠️ Fehler beim DM-Versand an {member.display_name}: {e}")
+
+
 # =========================================================
 # STATE
 # =========================================================
@@ -1066,6 +1148,20 @@ class LeagueScheduleView(BaseFlowView):
                 s.division,
             )
 
+            if interaction.guild:
+                await send_schedule_dm_to_other_player(
+                    guild=interaction.guild,
+                    creator=interaction.user,
+                    player1=s.player1,
+                    player2=s.player2,
+                    area="League",
+                    info=s.division,
+                    mode=s.mode,
+                    date_str=s.date_str,
+                    time_str=s.time_str,
+                    event_url=event_url,
+                )
+
             await interaction.response.edit_message(
                 content=f"✅ Termin erstellt:\n{event_url}",
                 view=None,
@@ -1138,6 +1234,20 @@ class CupScheduleView(BaseFlowView):
                 event_url,
                 entered_meta,
             )
+
+            if interaction.guild:
+                await send_schedule_dm_to_other_player(
+                    guild=interaction.guild,
+                    creator=interaction.user,
+                    player1=s.player1,
+                    player2=s.player2,
+                    area="Cup",
+                    info=s.cup_round,
+                    mode="Cup",
+                    date_str=s.date_str,
+                    time_str=s.time_str,
+                    event_url=event_url,
+                )
 
             await interaction.response.edit_message(
                 content=f"✅ Cup-Termin erstellt:\n{event_url}",
@@ -1350,7 +1460,7 @@ class CupResultView(BaseFlowView):
 
 
 # =========================================================
-# COG 
+# COG
 # =========================================================
 
 
