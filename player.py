@@ -22,10 +22,45 @@ from matchcenter import (
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
+# =========================================================
+# STREICHMODUS CONFIG
+# =========================================================
+
+DIVISION_CHANNELS = {
+    1: 1344118033920168047,
+    2: 1344118383859204146,
+    3: 1344118470102614036,
+    4: 1344118574943572100,
+    5: 1389541046874148924,
+    6: 1438136009085817023,
+}
+
+# Spalte O in den Divisionstabellen 1.DIV bis 6.DIV
+# leer = Änderung noch möglich
+# "1" = einmalige Änderung bereits genutzt
+STREICH_CHANGE_USED_COL = 15
+
+# Config-Sheet:
+# K = Division 1
+# L = Division 2
+# M = Division 3
+# N = Division 4
+# O = Division 5
+# P = Division 6
+STREICHMODUS_CONFIG_WORKSHEET_GID = 463142264
+STREICHMODUS_MODE_COLUMNS = {
+    1: 11,  # K
+    2: 12,  # L
+    3: 13,  # M
+    4: 14,  # N
+    5: 15,  # O
+    6: 16,  # P
+}
 
 # =========================================================
 # UI HELFER
 # =========================================================
+
 def menu_embed(title: str, description: str) -> discord.Embed:
     return discord.Embed(
         title=title,
@@ -37,6 +72,7 @@ def menu_embed(title: str, description: str) -> discord.Embed:
 def normalize_name(value: str) -> str:
     """
     Normalisiert Discord-/Sheet-Namen robust.
+
     Beispiele:
     GNRB, .gnrb, G-N-R-B, G_N_R_B, G N R B -> gnrb
     """
@@ -48,6 +84,7 @@ def normalize_name(value: str) -> str:
 # =========================================================
 # GOOGLE SHEETS FÜR STREICHMODI
 # =========================================================
+
 def get_name_candidates(member: discord.Member) -> list[str]:
     """
     Alle sinnvollen Discord-Namensvarianten für den Vergleich mit Spalte L.
@@ -58,6 +95,13 @@ def get_name_candidates(member: discord.Member) -> list[str]:
         member.name,
         str(member),
     ]
+
+
+def get_worksheet_by_gid(workbook, gid: int):
+    for ws in workbook.worksheets():
+        if ws.id == gid:
+            return ws
+    raise RuntimeError(f"Worksheet mit gid={gid} nicht gefunden.")
 
 
 def get_division_worksheet_for_name_candidates(name_candidates: list[str]):
@@ -91,9 +135,102 @@ def load_current_streichmodi_for_name_candidates(name_candidates: list[str]) -> 
         return "", ""
 
     row = ws.row_values(row_index)
+
     mode_1 = row[12].strip() if len(row) > 12 else ""  # M
     mode_2 = row[13].strip() if len(row) > 13 else ""  # N
+
     return mode_1, mode_2
+
+
+def get_division_modes_for_streichmodus(div_number: int) -> list[str]:
+    div_number = int(div_number)
+
+    col_index = STREICHMODUS_MODE_COLUMNS.get(div_number)
+    if not col_index:
+        return []
+
+    ws = get_worksheet_by_gid(
+        restinfo.WB,
+        STREICHMODUS_CONFIG_WORKSHEET_GID,
+    )
+
+    values = ws.col_values(col_index)
+
+    modes = []
+    seen = set()
+
+    ignored_headers = {
+        "1. division",
+        "2. division",
+        "3. division",
+        "4. division",
+        "5. division",
+        "6. division",
+        "division 1",
+        "division 2",
+        "division 3",
+        "division 4",
+        "division 5",
+        "division 6",
+        "1.division",
+        "2.division",
+        "3.division",
+        "4.division",
+        "5.division",
+        "6.division",
+        "modus",
+        "modis",
+        "modes",
+    }
+
+    for value in values:
+        mode = (value or "").strip()
+        if not mode:
+            continue
+
+        lowered = mode.lower()
+        if lowered in ignored_headers:
+            continue
+
+        key = lowered
+        if key in seen:
+            continue
+
+        seen.add(key)
+        modes.append(mode)
+
+    return modes[:25]
+
+
+def load_streichmodus_state_for_name_candidates(name_candidates: list[str]) -> dict:
+    ws, row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
+
+    if ws is None or row_index is None or div_number is None:
+        return {
+            "found": False,
+            "ws": None,
+            "row_index": None,
+            "div_number": None,
+            "mode_1": "",
+            "mode_2": "",
+            "change_used": False,
+        }
+
+    row = ws.row_values(row_index)
+
+    mode_1 = row[12].strip() if len(row) > 12 else ""  # M
+    mode_2 = row[13].strip() if len(row) > 13 else ""  # N
+    change_marker = row[14].strip() if len(row) > 14 else ""  # O
+
+    return {
+        "found": True,
+        "ws": ws,
+        "row_index": row_index,
+        "div_number": int(div_number),
+        "mode_1": mode_1,
+        "mode_2": mode_2,
+        "change_used": change_marker == "1",
+    }
 
 
 def write_streichmodi_for_name_candidates(
@@ -102,13 +239,9 @@ def write_streichmodi_for_name_candidates(
     mode_2: str,
 ) -> tuple[int, int]:
     """
-    Schreibt die Streichmodi in die eigene Division des Spielers.
-
-    Spalte L: Spielername
-    Spalte M: Streichmodus 1
-    Spalte N: Streichmodus 2
-
-    Rückgabe: (row_index, div_number)
+    Rückwärtskompatible Funktion.
+    Schreibt ohne Änderungslogik.
+    Wird im neuen Flow nicht mehr direkt verwendet.
     """
     ws, row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
 
@@ -123,16 +256,81 @@ def write_streichmodi_for_name_candidates(
         {"range": f"M{row_index}:M{row_index}", "values": [[mode_1]]},
         {"range": f"N{row_index}:N{row_index}", "values": [[mode_2]]},
     ]
+
     ws.batch_update(reqs)
+
     return row_index, div_number
+
+
+def write_streichmodi_with_change_limit(
+    name_candidates: list[str],
+    mode_1: str,
+    mode_2: str,
+) -> dict:
+    state = load_streichmodus_state_for_name_candidates(name_candidates)
+
+    if not state["found"]:
+        normalized = sorted({normalize_name(x) for x in name_candidates if x})
+        raise RuntimeError(
+            "Kein passender Name in Spalte L der Divisionen 1.DIV bis 6.DIV gefunden. "
+            f"Gesucht: {', '.join(normalized) or '-'}"
+        )
+
+    ws = state["ws"]
+    row_index = state["row_index"]
+    div_number = state["div_number"]
+
+    old_mode_1 = state["mode_1"]
+    old_mode_2 = state["mode_2"]
+    change_used = state["change_used"]
+
+    old_has_both = bool(old_mode_1 and old_mode_2)
+    changed = (old_mode_1 != mode_1) or (old_mode_2 != mode_2)
+
+    if old_has_both and changed and change_used:
+        raise RuntimeError(
+            "Du hast deine einmalige Änderung der Streichmodi für diese Saison bereits genutzt."
+        )
+
+    reqs = [
+        {"range": f"M{row_index}:M{row_index}", "values": [[mode_1]]},
+        {"range": f"N{row_index}:N{row_index}", "values": [[mode_2]]},
+    ]
+
+    notify_change = False
+
+    if old_has_both and changed:
+        reqs.append(
+            {
+                "range": f"O{row_index}:O{row_index}",
+                "values": [["1"]],
+            }
+        )
+        notify_change = True
+
+    ws.batch_update(reqs)
+
+    return {
+        "row_index": row_index,
+        "div_number": div_number,
+        "old_mode_1": old_mode_1,
+        "old_mode_2": old_mode_2,
+        "new_mode_1": mode_1,
+        "new_mode_2": mode_2,
+        "changed": changed,
+        "notify_change": notify_change,
+    }
 
 
 # =========================================================
 # QUALI INFO
 # =========================================================
+
 async def build_quali_info_text(member: discord.Member, quali_number: int) -> str:
     runner_name = member.display_name.strip()
+
     ws = await asyncio.to_thread(asnyc.get_quali_worksheet)
+
     total_played, rank = await asyncio.to_thread(
         asnyc.get_quali_stats_for_runner,
         ws,
@@ -154,7 +352,9 @@ async def build_quali_info_text(member: discord.Member, quali_number: int) -> st
 
 async def build_quali_overall_text(member: discord.Member) -> str:
     runner_name = member.display_name.strip()
+
     ws = await asyncio.to_thread(asnyc.get_quali_worksheet)
+
     total_completed, rank = await asyncio.to_thread(
         asnyc.get_overall_stats_for_runner,
         ws,
@@ -176,6 +376,7 @@ async def build_quali_overall_text(member: discord.Member) -> str:
 # =========================================================
 # BASIS
 # =========================================================
+
 class PlayerBaseView(discord.ui.View):
     def __init__(self, owner_id: int, timeout: float = 1800):
         super().__init__(timeout=timeout)
@@ -209,13 +410,14 @@ class PlaceholderView(PlayerBaseView):
 # =========================================================
 # ERGEBNIS WRAPPER
 # =========================================================
+
 class BackToResultMenuFromLeagueStep1Button(discord.ui.Button):
     def __init__(self):
         super().__init__(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=4)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            embed=menu_embed("🏁 Ergebnis melden", "Wähle einen Bereich."),
+            embed=menu_embed(" Ergebnis melden", "Wähle einen Bereich."),
             view=ResultMenuView(owner_id=interaction.user.id),
             content=None,
         )
@@ -242,7 +444,7 @@ class BackToResultMenuFromCupButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            embed=menu_embed("🏁 Ergebnis melden", "Wähle einen Bereich."),
+            embed=menu_embed(" Ergebnis melden", "Wähle einen Bereich."),
             view=ResultMenuView(owner_id=interaction.user.id),
             content=None,
         )
@@ -258,6 +460,7 @@ class PlayerLeagueResultContinueButton(discord.ui.Button):
             return
 
         s = view.state
+
         if not all([s.division, s.match_row_index, s.match_label, s.player1, s.player2]):
             await interaction.response.send_message(
                 "Bitte zuerst Division, Heimrecht und Spiel auswählen.",
@@ -292,6 +495,7 @@ class PlayerLeagueResultViewStep1(LeagueResultViewStep1):
 
         if old_back is not None:
             self.remove_item(old_back)
+
         if old_continue is not None:
             self.remove_item(old_continue)
 
@@ -304,6 +508,7 @@ class PlayerLeagueResultViewStep2(LeagueResultViewStep2):
         super().__init__(cog=None, author_id=author_id, state=state)
 
         old_back = None
+
         for item in list(self.children):
             if isinstance(item, discord.ui.Button) and item.label == "Zurück":
                 old_back = item
@@ -320,6 +525,7 @@ class PlayerCupResultView(CupResultView):
         super().__init__(cog=None, author_id=author_id)
 
         old_back = None
+
         for item in list(self.children):
             if isinstance(item, discord.ui.Button) and item.label == "Zurück":
                 old_back = item
@@ -334,6 +540,7 @@ class PlayerCupResultView(CupResultView):
 # =========================================================
 # STREICHMODI SETZEN
 # =========================================================
+
 class StreichmodusSelect(discord.ui.Select):
     EMPTY_VALUE = "__none__"
 
@@ -374,10 +581,12 @@ class StreichmodusSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
+
         if not isinstance(view, StreichmodusSettingView):
             return
 
         selected = self.values[0]
+
         if selected == self.EMPTY_VALUE:
             selected = ""
 
@@ -391,6 +600,8 @@ class StreichmodusSelect(discord.ui.Select):
             modes=view.modes,
             mode_1=view.mode_1,
             mode_2=view.mode_2,
+            div_number=view.div_number,
+            change_used=view.change_used,
         )
 
         await interaction.response.edit_message(
@@ -407,26 +618,42 @@ class StreichmodusSettingView(PlayerBaseView):
         modes: list[str],
         mode_1: str = "",
         mode_2: str = "",
+        div_number: int | None = None,
+        change_used: bool = False,
     ):
         super().__init__(owner_id)
         self.modes = modes
         self.mode_1 = mode_1
         self.mode_2 = mode_2
+        self.div_number = div_number
+        self.change_used = change_used
 
         self.add_item(StreichmodusSelect(1, self.modes, self.mode_1))
         self.add_item(StreichmodusSelect(2, self.modes, self.mode_2))
 
     def build_embed(self) -> discord.Embed:
+        div_text = f"Division {self.div_number}" if self.div_number else "Division nicht erkannt"
+
+        change_text = (
+            "Einmalige Änderung bereits genutzt."
+            if self.change_used
+            else "Nach der Erstsetzung ist noch genau eine Änderung möglich."
+        )
+
         text = (
+            f"**{div_text}**\n\n"
             "Wähle zwei Streichmodi.\n\n"
             f"**Modus 1:** {self.mode_1 or '-'}\n"
-            f"**Modus 2:** {self.mode_2 or '-'}"
+            f"**Modus 2:** {self.mode_2 or '-'}\n\n"
+            f"{change_text}"
         )
+
         return menu_embed("⚙️ Einstellungen → Streichmodis setzen", text)
 
     @discord.ui.button(label="Speichern", style=discord.ButtonStyle.success, row=2)
     async def save_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
@@ -438,16 +665,43 @@ class StreichmodusSettingView(PlayerBaseView):
             )
             return
 
+        if self.mode_1 == self.mode_2:
+            await interaction.response.send_message(
+                "Bitte zwei unterschiedliche Streichmodi auswählen.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer()
 
         try:
             name_candidates = get_name_candidates(member)
-            row_index, div_number = await asyncio.to_thread(
-                write_streichmodi_for_name_candidates,
+
+            result = await asyncio.to_thread(
+                write_streichmodi_with_change_limit,
                 name_candidates,
                 self.mode_1,
                 self.mode_2,
             )
+
+            div_number = result["div_number"]
+
+            if result["notify_change"]:
+                channel_id = DIVISION_CHANNELS.get(div_number)
+                channel = interaction.client.get_channel(channel_id) if channel_id else None
+
+                if channel is None and channel_id:
+                    try:
+                        channel = await interaction.client.fetch_channel(channel_id)
+                    except Exception:
+                        channel = None
+
+                if channel:
+                    await channel.send(
+                        f"Spieler {member.display_name} hat seinen Streichmodus "
+                        f"von {result['old_mode_1']} / {result['old_mode_2']} "
+                        f"auf {result['new_mode_1']} / {result['new_mode_2']} geändert."
+                    )
 
             await interaction.edit_original_response(
                 embed=menu_embed(
@@ -457,7 +711,7 @@ class StreichmodusSettingView(PlayerBaseView):
                         f"**Division:** {div_number}.DIV\n"
                         f"**Modus 1:** {self.mode_1}\n"
                         f"**Modus 2:** {self.mode_2}\n"
-                        f"**Sheet-Zeile:** {row_index}"
+                        f"**Sheet-Zeile:** {result['row_index']}"
                     ),
                 ),
                 view=PlaceholderView(
@@ -467,6 +721,7 @@ class StreichmodusSettingView(PlayerBaseView):
                 ),
                 content=None,
             )
+
         except Exception as e:
             await interaction.edit_original_response(
                 embed=menu_embed(
@@ -489,6 +744,7 @@ class StreichmodusSettingView(PlayerBaseView):
 # =========================================================
 # HAUPTMENÜ
 # =========================================================
+
 class PlayerMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -501,18 +757,18 @@ class PlayerMenuView(PlayerBaseView):
             content=None,
         )
 
-    @discord.ui.button(label="📅 Spiel planen", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label=" Spiel planen", style=discord.ButtonStyle.primary, row=0)
     async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=menu_embed("📅 Spiel planen", "Wähle einen Bereich."),
+            embed=menu_embed(" Spiel planen", "Wähle einen Bereich."),
             view=PlanMenuView(owner_id=interaction.user.id),
             content=None,
         )
 
-    @discord.ui.button(label="🏁 Ergebnis melden", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label=" Ergebnis melden", style=discord.ButtonStyle.success, row=0)
     async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=menu_embed("🏁 Ergebnis melden", "Wähle einen Bereich."),
+            embed=menu_embed(" Ergebnis melden", "Wähle einen Bereich."),
             view=ResultMenuView(owner_id=interaction.user.id),
             content=None,
         )
@@ -525,7 +781,7 @@ class PlayerMenuView(PlayerBaseView):
             content=None,
         )
 
-    @discord.ui.button(label="🏆 Qualifikation", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label=" Qualifikation", style=discord.ButtonStyle.primary, row=1)
     async def qualification_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if hasattr(asnyc, "open_quali_from_player"):
             await asnyc.open_quali_from_player(interaction)
@@ -536,7 +792,7 @@ class PlayerMenuView(PlayerBaseView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="📝 Saisonmeldung", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label=" Saisonmeldung", style=discord.ButtonStyle.primary, row=1)
     async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if hasattr(signup, "open_signup_from_player"):
             await signup.open_signup_from_player(interaction)
@@ -559,6 +815,7 @@ class PlayerMenuView(PlayerBaseView):
 # =========================================================
 # ASYNC MENÜ
 # =========================================================
+
 class AsyncMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -590,6 +847,7 @@ class AsyncMenuView(PlayerBaseView):
 # =========================================================
 # ERGEBNIS MENÜ
 # =========================================================
+
 class ResultMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -628,6 +886,7 @@ class ResultMenuView(PlayerBaseView):
 # =========================================================
 # INFO MENÜ
 # =========================================================
+
 class InfoMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -684,6 +943,7 @@ class InfoMenuView(PlayerBaseView):
 # =========================================================
 # MELDESTATUS
 # =========================================================
+
 class MeldestatusView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -691,6 +951,7 @@ class MeldestatusView(PlayerBaseView):
     @discord.ui.button(label="Meiner", style=discord.ButtonStyle.primary, row=0)
     async def meiner_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         if not isinstance(member, discord.Member):
             text = "Nur auf dem Server verfügbar."
         else:
@@ -755,6 +1016,7 @@ class MeldestatusView(PlayerBaseView):
 # =========================================================
 # INFO → QUALIFIKATION
 # =========================================================
+
 class InfoQualifikationView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -762,6 +1024,7 @@ class InfoQualifikationView(PlayerBaseView):
     @discord.ui.button(label="Quali 1", style=discord.ButtonStyle.primary, row=0)
     async def quali1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         await interaction.response.defer()
 
         if not isinstance(member, discord.Member):
@@ -785,6 +1048,7 @@ class InfoQualifikationView(PlayerBaseView):
     @discord.ui.button(label="Quali 2", style=discord.ButtonStyle.primary, row=0)
     async def quali2_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         await interaction.response.defer()
 
         if not isinstance(member, discord.Member):
@@ -808,6 +1072,7 @@ class InfoQualifikationView(PlayerBaseView):
     @discord.ui.button(label="Gesamt", style=discord.ButtonStyle.primary, row=0)
     async def gesamt_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         await interaction.response.defer()
 
         if not isinstance(member, discord.Member):
@@ -840,11 +1105,14 @@ class InfoQualifikationView(PlayerBaseView):
 # =========================================================
 # RESTPROGRAMM
 # =========================================================
+
 class RestOtherPlayerSelect(discord.ui.Select):
     def __init__(self, division: str, players: list[str], owner_id: int):
         self.division = division
         self.owner_id = owner_id
+
         options = [discord.SelectOption(label=p, value=p) for p in players[:25]]
+
         super().__init__(
             placeholder="Spieler wählen …",
             min_values=1,
@@ -854,6 +1122,7 @@ class RestOtherPlayerSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         player = self.values[0]
+
         try:
             text = restinfo.format_restprogramm_text(self.division, player)
         except Exception as e:
@@ -887,6 +1156,7 @@ class RestOtherPlayerView(PlayerBaseView):
 class RestOtherDivisionSelect(discord.ui.Select):
     def __init__(self, owner_id: int):
         self.owner_id = owner_id
+
         options = [
             discord.SelectOption(label="Division 1", value="1"),
             discord.SelectOption(label="Division 2", value="2"),
@@ -895,6 +1165,7 @@ class RestOtherDivisionSelect(discord.ui.Select):
             discord.SelectOption(label="Division 5", value="5"),
             discord.SelectOption(label="Division 6", value="6"),
         ]
+
         super().__init__(
             placeholder="Division wählen …",
             min_values=1,
@@ -964,6 +1235,7 @@ class RestprogrammView(PlayerBaseView):
     @discord.ui.button(label="Eigenes", style=discord.ButtonStyle.primary, row=0)
     async def eigenes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         await interaction.response.defer()
 
         if not isinstance(member, discord.Member):
@@ -1008,9 +1280,11 @@ class RestprogrammView(PlayerBaseView):
 # =========================================================
 # STREICHMODUS INFO
 # =========================================================
+
 class StreichOtherDivisionSelect(discord.ui.Select):
     def __init__(self, owner_id: int):
         self.owner_id = owner_id
+
         options = [
             discord.SelectOption(label="Division 1", value="1"),
             discord.SelectOption(label="Division 2", value="2"),
@@ -1019,6 +1293,7 @@ class StreichOtherDivisionSelect(discord.ui.Select):
             discord.SelectOption(label="Division 5", value="5"),
             discord.SelectOption(label="Division 6", value="6"),
         ]
+
         super().__init__(
             placeholder="Division wählen …",
             min_values=1,
@@ -1028,6 +1303,7 @@ class StreichOtherDivisionSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         div_number = self.values[0]
+
         try:
             text = restinfo.get_streich_text_for_division(div_number)
         except Exception as e:
@@ -1065,6 +1341,7 @@ class StreichmodusView(PlayerBaseView):
     @discord.ui.button(label="Eigene Division", style=discord.ButtonStyle.primary, row=0)
     async def eigene_division_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         await interaction.response.defer()
 
         if not isinstance(member, discord.Member):
@@ -1109,6 +1386,7 @@ class StreichmodusView(PlayerBaseView):
 # =========================================================
 # ERGEBNISSE / TABELLE
 # =========================================================
+
 class ErgebnisseTabelleView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -1119,36 +1397,42 @@ class ErgebnisseTabelleView(PlayerBaseView):
             url="https://tryforceleague.de/index.php/1-division",
             row=0,
         ))
+
         self.add_item(discord.ui.Button(
             label="2. Div",
             style=discord.ButtonStyle.link,
             url="https://tryforceleague.de/index.php/1-division-2",
             row=0,
         ))
+
         self.add_item(discord.ui.Button(
             label="3. Div",
             style=discord.ButtonStyle.link,
             url="https://tryforceleague.de/index.php/3-division",
             row=0,
         ))
+
         self.add_item(discord.ui.Button(
             label="4. Div",
             style=discord.ButtonStyle.link,
             url="https://tryforceleague.de/index.php/3-division-2",
             row=1,
         ))
+
         self.add_item(discord.ui.Button(
             label="5. Div",
             style=discord.ButtonStyle.link,
             url="https://tryforceleague.de/index.php/3-division-3",
             row=1,
         ))
+
         self.add_item(discord.ui.Button(
             label="6. Div",
             style=discord.ButtonStyle.link,
             url="https://tryforceleague.de/index.php/3-division-4",
             row=1,
         ))
+
         self.add_item(discord.ui.Button(
             label="Cup",
             style=discord.ButtonStyle.link,
@@ -1168,6 +1452,7 @@ class ErgebnisseTabelleView(PlayerBaseView):
 # =========================================================
 # EINSTELLUNGEN
 # =========================================================
+
 class SettingsMenuView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
@@ -1197,6 +1482,7 @@ class SettingsMenuView(PlayerBaseView):
     @discord.ui.button(label="Streichmodis setzen", style=discord.ButtonStyle.success, row=1)
     async def streich_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
+
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
@@ -1204,21 +1490,35 @@ class SettingsMenuView(PlayerBaseView):
         await interaction.response.defer()
 
         try:
-            modes = await asyncio.to_thread(get_runner_modes)
-            if not modes:
-                modes = ["Standard"]
-
             name_candidates = get_name_candidates(member)
-            current_mode_1, current_mode_2 = await asyncio.to_thread(
-                load_current_streichmodi_for_name_candidates,
+
+            state = await asyncio.to_thread(
+                load_streichmodus_state_for_name_candidates,
                 name_candidates,
             )
+
+            if not state["found"]:
+                raise RuntimeError("Du wurdest in keiner Division in Spalte L gefunden.")
+
+            div_number = state["div_number"]
+
+            modes = await asyncio.to_thread(
+                get_division_modes_for_streichmodus,
+                div_number,
+            )
+
+            if not modes:
+                raise RuntimeError(
+                    f"Für Division {div_number} wurden keine erlaubten Streichmodi im Sheet gefunden."
+                )
 
             view = StreichmodusSettingView(
                 owner_id=interaction.user.id,
                 modes=modes,
-                mode_1=current_mode_1,
-                mode_2=current_mode_2,
+                mode_1=state["mode_1"],
+                mode_2=state["mode_2"],
+                div_number=div_number,
+                change_used=state["change_used"],
             )
 
             await interaction.edit_original_response(
@@ -1253,6 +1553,7 @@ class SettingsMenuView(PlayerBaseView):
 # =========================================================
 # COG
 # =========================================================
+
 class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1261,6 +1562,7 @@ class PlayerCog(commands.Cog):
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
         view = PlayerMenuView(owner_id=interaction.user.id)
+
         await interaction.response.send_message(
             embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
             view=view,
