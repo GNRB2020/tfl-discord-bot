@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import asyncio
 import traceback
@@ -252,9 +253,57 @@ def get_runner_modes() -> list[str]:
     return out[:25] if out else ["Standard"]
 
 
+def normalize_twitch_lookup_key(value: str) -> str:
+    """
+    Normalisiert Spielernamen für das Twitch-Mapping.
+
+    Sheet-/Discord-Namen enthalten teilweise Leerzeichen, Punkte,
+    Unterstriche oder unterschiedliche Groß-/Kleinschreibung.
+    Beispiel:
+    "Officer Miau Miau" -> "officermiaumiau"
+    """
+    value = clean_text(value or "").lower()
+    return re.sub(r"[^a-z0-9äöüß]", "", value)
+
+
+def get_shared_twitch_map() -> dict:
+    """
+    Holt bevorzugt das zentrale TWITCH_MAP aus bot.py.
+
+    Kein normales `import bot`, weil matchcenter.py als Extension von bot.py
+    geladen wird und ein Import den Bot doppelt initialisieren könnte.
+    """
+    for module_name in ("__main__", "bot"):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+
+        shared_map = getattr(module, "TWITCH_MAP", None)
+        if isinstance(shared_map, dict) and shared_map:
+            return shared_map
+
+    return TWITCH_MAP
+
+
+def get_twitch_handle_for_player(player_name: str) -> str | None:
+    twitch_map = get_shared_twitch_map()
+
+    direct_key = (player_name or "").strip().lower()
+    if direct_key in twitch_map:
+        return twitch_map[direct_key]
+
+    normalized_target = normalize_twitch_lookup_key(player_name)
+
+    for key, handle in twitch_map.items():
+        if normalize_twitch_lookup_key(key) == normalized_target:
+            return handle
+
+    return None
+
+
 def build_multistream_url(player1: str, player2: str) -> str:
-    p1 = TWITCH_MAP.get(player1.strip().lower())
-    p2 = TWITCH_MAP.get(player2.strip().lower())
+    p1 = get_twitch_handle_for_player(player1)
+    p2 = get_twitch_handle_for_player(player2)
 
     if p1 and p2:
         return f"https://multistre.am/{p1}/{p2}/layout4"
@@ -262,6 +311,8 @@ def build_multistream_url(player1: str, player2: str) -> str:
         return f"https://www.twitch.tv/{p1}"
     if p2:
         return f"https://www.twitch.tv/{p2}"
+
+    print(f"⚠️ Kein Streamlink im Mapping gefunden: {player1} / {player2}")
     return "Kein Streamlink im Mapping gefunden"
 
 
@@ -1122,27 +1173,27 @@ class LeagueScheduleView(BaseFlowView):
         try:
             start_dt = parse_berlin_datetime(s.date_str, s.time_str)
             end_dt = start_dt + timedelta(hours=2)
-            location = build_multistream_url(s.player1, s.player2)
+            multistream_url = build_multistream_url(s.player1, s.player2)
             title = f"{s.division} | {s.player1} vs. {s.player2} | {s.mode}"
             description = f"Geplant über TFL Matchcenter von {interaction.user.display_name}"
 
             event = await create_scheduled_event(
                 interaction.guild,
                 title,
-                location,
+                multistream_url,
                 start_dt,
                 end_dt,
                 description,
             )
 
-            event_url = getattr(event, "url", location)
+            discord_event_url = getattr(event, "url", "") or ""
             timestamp = f"{s.date_str} {s.time_str}"
 
             await asyncio.to_thread(
                 write_league_schedule,
                 s.match_row_index,
                 s.mode,
-                event_url,
+                multistream_url,
                 interaction.user.display_name,
                 timestamp,
                 s.division,
@@ -1159,11 +1210,15 @@ class LeagueScheduleView(BaseFlowView):
                     mode=s.mode,
                     date_str=s.date_str,
                     time_str=s.time_str,
-                    event_url=event_url,
+                    event_url=discord_event_url or multistream_url,
                 )
 
             await interaction.response.edit_message(
-                content=f"✅ Termin erstellt:\n{event_url}",
+                content=(
+                    "✅ Termin erstellt:\n"
+                    f"Discord-Event: {discord_event_url or '-'}\n"
+                    f"Multistream: {multistream_url}"
+                ),
                 view=None,
             )
 
@@ -1210,28 +1265,32 @@ class CupScheduleView(BaseFlowView):
         try:
             start_dt = parse_berlin_datetime(s.date_str, s.time_str)
             end_dt = start_dt + timedelta(hours=2)
-            location = build_multistream_url(s.player1, s.player2)
+            multistream_url = build_multistream_url(s.player1, s.player2)
             title = f"TFL Cup | {s.player1} vs. {s.player2} | {s.cup_round}"
             description = f"Geplant über TFL Matchcenter von {interaction.user.display_name}"
 
             event = await create_scheduled_event(
                 interaction.guild,
                 title,
-                location,
+                multistream_url,
                 start_dt,
                 end_dt,
                 description,
             )
 
-            event_url = getattr(event, "url", location)
+            discord_event_url = getattr(event, "url", "") or ""
             timestamp = f"{s.date_str} {s.time_str}"
-            entered_meta = f"{timestamp} | {interaction.user.display_name} | {event_url}"
+            entered_meta = (
+                f"{timestamp} | {interaction.user.display_name} | "
+                f"Discord-Event: {discord_event_url or '-'} | "
+                f"Multistream: {multistream_url}"
+            )
 
             await asyncio.to_thread(
                 write_cup_schedule,
                 s.match_row_index,
                 timestamp,
-                event_url,
+                multistream_url,
                 entered_meta,
             )
 
@@ -1246,11 +1305,15 @@ class CupScheduleView(BaseFlowView):
                     mode="Cup",
                     date_str=s.date_str,
                     time_str=s.time_str,
-                    event_url=event_url,
+                    event_url=discord_event_url or multistream_url,
                 )
 
             await interaction.response.edit_message(
-                content=f"✅ Cup-Termin erstellt:\n{event_url}",
+                content=(
+                    "✅ Cup-Termin erstellt:\n"
+                    f"Discord-Event: {discord_event_url or '-'}\n"
+                    f"Multistream: {multistream_url}"
+                ),
                 view=None,
             )
 
