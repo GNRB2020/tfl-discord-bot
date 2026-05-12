@@ -396,6 +396,15 @@ TWITCH_MAP = {
     "marcii": "marciii86",
     "rennyur": "rennyur",
     "yasi89": "yasi89",
+    "malxantholos": "malxantholos",
+    "robg": "robg92",
+    "mrslexy": "mrslexy",
+    "der_kai01": "der_Kai01",
+    "satono92": "satono92",
+    "dergoatbuster": "dergoatbuster",
+    "snack": "snack",
+    "mahony": "mahony19888",
+    "hardy": "try_hardyy",
 }
 
 # =========================================================
