@@ -590,6 +590,20 @@ def set_schedule_completed(slot_id: str):
     return completed_at
 
 
+def set_schedule_cancelled(slot_id: str):
+    cancelled_at = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M:%S")
+
+    update_schedule_cells(
+        slot_id,
+        {
+            "Status": "cancelled",
+            SCHEDULE_COMPLETED_AT_COL: cancelled_at,
+        },
+    )
+
+    return cancelled_at
+
+
 # =========================================================
 # TIME HELPERS
 # =========================================================
@@ -746,6 +760,15 @@ def is_completed_channel_delete_due(row: dict) -> bool:
         return False
 
     return datetime.now(BERLIN_TZ) >= completed_at + timedelta(minutes=60)
+
+
+def is_cancelled_channel_delete_due(row: dict) -> bool:
+    cancelled_at = parse_completed_at(row.get(SCHEDULE_COMPLETED_AT_COL))
+
+    if not cancelled_at:
+        return False
+
+    return datetime.now(BERLIN_TZ) >= cancelled_at + timedelta(minutes=15)
 
 
 def seconds_to_timecode(seconds: int) -> str:
@@ -1889,6 +1912,7 @@ def build_slot_overview_message(schedule_row: dict) -> str:
 
     lines = [
         "**TFNL-Slot abgeschlossen**",
+        f"Slot ID: `{slot_id}`",
         "",
         f"Datum: `{datum}`",
         f"Slot: `{slot}`",
@@ -2411,6 +2435,9 @@ class LadderCog(commands.Cog):
         self.last_signup_status_message_id = None
         self.last_race_participants_message_id = None
         self.last_slot_id_check_at = None
+        self.result_publish_lock = asyncio.Lock()
+        self.slot_overview_publish_lock = asyncio.Lock()
+        self.standings_publish_lock = asyncio.Lock()
 
         if not self.update_schedule_channel.is_running():
             self.update_schedule_channel.start()
@@ -2606,30 +2633,31 @@ class LadderCog(commands.Cog):
             print(f"[TFNL] Konnte Signup nicht senden: {repr(e)}")
 
     async def publish_standings_to_channel(self):
-        try:
-            channel = await self.get_text_channel(TFNL_STANDINGS_CHANNEL_ID)
-        except Exception as e:
-            await self.log_tfnl(f"Konnte Standings-Channel nicht laden: {repr(e)}")
-            return
+        async with self.standings_publish_lock:
+            try:
+                channel = await self.get_text_channel(TFNL_STANDINGS_CHANNEL_ID)
+            except Exception as e:
+                await self.log_tfnl(f"Konnte Standings-Channel nicht laden: {repr(e)}")
+                return
 
-        try:
-            async for message in channel.history(limit=50):
-                if self.bot.user and message.author.id == self.bot.user.id:
-                    try:
-                        await message.delete()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+            try:
+                async for message in channel.history(limit=100):
+                    if self.bot.user and message.author.id == self.bot.user.id:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
-        try:
-            messages = build_standings_messages()
+            try:
+                messages = build_standings_messages()
 
-            for message in messages:
-                await channel.send(message)
+                for message in messages:
+                    await channel.send(message)
 
-        except Exception as e:
-            await self.log_tfnl(f"Gesamttabelle konnte nicht gepostet werden: {repr(e)}")
+            except Exception as e:
+                await self.log_tfnl(f"Gesamttabelle konnte nicht gepostet werden: {repr(e)}")
 
     async def publish_mode_standings_to_channel(self, mode_name: str, clear_existing: bool = False):
         try:
@@ -3397,34 +3425,60 @@ class LadderCog(commands.Cog):
             )
 
     async def publish_result_to_results_channel(self, match_row: dict, schedule_row: dict | None = None):
-        try:
-            channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
-        except Exception as e:
-            await self.log_tfnl(f"Ergebnis-Channel konnte nicht geladen werden: {repr(e)}")
-            return
+        match_id = normalize_text(match_row.get("Match ID"))
 
-        try:
-            await channel.send(build_public_result_message(match_row, schedule_row))
-        except Exception as e:
-            await self.log_tfnl(
-                f"Ergebnis konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: {repr(e)}"
-            )
+        async with self.result_publish_lock:
+            try:
+                channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
+            except Exception as e:
+                await self.log_tfnl(f"Ergebnis-Channel konnte nicht geladen werden: {repr(e)}")
+                return
+
+            if match_id:
+                try:
+                    async for message in channel.history(limit=100):
+                        if self.bot.user and message.author.id == self.bot.user.id and match_id in (message.content or ""):
+                            return
+                except Exception:
+                    pass
+
+            try:
+                await channel.send(build_public_result_message(match_row, schedule_row))
+            except Exception as e:
+                await self.log_tfnl(
+                    f"Ergebnis konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: {repr(e)}"
+                )
 
     async def publish_slot_overview_to_results_channel(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
 
-        try:
-            channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
-        except Exception as e:
-            await self.log_tfnl(f"Ergebnis-Channel konnte für Slotübersicht nicht geladen werden: {repr(e)}")
-            return
+        async with self.slot_overview_publish_lock:
+            try:
+                channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
+            except Exception as e:
+                await self.log_tfnl(f"Ergebnis-Channel konnte für Slotübersicht nicht geladen werden: {repr(e)}")
+                return
 
-        try:
-            await channel.send(build_slot_overview_message(schedule_row))
-        except Exception as e:
-            await self.log_tfnl(
-                f"Slot-Gesamtübersicht konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: `{slot_id}` — {repr(e)}"
-            )
+            if slot_id:
+                try:
+                    async for message in channel.history(limit=100):
+                        content = message.content or ""
+                        if (
+                            self.bot.user
+                            and message.author.id == self.bot.user.id
+                            and "TFNL-Slot abgeschlossen" in content
+                            and slot_id in content
+                        ):
+                            return
+                except Exception:
+                    pass
+
+            try:
+                await channel.send(build_slot_overview_message(schedule_row))
+            except Exception as e:
+                await self.log_tfnl(
+                    f"Slot-Gesamtübersicht konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: `{slot_id}` — {repr(e)}"
+                )
 
     async def post_slot_runners_to_channel(self, schedule_row: dict):
         try:
@@ -3549,15 +3603,8 @@ class LadderCog(commands.Cog):
                 f"Gesamttabelle konnte beim Slotabschluss nicht gepostet werden: `{slot_id}` — {repr(e)}"
             )
 
-        slot_mode = normalize_text(updated_schedule_row.get("Modus"))
-
-        try:
-            await self.publish_mode_standings_to_channel(slot_mode, clear_existing=False)
-        except Exception as e:
-            await self.log_tfnl(
-                f"Modus-Tabelle konnte beim Slotabschluss nicht gepostet werden: `{slot_id}` / `{slot_mode}` — {repr(e)}"
-            )
-
+        # Keine zusätzliche Modus-Tabelle automatisch in den Tabellenkanal posten.
+        # Der Tabellenkanal wird dadurch nur einmal aktualisiert und nicht doppelt befüllt.
         completed_at = set_schedule_completed(slot_id)
 
         await self.publish_schedule_to_channel()
@@ -3597,10 +3644,17 @@ class LadderCog(commands.Cog):
 
     async def delete_slot_channel_if_due(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
+        status = normalize_text(schedule_row.get("Status")).lower()
         channel_id = normalize_text(schedule_row.get("Slot Channel ID"))
 
-        if not is_completed_channel_delete_due(schedule_row):
-            return
+        if status == "cancelled":
+            if not is_cancelled_channel_delete_due(schedule_row):
+                return
+            reason = "TFNL Slot 15 Minuten nach Absage gelöscht"
+        else:
+            if not is_completed_channel_delete_due(schedule_row):
+                return
+            reason = "TFNL Slot 60 Minuten nach Abschluss gelöscht"
 
         if not channel_id:
             update_schedule_status(slot_id, "archived")
@@ -3612,7 +3666,7 @@ class LadderCog(commands.Cog):
             if channel is None:
                 channel = await self.bot.fetch_channel(int(channel_id))
 
-            await channel.delete(reason="TFNL Slot 60 Minuten nach Abschluss gelöscht")
+            await channel.delete(reason=reason)
         except Exception as e:
             await self.log_tfnl(f"Slot-Channel konnte nicht gelöscht werden: `{slot_id}` — {repr(e)}")
 
@@ -3652,10 +3706,10 @@ class LadderCog(commands.Cog):
             if not slot_id:
                 continue
 
-            if status in ("archived", "cancelled"):
+            if status == "archived":
                 continue
 
-            if status == "completed":
+            if status in ("completed", "cancelled"):
                 await self.delete_slot_channel_if_due(row)
                 continue
 
@@ -3721,15 +3775,18 @@ class LadderCog(commands.Cog):
             await self.log_tfnl(f"Slot-Channel konnte beim Pairing nicht geladen/erstellt werden: {repr(e)}")
 
         if len(participants) < 2:
-            update_schedule_status(slot_id, "cancelled")
+            cancelled_at = set_schedule_cancelled(slot_id)
 
             if slot_channel:
                 await slot_channel.send(
                     "**Anmeldung geschlossen.**\n"
-                    "Der Slot wurde abgesagt, da weniger als 2 Spieler angemeldet sind."
+                    "Der Slot wurde abgesagt, da weniger als 2 Spieler angemeldet sind.\n"
+                    "Dieser Raceroom wird in 15 Minuten geschlossen."
                 )
 
-            await self.log_tfnl(f"Slot `{slot_id}` cancelled: weniger als 2 Teilnehmer.")
+            await self.log_tfnl(
+                f"Slot `{slot_id}` cancelled um `{cancelled_at}`: weniger als 2 Teilnehmer. Channel-Löschung in 15 Minuten."
+            )
             await self.publish_schedule_to_channel()
             await self.publish_signup_to_channel()
             return
