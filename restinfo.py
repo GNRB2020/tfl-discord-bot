@@ -1,6 +1,10 @@
 import os
+import re
+import unicodedata
+
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
 
 DIV_COL_LEFT = 4
 DIV_COL_MARKER = 5
@@ -37,45 +41,55 @@ def _cell(row, idx0):
 
 
 def normalize_name(value: str) -> str:
-    return (
-        (value or "")
-        .strip()
-        .lower()
-        .replace("_", "")
-        .replace("-", "")
-        .replace(" ", "")
-    )
+    value = unicodedata.normalize("NFKC", value or "")
+    value = value.strip().lower()
+    return re.sub(r"[^a-z0-9äöüß]", "", value)
+
+
+def _division_worksheet(div_number: str):
+    sheets_required()
+    return WB.worksheet(f"{div_number}.DIV")
+
+
+def _unique_players_from_column_l(rows: list[list[str]]) -> list[str]:
+    """
+    Liest Spieler aus Spalte L ab Sheet-Zeile 2.
+
+    Bewusst ohne feste Grenze auf 8 oder 9 Spieler.
+    Dadurch funktionieren 7er-, 8er- und 9er-Staffeln sauber.
+    """
+    players = []
+    seen = set()
+
+    for row in rows[1:]:
+        name = _cell(row, 11)  # L
+
+        if not name:
+            continue
+
+        key = normalize_name(name)
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        players.append(name)
+
+    return players
 
 
 # =========================================================
 # RESTPROGRAMM
 # =========================================================
+
 def list_rest_players(div_number: str) -> list[str]:
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
+    ws = _division_worksheet(div_number)
     rows = ws.get_all_values()
 
-    players = []
-    seen = set()
-
-    max_row_index = min(10, len(rows))
-    for idx in range(1, max_row_index):
-        row = rows[idx]
-        name = _cell(row, 11)  # L
-        if not name:
-            continue
-
-        low = normalize_name(name)
-        if low not in seen:
-            seen.add(low)
-            players.append(name)
-
-    return players
+    return _unique_players_from_column_l(rows)
 
 
 def list_restprogramm(div_number: str, player_name: str):
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
+    ws = _division_worksheet(div_number)
     rows = ws.get_all_values()
 
     matches = []
@@ -115,13 +129,15 @@ def format_restprogramm_text(div_number: str, player: str) -> str:
         "",
     ]
 
-    for m in matches:
-        heim = m["heim"]
-        gast = m["gast"]
+    player_key = normalize_name(player)
 
-        if normalize_name(heim) == normalize_name(player):
+    for match in matches:
+        heim = match["heim"]
+        gast = match["gast"]
+
+        if normalize_name(heim) == player_key:
             info = f"**{heim} (H)** vs {gast}"
-        elif normalize_name(gast) == normalize_name(player):
+        elif normalize_name(gast) == player_key:
             info = f"{heim} vs **{gast} (A)**"
         else:
             info = f"{heim} vs {gast}"
@@ -171,9 +187,11 @@ def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -
     for name in name_candidates:
         if not name:
             continue
+
         norm = normalize_name(name)
         if not norm or norm in seen:
             continue
+
         seen.add(norm)
         clean_candidates.append(name.strip())
 
@@ -188,10 +206,13 @@ def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -
                 f"Für **{candidate}** wurden offene Spiele in mehreren Divisionen gefunden:",
                 "",
             ]
+
             for div in open_divisions:
                 lines.append(f"- Division {div}")
+
             lines.append("")
             lines.append("Nutze bitte **Andere** und wähle die Division manuell.")
+
             return "\n".join(lines)
 
     for candidate in clean_candidates:
@@ -208,14 +229,18 @@ def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -
                 f"Für **{candidate}** wurden Einträge in mehreren Divisionen gefunden, aber aktuell keine offenen Spiele:",
                 "",
             ]
+
             for div in player_divisions:
                 lines.append(f"- Division {div}")
+
             lines.append("")
             lines.append("Nutze bitte **Andere** und wähle die Division manuell.")
+
             return "\n".join(lines)
 
     if clean_candidates:
         tried = ", ".join(f"`{name}`" for name in clean_candidates)
+
         return (
             "Für dich wurde kein passendes Restprogramm gefunden.\n"
             f"Verwendete Namensvarianten: {tried}\n\n"
@@ -231,28 +256,34 @@ def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -
 # =========================================================
 # STREICHMODUS
 # =========================================================
+
 def list_streichungen(div_number: str):
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
+    ws = _division_worksheet(div_number)
     rows = ws.get_all_values()
 
     entries = []
-    max_row_index = min(9, len(rows))  # Zeile 2-9 -> Index 1-8
+    seen = set()
 
-    for idx in range(1, max_row_index):
-        row = rows[idx]
+    for idx, row in enumerate(rows[1:], start=2):
         spieler = _cell(row, 11)  # L
-        modus_m = _cell(row, 12)  # M
-        modus_n = _cell(row, 13)  # N
 
-        if spieler:
-            entries.append(
-                {
-                    "spieler": spieler,
-                    "modus_m": modus_m,
-                    "modus_n": modus_n,
-                }
-            )
+        if not spieler:
+            continue
+
+        key = normalize_name(spieler)
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+
+        entries.append(
+            {
+                "row_index": idx,
+                "spieler": spieler,
+                "modus_m": _cell(row, 12),  # M
+                "modus_n": _cell(row, 13),  # N
+            }
+        )
 
     return entries
 
@@ -263,7 +294,10 @@ def get_streich_text_for_division(div_number: str) -> str:
     if not entries:
         return f"Keine Streichmodi in Division {div_number} hinterlegt."
 
-    lines = [f"Streichmodi in Division {div_number}:", ""]
+    lines = [
+        f"Streichmodi in Division {div_number}:",
+        "",
+    ]
 
     for entry in entries:
         spieler = entry["spieler"]
@@ -271,6 +305,7 @@ def get_streich_text_for_division(div_number: str) -> str:
 
         if entry["modus_m"]:
             parts.append(entry["modus_m"])
+
         if entry["modus_n"]:
             parts.append(entry["modus_n"])
 
@@ -289,14 +324,17 @@ def find_own_division_for_name_candidates(name_candidates: list[str]) -> str | N
     for name in name_candidates:
         if not name:
             continue
+
         norm = normalize_name(name)
         if not norm or norm in seen:
             continue
+
         seen.add(norm)
         clean_candidates.append(name.strip())
 
     for candidate in clean_candidates:
         divisions = find_divisions_with_player(candidate)
+
         if len(divisions) == 1:
             return divisions[0]
 
@@ -308,6 +346,7 @@ def get_own_division_streich_text(name_candidates: list[str]) -> str:
 
     if not div_number:
         tried = [x for x in name_candidates if x]
+
         if tried:
             return (
                 "Für dich konnte keine eindeutige Division gefunden werden.\n"
