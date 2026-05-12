@@ -58,7 +58,7 @@ def list_rest_players(div_number: str) -> list[str]:
     players = []
     seen = set()
 
-    max_row_index = min(9, len(rows))
+    max_row_index = min(10, len(rows))
     for idx in range(1, max_row_index):
         row = rows[idx]
         name = _cell(row, 11)  # L
