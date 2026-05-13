@@ -884,6 +884,124 @@ class RestreamRequestsCog(commands.Cog):
                 ephemeral=True,
             )
 
+    @app_commands.command(
+        name="restreampush",
+        description="Postet einen Restream ohne Spieler-DMs direkt in #restreams und aktualisiert das Event.",
+    )
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(
+        event_id="Discord-Event-ID des Spiels",
+        ziel="Restream-Ziel",
+        link="Restream-Link. Bei ZSRDE/DRR leer lassen möglich.",
+        kommentator="Kommentator",
+        co_kommentator="Co-Kommentator",
+        tracker="Tracker",
+    )
+    @app_commands.choices(
+        ziel=[
+            app_commands.Choice(name="ZSRDE", value="ZSRDE"),
+            app_commands.Choice(name="DRR", value="DRR"),
+            app_commands.Choice(name="Privat", value="Privat"),
+        ]
+    )
+    async def restreampush_slash(
+        self,
+        interaction: discord.Interaction,
+        event_id: str,
+        ziel: app_commands.Choice[str],
+        link: str = "",
+        kommentator: str = "",
+        co_kommentator: str = "",
+        tracker: str = "",
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        if guild is None:
+            guild = interaction.client.get_guild(GUILD_ID)
+
+        if guild is None:
+            await interaction.followup.send(
+                "Server nicht gefunden. Bitte Command direkt auf dem TFL-Server ausführen.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            clean_event_id = int(clean_text(event_id))
+        except ValueError:
+            await interaction.followup.send(
+                "Event-ID ist ungültig. Bitte nur die numerische Discord-Event-ID eintragen.",
+                ephemeral=True,
+            )
+            return
+
+        event = await get_scheduled_event_by_id(guild, clean_event_id)
+        if event is None:
+            await interaction.followup.send(
+                "Discord-Event wurde nicht gefunden. Prüfe die Event-ID.",
+                ephemeral=True,
+            )
+            return
+
+        target = ziel.value
+        final_link = clean_text(link)
+
+        if target in {"ZSRDE", "DRR"} and not final_link:
+            final_link = RESTREAM_TARGETS.get(target, "")
+
+        if not final_link:
+            await interaction.followup.send(
+                "Restream-Link fehlt. Bei Privat ist der Link Pflicht.",
+                ephemeral=True,
+            )
+            return
+
+        parsed = parse_event_title(event)
+
+        if not parsed["player1"] or not parsed["player2"]:
+            await interaction.followup.send(
+                "Spieler konnten aus dem Event-Titel nicht erkannt werden. Erwartetes Format: `Bereich | Spieler1 vs. Spieler2 | Modus`.",
+                ephemeral=True,
+            )
+            return
+
+        req = RestreamRequest(
+            request_id=f"manual-{uuid.uuid4().hex[:8]}",
+            guild_id=int(guild.id),
+            event_id=int(event.id),
+            event_title=event.name,
+            event_start_text=format_event_start_long(event.start_time),
+            area=parsed["area"] or "TFL",
+            player1=parsed["player1"],
+            player2=parsed["player2"],
+            mode=parsed["mode"],
+            requester_id=interaction.user.id,
+            requester_name=interaction.user.display_name,
+            target=target,
+            link=final_link,
+            commentator=clean_text(kommentator),
+            co_commentator=clean_text(co_kommentator),
+            tracker=clean_text(tracker),
+            approvals={},
+            player_member_ids=[],
+            declined=False,
+            finalized=False,
+        )
+
+        try:
+            await finalize_restream(interaction.client, guild, req)
+            await interaction.followup.send(
+                f"Restream wurde ohne Spieler-DMs in <#{RESTREAMS_CHANNEL_ID}> gepostet und das Discord-Event wurde aktualisiert.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Pushen des Restreams: {e}",
+                ephemeral=True,
+            )
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RestreamRequestsCog(bot))
