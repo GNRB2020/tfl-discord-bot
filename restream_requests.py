@@ -136,22 +136,43 @@ def format_event_start_long(start_time) -> str:
 
 def parse_event_title(event: discord.ScheduledEvent) -> dict:
     """
-    Erwartete Titel aus Matchcenter:
+    Erkennt mehrere Titelvarianten:
 
-    League:
+    Standard:
     Div 1 | Spieler1 vs. Spieler2 | Modus
-
-    Cup:
     TFL Cup | Spieler1 vs. Spieler2 | Runde
+
+    Bereits aktualisierte Restream-Events:
+    RESTREAM ZSRDE | Div 1 | Spieler1 vs. Spieler2 | Modus
+
+    Fallback:
+    sucht den Teil mit "vs" und nimmt davor Bereich, danach Modus.
     """
     title = clean_text(event.name)
-    parts = [clean_text(p) for p in title.split("|")]
+    parts = [clean_text(p) for p in title.split("|") if clean_text(p)]
+
+    # Falls Event bereits als Restream markiert ist:
+    # RESTREAM ZSRDE | Div X | Spieler1 vs. Spieler2 | Modus
+    if parts and parts[0].upper().startswith("RESTREAM "):
+        parts = parts[1:]
 
     area = ""
     match = ""
     mode = ""
 
-    if len(parts) >= 3:
+    # Robust: Teil mit vs suchen
+    match_index = None
+    for i, part in enumerate(parts):
+        normalized = part.replace(" vs. ", " vs ").replace(" VS ", " vs ")
+        if " vs " in normalized:
+            match_index = i
+            break
+
+    if match_index is not None:
+        match = parts[match_index]
+        area = parts[match_index - 1] if match_index > 0 else ""
+        mode = parts[match_index + 1] if match_index + 1 < len(parts) else ""
+    elif len(parts) >= 3:
         area = parts[0]
         match = parts[1]
         mode = parts[2]
