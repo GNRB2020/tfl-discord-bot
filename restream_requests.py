@@ -67,6 +67,7 @@ class RestreamRequest:
     event_id: int
     event_title: str
     event_start_text: str
+    area: str
     player1: str
     player2: str
     mode: str
@@ -292,6 +293,7 @@ def build_restream_post(req: RestreamRequest) -> str:
 
     return (
         "📺 **Restream bestätigt**\n\n"
+        f"**Bereich:** {req.area}\n"
         f"**Spiel:** {req.player1} vs. {req.player2}\n"
         f"**Modus:** {req.mode}\n"
         f"**Termin:** {req.event_start_text}\n"
@@ -304,7 +306,7 @@ def build_restream_post(req: RestreamRequest) -> str:
 
 def build_dm_request_text(req: RestreamRequest) -> str:
     return (
-        f"**{req.player1} vs. {req.player2}**, {req.mode} am "
+        f"**{req.area}: {req.player1} vs. {req.player2}**, {req.mode} am "
         f"**{req.event_start_text}** wurde von **{req.requester_name}** "
         f"für einen Restream auf {req.link} ausgewählt.\n\n"
         "Ein anschließendes Interview ist immer optional.\n\n"
@@ -397,8 +399,8 @@ class RestreamEventSelect(discord.ui.Select):
 
         for event in events[:25]:
             parsed = parse_event_title(event)
-            label = short_text(f"{format_event_start(event.start_time)} | {parsed['match'] or event.name}", 100)
-            description = short_text(f"{parsed['area']} | {parsed['mode']}", 100)
+            label = short_text(f"{format_event_start(event.start_time)} | {parsed['area'] or '-'} | {parsed['match'] or event.name}", 100)
+            description = short_text(f"{parsed['mode']}", 100)
 
             options.append(
                 discord.SelectOption(
@@ -569,6 +571,7 @@ class RestreamRequestModal(discord.ui.Modal):
             event_id=int(event.id),
             event_title=event.name,
             event_start_text=format_event_start_long(event.start_time),
+            area=parsed["area"] or "TFL",
             player1=parsed["player1"],
             player2=parsed["player2"],
             mode=parsed["mode"],
@@ -644,6 +647,7 @@ class PlayerApprovalView(discord.ui.View):
                 req,
                 (
                     "Beide Spieler haben dem Restream zugestimmt.\n\n"
+                    f"**Bereich:** {req.area}\n"
                     f"**Spiel:** {req.player1} vs. {req.player2}\n"
                     f"**Modus:** {req.mode}\n"
                     f"**Termin:** {req.event_start_text}\n"
@@ -678,6 +682,7 @@ class PlayerApprovalView(discord.ui.View):
             req,
             (
                 "Die Restream-Anfrage wurde abgelehnt.\n\n"
+                f"**Bereich:** {req.area}\n"
                 f"**Spiel:** {req.player1} vs. {req.player2}\n"
                 f"**Abgelehnt von:** {interaction.user.display_name}"
             ),
@@ -819,7 +824,7 @@ class RestreamRequestsCog(commands.Cog):
             parsed = parse_event_title(event)
             match = parsed["match"] or event.name
             lines.append(
-                f"`{i:02d}` {format_event_start(event.start_time)} · {match} · {parsed['mode']}"
+                f"`{i:02d}` {format_event_start(event.start_time)} · {parsed['area'] or '-'} · {match} · {parsed['mode']}"
             )
 
         if len(events) > 25:
