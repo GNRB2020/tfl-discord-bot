@@ -2383,6 +2383,69 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
         f"{table}"
     ]
 
+def get_completed_match_modes() -> list[str]:
+    schedule_modes = get_schedule_mode_map()
+    matches = load_matches_rows()
+    modes_by_canonical: dict[str, str] = {}
+
+    for match in matches:
+        if normalize_text(match.get("Status")).lower() != "finished":
+            continue
+
+        if normalize_text(match.get("Veröffentlicht")).lower() != "ja":
+            continue
+
+        slot_id = normalize_text(match.get("Slot ID"))
+        mode_name = normalize_text(schedule_modes.get(slot_id))
+
+        if not mode_name:
+            continue
+
+        canonical = get_canonical_mode_name(mode_name)
+
+        if canonical not in modes_by_canonical:
+            modes_by_canonical[canonical] = mode_name
+
+    preferred_order = [
+        "casual boots",
+        "open",
+        "inverted",
+        "open ad boots",
+        "invrosia",
+        "ambrosia",
+        "ludicrous speed",
+        "hard standard",
+        "standard",
+        "tfl hard standard",
+        "keysanity",
+        "ad keysanity mit boots",
+        "ad keys",
+        "mc boss",
+        "influkeys",
+        "crosskeys",
+    ]
+
+    ordered_modes = []
+
+    for canonical in preferred_order:
+        if canonical in modes_by_canonical:
+            ordered_modes.append(modes_by_canonical.pop(canonical))
+
+    for canonical in sorted(modes_by_canonical):
+        ordered_modes.append(modes_by_canonical[canonical])
+
+    return ordered_modes
+
+
+def build_all_mode_standings_messages() -> list[str]:
+    messages = []
+
+    for mode_name in get_completed_match_modes():
+        messages.extend(build_mode_standings_messages(mode_name))
+
+    return messages
+
+
 def get_visible_race_slots_for_signup_channel() -> list[dict]:
     rows = load_schedule_rows()
     visible_statuses = {
@@ -2782,12 +2845,13 @@ class LadderCog(commands.Cog):
 
             try:
                 messages = build_standings_messages()
+                messages.extend(build_all_mode_standings_messages())
 
                 for message in messages:
                     await channel.send(message)
 
             except Exception as e:
-                await self.log_tfnl(f"Gesamttabelle konnte nicht gepostet werden: {repr(e)}")
+                await self.log_tfnl(f"Gesamttabellen konnten nicht gepostet werden: {repr(e)}")
 
     async def publish_mode_standings_to_channel(self, mode_name: str, clear_existing: bool = False):
         try:
