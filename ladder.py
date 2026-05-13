@@ -2071,6 +2071,135 @@ def sort_players_sheet():
     sheet.update("A2:J", values)
 
 
+
+
+def rebuild_players_from_published_matches() -> dict[str, int]:
+    """
+    Baut die Players-Tabelle vollständig aus Matches neu auf.
+
+    Grundlage:
+    - Matches.Status = finished
+    - Matches.Veröffentlicht = Ja
+
+    Diese Funktion ist idempotent:
+    Sie kann mehrfach ausgeführt werden, ohne Punkte doppelt zu zählen.
+    """
+    matches = load_matches_rows()
+    standings: dict[str, dict] = {}
+    processed_matches = 0
+    processed_player_results = 0
+
+    for match in matches:
+        if normalize_text(match.get("Status")).lower() != "finished":
+            continue
+
+        if normalize_text(match.get("Veröffentlicht")).lower() != "ja":
+            continue
+
+        match_players = get_match_players(match)
+        slot_id = normalize_text(match.get("Slot ID"))
+
+        if not match_players:
+            continue
+
+        match_counted = False
+
+        for player in match_players:
+            player_id = normalize_text(player.get("discord_id"))
+            player_name = normalize_text(player.get("name"))
+
+            if not player_id:
+                continue
+
+            time_value = normalize_text(match.get(player["time_col"]))
+            result_text = normalize_text(match.get(player["result_col"]))
+            points = int_value(match.get(player["points_col"]))
+
+            if not time_value or not result_text:
+                continue
+
+            opponents = [
+                p["name"] for p in match_players
+                if p["discord_id"] != player_id
+            ]
+
+            if player_id not in standings:
+                standings[player_id] = {
+                    "Discord ID": player_id,
+                    "Discord Display Name": player_name,
+                    "Punkte": 0,
+                    "Starts": 0,
+                    "Siege": 0,
+                    "Remis": 0,
+                    "Niederlagen": 0,
+                    "Forfeits": 0,
+                    "Letzter Gegner": "",
+                    "Letzter Start": "",
+                }
+
+            row = standings[player_id]
+            row["Discord Display Name"] = player_name or row["Discord Display Name"]
+            row["Punkte"] += points
+            row["Starts"] += 1
+            row["Siege"] += 1 if result_text == "Sieg" else 0
+            row["Remis"] += 1 if result_text == "Remis" else 0
+            row["Niederlagen"] += 1 if result_text == "Niederlage" else 0
+            row["Forfeits"] += 1 if time_value.upper() == "FF" else 0
+            row["Letzter Gegner"] = ", ".join(opponents)
+            row["Letzter Start"] = slot_id
+
+            processed_player_results += 1
+            match_counted = True
+
+        if match_counted:
+            processed_matches += 1
+
+    rows = list(standings.values())
+
+    rows.sort(
+        key=lambda r: (
+            -int_value(r.get("Punkte")),
+            -int_value(r.get("Siege")),
+            -int_value(r.get("Remis")),
+            int_value(r.get("Forfeits")),
+            normalize_text(r.get("Discord Display Name")).lower(),
+        )
+    )
+
+    values = []
+
+    for row in rows:
+        values.append(
+            [
+                normalize_text(row.get("Discord ID")),
+                normalize_text(row.get("Discord Display Name")),
+                int_value(row.get("Punkte")),
+                int_value(row.get("Starts")),
+                int_value(row.get("Siege")),
+                int_value(row.get("Remis")),
+                int_value(row.get("Niederlagen")),
+                int_value(row.get("Forfeits")),
+                normalize_text(row.get("Letzter Gegner")),
+                normalize_text(row.get("Letzter Start")),
+            ]
+        )
+
+    sheet = get_players_sheet()
+    sheet.resize(rows=max(1000, len(values) + 1), cols=len(PLAYERS_HEADERS))
+    sheet.batch_clear(["A2:J1000"])
+
+    if values:
+        sheet.update("A2:J", values, value_input_option="USER_ENTERED")
+
+    invalidate_sheet_cache(PLAYERS_SHEET_NAME)
+
+    return {
+        "players": len(values),
+        "matches": processed_matches,
+        "player_results": processed_player_results,
+    }
+
+
 def build_standings_messages() -> list[str]:
     rows = load_players_rows()
 
@@ -2438,6 +2567,7 @@ class LadderCog(commands.Cog):
         self.result_publish_lock = asyncio.Lock()
         self.slot_overview_publish_lock = asyncio.Lock()
         self.standings_publish_lock = asyncio.Lock()
+        self.sheet_write_lock = asyncio.Lock()
 
         if not self.update_schedule_channel.is_running():
             self.update_schedule_channel.start()
@@ -3489,30 +3619,31 @@ class LadderCog(commands.Cog):
             await self.log_tfnl(f"Teilnehmerliste konnte nicht gepostet werden: `{slot_id}` — {repr(e)}")
 
     async def evaluate_match_if_complete(self, match_id: str):
-        _, match_row = find_match_row(match_id)
+        async with self.sheet_write_lock:
+            _, match_row = find_match_row(match_id)
 
-        if not match_row:
-            return
+            if not match_row:
+                return
 
-        if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
-            return
+            if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
+                return
 
-        result = calculate_match_result(match_row)
+            result = calculate_match_result(match_row)
 
-        if result is None:
-            return
+            if result is None:
+                return
 
-        apply_result_to_match(match_id, result)
+            apply_result_to_match(match_id, result)
 
-        _, updated_match = find_match_row(match_id)
+            _, updated_match = find_match_row(match_id)
 
-        if not updated_match:
-            return
+            if not updated_match:
+                return
 
-        update_players_from_match(updated_match)
+            update_players_from_match(updated_match)
 
-        slot_id = normalize_text(updated_match.get("Slot ID"))
-        _, schedule_row = find_schedule_row(slot_id)
+            slot_id = normalize_text(updated_match.get("Slot ID"))
+            _, schedule_row = find_schedule_row(slot_id)
 
         if schedule_row:
             try:
@@ -4010,6 +4141,58 @@ class LadderCog(commands.Cog):
             "TFNL-Anmeldung wurde aktualisiert.",
             ephemeral=True,
         )
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="tfnlrebuild",
+        description="Baut die TFNL-Players-Tabelle vollständig aus veröffentlichten Matches neu auf.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def tfnlrebuild(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            async with self.sheet_write_lock:
+                stats = rebuild_players_from_published_matches()
+
+            await self.publish_standings_to_channel()
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Rebuild der TFNL-Gesamttabelle:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "TFNL-Gesamttabelle wurde aus veröffentlichten Matches neu aufgebaut.\n"
+            f"Matches verarbeitet: `{stats['matches']}`\n"
+            f"Spieler-Ergebnisse verarbeitet: `{stats['player_results']}`\n"
+            f"Spieler in Tabelle: `{stats['players']}`",
+            ephemeral=True,
+        )
+
+    @tfnlrebuild.error
+    async def tfnlrebuild_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
 
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.command(
