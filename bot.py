@@ -50,6 +50,35 @@ print("DEBUG Intents:", intents)
 # Discord Client + CommandTree
 # =========================================================
 
+DISABLED_MANUAL_COMMANDS = {
+    "matchcenter",
+    "showpicks",
+    "result",
+    "asyncplay",
+    "cupresult",
+    "cuptermin",
+    "pick",
+    "quali",
+    "rest",
+    "signup",
+    "streich",
+    "termin",
+}
+
+
+def remove_disabled_manual_commands(tree: app_commands.CommandTree, guild: discord.Object):
+    """
+    Entfernt nur die manuelle Slash-Command-Registrierung.
+    Die Extensions bleiben geladen, damit Views/Buttons aus /player weiter funktionieren.
+    """
+    for cmd_name in DISABLED_MANUAL_COMMANDS:
+        removed_global = tree.remove_command(cmd_name)
+        removed_guild = tree.remove_command(cmd_name, guild=guild)
+
+        if removed_global or removed_guild:
+            print(f"🧹 Slash-Command deaktiviert: /{cmd_name}")
+
+
 class TFLBot(commands.Bot):
     async def setup_hook(self):
         guild = discord.Object(id=GUILD_ID)
@@ -86,6 +115,13 @@ class TFLBot(commands.Bot):
 
         print(
             "TREE GUILD NACH COPY:",
+            [cmd.name for cmd in self.tree.get_commands(guild=guild)]
+        )
+
+        remove_disabled_manual_commands(self.tree, guild)
+
+        print(
+            "TREE GUILD VOR SYNC:",
             [cmd.name for cmd in self.tree.get_commands(guild=guild)]
         )
 
@@ -2118,16 +2154,8 @@ async def help(interaction: discord.Interaction):
     )
 
     embed.add_field(
-        name="/termin",
-        value="Neues Match eintragen, Event erstellen (kein Sheet)",
-        inline=False,
-    )
-    embed.add_field(
-        name="/result",
-        value=(
-            "Ergebnis melden (schreibt ins DIV-Sheet & postet in den "
-            "Ergebnischannel)."
-        ),
+        name="/player",
+        value="Zentrales Spielermenü für Planung, Ergebnisse, Qualifikation, Saisonmeldung und weitere Funktionen.",
         inline=False,
     )
     embed.add_field(
@@ -2147,19 +2175,6 @@ async def help(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name="/pick",
-        value=(
-            "Restream für ein Event setzen (ZSR oder privater Link). "
-            "Erweitert den Eventtitel um '(Restream)'."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/showpicks",
-        value="Zeigt alle zukünftigen Events ohne Restream (Basis für /pick).",
-        inline=False,
-    )
-    embed.add_field(
         name="/restreams",
         value="Zeigt alle zukünftigen Events mit '(Restream)' im Titel.",
         inline=False,
@@ -2167,16 +2182,6 @@ async def help(interaction: discord.Interaction):
     embed.add_field(
         name="/add",
         value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).",
-        inline=False,
-    )
-    embed.add_field(
-        name="/streich",
-        value="Zeigt die Streichungen der gewählten Division (L/M/N2-9).",
-        inline=False,
-    )
-    embed.add_field(
-        name="/rest",
-        value="Zeigt das Restprogramm eines Spielers (offene Spiele mit E='vs').",
         inline=False,
     )
     embed.add_field(
@@ -2274,7 +2279,9 @@ async def sync_cmd(interaction: discord.Interaction):
 
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+        guild = discord.Object(id=GUILD_ID)
+        remove_disabled_manual_commands(tree, guild)
+        synced = await tree.sync(guild=guild)
         names = ", ".join(sorted(c.name for c in synced))
 
         await interaction.followup.send(
@@ -2454,7 +2461,9 @@ async def on_ready():
     print(f"✅ Eingeloggt als {client.user} (ID: {client.user.id})")
 
     if not _client_synced_once:
-        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+        guild = discord.Object(id=GUILD_ID)
+        remove_disabled_manual_commands(tree, guild)
+        synced = await tree.sync(guild=guild)
         print("✅ Slash-Befehle synchronisiert:", [cmd.name for cmd in synced])
         _client_synced_once = True
 
@@ -2472,4 +2481,3 @@ async def on_ready():
     print("🤖 Bot bereit")
 
 client.run(TOKEN)
-
