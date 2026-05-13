@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime as dt, timedelta, time
 
 import discord
+import gspread
 import pytz
+from oauth2client.service_account import ServiceAccountCredentials
 from discord import app_commands
 from discord.ext import commands
 
@@ -18,6 +20,54 @@ from discord.ext import commands
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+
+
+RESTREAM_REQUESTS_SPREADSHEET_ID = os.getenv(
+    "RESTREAM_REQUESTS_SPREADSHEET_ID",
+    "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8",
+).strip()
+
+RESTREAM_REQUESTS_WORKSHEET_GID = int(
+    os.getenv("RESTREAM_REQUESTS_WORKSHEET_GID", "1068009749").strip()
+)
+
+CREDS_FILE = os.getenv(
+    "GOOGLE_CREDENTIALS_FILE",
+    os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json"),
+).strip()
+
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+
+RESTREAM_REQUEST_HEADERS = [
+    "Request ID",
+    "Guild ID",
+    "Event ID",
+    "Event Title",
+    "Event Start",
+    "Area",
+    "Player 1",
+    "Player 2",
+    "Mode",
+    "Requester ID",
+    "Requester Name",
+    "Target",
+    "Link",
+    "Commentator",
+    "Co-Commentator",
+    "Tracker",
+    "Player Member IDs",
+    "Approvals",
+    "Declined",
+    "Finalized",
+    "Created At",
+    "Updated At",
+]
+
+RESTREAM_REQUESTS_WORKSHEET_CACHE = None
+
 
 # Zielkanal: tägliche kompakte Liste der Spiele, die für Restreams auswählbar sind
 RESTREAMABLE_CHANNEL_ID = int(os.getenv("RESTREAMABLE_CHANNEL_ID", "1405291916387422228"))
@@ -82,6 +132,203 @@ class RestreamRequest:
 
 
 REQUESTS: dict[str, RestreamRequest] = {}
+
+
+# =========================================================
+# GOOGLE SHEETS PERSISTENCE
+# =========================================================
+
+def get_restream_requests_sheet():
+    global RESTREAM_REQUESTS_WORKSHEET_CACHE
+
+    if RESTREAM_REQUESTS_WORKSHEET_CACHE is not None:
+        return RESTREAM_REQUESTS_WORKSHEET_CACHE
+
+    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(RESTREAM_REQUESTS_SPREADSHEET_ID)
+
+    worksheet = None
+
+    try:
+        worksheet = spreadsheet.get_worksheet_by_id(RESTREAM_REQUESTS_WORKSHEET_GID)
+    except Exception:
+        worksheet = None
+
+    if worksheet is None:
+        for candidate in spreadsheet.worksheets():
+            if int(getattr(candidate, "id", 0)) == RESTREAM_REQUESTS_WORKSHEET_GID:
+                worksheet = candidate
+                break
+
+    if worksheet is None:
+        raise RuntimeError(
+            f"Restream-Requests-Worksheet mit GID `{RESTREAM_REQUESTS_WORKSHEET_GID}` wurde nicht gefunden."
+        )
+
+    existing_headers = worksheet.row_values(1)
+
+    if existing_headers != RESTREAM_REQUEST_HEADERS:
+        worksheet.update("A1", [RESTREAM_REQUEST_HEADERS])
+
+    RESTREAM_REQUESTS_WORKSHEET_CACHE = worksheet
+    return worksheet
+
+
+def serialize_bool(value: bool) -> str:
+    return "Ja" if bool(value) else "Nein"
+
+
+def deserialize_bool(value) -> bool:
+    return str(value or "").strip().lower() in ("ja", "yes", "true", "1")
+
+
+def serialize_ids(values: list[int]) -> str:
+    return ";".join(str(int(value)) for value in values)
+
+
+def deserialize_ids(value: str) -> list[int]:
+    ids = []
+
+    for part in str(value or "").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+
+        try:
+            ids.append(int(part))
+        except ValueError:
+            pass
+
+    return ids
+
+
+def serialize_approvals(approvals: dict[int, bool]) -> str:
+    parts = []
+
+    for user_id, approved in approvals.items():
+        parts.append(f"{int(user_id)}:{serialize_bool(approved)}")
+
+    return ";".join(parts)
+
+
+def deserialize_approvals(value: str) -> dict[int, bool]:
+    approvals = {}
+
+    for part in str(value or "").split(";"):
+        part = part.strip()
+
+        if not part or ":" not in part:
+            continue
+
+        user_id, approved = part.split(":", 1)
+
+        try:
+            approvals[int(user_id)] = deserialize_bool(approved)
+        except ValueError:
+            pass
+
+    return approvals
+
+
+def now_text() -> str:
+    return dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M:%S")
+
+
+def restream_request_to_row(req: RestreamRequest, created_at: str = "") -> list:
+    current_time = now_text()
+
+    return [
+        req.request_id,
+        str(req.guild_id),
+        str(req.event_id),
+        req.event_title,
+        req.event_start_text,
+        req.area,
+        req.player1,
+        req.player2,
+        req.mode,
+        str(req.requester_id),
+        req.requester_name,
+        req.target,
+        req.link,
+        req.commentator,
+        req.co_commentator,
+        req.tracker,
+        serialize_ids(req.player_member_ids),
+        serialize_approvals(req.approvals),
+        serialize_bool(req.declined),
+        serialize_bool(req.finalized),
+        created_at or current_time,
+        current_time,
+    ]
+
+
+def row_to_restream_request(row: dict) -> RestreamRequest:
+    return RestreamRequest(
+        request_id=str(row.get("Request ID") or "").strip(),
+        guild_id=int(str(row.get("Guild ID") or "0").strip() or 0),
+        event_id=int(str(row.get("Event ID") or "0").strip() or 0),
+        event_title=str(row.get("Event Title") or "").strip(),
+        event_start_text=str(row.get("Event Start") or "").strip(),
+        area=str(row.get("Area") or "").strip(),
+        player1=str(row.get("Player 1") or "").strip(),
+        player2=str(row.get("Player 2") or "").strip(),
+        mode=str(row.get("Mode") or "").strip(),
+        requester_id=int(str(row.get("Requester ID") or "0").strip() or 0),
+        requester_name=str(row.get("Requester Name") or "").strip(),
+        target=str(row.get("Target") or "").strip(),
+        link=str(row.get("Link") or "").strip(),
+        commentator=str(row.get("Commentator") or "").strip(),
+        co_commentator=str(row.get("Co-Commentator") or "").strip(),
+        tracker=str(row.get("Tracker") or "").strip(),
+        approvals=deserialize_approvals(str(row.get("Approvals") or "")),
+        player_member_ids=deserialize_ids(str(row.get("Player Member IDs") or "")),
+        declined=deserialize_bool(row.get("Declined")),
+        finalized=deserialize_bool(row.get("Finalized")),
+    )
+
+
+def find_restream_request_row(request_id: str):
+    sheet = get_restream_requests_sheet()
+    records = sheet.get_all_records()
+
+    for row_index, row in enumerate(records, start=2):
+        if str(row.get("Request ID") or "").strip() == request_id:
+            return row_index, row
+
+    return None, None
+
+
+def save_restream_request(req: RestreamRequest):
+    sheet = get_restream_requests_sheet()
+    row_index, existing = find_restream_request_row(req.request_id)
+    created_at = str((existing or {}).get("Created At") or "").strip()
+
+    values = restream_request_to_row(req, created_at=created_at)
+
+    if row_index:
+        sheet.update(f"A{row_index}:V{row_index}", [values], value_input_option="USER_ENTERED")
+    else:
+        sheet.append_row(values, value_input_option="USER_ENTERED")
+
+    REQUESTS[req.request_id] = req
+
+
+def load_restream_request(request_id: str) -> RestreamRequest | None:
+    request_id = str(request_id or "").strip()
+
+    if not request_id:
+        return None
+
+    row_index, row = find_restream_request_row(request_id)
+
+    if row:
+        req = row_to_restream_request(row)
+        REQUESTS[request_id] = req
+        return req
+
+    return REQUESTS.get(request_id)
 
 
 # =========================================================
@@ -606,7 +853,7 @@ class RestreamRequestModal(discord.ui.Modal):
             player_member_ids=[int(p1_member.id), int(p2_member.id)],
         )
 
-        REQUESTS[request_id] = req
+        save_restream_request(req)
 
         dm_text = build_dm_request_text(req)
 
@@ -628,15 +875,105 @@ class RestreamRequestModal(discord.ui.Modal):
 
 class PlayerApprovalView(discord.ui.View):
     def __init__(self, request_id: str):
-        super().__init__(timeout=7 * 24 * 60 * 60)
-        self.request_id = request_id
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="Bestätigen", style=discord.ButtonStyle.success, custom_id="tfl_restream_approve")
-    async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        req = REQUESTS.get(self.request_id)
+        self.add_item(
+            discord.ui.Button(
+                label="Bestätigen",
+                style=discord.ButtonStyle.success,
+                custom_id=f"tfl_restream_approve:{request_id}",
+            )
+        )
+
+        self.add_item(
+            discord.ui.Button(
+                label="Ablehnen",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"tfl_restream_decline:{request_id}",
+            )
+        )
+
+
+class RequesterFinalizeView(discord.ui.View):
+    def __init__(self, request_id: str):
+        super().__init__(timeout=None)
+
+        self.add_item(
+            discord.ui.Button(
+                label="Eintragen",
+                style=discord.ButtonStyle.success,
+                custom_id=f"tfl_restream_finalize:{request_id}",
+            )
+        )
+
+
+# =========================================================
+# COG
+# =========================================================
+
+class RestreamRequestsCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.daily_task: asyncio.Task | None = None
+
+    async def cog_load(self):
+        self.daily_task = asyncio.create_task(self.daily_restreamable_loop())
+        print("✅ restream_requests daily loop gestartet")
+
+    async def cog_unload(self):
+        if self.daily_task:
+            self.daily_task.cancel()
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+
+        data = interaction.data or {}
+        custom_id = clean_text(data.get("custom_id"))
+
+        if not custom_id.startswith("tfl_restream_"):
+            return
+
+        parts = custom_id.split(":", 1)
+        action = parts[0]
+        request_id = parts[1] if len(parts) == 2 else ""
+
+        try:
+            if action == "tfl_restream_approve":
+                await self.handle_player_approval(interaction, request_id, approved=True)
+                return
+
+            if action == "tfl_restream_decline":
+                await self.handle_player_approval(interaction, request_id, approved=False)
+                return
+
+            if action == "tfl_restream_finalize":
+                await self.handle_requester_finalize(interaction, request_id)
+                return
+
+        except Exception as e:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    f"Fehler bei Restream-Interaktion: {e}",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Fehler bei Restream-Interaktion: {e}",
+                    ephemeral=True,
+                )
+
+    async def handle_player_approval(
+        self,
+        interaction: discord.Interaction,
+        request_id: str,
+        approved: bool,
+    ):
+        req = load_restream_request(request_id)
 
         if req is None:
-            await interaction.response.send_message("Diese Anfrage ist nicht mehr aktiv.", ephemeral=True)
+            await interaction.response.send_message("Diese Anfrage wurde nicht gefunden.", ephemeral=True)
             return
 
         if req.declined:
@@ -651,43 +988,35 @@ class PlayerApprovalView(discord.ui.View):
             await interaction.response.send_message("Diese Anfrage gehört nicht zu dir.", ephemeral=True)
             return
 
-        req.approvals[interaction.user.id] = True
+        if approved:
+            req.approvals[interaction.user.id] = True
+            save_restream_request(req)
 
-        await interaction.response.edit_message(
-            content="Du hast den Restream bestätigt.",
-            view=None,
-        )
-
-        if all(req.approvals.values()):
-            await notify_requester(
-                interaction.client,
-                req,
-                (
-                    "Beide Spieler haben dem Restream zugestimmt.\n\n"
-                    f"**Bereich:** {req.area}\n"
-                    f"**Spiel:** {req.player1} vs. {req.player2}\n"
-                    f"**Modus:** {req.mode}\n"
-                    f"**Termin:** {req.event_start_text}\n"
-                    f"**Restream:** {req.target}\n"
-                    f"**Link:** {req.link}\n\n"
-                    "Klicke auf **Eintragen**, um den Restream zu veröffentlichen und das Discord-Event zu aktualisieren."
-                ),
-                view=RequesterFinalizeView(req.request_id),
+            await interaction.response.edit_message(
+                content="Du hast den Restream bestätigt.",
+                view=None,
             )
 
-    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="tfl_restream_decline")
-    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        req = REQUESTS.get(self.request_id)
-
-        if req is None:
-            await interaction.response.send_message("Diese Anfrage ist nicht mehr aktiv.", ephemeral=True)
-            return
-
-        if interaction.user.id not in req.approvals:
-            await interaction.response.send_message("Diese Anfrage gehört nicht zu dir.", ephemeral=True)
+            if all(req.approvals.values()):
+                await notify_requester(
+                    interaction.client,
+                    req,
+                    (
+                        "Beide Spieler haben dem Restream zugestimmt.\n\n"
+                        f"**Bereich:** {req.area}\n"
+                        f"**Spiel:** {req.player1} vs. {req.player2}\n"
+                        f"**Modus:** {req.mode}\n"
+                        f"**Termin:** {req.event_start_text}\n"
+                        f"**Restream:** {req.target}\n"
+                        f"**Link:** {req.link}\n\n"
+                        "Klicke auf **Eintragen**, um den Restream zu veröffentlichen und das Discord-Event zu aktualisieren."
+                    ),
+                    view=RequesterFinalizeView(req.request_id),
+                )
             return
 
         req.declined = True
+        save_restream_request(req)
 
         await interaction.response.edit_message(
             content="Du hast den Restream abgelehnt.",
@@ -705,18 +1034,15 @@ class PlayerApprovalView(discord.ui.View):
             ),
         )
 
-
-class RequesterFinalizeView(discord.ui.View):
-    def __init__(self, request_id: str):
-        super().__init__(timeout=7 * 24 * 60 * 60)
-        self.request_id = request_id
-
-    @discord.ui.button(label="Eintragen", style=discord.ButtonStyle.success, custom_id="tfl_restream_finalize")
-    async def finalize_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        req = REQUESTS.get(self.request_id)
+    async def handle_requester_finalize(
+        self,
+        interaction: discord.Interaction,
+        request_id: str,
+    ):
+        req = load_restream_request(request_id)
 
         if req is None:
-            await interaction.response.send_message("Diese Anfrage ist nicht mehr aktiv.", ephemeral=True)
+            await interaction.response.send_message("Diese Anfrage wurde nicht gefunden.", ephemeral=True)
             return
 
         if interaction.user.id != req.requester_id:
@@ -727,7 +1053,11 @@ class RequesterFinalizeView(discord.ui.View):
             await interaction.response.send_message("Diese Anfrage wurde abgelehnt.", ephemeral=True)
             return
 
-        if not all(req.approvals.values()):
+        if req.finalized:
+            await interaction.response.send_message("Diese Anfrage wurde bereits eingetragen.", ephemeral=True)
+            return
+
+        if not req.approvals or not all(req.approvals.values()):
             await interaction.response.send_message("Noch nicht beide Spieler haben zugestimmt.", ephemeral=True)
             return
 
@@ -753,6 +1083,9 @@ class RequesterFinalizeView(discord.ui.View):
 
         try:
             await finalize_restream(interaction.client, guild, req)
+            req.finalized = True
+            save_restream_request(req)
+
             await interaction.edit_original_response(
                 content=f"Restream wurde eingetragen, in <#{RESTREAMS_CHANNEL_ID}> gepostet und das Discord-Event wurde aktualisiert.",
                 view=None,
@@ -760,26 +1093,8 @@ class RequesterFinalizeView(discord.ui.View):
         except Exception as e:
             await interaction.edit_original_response(
                 content=f"Fehler beim Eintragen des Restreams: {e}",
-                view=self,
+                view=RequesterFinalizeView(req.request_id),
             )
-
-
-# =========================================================
-# COG
-# =========================================================
-
-class RestreamRequestsCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        self.daily_task: asyncio.Task | None = None
-
-    async def cog_load(self):
-        self.daily_task = asyncio.create_task(self.daily_restreamable_loop())
-        print("✅ restream_requests daily loop gestartet")
-
-    async def cog_unload(self):
-        if self.daily_task:
-            self.daily_task.cancel()
 
     async def daily_restreamable_loop(self):
         await self.bot.wait_until_ready()
