@@ -61,6 +61,7 @@ class TFLBot(commands.Bot):
             "matchcenter",
             "asnyc",
             "player",
+            "restream_requests",
         ]
 
         for ext in extensions:
