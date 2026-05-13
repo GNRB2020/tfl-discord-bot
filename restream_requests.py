@@ -64,6 +64,7 @@ EVENT_TITLE_FILTERS = (
 @dataclass
 class RestreamRequest:
     request_id: str
+    guild_id: int
     event_id: int
     event_title: str
     event_start_text: str
@@ -339,10 +340,11 @@ async def finalize_restream(bot: commands.Bot, guild: discord.Guild, req: Restre
         except Exception:
             restream_channel = None
 
-    if isinstance(restream_channel, discord.TextChannel):
-        await restream_channel.send(build_restream_post(req))
-    else:
-        raise RuntimeError("Restream-Kanal nicht gefunden oder kein Textkanal.")
+    if restream_channel is None or not hasattr(restream_channel, "send"):
+        raise RuntimeError(f"Restream-Kanal nicht gefunden oder nicht beschreibbar: {RESTREAMS_CHANNEL_ID}")
+
+    await restream_channel.send(build_restream_post(req))
+    print(f"✅ Restream-Post gesendet in Kanal {RESTREAMS_CHANNEL_ID}")
 
     event = await get_scheduled_event_by_id(guild, req.event_id)
 
@@ -568,6 +570,7 @@ class RestreamRequestModal(discord.ui.Modal):
 
         req = RestreamRequest(
             request_id=request_id,
+            guild_id=int(interaction.guild.id),
             event_id=int(event.id),
             event_title=event.name,
             event_start_text=format_event_start_long(event.start_time),
@@ -714,12 +717,22 @@ class RequesterFinalizeView(discord.ui.View):
             await interaction.response.send_message("Noch nicht beide Spieler haben zugestimmt.", ephemeral=True)
             return
 
-        guild = interaction.client.get_guild(GUILD_ID)
+        guild = interaction.client.get_guild(req.guild_id)
+
+        if guild is None:
+            try:
+                guild = await interaction.client.fetch_guild(req.guild_id)
+            except Exception:
+                guild = None
+
         if guild is None and interaction.guild is not None:
             guild = interaction.guild
 
         if guild is None:
-            await interaction.response.send_message("Server nicht gefunden.", ephemeral=True)
+            await interaction.response.send_message(
+                f"Server nicht gefunden. Gespeicherte Guild-ID: {req.guild_id}",
+                ephemeral=True,
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -727,7 +740,7 @@ class RequesterFinalizeView(discord.ui.View):
         try:
             await finalize_restream(interaction.client, guild, req)
             await interaction.edit_original_response(
-                content="Restream wurde eingetragen, gepostet und das Discord-Event wurde aktualisiert.",
+                content=f"Restream wurde eingetragen, in <#{RESTREAMS_CHANNEL_ID}> gepostet und das Discord-Event wurde aktualisiert.",
                 view=None,
             )
         except Exception as e:
