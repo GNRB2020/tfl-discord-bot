@@ -7,6 +7,7 @@ from datetime import datetime as dt, timedelta, time
 
 import discord
 import pytz
+from discord import app_commands
 from discord.ext import commands
 
 
@@ -784,9 +785,34 @@ class RestreamRequestsCog(commands.Cog):
         """
         Admin-Testbefehl:
         !restreamables
+
+        Hinweis:
+        Funktioniert nur, wenn Prefix-Commands und Message Content Intent aktiv sind.
+        Der Slash-Command /restreamables ist zuverlässiger.
         """
         await self.post_restreamable_events()
         await ctx.reply("Restreamable-Spiele wurden neu gepostet.", mention_author=False)
+
+    @app_commands.command(
+        name="restreamables",
+        description="Postet die restreambaren Spiele sofort neu.",
+    )
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.default_permissions(administrator=True)
+    async def restreamables_slash(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            await self.post_restreamable_events()
+            await interaction.followup.send(
+                "Restreamable-Spiele wurden neu gepostet.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Posten der restreambaren Spiele: {e}",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):
