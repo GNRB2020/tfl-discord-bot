@@ -19,7 +19,7 @@ BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
-# Zielkanal: tägliche Liste der Spiele, die für Restreams auswählbar sind
+# Zielkanal: tägliche kompakte Liste der Spiele, die für Restreams auswählbar sind
 RESTREAMABLE_CHANNEL_ID = int(os.getenv("RESTREAMABLE_CHANNEL_ID", "1405291916387422228"))
 
 # Zielkanal: final bestätigte Restream-Posts
@@ -99,7 +99,27 @@ def normalize_lookup(value: str) -> str:
     return re.sub(r"[^a-z0-9äöüß]", "", value)
 
 
+def short_text(value: str, limit: int) -> str:
+    value = clean_text(value)
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)].rstrip() + "…"
+
+
 def format_event_start(start_time) -> str:
+    if not start_time:
+        return "unbekannter Termin"
+
+    try:
+        if start_time.tzinfo is None:
+            start_time = pytz.utc.localize(start_time)
+        local = start_time.astimezone(BERLIN_TZ)
+        return local.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(start_time)
+
+
+def format_event_start_long(start_time) -> str:
     if not start_time:
         return "unbekannter Termin"
 
@@ -371,18 +391,47 @@ async def finalize_restream(bot: commands.Bot, guild: discord.Guild, req: Restre
 # VIEWS
 # =========================================================
 
-class RestreamPickView(discord.ui.View):
-    def __init__(self, event_id: int):
-        super().__init__(timeout=None)
-        self.event_id = int(event_id)
+class RestreamEventSelect(discord.ui.Select):
+    def __init__(self, events: list[discord.ScheduledEvent]):
+        options = []
 
-    @discord.ui.button(label="Restream anfragen", style=discord.ButtonStyle.primary)
-    async def request_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
+        for event in events[:25]:
+            parsed = parse_event_title(event)
+            label = short_text(f"{format_event_start(event.start_time)} | {parsed['match'] or event.name}", 100)
+            description = short_text(f"{parsed['area']} | {parsed['mode']}", 100)
+
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(event.id),
+                    description=description,
+                )
+            )
+
+        super().__init__(
+            placeholder="Spiel für Restream-Anfrage auswählen …",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="tfl_restream_event_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        event_id = int(self.values[0])
+
+        await interaction.followup.send(
             "Wähle das Restream-Ziel.",
-            view=RestreamTargetView(self.event_id),
+            view=RestreamTargetView(event_id),
             ephemeral=True,
         )
+
+
+class RestreamEventSelectView(discord.ui.View):
+    def __init__(self, events: list[discord.ScheduledEvent]):
+        super().__init__(timeout=86400)
+        self.add_item(RestreamEventSelect(events))
 
 
 class RestreamTargetSelect(discord.ui.Select):
@@ -400,6 +449,7 @@ class RestreamTargetSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             options=options,
+            custom_id=f"tfl_restream_target_{self.event_id}",
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -518,7 +568,7 @@ class RestreamRequestModal(discord.ui.Modal):
             request_id=request_id,
             event_id=int(event.id),
             event_title=event.name,
-            event_start_text=format_event_start(event.start_time),
+            event_start_text=format_event_start_long(event.start_time),
             player1=parsed["player1"],
             player2=parsed["player2"],
             mode=parsed["mode"],
@@ -558,10 +608,10 @@ class RestreamRequestModal(discord.ui.Modal):
 
 class PlayerApprovalView(discord.ui.View):
     def __init__(self, request_id: str):
-        super().__init__(timeout=None)
+        super().__init__(timeout=7 * 24 * 60 * 60)
         self.request_id = request_id
 
-    @discord.ui.button(label="Bestätigen", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Bestätigen", style=discord.ButtonStyle.success, custom_id="tfl_restream_approve")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         req = REQUESTS.get(self.request_id)
 
@@ -604,7 +654,7 @@ class PlayerApprovalView(discord.ui.View):
                 view=RequesterFinalizeView(req.request_id),
             )
 
-    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="tfl_restream_decline")
     async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         req = REQUESTS.get(self.request_id)
 
@@ -636,10 +686,10 @@ class PlayerApprovalView(discord.ui.View):
 
 class RequesterFinalizeView(discord.ui.View):
     def __init__(self, request_id: str):
-        super().__init__(timeout=None)
+        super().__init__(timeout=7 * 24 * 60 * 60)
         self.request_id = request_id
 
-    @discord.ui.button(label="Eintragen", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Eintragen", style=discord.ButtonStyle.success, custom_id="tfl_restream_finalize")
     async def finalize_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         req = REQUESTS.get(self.request_id)
 
@@ -659,9 +709,8 @@ class RequesterFinalizeView(discord.ui.View):
             await interaction.response.send_message("Noch nicht beide Spieler haben zugestimmt.", ephemeral=True)
             return
 
-        if interaction.guild is None:
-            guild = interaction.client.get_guild(GUILD_ID)
-        else:
+        guild = interaction.client.get_guild(GUILD_ID)
+        if guild is None and interaction.guild is not None:
             guild = interaction.guild
 
         if guild is None:
@@ -754,30 +803,33 @@ class RestreamRequestsCog(commands.Cog):
         events.sort(key=lambda e: e.start_time or dt.max)
 
         if not events:
-            await channel.send("Aktuell sind keine restreambaren TFL-Spiele als Discord-Event vorhanden.")
+            await channel.send("📺 **Restreamable Spiele**\nAktuell sind keine restreambaren TFL-Spiele als Discord-Event vorhanden.")
             return
 
-        header = (
-            "📺 **Restreamable Spiele**\n\n"
-            "Klicke bei einem Spiel auf **Restream anfragen**, um ZSRDE, DRR oder einen privaten Restream anzufragen."
-        )
-        await channel.send(header)
+        shown_events = events[:25]
 
-        for event in events:
+        lines = [
+            "📺 **Restreamable Spiele**",
+            "",
+            "Spiel unten im Dropdown auswählen.",
+            "",
+        ]
+
+        for i, event in enumerate(shown_events, start=1):
             parsed = parse_event_title(event)
-
-            content = (
-                f"**{event.name}**\n"
-                f"Termin: {format_event_start(event.start_time)}\n"
-                f"Spieler: {parsed['player1'] or '-'} vs. {parsed['player2'] or '-'}\n"
-                f"Modus: {parsed['mode']}\n"
-                f"Aktueller Ort: {get_event_location(event) or '-'}"
+            match = parsed["match"] or event.name
+            lines.append(
+                f"`{i:02d}` {format_event_start(event.start_time)} · {match} · {parsed['mode']}"
             )
 
-            await channel.send(
-                content,
-                view=RestreamPickView(int(event.id)),
-            )
+        if len(events) > 25:
+            lines.append("")
+            lines.append(f"⚠️ Es werden nur die ersten 25 von {len(events)} Events angezeigt. Discord erlaubt max. 25 Dropdown-Optionen.")
+
+        await channel.send(
+            "\n".join(lines),
+            view=RestreamEventSelectView(shown_events),
+        )
 
     @commands.command(name="restreamables")
     @commands.has_permissions(administrator=True)
