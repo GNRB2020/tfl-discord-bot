@@ -22,13 +22,9 @@ GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 # Zielkanal: tägliche kompakte Liste der Spiele, die für Restreams auswählbar sind
 RESTREAMABLE_CHANNEL_ID = int(os.getenv("RESTREAMABLE_CHANNEL_ID", "1405291916387422228"))
 
-# Zielkanal: final bestätigte Restream-Posts
-RESTREAMS_CHANNEL_ID = int(
-    os.getenv(
-        "RESTREAMS_CHANNEL_ID",
-        os.getenv("RESTREAM_CHANNEL_ID", "1277949546650931241"),
-    )
-)
+# Zielkanal: finale Restream-Ankündigungen
+# Wichtig: NICHT RESTREAM_CHANNEL_ID als Fallback nutzen, weil diese Variable in bot.py ggf. anders belegt ist.
+RESTREAMS_CHANNEL_ID = int(os.getenv("RESTREAMS_CHANNEL_ID", "1277949546650931241"))
 
 ZSRDE_RESTREAM_URL = os.getenv(
     "ZSRDE_RESTREAM_URL",
@@ -302,27 +298,24 @@ async def send_dm_safe(member: discord.Member | discord.User, content: str, view
 
 
 def build_restream_post(req: RestreamRequest) -> str:
-    team_lines = []
+    team_parts = []
 
     if req.commentator:
-        team_lines.append(f"Kommentator: {req.commentator}")
+        team_parts.append(f"🎙️ {req.commentator}")
     if req.co_commentator:
-        team_lines.append(f"Co-Kommentator: {req.co_commentator}")
+        team_parts.append(f"🎙️ {req.co_commentator}")
     if req.tracker:
-        team_lines.append(f"Tracker: {req.tracker}")
+        team_parts.append(f"🧭 {req.tracker}")
 
-    team_text = "\n".join(team_lines) if team_lines else "Keine Teamangaben."
+    team_text = " · ".join(team_parts) if team_parts else "Team folgt"
 
     return (
-        "📺 **Restream bestätigt**\n\n"
-        f"**Bereich:** {req.area}\n"
-        f"**Spiel:** {req.player1} vs. {req.player2}\n"
-        f"**Modus:** {req.mode}\n"
-        f"**Termin:** {req.event_start_text}\n"
-        f"**Restream:** {req.target}\n"
-        f"**Link:** {req.link}\n\n"
-        f"**Team:**\n{team_text}\n\n"
-        "Ein anschließendes Interview ist optional."
+        "📺 **RESTREAM-ANKÜNDIGUNG**\n"
+        f"**{req.area} · {req.player1} vs. {req.player2}**\n"
+        f"🕒 {req.event_start_text} · 🎮 {req.mode}\n"
+        f"📡 **{req.target}:** {req.link}\n"
+        f"👥 {team_text}\n"
+        "Interview nach dem Race: optional."
     )
 
 
@@ -362,10 +355,10 @@ async def finalize_restream(bot: commands.Bot, guild: discord.Guild, req: Restre
             restream_channel = None
 
     if restream_channel is None or not hasattr(restream_channel, "send"):
-        raise RuntimeError(f"Restream-Kanal nicht gefunden oder nicht beschreibbar: {RESTREAMS_CHANNEL_ID}")
+        raise RuntimeError(f"Ankündigungs-Kanal nicht gefunden oder nicht beschreibbar: {RESTREAMS_CHANNEL_ID}")
 
     await restream_channel.send(build_restream_post(req))
-    print(f"✅ Restream-Post gesendet in Kanal {RESTREAMS_CHANNEL_ID}")
+    print(f"✅ Restream-Ankündigung gesendet in Kanal {RESTREAMS_CHANNEL_ID}")
 
     event = await get_scheduled_event_by_id(guild, req.event_id)
 
