@@ -14,7 +14,18 @@ import yaml
 from discord import app_commands
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
-from ladder_elo_sheets import ensure_ladder_elo_sheets
+from ladder_elo import create_elo_pairings
+from ladder_elo_sheets import (
+    SCOPE_SEASON_OVERALL,
+    SCOPE_SEASON_MODE,
+    SCOPE_ALLTIME_OVERALL,
+    SCOPE_ALLTIME_MODE,
+    ensure_ladder_elo_sheets,
+    build_pairing_players,
+    process_match_elo,
+    rebuild_elo_from_matches,
+    build_standings_rows as build_elo_standings_rows,
+)
 
 
 # =========================================================
@@ -1639,25 +1650,43 @@ def get_match_players(row: dict) -> list[dict]:
     return players
 
 
-def get_last_opponents() -> dict[str, set[str]]:
-    rows = load_matches_rows()
-    last_opponents: dict[str, set[str]] = {}
+def get_last_opponents(limit: int = 5) -> dict[str, set[str]]:
+    rows = load_matches_rows_all()
+    last_opponents: dict[str, list[str]] = {}
 
-    for row in rows:
+    for row in reversed(rows):
+        if normalize_text(row.get("Veröffentlicht")).lower() != "ja":
+            continue
+
         players = [
             normalize_text(row.get("Spieler 1 Discord ID")),
             normalize_text(row.get("Spieler 2 Discord ID")),
             normalize_text(row.get("Spieler 3 Discord ID")),
         ]
-        players = [p for p in players if p]
+        players = [player_id for player_id in players if player_id]
+
+        if len(players) < 2:
+            continue
 
         for player_id in players:
-            opponents = set(p for p in players if p != player_id)
+            current = last_opponents.setdefault(player_id, [])
 
-            if opponents:
-                last_opponents[player_id] = opponents
+            for opponent_id in players:
+                if opponent_id == player_id:
+                    continue
 
-    return last_opponents
+                if opponent_id in current:
+                    continue
+
+                if len(current) >= limit:
+                    continue
+
+                current.append(opponent_id)
+
+    return {
+        player_id: set(opponents[:limit])
+        for player_id, opponents in last_opponents.items()
+    }
 
 
 def calculate_pairing_score(groups: list[list[dict]], last_opponents: dict[str, set[str]]) -> int:
@@ -1676,48 +1705,81 @@ def calculate_pairing_score(groups: list[list[dict]], last_opponents: dict[str, 
     return score
 
 
-def create_pairings(participants: list[dict]) -> list[list[dict]]:
+def create_pairings(participants: list[dict], schedule_row: dict | None = None) -> list[list[dict]]:
     count = len(participants)
 
     if count < 2:
         return []
 
-    if count == 3:
-        return [participants]
+    if not schedule_row:
+        # Fallback: alte Logik, falls die Funktion außerhalb des Slot-Kontexts genutzt wird.
+        if count == 3:
+            return [participants]
 
-    last_opponents = get_last_opponents()
-    best_groups = None
-    best_score = None
+        last_opponents = get_last_opponents(limit=5)
+        best_groups = None
+        best_score = None
 
-    for _ in range(100):
-        shuffled = participants[:]
-        random.shuffle(shuffled)
+        for _ in range(100):
+            shuffled = participants[:]
+            random.shuffle(shuffled)
 
-        groups = []
+            groups = []
 
-        if len(shuffled) % 2 == 1:
-            three_way = shuffled[-3:]
-            rest = shuffled[:-3]
-        else:
-            three_way = None
-            rest = shuffled
+            if len(shuffled) % 2 == 1:
+                three_way = shuffled[-3:]
+                rest = shuffled[:-3]
+            else:
+                three_way = None
+                rest = shuffled
 
-        for index in range(0, len(rest), 2):
-            groups.append(rest[index:index + 2])
+            for index in range(0, len(rest), 2):
+                groups.append(rest[index:index + 2])
 
-        if three_way:
-            groups.append(three_way)
+            if three_way:
+                groups.append(three_way)
 
-        score = calculate_pairing_score(groups, last_opponents)
+            score = calculate_pairing_score(groups, last_opponents)
 
-        if best_score is None or score < best_score:
-            best_score = score
-            best_groups = groups
+            if best_score is None or score < best_score:
+                best_score = score
+                best_groups = groups
 
-        if score == 0:
-            break
+            if score == 0:
+                break
 
-    return best_groups or []
+        return best_groups or []
+
+    season = get_active_season_for_row(schedule_row)
+    mode = normalize_text(schedule_row.get("Modus"))
+    participant_by_id = {
+        normalize_text(player.get("discord_id")): player
+        for player in participants
+    }
+
+    pairing_players = build_pairing_players(
+        participants=participants,
+        season=season,
+        mode=mode,
+    )
+    recent_opponents = get_last_opponents(limit=5)
+    elo_groups = create_elo_pairings(pairing_players, recent_opponents)
+
+    groups: list[list[dict]] = []
+
+    for elo_group in elo_groups:
+        group = []
+
+        for elo_player in elo_group:
+            original = participant_by_id.get(elo_player.player_id)
+
+            if original:
+                group.append(original)
+
+        if len(group) >= 2:
+            groups.append(group)
+
+    return groups
 
 
 def build_match_rows(slot_id: str, schedule_row: dict, pairings: list[list[dict]]) -> list[list]:
@@ -3008,6 +3070,59 @@ class UndoFinishView(discord.ui.View):
 # COG
 # =========================================================
 
+
+def build_elo_table_message(scope: str, season: str, mode: str = "", limit: int = 20) -> str:
+    rows = build_elo_standings_rows(scope=scope, season=season, mode=mode, limit=limit)
+
+    scope_titles = {
+        SCOPE_SEASON_OVERALL: "Saison Gesamt",
+        SCOPE_SEASON_MODE: f"Saison Modus: {mode}",
+        SCOPE_ALLTIME_OVERALL: "All-Time Gesamt",
+        SCOPE_ALLTIME_MODE: f"All-Time Modus: {mode}",
+    }
+
+    title = scope_titles.get(scope, scope)
+
+    lines = [
+        f"**TFNL ELO-Tabelle — {title}**",
+        f"Season: `{season}`" if scope.startswith("season_") else "Season: `ALL_TIME`",
+        "",
+    ]
+
+    if not rows:
+        lines.append("_Keine ELO-Daten gefunden._")
+        return "\n".join(lines)
+
+    table_rows = []
+
+    for index, row in enumerate(rows, start=1):
+        table_rows.append(
+            [
+                index,
+                normalize_text(row.get("Player Name")),
+                normalize_text(row.get("Elo")),
+                normalize_text(row.get("Wins")),
+                normalize_text(row.get("Draws")),
+                normalize_text(row.get("Lose")),
+                f"{normalize_text(row.get('Winrate'))}%",
+            ]
+        )
+
+    lines.append(
+        build_discord_table(
+            ["#", "Name", "ELO", "W", "D", "L", "Win%"],
+            table_rows,
+            max_col_width=22,
+        )
+    )
+
+    if len(rows) >= limit:
+        lines.append("")
+        lines.append(f"_Anzeige begrenzt auf Top {limit}._")
+
+    return "\n".join(lines)
+
+
 class LadderCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -4100,10 +4215,15 @@ class LadderCog(commands.Cog):
             if not updated_match:
                 return
 
-            update_players_from_match(updated_match)
-
             slot_id = normalize_text(updated_match.get("Slot ID"))
             _, schedule_row = find_schedule_row(slot_id)
+
+            try:
+                process_match_elo(updated_match, schedule_row=schedule_row)
+            except Exception as e:
+                await self.log_tfnl(f"ELO-Verarbeitung fehlgeschlagen für `{match_id}` — {repr(e)}")
+
+            update_players_from_match(updated_match)
 
         if schedule_row:
             try:
@@ -4382,7 +4502,7 @@ class LadderCog(commands.Cog):
             await self.publish_signup_to_channel()
             return
 
-        pairings = create_pairings(participants)
+        pairings = create_pairings(participants, schedule_row)
         match_rows = build_match_rows(slot_id, schedule_row, pairings)
 
         append_matches(match_rows)
@@ -4538,6 +4658,86 @@ class LadderCog(commands.Cog):
     # =====================================================
     # COMMANDS
     # =====================================================
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="laddertable",
+        description="Zeigt die neue TFNL-ELO-Tabelle.",
+    )
+    @app_commands.describe(
+        wertung="Welche ELO-Wertung angezeigt werden soll.",
+        modus="Nur bei Modus-Wertungen nötig, z. B. Open oder Casual Boots.",
+    )
+    @app_commands.choices(
+        wertung=[
+            app_commands.Choice(name="Saison Gesamt", value=SCOPE_SEASON_OVERALL),
+            app_commands.Choice(name="Saison Modus", value=SCOPE_SEASON_MODE),
+            app_commands.Choice(name="All-Time Gesamt", value=SCOPE_ALLTIME_OVERALL),
+            app_commands.Choice(name="All-Time Modus", value=SCOPE_ALLTIME_MODE),
+        ]
+    )
+    async def laddertable(
+        self,
+        interaction: discord.Interaction,
+        wertung: app_commands.Choice[str],
+        modus: str = "",
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        scope = wertung.value
+
+        if scope in (SCOPE_SEASON_MODE, SCOPE_ALLTIME_MODE) and not normalize_text(modus):
+            await interaction.followup.send(
+                "Für Modus-Tabellen muss `modus` angegeben werden, z. B. `Open`.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            season = get_active_season()
+            message = build_elo_table_message(
+                scope=scope,
+                season=season,
+                mode=modus,
+                limit=20,
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"ELO-Tabelle konnte nicht geladen werden:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(message, ephemeral=True)
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="tfnl_elo_rebuild",
+        description="Admin: Baut alle TFNL-ELO-Tabellen aus veröffentlichten Matches neu auf.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def tfnl_elo_rebuild(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            stats = rebuild_elo_from_matches(
+                matches_rows=load_matches_rows_all(),
+                schedule_rows=load_schedule_rows_all(),
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"ELO-Rebuild fehlgeschlagen:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "TFNL-ELO-Rebuild abgeschlossen.\n"
+            f"Verarbeitete Matches: `{stats.get('processed_matches', 0)}`\n"
+            f"Rating-Events: `{stats.get('processed_events', 0)}`\n"
+            f"Übersprungene Matches: `{stats.get('skipped_matches', 0)}`",
+            ephemeral=True,
+        )
 
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.command(
