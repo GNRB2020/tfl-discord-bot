@@ -3093,18 +3093,29 @@ def build_elo_table_message(scope: str, season: str, mode: str = "", limit: int 
         lines.append("_Keine ELO-Daten gefunden._")
         return "\n".join(lines)
 
+    def table_value(value, fallback: str = "0") -> str:
+        if value is None:
+            return fallback
+
+        value_text = str(value).strip()
+
+        if value_text == "":
+            return fallback
+
+        return value_text
+
     table_rows = []
 
     for index, row in enumerate(rows, start=1):
         table_rows.append(
             [
                 index,
-                normalize_text(row.get("Player Name")),
-                normalize_text(row.get("Elo")),
-                normalize_text(row.get("Wins")),
-                normalize_text(row.get("Draws")),
-                normalize_text(row.get("Lose")),
-                f"{normalize_text(row.get('Winrate'))}%",
+                table_value(row.get("Player Name"), ""),
+                table_value(row.get("Elo"), "1000.0"),
+                table_value(row.get("Wins"), "0"),
+                table_value(row.get("Draws"), "0"),
+                table_value(row.get("Lose"), "0"),
+                f"{table_value(row.get('Winrate'), '0.0')}%",
             ]
         )
 
