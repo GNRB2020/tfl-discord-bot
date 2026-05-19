@@ -2866,7 +2866,41 @@ def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_fr
     }
 
 
-def archive_season(season: str, delete_from_live: bool = False) -> dict[str, dict[str, int]]:
+def get_archive_source_sheet_names(sheet_name: str = "alle") -> tuple[str, ...]:
+    selected_sheet = normalize_text(sheet_name).lower()
+
+    mapping = {
+        "alle": (
+            SCHEDULE_SHEET_NAME,
+            SIGNUP_SHEET_NAME,
+            MATCHES_SHEET_NAME,
+            PLAYERS_SHEET_NAME,
+        ),
+        "all": (
+            SCHEDULE_SHEET_NAME,
+            SIGNUP_SHEET_NAME,
+            MATCHES_SHEET_NAME,
+            PLAYERS_SHEET_NAME,
+        ),
+        "schedule": (SCHEDULE_SHEET_NAME,),
+        "signup": (SIGNUP_SHEET_NAME,),
+        "matches": (MATCHES_SHEET_NAME,),
+        "players": (PLAYERS_SHEET_NAME,),
+    }
+
+    if selected_sheet not in mapping:
+        raise RuntimeError(
+            "Ungültiges Sheet. Erlaubt sind: alle, schedule, signup, matches, players."
+        )
+
+    return mapping[selected_sheet]
+
+
+def archive_season(
+    season: str,
+    delete_from_live: bool = False,
+    sheet_name: str = "alle",
+) -> dict[str, dict[str, int]]:
     selected_season = normalize_text(season)
 
     if not selected_season:
@@ -2874,12 +2908,7 @@ def archive_season(season: str, delete_from_live: bool = False) -> dict[str, dic
 
     stats = {}
 
-    for source_sheet_name in (
-        SCHEDULE_SHEET_NAME,
-        SIGNUP_SHEET_NAME,
-        MATCHES_SHEET_NAME,
-        PLAYERS_SHEET_NAME,
-    ):
+    for source_sheet_name in get_archive_source_sheet_names(sheet_name):
         stats[source_sheet_name] = archive_sheet_rows_for_season(
             source_sheet_name=source_sheet_name,
             season=selected_season,
@@ -4572,13 +4601,24 @@ class LadderCog(commands.Cog):
     )
     @app_commands.describe(
         season="Season-Wert, z. B. Test-01",
+        sheet="Welche Tabelle archiviert werden soll: alle, schedule, signup, matches, players.",
         delete_from_live="Wenn True: Zeilen nach dem Kopieren aus Live-Sheets löschen. Standard: False.",
+    )
+    @app_commands.choices(
+        sheet=[
+            app_commands.Choice(name="alle", value="alle"),
+            app_commands.Choice(name="schedule", value="schedule"),
+            app_commands.Choice(name="signup", value="signup"),
+            app_commands.Choice(name="matches", value="matches"),
+            app_commands.Choice(name="players", value="players"),
+        ]
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def tfnl_archive_season(
         self,
         interaction: discord.Interaction,
         season: str,
+        sheet: app_commands.Choice[str],
         delete_from_live: bool = False,
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -4591,7 +4631,11 @@ class LadderCog(commands.Cog):
 
         try:
             async with self.sheet_write_lock:
-                stats = archive_season(selected_season, delete_from_live=delete_from_live)
+                stats = archive_season(
+                    selected_season,
+                    delete_from_live=delete_from_live,
+                    sheet_name=sheet.value,
+                )
 
         except Exception as e:
             await interaction.followup.send(
@@ -4602,6 +4646,7 @@ class LadderCog(commands.Cog):
 
         lines = [
             f"Season `{selected_season}` wurde archiviert.",
+            f"Archiv-Auswahl: `{sheet.value}`",
             f"Aus Live-Sheets gelöscht: `{'Ja' if delete_from_live else 'Nein'}`",
             "",
         ]
