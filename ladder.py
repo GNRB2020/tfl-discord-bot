@@ -67,6 +67,14 @@ SCHEDULE_SHEET_NAME = "Schedule"
 SIGNUP_SHEET_NAME = "Signup"
 MATCHES_SHEET_NAME = "Matches"
 PLAYERS_SHEET_NAME = "Players"
+SETTINGS_SHEET_NAME = "Settings"
+
+ARCHIVE_SCHEDULE_SHEET_NAME = "Archive_Schedule"
+ARCHIVE_SIGNUP_SHEET_NAME = "Archive_Signup"
+ARCHIVE_MATCHES_SHEET_NAME = "Archive_Matches"
+ARCHIVE_PLAYERS_SHEET_NAME = "Archive_Players"
+
+DEFAULT_ACTIVE_SEASON = os.getenv("TFNL_ACTIVE_SEASON", "TFNL-S1").strip()
 
 SCHEDULE_ANNOUNCEMENT_COL = "Signup Announcement Sent"
 SCHEDULE_COMPLETED_AT_COL = "Completed At"
@@ -83,6 +91,7 @@ SIGNUP_HEADERS = [
     "Angemeldet um",
     "DM geprüft",
     "Status",
+    "Season",
 ]
 
 MATCHES_HEADERS = [
@@ -108,6 +117,7 @@ MATCHES_HEADERS = [
     "Punkte Spieler 3",
     "Status",
     "Veröffentlicht",
+    "Season",
 ]
 
 PLAYERS_HEADERS = [
@@ -121,6 +131,12 @@ PLAYERS_HEADERS = [
     "Forfeits",
     "Letzter Gegner",
     "Letzter Start",
+    "Season",
+]
+
+SETTINGS_HEADERS = [
+    "Key",
+    "Value",
 ]
 
 SCOPE = [
@@ -284,6 +300,53 @@ def get_or_create_worksheet(
     return sheet
 
 
+def get_settings_sheet():
+    spreadsheet = get_tfnl_spreadsheet()
+    return get_or_create_worksheet(
+        spreadsheet=spreadsheet,
+        title=SETTINGS_SHEET_NAME,
+        headers=SETTINGS_HEADERS,
+        rows=100,
+        cols=len(SETTINGS_HEADERS),
+    )
+
+
+def get_setting_value(key: str, default: str = "") -> str:
+    sheet = get_settings_sheet()
+    rows = get_cached_records(SETTINGS_SHEET_NAME, get_settings_sheet)
+
+    for row in rows:
+        if normalize_text(row.get("Key")) == key:
+            value = normalize_text(row.get("Value"))
+            return value or default
+
+    sheet.append_row([key, default], value_input_option="USER_ENTERED")
+    invalidate_sheet_cache(SETTINGS_SHEET_NAME)
+    return default
+
+
+def get_active_season() -> str:
+    return get_setting_value("ACTIVE_SEASON", DEFAULT_ACTIVE_SEASON)
+
+
+def row_matches_season(row: dict, season: str) -> bool:
+    return normalize_text(row.get("Season")) == normalize_text(season)
+
+
+def filter_rows_by_season(rows: list[dict], season: str | None = None) -> list[dict]:
+    selected_season = normalize_text(season) or get_active_season()
+    return [row for row in rows if row_matches_season(row, selected_season)]
+
+
+def get_active_season_for_row(row: dict | None = None) -> str:
+    if row:
+        season = normalize_text(row.get("Season"))
+        if season:
+            return season
+
+    return get_active_season()
+
+
 def get_header_index(sheet, sheet_name: str, column_name: str):
     if sheet_name not in HEADER_CACHE:
         HEADER_CACHE[sheet_name] = sheet.row_values(1)
@@ -308,6 +371,7 @@ def get_schedule_sheet():
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_ANNOUNCEMENT_COL)
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_COMPLETED_AT_COL)
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_PRESTART_DM_COL)
+    ensure_header_column(sheet, SCHEDULE_SHEET_NAME, "Season")
 
     WORKSHEET_CACHE[SCHEDULE_SHEET_NAME] = sheet
     return sheet
@@ -346,35 +410,76 @@ def get_players_sheet():
     )
 
 
-def load_schedule_rows():
+def load_schedule_rows_all():
     return get_cached_records(SCHEDULE_SHEET_NAME, get_schedule_sheet)
 
 
+def load_schedule_rows():
+    return filter_rows_by_season(load_schedule_rows_all())
+
+
 def load_schedule_rows_with_index():
-    rows = load_schedule_rows()
-    return [(index, row) for index, row in enumerate(rows, start=2)]
+    selected_season = get_active_season()
+    rows = load_schedule_rows_all()
+    return [
+        (index, row)
+        for index, row in enumerate(rows, start=2)
+        if row_matches_season(row, selected_season)
+    ]
 
 
-def load_signup_rows():
+def load_signup_rows_all():
     return get_cached_records(SIGNUP_SHEET_NAME, get_signup_sheet)
 
 
-def load_matches_rows():
+def load_signup_rows():
+    return filter_rows_by_season(load_signup_rows_all())
+
+
+def load_signup_rows_with_index():
+    selected_season = get_active_season()
+    rows = load_signup_rows_all()
+    return [
+        (index, row)
+        for index, row in enumerate(rows, start=2)
+        if row_matches_season(row, selected_season)
+    ]
+
+
+def load_matches_rows_all():
     return get_cached_records(MATCHES_SHEET_NAME, get_matches_sheet)
 
 
+def load_matches_rows():
+    return filter_rows_by_season(load_matches_rows_all())
+
+
 def load_matches_rows_with_index():
-    rows = load_matches_rows()
-    return [(index, row) for index, row in enumerate(rows, start=2)]
+    selected_season = get_active_season()
+    rows = load_matches_rows_all()
+    return [
+        (index, row)
+        for index, row in enumerate(rows, start=2)
+        if row_matches_season(row, selected_season)
+    ]
 
 
-def load_players_rows():
+def load_players_rows_all():
     return get_cached_records(PLAYERS_SHEET_NAME, get_players_sheet)
 
 
+def load_players_rows():
+    return filter_rows_by_season(load_players_rows_all())
+
+
 def load_players_rows_with_index():
-    rows = load_players_rows()
-    return [(index, row) for index, row in enumerate(rows, start=2)]
+    selected_season = get_active_season()
+    rows = load_players_rows_all()
+    return [
+        (index, row)
+        for index, row in enumerate(rows, start=2)
+        if row_matches_season(row, selected_season)
+    ]
 
 
 def append_signup(slot_id: str, user_id: int, display_name: str):
@@ -388,6 +493,7 @@ def append_signup(slot_id: str, user_id: int, display_name: str):
             now,
             "Ja",
             "signed_up",
+            get_active_season(),
         ],
         value_input_option="USER_ENTERED",
     )
@@ -1478,14 +1584,14 @@ def user_already_signed_up(slot_id: str, user_id: int) -> bool:
 
 def cancel_signup(slot_id: str, user_id: int) -> bool:
     sheet = get_signup_sheet()
-    rows = load_signup_rows()
+    rows_with_index = load_signup_rows_with_index()
 
     status_col = get_header_index(sheet, SIGNUP_SHEET_NAME, "Status")
 
     if not status_col:
         return False
 
-    for row_index, row in enumerate(rows, start=2):
+    for row_index, row in rows_with_index:
         if (
             normalize_text(row.get("Slot ID")) == slot_id
             and normalize_text(row.get("Discord ID")) == str(user_id)
@@ -1650,6 +1756,7 @@ def build_match_rows(slot_id: str, schedule_row: dict, pairings: list[list[dict]
                 "",
                 "created",
                 "Nein",
+                get_active_season_for_row(schedule_row),
             ]
         )
 
@@ -1964,6 +2071,7 @@ def int_value(value) -> int:
 def update_players_from_match(match_row: dict):
     players_sheet = get_players_sheet()
     existing_rows = load_players_rows_with_index()
+    active_season = get_active_season_for_row(match_row)
 
     existing_by_id = {
         normalize_text(row.get("Discord ID")): (row_index, row)
@@ -2006,9 +2114,10 @@ def update_players_from_match(match_row: dict):
                 new_forfeits,
                 ", ".join(opponents),
                 slot_id,
+                active_season,
             ]
 
-            players_sheet.update(f"A{row_index}:J{row_index}", [values])
+            players_sheet.update(f"A{row_index}:K{row_index}", [values])
             invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
         else:
@@ -2024,6 +2133,7 @@ def update_players_from_match(match_row: dict):
                     1 if time_value.upper() == "FF" else 0,
                     ", ".join(opponents),
                     slot_id,
+                    active_season,
                 ],
                 value_input_option="USER_ENTERED",
             )
@@ -2032,23 +2142,7 @@ def update_players_from_match(match_row: dict):
     sort_players_sheet()
 
 
-def sort_players_sheet():
-    sheet = get_players_sheet()
-    rows = load_players_rows()
-
-    if not rows:
-        return
-
-    rows.sort(
-        key=lambda r: (
-            -int_value(r.get("Punkte")),
-            -int_value(r.get("Siege")),
-            -int_value(r.get("Remis")),
-            int_value(r.get("Forfeits")),
-            normalize_text(r.get("Discord Display Name")).lower(),
-        )
-    )
-
+def build_player_sheet_values(rows: list[dict]) -> list[list]:
     values = []
 
     for row in rows:
@@ -2064,27 +2158,59 @@ def sort_players_sheet():
                 int_value(row.get("Forfeits")),
                 normalize_text(row.get("Letzter Gegner")),
                 normalize_text(row.get("Letzter Start")),
+                normalize_text(row.get("Season")),
             ]
         )
 
+    return values
+
+
+def sort_players_sheet():
+    sheet = get_players_sheet()
+    active_season = get_active_season()
+    rows = load_players_rows_all()
+
+    if not rows:
+        return
+
+    active_rows = [row for row in rows if row_matches_season(row, active_season)]
+    other_rows = [row for row in rows if not row_matches_season(row, active_season)]
+
+    active_rows.sort(
+        key=lambda r: (
+            -int_value(r.get("Punkte")),
+            -int_value(r.get("Siege")),
+            -int_value(r.get("Remis")),
+            int_value(r.get("Forfeits")),
+            normalize_text(r.get("Discord Display Name")).lower(),
+        )
+    )
+
+    values = build_player_sheet_values(active_rows + other_rows)
+
     sheet.resize(rows=max(1000, len(values) + 1), cols=len(PLAYERS_HEADERS))
-    sheet.update("A2:J", values)
+    sheet.batch_clear(["A2:K1000"])
+
+    if values:
+        sheet.update("A2:K", values, value_input_option="USER_ENTERED")
+
+    invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
 
-
-
-def rebuild_players_from_published_matches() -> dict[str, int]:
+def rebuild_players_from_published_matches(season: str | None = None) -> dict[str, int]:
     """
-    Baut die Players-Tabelle vollständig aus Matches neu auf.
+    Baut die Players-Tabelle vollständig aus Matches einer Season neu auf.
 
     Grundlage:
+    - Matches.Season = season oder ACTIVE_SEASON
     - Matches.Status = finished
     - Matches.Veröffentlicht = Ja
 
     Diese Funktion ist idempotent:
     Sie kann mehrfach ausgeführt werden, ohne Punkte doppelt zu zählen.
     """
-    matches = load_matches_rows()
+    selected_season = normalize_text(season) or get_active_season()
+    matches = filter_rows_by_season(load_matches_rows_all(), selected_season)
     standings: dict[str, dict] = {}
     processed_matches = 0
     processed_player_results = 0
@@ -2135,6 +2261,7 @@ def rebuild_players_from_published_matches() -> dict[str, int]:
                     "Forfeits": 0,
                     "Letzter Gegner": "",
                     "Letzter Start": "",
+                    "Season": selected_season,
                 }
 
             row = standings[player_id]
@@ -2154,9 +2281,9 @@ def rebuild_players_from_published_matches() -> dict[str, int]:
         if match_counted:
             processed_matches += 1
 
-    rows = list(standings.values())
+    active_rows = list(standings.values())
 
-    rows.sort(
+    active_rows.sort(
         key=lambda r: (
             -int_value(r.get("Punkte")),
             -int_value(r.get("Siege")),
@@ -2166,35 +2293,22 @@ def rebuild_players_from_published_matches() -> dict[str, int]:
         )
     )
 
-    values = []
-
-    for row in rows:
-        values.append(
-            [
-                normalize_text(row.get("Discord ID")),
-                normalize_text(row.get("Discord Display Name")),
-                int_value(row.get("Punkte")),
-                int_value(row.get("Starts")),
-                int_value(row.get("Siege")),
-                int_value(row.get("Remis")),
-                int_value(row.get("Niederlagen")),
-                int_value(row.get("Forfeits")),
-                normalize_text(row.get("Letzter Gegner")),
-                normalize_text(row.get("Letzter Start")),
-            ]
-        )
+    existing_rows = load_players_rows_all()
+    other_rows = [row for row in existing_rows if not row_matches_season(row, selected_season)]
+    values = build_player_sheet_values(active_rows + other_rows)
 
     sheet = get_players_sheet()
     sheet.resize(rows=max(1000, len(values) + 1), cols=len(PLAYERS_HEADERS))
-    sheet.batch_clear(["A2:J1000"])
+    sheet.batch_clear(["A2:K1000"])
 
     if values:
-        sheet.update("A2:J", values, value_input_option="USER_ENTERED")
+        sheet.update("A2:K", values, value_input_option="USER_ENTERED")
 
     invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
     return {
-        "players": len(values),
+        "season": selected_season,
+        "players": len(active_rows),
         "matches": processed_matches,
         "player_results": processed_player_results,
     }
@@ -2214,10 +2328,11 @@ def build_standings_messages() -> list[str]:
     )
 
     timestamp = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+    active_season = get_active_season()
 
     if not rows:
         return [
-            "**TFNL Gesamttabelle**\n"
+            f"**TFNL Gesamttabelle — {active_season}**\n"
             f"Stand: `{timestamp} Uhr`\n\n"
             "Noch keine Einträge."
         ]
@@ -2244,7 +2359,7 @@ def build_standings_messages() -> list[str]:
     )
 
     return [
-        "**TFNL Gesamttabelle**\n"
+        f"**TFNL Gesamttabelle — {get_active_season()}**\n"
         f"Stand: `{timestamp} Uhr`\n"
         f"{table}"
     ]
@@ -2528,6 +2643,171 @@ def build_public_race_participants_embed() -> discord.Embed:
     embed.set_footer(text=f"Bleibt bis Slot-Ende sichtbar | Aktualisiert: {now} Uhr")
     return embed
 
+
+
+# =========================================================
+# SEASON ARCHIVE
+# =========================================================
+
+def get_archive_sheet_name(source_sheet_name: str) -> str:
+    mapping = {
+        SCHEDULE_SHEET_NAME: ARCHIVE_SCHEDULE_SHEET_NAME,
+        SIGNUP_SHEET_NAME: ARCHIVE_SIGNUP_SHEET_NAME,
+        MATCHES_SHEET_NAME: ARCHIVE_MATCHES_SHEET_NAME,
+        PLAYERS_SHEET_NAME: ARCHIVE_PLAYERS_SHEET_NAME,
+    }
+    return mapping[source_sheet_name]
+
+
+def get_source_sheet_and_headers(source_sheet_name: str):
+    if source_sheet_name == SCHEDULE_SHEET_NAME:
+        sheet = get_schedule_sheet()
+    elif source_sheet_name == SIGNUP_SHEET_NAME:
+        sheet = get_signup_sheet()
+    elif source_sheet_name == MATCHES_SHEET_NAME:
+        sheet = get_matches_sheet()
+    elif source_sheet_name == PLAYERS_SHEET_NAME:
+        sheet = get_players_sheet()
+    else:
+        raise RuntimeError(f"Unbekanntes Sheet: {source_sheet_name}")
+
+    headers = sheet.row_values(1)
+
+    if "Season" not in headers:
+        headers.append("Season")
+        sheet.update("A1", [headers])
+        HEADER_CACHE[source_sheet_name] = headers
+
+    return sheet, headers
+
+
+def get_or_create_archive_sheet(source_sheet_name: str, headers: list[str]):
+    spreadsheet = get_tfnl_spreadsheet()
+    archive_name = get_archive_sheet_name(source_sheet_name)
+
+    try:
+        sheet = spreadsheet.worksheet(archive_name)
+    except gspread.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(
+            title=archive_name,
+            rows=1000,
+            cols=max(len(headers), 1),
+        )
+
+    existing_headers = sheet.row_values(1)
+
+    if existing_headers != headers:
+        sheet.update("A1", [headers])
+
+    return sheet
+
+
+def get_archive_unique_key(source_sheet_name: str, row: dict, season: str) -> str:
+    if source_sheet_name == SCHEDULE_SHEET_NAME:
+        return f"{season}|{normalize_text(row.get('Slot ID'))}"
+
+    if source_sheet_name == SIGNUP_SHEET_NAME:
+        return f"{season}|{normalize_text(row.get('Slot ID'))}|{normalize_text(row.get('Discord ID'))}"
+
+    if source_sheet_name == MATCHES_SHEET_NAME:
+        return f"{season}|{normalize_text(row.get('Match ID'))}"
+
+    if source_sheet_name == PLAYERS_SHEET_NAME:
+        return f"{season}|{normalize_text(row.get('Discord ID'))}"
+
+    return f"{season}|{repr(row)}"
+
+
+def get_all_rows_for_sheet(source_sheet_name: str) -> list[dict]:
+    if source_sheet_name == SCHEDULE_SHEET_NAME:
+        return load_schedule_rows_all()
+
+    if source_sheet_name == SIGNUP_SHEET_NAME:
+        return load_signup_rows_all()
+
+    if source_sheet_name == MATCHES_SHEET_NAME:
+        return load_matches_rows_all()
+
+    if source_sheet_name == PLAYERS_SHEET_NAME:
+        return load_players_rows_all()
+
+    return []
+
+
+def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_from_live: bool = False) -> dict[str, int]:
+    source_sheet, headers = get_source_sheet_and_headers(source_sheet_name)
+    archive_sheet = get_or_create_archive_sheet(source_sheet_name, headers)
+    all_rows = get_all_rows_for_sheet(source_sheet_name)
+    archive_rows = archive_sheet.get_all_records()
+
+    existing_keys = {
+        get_archive_unique_key(source_sheet_name, row, season)
+        for row in archive_rows
+        if row_matches_season(row, season)
+    }
+
+    values_to_append = []
+    rows_to_delete = []
+    copied = 0
+    skipped = 0
+
+    for row_index, row in enumerate(all_rows, start=2):
+        if not row_matches_season(row, season):
+            continue
+
+        key = get_archive_unique_key(source_sheet_name, row, season)
+
+        if key in existing_keys:
+            skipped += 1
+        else:
+            values_to_append.append([normalize_text(row.get(header)) for header in headers])
+            existing_keys.add(key)
+            copied += 1
+
+        if delete_from_live:
+            rows_to_delete.append(row_index)
+
+    if values_to_append:
+        archive_sheet.append_rows(values_to_append, value_input_option="USER_ENTERED")
+
+    deleted = 0
+
+    if delete_from_live and rows_to_delete:
+        for row_index in sorted(rows_to_delete, reverse=True):
+            source_sheet.delete_rows(row_index)
+            deleted += 1
+
+    invalidate_sheet_cache(source_sheet_name)
+    invalidate_sheet_cache(get_archive_sheet_name(source_sheet_name))
+
+    return {
+        "copied": copied,
+        "skipped": skipped,
+        "deleted": deleted,
+    }
+
+
+def archive_season(season: str, delete_from_live: bool = False) -> dict[str, dict[str, int]]:
+    selected_season = normalize_text(season)
+
+    if not selected_season:
+        raise RuntimeError("Season fehlt.")
+
+    stats = {}
+
+    for source_sheet_name in (
+        SCHEDULE_SHEET_NAME,
+        SIGNUP_SHEET_NAME,
+        MATCHES_SHEET_NAME,
+        PLAYERS_SHEET_NAME,
+    ):
+        stats[source_sheet_name] = archive_sheet_rows_for_season(
+            source_sheet_name=source_sheet_name,
+            season=selected_season,
+            delete_from_live=delete_from_live,
+        )
+
+    return stats
 
 
 # =========================================================
@@ -4208,6 +4488,76 @@ class LadderCog(commands.Cog):
 
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.command(
+        name="tfnl_archive_season",
+        description="Archiviert eine TFNL-Season in Archive-Sheets.",
+    )
+    @app_commands.describe(
+        season="Season-Wert, z. B. Test-01",
+        delete_from_live="Wenn True: Zeilen nach dem Kopieren aus Live-Sheets löschen. Standard: False.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def tfnl_archive_season(
+        self,
+        interaction: discord.Interaction,
+        season: str,
+        delete_from_live: bool = False,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        selected_season = normalize_text(season)
+
+        if not selected_season:
+            await interaction.followup.send("Season fehlt.", ephemeral=True)
+            return
+
+        try:
+            async with self.sheet_write_lock:
+                stats = archive_season(selected_season, delete_from_live=delete_from_live)
+
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Archivieren der Season `{selected_season}`:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        lines = [
+            f"Season `{selected_season}` wurde archiviert.",
+            f"Aus Live-Sheets gelöscht: `{'Ja' if delete_from_live else 'Nein'}`",
+            "",
+        ]
+
+        for sheet_name, sheet_stats in stats.items():
+            lines.append(
+                f"{sheet_name}: kopiert `{sheet_stats['copied']}`, übersprungen `{sheet_stats['skipped']}`, gelöscht `{sheet_stats['deleted']}`"
+            )
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    @tfnl_archive_season.error
+    async def tfnl_archive_season_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
         name="tfnlrebuild",
         description="Baut die TFNL-Players-Tabelle vollständig aus veröffentlichten Matches neu auf.",
     )
@@ -4229,7 +4579,7 @@ class LadderCog(commands.Cog):
             return
 
         await interaction.followup.send(
-            "TFNL-Gesamttabelle wurde aus veröffentlichten Matches neu aufgebaut.\n"
+            f"TFNL-Gesamttabelle wurde aus veröffentlichten Matches neu aufgebaut. Season: `{stats['season']}`\n"
             f"Matches verarbeitet: `{stats['matches']}`\n"
             f"Spieler-Ergebnisse verarbeitet: `{stats['player_results']}`\n"
             f"Spieler in Tabelle: `{stats['players']}`",
