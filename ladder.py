@@ -2734,10 +2734,36 @@ def get_all_rows_for_sheet(source_sheet_name: str) -> list[dict]:
     return []
 
 
+def get_source_rows_with_real_indexes(source_sheet, headers: list[str]) -> list[tuple[int, dict]]:
+    values = source_sheet.get_all_values()
+
+    if len(values) <= 1:
+        return []
+
+    rows = []
+
+    for row_index, raw_values in enumerate(values[1:], start=2):
+        if not any(normalize_text(value) for value in raw_values):
+            continue
+
+        row = {}
+
+        for col_index, header in enumerate(headers):
+            row[header] = raw_values[col_index] if col_index < len(raw_values) else ""
+
+        rows.append((row_index, row))
+
+    return rows
+
+
 def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_from_live: bool = False) -> dict[str, int]:
     source_sheet, headers = get_source_sheet_and_headers(source_sheet_name)
     archive_sheet = get_or_create_archive_sheet(source_sheet_name, headers)
-    all_rows = get_all_rows_for_sheet(source_sheet_name)
+
+    # Wichtig:
+    # Für die Archivierung bewusst keine Cache-Funktion nutzen.
+    # Sonst können frisch eingetragene Season-Werte übersehen werden.
+    source_rows = get_source_rows_with_real_indexes(source_sheet, headers)
     archive_rows = archive_sheet.get_all_records()
 
     existing_keys = {
@@ -2750,11 +2776,13 @@ def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_fr
     rows_to_delete = []
     copied = 0
     skipped = 0
+    matched = 0
 
-    for row_index, row in enumerate(all_rows, start=2):
+    for row_index, row in source_rows:
         if not row_matches_season(row, season):
             continue
 
+        matched += 1
         key = get_archive_unique_key(source_sheet_name, row, season)
 
         if key in existing_keys:
@@ -2781,6 +2809,7 @@ def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_fr
     invalidate_sheet_cache(get_archive_sheet_name(source_sheet_name))
 
     return {
+        "matched": matched,
         "copied": copied,
         "skipped": skipped,
         "deleted": deleted,
@@ -4529,7 +4558,7 @@ class LadderCog(commands.Cog):
 
         for sheet_name, sheet_stats in stats.items():
             lines.append(
-                f"{sheet_name}: kopiert `{sheet_stats['copied']}`, übersprungen `{sheet_stats['skipped']}`, gelöscht `{sheet_stats['deleted']}`"
+                f"{sheet_name}: gefunden `{sheet_stats.get('matched', 0)}`, kopiert `{sheet_stats['copied']}`, übersprungen `{sheet_stats['skipped']}`, gelöscht `{sheet_stats['deleted']}`"
             )
 
         await interaction.followup.send("\n".join(lines), ephemeral=True)
