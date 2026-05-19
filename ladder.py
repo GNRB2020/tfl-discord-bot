@@ -2756,6 +2756,58 @@ def get_source_rows_with_real_indexes(source_sheet, headers: list[str]) -> list[
     return rows
 
 
+def group_contiguous_row_indexes(row_indexes: list[int]) -> list[tuple[int, int]]:
+    if not row_indexes:
+        return []
+
+    sorted_rows = sorted(set(row_indexes))
+    groups = []
+    start = sorted_rows[0]
+    previous = sorted_rows[0]
+
+    for row_index in sorted_rows[1:]:
+        if row_index == previous + 1:
+            previous = row_index
+            continue
+
+        groups.append((start, previous))
+        start = row_index
+        previous = row_index
+
+    groups.append((start, previous))
+    return groups
+
+
+def delete_rows_batch(sheet, row_indexes: list[int]) -> int:
+    if not row_indexes:
+        return 0
+
+    sheet_id = int(getattr(sheet, "id", 0))
+    spreadsheet = get_tfnl_spreadsheet()
+
+    requests = []
+
+    # Von unten nach oben löschen, damit sich die noch folgenden Zeilenindizes nicht verschieben.
+    for start_row, end_row in sorted(group_contiguous_row_indexes(row_indexes), reverse=True):
+        requests.append(
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": start_row - 1,
+                        "endIndex": end_row,
+                    }
+                }
+            }
+        )
+
+    if requests:
+        spreadsheet.batch_update({"requests": requests})
+
+    return len(set(row_indexes))
+
+
 def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_from_live: bool = False) -> dict[str, int]:
     source_sheet, headers = get_source_sheet_and_headers(source_sheet_name)
     archive_sheet = get_or_create_archive_sheet(source_sheet_name, headers)
@@ -2801,9 +2853,7 @@ def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_fr
     deleted = 0
 
     if delete_from_live and rows_to_delete:
-        for row_index in sorted(rows_to_delete, reverse=True):
-            source_sheet.delete_rows(row_index)
-            deleted += 1
+        deleted = delete_rows_batch(source_sheet, rows_to_delete)
 
     invalidate_sheet_cache(source_sheet_name)
     invalidate_sheet_cache(get_archive_sheet_name(source_sheet_name))
