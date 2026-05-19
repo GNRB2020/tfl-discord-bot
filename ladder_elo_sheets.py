@@ -644,6 +644,13 @@ def clear_elo_tables():
 
 
 def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]) -> dict:
+    """
+    Baut ELO komplett neu auf.
+
+    Wichtig:
+    Diese Funktion arbeitet absichtlich speicherbasiert und schreibt am Ende gesammelt.
+    Dadurch werden beim Rebuild nicht pro Match mehrfach Ratings/History aus Google Sheets gelesen.
+    """
     ensure_ladder_elo_sheets()
     clear_elo_tables()
 
@@ -653,9 +660,42 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
         if normalize_text(row.get("Slot ID"))
     }
 
+    ratings: dict[tuple[str, str, str, str], dict] = {}
+    history_rows: list[list] = []
+    created_at = now_text()
+
+    scopes = [
+        SCOPE_SEASON_OVERALL,
+        SCOPE_SEASON_MODE,
+        SCOPE_ALLTIME_OVERALL,
+        SCOPE_ALLTIME_MODE,
+    ]
+
     processed_matches = 0
     processed_events = 0
     skipped_matches = 0
+
+    def get_rating_state(player_id: str, player_name: str, season: str, mode: str, scope: str) -> dict:
+        selected_season, selected_mode = scope_key_parts(scope, season, mode)
+        key = (normalize_text(player_id), selected_season, selected_mode, scope)
+
+        if key not in ratings:
+            ratings[key] = {
+                "player_id": normalize_text(player_id),
+                "player_name": normalize_text(player_name),
+                "season": selected_season,
+                "mode": selected_mode,
+                "scope": scope,
+                "elo": float(START_ELO),
+                "wins": 0,
+                "draws": 0,
+                "lose": 0,
+            }
+
+        if normalize_text(player_name):
+            ratings[key]["player_name"] = normalize_text(player_name)
+
+        return ratings[key]
 
     for match_row in matches_rows:
         if normalize_text(match_row.get("Veröffentlicht")).lower() != "ja":
@@ -664,21 +704,170 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
         if normalize_text(match_row.get("Status")).lower() != "finished":
             continue
 
+        match_id = normalize_text(match_row.get("Match ID"))
         slot_id = normalize_text(match_row.get("Slot ID"))
-        schedule_row = schedule_by_slot.get(slot_id)
+        race_type = normalize_text(match_row.get("Matchtyp"))
+        schedule_row = schedule_by_slot.get(slot_id, {})
 
-        result = process_match_elo(match_row, schedule_row=schedule_row)
+        season = (
+            normalize_text(match_row.get("Season"))
+            or normalize_text(schedule_row.get("Season"))
+            or get_active_season()
+        )
+        mode = (
+            normalize_text(schedule_row.get("Modus"))
+            or normalize_text(match_row.get("Modus"))
+            or "Unknown"
+        )
+        date_text = normalize_text(schedule_row.get("Datum"))
 
-        if result.get("processed", 0) > 0:
+        players = parse_match_players(match_row)
+
+        if len(players) < 2:
+            skipped_matches += 1
+            continue
+
+        match_had_events = False
+
+        for scope in scopes:
+            old_elos = {}
+
+            for player in players:
+                state = get_rating_state(
+                    player_id=player["player_id"],
+                    player_name=player["name"],
+                    season=season,
+                    mode=mode,
+                    scope=scope,
+                )
+                old_elos[player["player_id"]] = float(state["elo"])
+
+            for player in players:
+                opponents = [
+                    other
+                    for other in players
+                    if other["player_id"] != player["player_id"]
+                ]
+
+                if not opponents:
+                    continue
+
+                state = get_rating_state(
+                    player_id=player["player_id"],
+                    player_name=player["name"],
+                    season=season,
+                    mode=mode,
+                    scope=scope,
+                )
+
+                opponent_elo = (
+                    sum(old_elos[other["player_id"]] for other in opponents)
+                    / len(opponents)
+                )
+                elo_before = old_elos[player["player_id"]]
+                elo_after, elo_change = calculate_new_elo(
+                    elo_before,
+                    opponent_elo,
+                    player["score"],
+                )
+
+                result_type = player["result_type"]
+
+                if result_type == "Sieg":
+                    state["wins"] += 1
+                elif result_type == "Remis":
+                    state["draws"] += 1
+                else:
+                    state["lose"] += 1
+
+                state["elo"] = elo_after
+
+                opponent_info = ", ".join(
+                    f"{opponent['name']} ({round(old_elos[opponent['player_id']], 1)})"
+                    for opponent in opponents
+                )
+
+                history_rows.append(
+                    [
+                        f"{match_id}:{scope}:{player['player_id']}",
+                        season,
+                        slot_id,
+                        date_text,
+                        mode,
+                        race_type,
+                        player["player_id"],
+                        player["name"],
+                        opponent_info,
+                        player["placement"],
+                        player["score"],
+                        scope,
+                        format_elo(elo_before),
+                        format_elo(opponent_elo),
+                        format_elo(elo_after),
+                        f"{elo_change:+.1f}",
+                        result_type,
+                        created_at,
+                    ]
+                )
+
+                processed_events += 1
+                match_had_events = True
+
+        if match_had_events:
             processed_matches += 1
-            processed_events += int(result.get("processed", 0))
         else:
             skipped_matches += 1
+
+    rating_rows: list[list] = []
+
+    for key in sorted(ratings.keys(), key=lambda item: (item[3], item[1], item[2], item[0])):
+        state = ratings[key]
+        games = int(state["wins"]) + int(state["draws"]) + int(state["lose"])
+        winrate = calculate_winrate(
+            int(state["wins"]),
+            int(state["draws"]),
+            int(state["lose"]),
+        )
+
+        rating_rows.append(
+            [
+                state["player_id"],
+                state["player_name"],
+                state["season"],
+                state["mode"],
+                state["scope"],
+                format_elo(state["elo"]),
+                state["wins"],
+                state["draws"],
+                state["lose"],
+                games,
+                f"{winrate:.1f}",
+                created_at,
+            ]
+        )
+
+    ratings_sheet = get_ratings_sheet()
+    history_sheet = get_history_sheet()
+
+    if rating_rows:
+        ratings_sheet.append_rows(rating_rows, value_input_option="USER_ENTERED")
+
+    if history_rows:
+        # In sinnvollen Blöcken schreiben, damit Google Sheets nicht an Payload-Größen scheitert.
+        chunk_size = 500
+
+        for index in range(0, len(history_rows), chunk_size):
+            history_sheet.append_rows(
+                history_rows[index:index + chunk_size],
+                value_input_option="USER_ENTERED",
+            )
 
     return {
         "processed_matches": processed_matches,
         "processed_events": processed_events,
         "skipped_matches": skipped_matches,
+        "rating_rows": len(rating_rows),
+        "history_rows": len(history_rows),
     }
 
 
