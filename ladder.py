@@ -14,6 +14,7 @@ import yaml
 from discord import app_commands
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
+from ladder_elo_sheets import ensure_ladder_elo_sheets
 
 
 # =========================================================
@@ -3020,6 +3021,13 @@ class LadderCog(commands.Cog):
         self.standings_publish_lock = asyncio.Lock()
         self.sheet_write_lock = asyncio.Lock()
 
+        try:
+            self.elo_sheet_setup_status = ensure_ladder_elo_sheets()
+            print(f"[TFNL ELO] Sheet-Setup OK: {self.elo_sheet_setup_status}")
+        except Exception as e:
+            self.elo_sheet_setup_status = None
+            print(f"[TFNL ELO] Sheet-Setup fehlgeschlagen: {repr(e)}")
+
         if not self.update_schedule_channel.is_running():
             self.update_schedule_channel.start()
 
@@ -4530,6 +4538,60 @@ class LadderCog(commands.Cog):
     # =====================================================
     # COMMANDS
     # =====================================================
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="tfnl_elo_setup",
+        description="Prüft und erstellt die benötigten TFNL-ELO-Sheets und Header.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def tfnl_elo_setup(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            status = ensure_ladder_elo_sheets()
+            self.elo_sheet_setup_status = status
+        except Exception as e:
+            await interaction.followup.send(
+                f"TFNL-ELO-Sheet-Setup fehlgeschlagen:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        added = status.get("season_columns_added") or []
+        added_text = ", ".join(added) if added else "keine"
+        sheet_text = ", ".join(status.get("sheets") or [])
+
+        await interaction.followup.send(
+            "TFNL-ELO-Sheet-Setup erfolgreich.\n"
+            f"Aktive Saison: `{status.get('active_season')}`\n"
+            f"Geprüfte/angelegte Sheets: `{sheet_text}`\n"
+            f"Neu ergänzte Season-Spalten: `{added_text}`\n"
+            f"Zeitpunkt: `{status.get('checked_at')}`",
+            ephemeral=True,
+        )
+
+    @tfnl_elo_setup.error
+    async def tfnl_elo_setup_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            return
+
+        raise error
+
 
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.command(
