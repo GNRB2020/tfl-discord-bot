@@ -14,6 +14,16 @@ import yaml
 from discord import app_commands
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
+
+from sheet_guard import (
+    get_all_records_cached,
+    get_all_values_cached,
+    row_values_cached,
+    sheet_write_call,
+    invalidate_cache as invalidate_global_sheet_cache,
+    should_log_quota_warning,
+    seconds_until_quota_retry,
+)
 from ladder_elo import create_elo_pairings
 from ladder_elo_sheets import (
     SCOPE_SEASON_OVERALL,
@@ -160,35 +170,33 @@ SCOPE = [
 
 HEADER_CACHE = {}
 WORKSHEET_CACHE = {}
-SHEET_READ_CACHE = {}
+
 SHEET_READ_CACHE_TTL_SECONDS = int(
-    os.getenv("TFNL_SHEET_CACHE_TTL_SECONDS", "15").strip()
+    os.getenv("TFNL_SHEET_CACHE_TTL_SECONDS", "45").strip()
 )
 
 
 def invalidate_sheet_cache(sheet_name: str | None = None):
     if sheet_name is None:
-        SHEET_READ_CACHE.clear()
+        invalidate_global_sheet_cache()
+        HEADER_CACHE.clear()
         return
 
-    SHEET_READ_CACHE.pop(sheet_name, None)
+    invalidate_global_sheet_cache(f"records:{sheet_name}")
+    invalidate_global_sheet_cache(f"values:{sheet_name}")
+    invalidate_global_sheet_cache(f"row:{sheet_name}:")
+    invalidate_global_sheet_cache(f"col:{sheet_name}:")
+    invalidate_global_sheet_cache(f"cell:{sheet_name}:")
 
 
 def get_cached_records(sheet_name: str, sheet_getter, ttl_seconds: int = SHEET_READ_CACHE_TTL_SECONDS):
-    now = datetime.now(BERLIN_TZ).timestamp()
-    cached = SHEET_READ_CACHE.get(sheet_name)
-
-    if cached:
-        cached_at, rows = cached
-
-        if now - cached_at <= ttl_seconds:
-            return deepcopy(rows)
-
-    rows = sheet_getter().get_all_records()
-    SHEET_READ_CACHE[sheet_name] = (now, deepcopy(rows))
-    return rows
-
-
+    return get_all_records_cached(
+        sheet_getter,
+        sheet_name=sheet_name,
+        ttl_seconds=ttl_seconds,
+    )
+# =========================================================
+# MODE / PRESET MAPPING
 
 # =========================================================
 # MODE / PRESET MAPPING
@@ -275,15 +283,28 @@ def ensure_header_column(sheet, sheet_name: str, column_name: str):
     headers = HEADER_CACHE.get(sheet_name)
 
     if headers is None:
-        headers = sheet.row_values(1)
+        headers = row_values_cached(
+            lambda: sheet,
+            sheet_name=sheet_name,
+            row=1,
+            ttl_seconds=300,
+        )
         HEADER_CACHE[sheet_name] = headers
 
     if column_name not in headers:
         next_col = len(headers) + 1
-        sheet.update_cell(1, next_col, column_name)
+
+        sheet_write_call(
+            lambda: sheet.update_cell(1, next_col, column_name),
+            invalidate_prefixes=[
+                f"records:{sheet_name}",
+                f"values:{sheet_name}",
+                f"row:{sheet_name}:",
+            ],
+        )
+
         headers.append(column_name)
         HEADER_CACHE[sheet_name] = headers
-
 
 def get_or_create_worksheet(
     spreadsheet,
@@ -302,17 +323,28 @@ def get_or_create_worksheet(
     except gspread.WorksheetNotFound:
         sheet = spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
-    existing_headers = sheet.row_values(1)
+    existing_headers = row_values_cached(
+        lambda: sheet,
+        sheet_name=title,
+        row=1,
+        ttl_seconds=300,
+    )
 
     if existing_headers != headers:
-        sheet.update("A1", [headers])
+        sheet_write_call(
+            lambda: sheet.update("A1", [headers]),
+            invalidate_prefixes=[
+                f"records:{title}",
+                f"values:{title}",
+                f"row:{title}:",
+            ],
+        )
         HEADER_CACHE[title] = headers
     else:
         HEADER_CACHE[title] = existing_headers
 
     WORKSHEET_CACHE[title] = sheet
     return sheet
-
 
 def get_settings_sheet():
     spreadsheet = get_tfnl_spreadsheet()
@@ -334,10 +366,14 @@ def get_setting_value(key: str, default: str = "") -> str:
             value = normalize_text(row.get("Value"))
             return value or default
 
-    sheet.append_row([key, default], value_input_option="USER_ENTERED")
-    invalidate_sheet_cache(SETTINGS_SHEET_NAME)
+    sheet_write_call(
+        lambda: sheet.append_row([key, default], value_input_option="USER_ENTERED"),
+        invalidate_prefixes=[
+            f"records:{SETTINGS_SHEET_NAME}",
+            f"values:{SETTINGS_SHEET_NAME}",
+        ],
+    )
     return default
-
 
 def get_active_season() -> str:
     return get_setting_value("ACTIVE_SEASON", DEFAULT_ACTIVE_SEASON)
@@ -363,7 +399,12 @@ def get_active_season_for_row(row: dict | None = None) -> str:
 
 def get_header_index(sheet, sheet_name: str, column_name: str):
     if sheet_name not in HEADER_CACHE:
-        HEADER_CACHE[sheet_name] = sheet.row_values(1)
+        HEADER_CACHE[sheet_name] = row_values_cached(
+            lambda: sheet,
+            sheet_name=sheet_name,
+            row=1,
+            ttl_seconds=300,
+        )
 
     headers = HEADER_CACHE[sheet_name]
 
@@ -371,7 +412,6 @@ def get_header_index(sheet, sheet_name: str, column_name: str):
         return headers.index(column_name) + 1
     except ValueError:
         return None
-
 
 def get_schedule_sheet():
     cached_sheet = WORKSHEET_CACHE.get(SCHEDULE_SHEET_NAME)
@@ -499,26 +539,39 @@ def load_players_rows_with_index():
 def append_signup(slot_id: str, user_id: int, display_name: str):
     now = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M:%S")
 
-    get_signup_sheet().append_row(
-        [
-            slot_id,
-            str(user_id),
-            display_name,
-            now,
-            "Ja",
-            "signed_up",
-            get_active_season(),
+    sheet_write_call(
+        lambda: get_signup_sheet().append_row(
+            [
+                slot_id,
+                str(user_id),
+                display_name,
+                now,
+                "Ja",
+                "signed_up",
+                get_active_season(),
+            ],
+            value_input_option="USER_ENTERED",
+        ),
+        invalidate_prefixes=[
+            f"records:{SIGNUP_SHEET_NAME}",
+            f"values:{SIGNUP_SHEET_NAME}",
         ],
-        value_input_option="USER_ENTERED",
     )
-    invalidate_sheet_cache(SIGNUP_SHEET_NAME)
-
 
 def append_matches(match_rows: list[list]):
-    if match_rows:
-        get_matches_sheet().append_rows(match_rows, value_input_option="USER_ENTERED")
-        invalidate_sheet_cache(MATCHES_SHEET_NAME)
+    if not match_rows:
+        return
 
+    sheet_write_call(
+        lambda: get_matches_sheet().append_rows(
+            match_rows,
+            value_input_option="USER_ENTERED",
+        ),
+        invalidate_prefixes=[
+            f"records:{MATCHES_SHEET_NAME}",
+            f"values:{MATCHES_SHEET_NAME}",
+        ],
+    )
 
 def find_schedule_row(slot_id: str):
     for row_index, row in load_schedule_rows_with_index():
@@ -548,9 +601,15 @@ def update_schedule_cell(slot_id: str, column_name: str, value: str):
     if not col_index:
         return
 
-    sheet.update_cell(row_index, col_index, value)
-    invalidate_sheet_cache(SCHEDULE_SHEET_NAME)
-
+    sheet_write_call(
+        lambda: sheet.update_cell(row_index, col_index, value),
+        invalidate_prefixes=[
+            f"records:{SCHEDULE_SHEET_NAME}",
+            f"values:{SCHEDULE_SHEET_NAME}",
+            f"row:{SCHEDULE_SHEET_NAME}:",
+            f"cell:{SCHEDULE_SHEET_NAME}:",
+        ],
+    )
 
 def update_schedule_cells(slot_id: str, values: dict[str, str]):
     sheet = get_schedule_sheet()
@@ -575,9 +634,15 @@ def update_schedule_cells(slot_id: str, values: dict[str, str]):
         )
 
     if requests:
-        sheet.batch_update(requests, value_input_option="USER_ENTERED")
-        invalidate_sheet_cache(SCHEDULE_SHEET_NAME)
-
+        sheet_write_call(
+            lambda: sheet.batch_update(requests, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{SCHEDULE_SHEET_NAME}",
+                f"values:{SCHEDULE_SHEET_NAME}",
+                f"row:{SCHEDULE_SHEET_NAME}:",
+                f"cell:{SCHEDULE_SHEET_NAME}:",
+            ],
+        )
 
 def update_schedule_cell_by_row(row_index: int, column_name: str, value: str):
     sheet = get_schedule_sheet()
@@ -586,9 +651,15 @@ def update_schedule_cell_by_row(row_index: int, column_name: str, value: str):
     if not col_index:
         return
 
-    sheet.update_cell(row_index, col_index, value)
-    invalidate_sheet_cache(SCHEDULE_SHEET_NAME)
-
+    sheet_write_call(
+        lambda: sheet.update_cell(row_index, col_index, value),
+        invalidate_prefixes=[
+            f"records:{SCHEDULE_SHEET_NAME}",
+            f"values:{SCHEDULE_SHEET_NAME}",
+            f"row:{SCHEDULE_SHEET_NAME}:",
+            f"cell:{SCHEDULE_SHEET_NAME}:",
+        ],
+    )
 
 def normalize_slot_id_part(value: str) -> str:
     value = normalize_text(value).upper()
@@ -680,9 +751,15 @@ def update_match_cells(match_id: str, values: dict[str, str]):
         )
 
     if requests:
-        sheet.batch_update(requests, value_input_option="USER_ENTERED")
-        invalidate_sheet_cache(MATCHES_SHEET_NAME)
-
+        sheet_write_call(
+            lambda: sheet.batch_update(requests, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{MATCHES_SHEET_NAME}",
+                f"values:{MATCHES_SHEET_NAME}",
+                f"row:{MATCHES_SHEET_NAME}:",
+                f"cell:{MATCHES_SHEET_NAME}:",
+            ],
+        )
 
 def update_schedule_status(slot_id: str, status: str):
     update_schedule_cell(slot_id, "Status", status)
@@ -1611,12 +1688,18 @@ def cancel_signup(slot_id: str, user_id: int) -> bool:
             and normalize_text(row.get("Discord ID")) == str(user_id)
             and normalize_text(row.get("Status")).lower() == "signed_up"
         ):
-            sheet.update_cell(row_index, status_col, "cancelled")
-            invalidate_sheet_cache(SIGNUP_SHEET_NAME)
+            sheet_write_call(
+                lambda: sheet.update_cell(row_index, status_col, "cancelled"),
+                invalidate_prefixes=[
+                    f"records:{SIGNUP_SHEET_NAME}",
+                    f"values:{SIGNUP_SHEET_NAME}",
+                    f"row:{SIGNUP_SHEET_NAME}:",
+                    f"cell:{SIGNUP_SHEET_NAME}:",
+                ],
+            )
             return True
 
     return False
-
 
 def matches_already_created(slot_id: str) -> bool:
     rows = load_matches_rows()
@@ -2190,30 +2273,39 @@ def update_players_from_match(match_row: dict):
                 active_season,
             ]
 
-            players_sheet.update(f"A{row_index}:K{row_index}", [values])
-            invalidate_sheet_cache(PLAYERS_SHEET_NAME)
+            sheet_write_call(
+                lambda row_index=row_index, values=values: players_sheet.update(f"A{row_index}:K{row_index}", [values]),
+                invalidate_prefixes=[
+                    f"records:{PLAYERS_SHEET_NAME}",
+                    f"values:{PLAYERS_SHEET_NAME}",
+                    f"row:{PLAYERS_SHEET_NAME}:",
+                ],
+            )
 
         else:
-            players_sheet.append_row(
-                [
-                    player_id,
-                    player_name,
-                    points,
-                    1,
-                    1 if result_text == "Sieg" else 0,
-                    1 if result_text == "Remis" else 0,
-                    1 if result_text == "Niederlage" else 0,
-                    1 if time_value.upper() == "FF" else 0,
-                    ", ".join(opponents),
-                    slot_id,
-                    active_season,
+            values = [
+                player_id,
+                player_name,
+                points,
+                1,
+                1 if result_text == "Sieg" else 0,
+                1 if result_text == "Remis" else 0,
+                1 if result_text == "Niederlage" else 0,
+                1 if time_value.upper() == "FF" else 0,
+                ", ".join(opponents),
+                slot_id,
+                active_season,
+            ]
+
+            sheet_write_call(
+                lambda values=values: players_sheet.append_row(values, value_input_option="USER_ENTERED"),
+                invalidate_prefixes=[
+                    f"records:{PLAYERS_SHEET_NAME}",
+                    f"values:{PLAYERS_SHEET_NAME}",
                 ],
-                value_input_option="USER_ENTERED",
             )
-            invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
     sort_players_sheet()
-
 
 def build_player_sheet_values(rows: list[dict]) -> list[list]:
     values = []
@@ -2261,14 +2353,27 @@ def sort_players_sheet():
 
     values = build_player_sheet_values(active_rows + other_rows)
 
-    sheet.resize(rows=max(1000, len(values) + 1), cols=len(PLAYERS_HEADERS))
-    sheet.batch_clear(["A2:K1000"])
+    sheet_write_call(
+        lambda: sheet.resize(rows=max(1000, len(values) + 1), cols=len(PLAYERS_HEADERS)),
+        invalidate_prefixes=[],
+    )
+    sheet_write_call(
+        lambda: sheet.batch_clear(["A2:K1000"]),
+        invalidate_prefixes=[],
+    )
 
     if values:
-        sheet.update("A2:K", values, value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: sheet.update("A2:K", values, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{PLAYERS_SHEET_NAME}",
+                f"values:{PLAYERS_SHEET_NAME}",
+            ],
+        )
+    else:
+        invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
     invalidate_sheet_cache(PLAYERS_SHEET_NAME)
-
 
 def rebuild_players_from_published_matches(season: str | None = None) -> dict[str, int]:
     """
@@ -2371,11 +2476,23 @@ def rebuild_players_from_published_matches(season: str | None = None) -> dict[st
     values = build_player_sheet_values(active_rows + other_rows)
 
     sheet = get_players_sheet()
-    sheet.resize(rows=max(1000, len(values) + 1), cols=len(PLAYERS_HEADERS))
-    sheet.batch_clear(["A2:K1000"])
+    sheet_write_call(
+        lambda: sheet.resize(rows=max(1000, len(values) + 1), cols=len(PLAYERS_HEADERS)),
+        invalidate_prefixes=[],
+    )
+    sheet_write_call(
+        lambda: sheet.batch_clear(["A2:K1000"]),
+        invalidate_prefixes=[],
+    )
 
     if values:
-        sheet.update("A2:K", values, value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: sheet.update("A2:K", values, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{PLAYERS_SHEET_NAME}",
+                f"values:{PLAYERS_SHEET_NAME}",
+            ],
+        )
 
     invalidate_sheet_cache(PLAYERS_SHEET_NAME)
 
@@ -2774,15 +2891,26 @@ def get_source_sheet_and_headers(source_sheet_name: str):
     else:
         raise RuntimeError(f"Unbekanntes Sheet: {source_sheet_name}")
 
-    headers = sheet.row_values(1)
+    headers = row_values_cached(
+        lambda: sheet,
+        sheet_name=source_sheet_name,
+        row=1,
+        ttl_seconds=300,
+    )
 
     if "Season" not in headers:
         headers.append("Season")
-        sheet.update("A1", [headers])
+        sheet_write_call(
+            lambda: sheet.update("A1", [headers]),
+            invalidate_prefixes=[
+                f"records:{source_sheet_name}",
+                f"values:{source_sheet_name}",
+                f"row:{source_sheet_name}:",
+            ],
+        )
         HEADER_CACHE[source_sheet_name] = headers
 
     return sheet, headers
-
 
 def get_or_create_archive_sheet(source_sheet_name: str, headers: list[str]):
     spreadsheet = get_tfnl_spreadsheet()
@@ -2797,13 +2925,24 @@ def get_or_create_archive_sheet(source_sheet_name: str, headers: list[str]):
             cols=max(len(headers), 1),
         )
 
-    existing_headers = sheet.row_values(1)
+    existing_headers = row_values_cached(
+        lambda: sheet,
+        sheet_name=archive_name,
+        row=1,
+        ttl_seconds=300,
+    )
 
     if existing_headers != headers:
-        sheet.update("A1", [headers])
+        sheet_write_call(
+            lambda: sheet.update("A1", [headers]),
+            invalidate_prefixes=[
+                f"records:{archive_name}",
+                f"values:{archive_name}",
+                f"row:{archive_name}:",
+            ],
+        )
 
     return sheet
-
 
 def get_archive_unique_key(source_sheet_name: str, row: dict, season: str) -> str:
     if source_sheet_name == SCHEDULE_SHEET_NAME:
@@ -2838,7 +2977,13 @@ def get_all_rows_for_sheet(source_sheet_name: str) -> list[dict]:
 
 
 def get_source_rows_with_real_indexes(source_sheet, headers: list[str]) -> list[tuple[int, dict]]:
-    values = source_sheet.get_all_values()
+    sheet_name = getattr(source_sheet, "title", "source")
+    values = get_all_values_cached(
+        lambda: source_sheet,
+        sheet_name=sheet_name,
+        ttl_seconds=30,
+        force_refresh=True,
+    )
 
     if len(values) <= 1:
         return []
@@ -2857,7 +3002,6 @@ def get_source_rows_with_real_indexes(source_sheet, headers: list[str]) -> list[
         rows.append((row_index, row))
 
     return rows
-
 
 def group_contiguous_row_indexes(row_indexes: list[int]) -> list[tuple[int, int]]:
     if not row_indexes:
@@ -2906,20 +3050,30 @@ def delete_rows_batch(sheet, row_indexes: list[int]) -> int:
         )
 
     if requests:
-        spreadsheet.batch_update({"requests": requests})
+        sheet_write_call(
+            lambda: spreadsheet.batch_update({"requests": requests}),
+            invalidate_prefixes=[
+                f"records:{getattr(sheet, 'title', '')}",
+                f"values:{getattr(sheet, 'title', '')}",
+            ],
+        )
 
     return len(set(row_indexes))
-
 
 def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_from_live: bool = False) -> dict[str, int]:
     source_sheet, headers = get_source_sheet_and_headers(source_sheet_name)
     archive_sheet = get_or_create_archive_sheet(source_sheet_name, headers)
+    archive_name = get_archive_sheet_name(source_sheet_name)
 
     # Wichtig:
-    # Für die Archivierung bewusst keine Cache-Funktion nutzen.
-    # Sonst können frisch eingetragene Season-Werte übersehen werden.
+    # Für die Archivierung wird force_refresh genutzt, damit frisch eingetragene Season-Werte nicht übersehen werden.
     source_rows = get_source_rows_with_real_indexes(source_sheet, headers)
-    archive_rows = archive_sheet.get_all_records()
+    archive_rows = get_all_records_cached(
+        lambda: archive_sheet,
+        sheet_name=archive_name,
+        ttl_seconds=30,
+        force_refresh=True,
+    )
 
     existing_keys = {
         get_archive_unique_key(source_sheet_name, row, season)
@@ -2951,7 +3105,13 @@ def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_fr
             rows_to_delete.append(row_index)
 
     if values_to_append:
-        archive_sheet.append_rows(values_to_append, value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: archive_sheet.append_rows(values_to_append, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{archive_name}",
+                f"values:{archive_name}",
+            ],
+        )
 
     deleted = 0
 
@@ -2959,7 +3119,7 @@ def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_fr
         deleted = delete_rows_batch(source_sheet, rows_to_delete)
 
     invalidate_sheet_cache(source_sheet_name)
-    invalidate_sheet_cache(get_archive_sheet_name(source_sheet_name))
+    invalidate_sheet_cache(archive_name)
 
     return {
         "matched": matched,
@@ -2967,7 +3127,6 @@ def archive_sheet_rows_for_season(source_sheet_name: str, season: str, delete_fr
         "skipped": skipped,
         "deleted": deleted,
     }
-
 
 def get_archive_source_sheet_names(sheet_name: str = "alle") -> tuple[str, ...]:
     selected_sheet = normalize_text(sheet_name).lower()
@@ -4701,10 +4860,12 @@ class LadderCog(commands.Cog):
             error_text = repr(e)
 
             if "Quota exceeded" in error_text or "[429]" in error_text:
-                await self.log_tfnl(
-                    f"Google-Sheets-Quota erreicht. Bot pausiert Sheet-Reads kurz und versucht es danach erneut: {error_text}"
-                )
-                invalidate_sheet_cache()
+                if should_log_quota_warning(60):
+                    retry_seconds = seconds_until_quota_retry() or 60
+                    await self.log_tfnl(
+                        f"Google-Sheets-Quota erreicht. Nutze Cache und pausiert echte Sheet-Reads kurz. Neuer Versuch in ca. {retry_seconds} Sekunden."
+                    )
+
                 await asyncio.sleep(30)
                 return
 
