@@ -1,26 +1,41 @@
 import os
+from typing import Optional
+
 import discord
+import gspread
 from discord import app_commands
 from discord.ext import commands
-import gspread
 from google.oauth2.service_account import Credentials
-from typing import Optional
+
+from sheet_guard import (
+    acell_cached,
+    col_values_cached,
+    get_all_values_cached,
+    row_values_cached,
+    sheet_write_call,
+)
+
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
 # =========================================================
 # GOOGLE CONFIG
 # =========================================================
+
 SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
 WORKSHEET_GID = 463142264
-GOOGLE_CREDENTIALS_FILE = "credentials.json"
-
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 ADMIN_ROLE_NAMES = {"Admin", "Orga", "TFL Admin"}
+
+SIGNUP_CACHE_TTL_SECONDS = int(os.getenv("SIGNUP_SHEET_CACHE_TTL_SECONDS", "45"))
+SIGNUP_STATUS_CACHE_TTL_SECONDS = int(os.getenv("SIGNUP_STATUS_CACHE_TTL_SECONDS", "15"))
+SIGNUP_SHEET_CACHE_NAME = "SeasonSignup"
 
 
 # =========================================================
 # GOOGLE SHEET
 # =========================================================
+
 def get_worksheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -28,7 +43,7 @@ def get_worksheet():
     ]
     creds = Credentials.from_service_account_file(
         GOOGLE_CREDENTIALS_FILE,
-        scopes=scopes
+        scopes=scopes,
     )
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID)
@@ -36,7 +51,12 @@ def get_worksheet():
 
 
 def is_signup_open(ws) -> bool:
-    value = ws.acell("A2").value or ""
+    value = acell_cached(
+        lambda: ws,
+        sheet_name=SIGNUP_SHEET_CACHE_NAME,
+        cell="A2",
+        ttl_seconds=SIGNUP_STATUS_CACHE_TTL_SECONDS,
+    ) or ""
     return value.strip().lower() == "open"
 
 
@@ -49,20 +69,33 @@ def normalize_yes_no(value: str) -> str:
 
 
 def find_name_row(ws, name: str) -> Optional[int]:
-    names = ws.col_values(1)
+    names = col_values_cached(
+        lambda: ws,
+        sheet_name=SIGNUP_SHEET_CACHE_NAME,
+        col=1,
+        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
+    )
     target = normalize_name(name)
 
     for i, cell in enumerate(names, start=1):
         if normalize_name(cell) == target:
             return i
+
     return None
 
 
 def find_free_row(ws) -> int:
-    names = ws.col_values(1)
+    names = col_values_cached(
+        lambda: ws,
+        sheet_name=SIGNUP_SHEET_CACHE_NAME,
+        col=1,
+        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
+    )
+
     for i, cell in enumerate(names, start=1):
         if not cell.strip():
             return i
+
     return len(names) + 1
 
 
@@ -70,10 +103,23 @@ def is_blocked(status: str) -> bool:
     return status.strip().lower() in {"banned", "timeout"}
 
 
+def _signup_invalidate_prefixes() -> list[str]:
+    return [
+        f"records:{SIGNUP_SHEET_CACHE_NAME}",
+        f"values:{SIGNUP_SHEET_CACHE_NAME}",
+        f"row:{SIGNUP_SHEET_CACHE_NAME}:",
+        f"col:{SIGNUP_SHEET_CACHE_NAME}:",
+        f"cell:{SIGNUP_SHEET_CACHE_NAME}:",
+    ]
+
+
 def write_row(ws, row, name, twitch, league, cup, restream, commentary, tracker):
-    ws.update(
-        f"A{row}:G{row}",
-        [[name, twitch, league, cup, restream, commentary, tracker]]
+    sheet_write_call(
+        lambda: ws.update(
+            f"A{row}:G{row}",
+            [[name, twitch, league, cup, restream, commentary, tracker]],
+        ),
+        invalidate_prefixes=_signup_invalidate_prefixes(),
     )
 
 
@@ -82,7 +128,13 @@ def process_signup(name, twitch, league, cup, restream, commentary, tracker):
     row = find_name_row(ws, name)
 
     if row is not None:
-        status = ws.acell(f"H{row}").value or ""
+        status = acell_cached(
+            lambda: ws,
+            sheet_name=SIGNUP_SHEET_CACHE_NAME,
+            cell=f"H{row}",
+            ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
+        ) or ""
+
         if is_blocked(status):
             return "Du kannst dich aktuell nicht anmelden, da eine Sperre aktiv ist."
 
@@ -95,15 +147,21 @@ def process_signup(name, twitch, league, cup, restream, commentary, tracker):
 
 
 def get_row_values(ws, row: int):
-    values = ws.row_values(row)
+    values = row_values_cached(
+        lambda: ws,
+        sheet_name=SIGNUP_SHEET_CACHE_NAME,
+        row=row,
+        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
+    )
+
     while len(values) < 8:
         values.append("")
+
     return values[:8]
 
 
 def get_existing_signup_data(ws, name: str) -> dict:
     row = find_name_row(ws, name)
-
     if row is None:
         return {
             "twitch": "",
@@ -115,7 +173,6 @@ def get_existing_signup_data(ws, name: str) -> dict:
         }
 
     values = get_row_values(ws, row)
-
     return {
         "twitch": values[1].strip(),
         "league": normalize_yes_no(values[2]),
@@ -140,9 +197,13 @@ def format_signup_row(values: list[str]) -> str:
 
 
 def get_names_by_column_value(ws, column_index: int, target_value: str):
-    rows = ws.get_all_values()
-    matches = []
+    rows = get_all_values_cached(
+        lambda: ws,
+        sheet_name=SIGNUP_SHEET_CACHE_NAME,
+        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
+    )
 
+    matches = []
     for row in rows:
         if len(row) < column_index:
             continue
@@ -157,7 +218,14 @@ def get_names_by_column_value(ws, column_index: int, target_value: str):
 
 
 def reset_signup_data(ws):
-    rows = ws.get_all_values()
+    rows = get_all_values_cached(
+        lambda: ws,
+        sheet_name=SIGNUP_SHEET_CACHE_NAME,
+        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
+        force_refresh=True,
+    )
+
+    updates = []
     count = 0
 
     for i, row in enumerate(rows, start=1):
@@ -167,11 +235,19 @@ def reset_signup_data(ws):
         if i == 2 and row[0].lower() in ["open", "closed"]:
             continue
 
-        ws.update(
-            f"C{i}:H{i}",
-            [["Nein", "Nein", "Nein", "Nein", "Nein", "nicht gemeldet"]]
+        updates.append(
+            {
+                "range": f"C{i}:H{i}",
+                "values": [["Nein", "Nein", "Nein", "Nein", "Nein", "nicht gemeldet"]],
+            }
         )
         count += 1
+
+    if updates:
+        sheet_write_call(
+            lambda: ws.batch_update(updates, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=_signup_invalidate_prefixes(),
+        )
 
     return count
 
@@ -183,6 +259,7 @@ def has_admin_role(member: discord.Member) -> bool:
 # =========================================================
 # HELFER FÜR PLAYER.PY
 # =========================================================
+
 def get_signup_status_text_for_member(member: discord.Member) -> str:
     ws = get_worksheet()
     name = member.display_name.strip()
@@ -235,18 +312,16 @@ async def open_signup_from_player(interaction: discord.Interaction):
             return
 
         existing_data = get_existing_signup_data(ws, member.display_name.strip())
-
         view = SignupView(
             member.id,
             member.display_name.strip(),
-            initial_data=existing_data
+            initial_data=existing_data,
         )
 
         await interaction.edit_original_response(
             content=f"Anmeldung für **{member.display_name}**",
             view=view,
         )
-
     except Exception as e:
         await interaction.edit_original_response(
             content=f"Fehler beim Laden der Anmeldung: {e}",
@@ -257,6 +332,7 @@ async def open_signup_from_player(interaction: discord.Interaction):
 # =========================================================
 # UI
 # =========================================================
+
 class TwitchModal(discord.ui.Modal, title="Twitchkanal"):
     twitch = discord.ui.TextInput(label="Twitchkanal", required=False)
 
@@ -275,7 +351,7 @@ class ToggleButton(discord.ui.Button):
         super().__init__(
             label=label_name,
             style=discord.ButtonStyle.secondary,
-            row=row
+            row=row,
         )
         self.field_name = field_name
         self.label_name = label_name
@@ -303,7 +379,6 @@ class ToggleButton(discord.ui.Button):
         current_value = getattr(view, self.field_name)
         new_value = "Ja" if current_value == "Nein" else "Nein"
         setattr(view, self.field_name, new_value)
-
         self.sync_state(view)
         await interaction.response.edit_message(view=view)
 
@@ -311,12 +386,10 @@ class ToggleButton(discord.ui.Button):
 class SignupView(discord.ui.View):
     def __init__(self, user_id, name, initial_data: Optional[dict] = None):
         super().__init__(timeout=600)
-
         self.user_id = user_id
         self.name = name
 
         initial_data = initial_data or {}
-
         self.twitch = initial_data.get("twitch", "")
         self.league = normalize_yes_no(initial_data.get("league", "Nein"))
         self.cup = normalize_yes_no(initial_data.get("cup", "Nein"))
@@ -350,13 +423,12 @@ class SignupView(discord.ui.View):
 
         try:
             await interaction.response.defer(ephemeral=True)
-
             ws = get_worksheet()
 
             if not is_signup_open(ws):
                 await interaction.followup.send(
                     "Die Anmeldephase ist vorbei.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
                 return
 
@@ -367,21 +439,20 @@ class SignupView(discord.ui.View):
                 self.cup,
                 self.restream,
                 self.commentary,
-                self.tracker
+                self.tracker,
             )
-
             await interaction.followup.send(result, ephemeral=True)
-
         except Exception as e:
             await interaction.followup.send(
                 f"Fehler beim Absenden: {e}",
-                ephemeral=True
+                ephemeral=True,
             )
 
 
 # =========================================================
 # COG
 # =========================================================
+
 class SignupCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -403,43 +474,35 @@ class SignupCog(commands.Cog):
             if not is_signup_open(ws):
                 await interaction.followup.send(
                     "Die Anmeldephase ist vorbei.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
                 return
 
             existing_data = get_existing_signup_data(ws, member.display_name.strip())
-
             view = SignupView(
                 member.id,
                 member.display_name.strip(),
-                initial_data=existing_data
+                initial_data=existing_data,
             )
 
             await interaction.followup.send(
                 f"Anmeldung für **{member.display_name}**",
                 view=view,
-                ephemeral=True
+                ephemeral=True,
             )
-
         except Exception as e:
             await interaction.followup.send(
                 f"Fehler beim Laden der Anmeldung: {e}",
-                ephemeral=True
+                ephemeral=True,
             )
 
-    @app_commands.command(
-        name="signstat",
-        description="Zeigt deinen Eintrag."
-    )
+    @app_commands.command(name="signstat", description="Zeigt deinen Eintrag.")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def signstat(self, interaction: discord.Interaction):
         member = interaction.user
 
         if not isinstance(member, discord.Member):
-            await interaction.response.send_message(
-                "Nur Server.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("Nur Server.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -452,21 +515,16 @@ class SignupCog(commands.Cog):
             if row is None:
                 await interaction.followup.send(
                     "Es wurde kein Eintrag mit deinem Namen gefunden.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
                 return
 
             values = get_row_values(ws, row)
-
-            await interaction.followup.send(
-                format_signup_row(values),
-                ephemeral=True
-            )
-
+            await interaction.followup.send(format_signup_row(values), ephemeral=True)
         except Exception as e:
             await interaction.followup.send(
                 f"Fehler beim Abrufen deines Eintrags: {e}",
-                ephemeral=True
+                ephemeral=True,
             )
 
     @app_commands.command(name="leaguesign", description="Zeigt alle League-Anmeldungen")
@@ -505,7 +563,7 @@ class SignupCog(commands.Cog):
         if not has_admin_role(member):
             await interaction.response.send_message(
                 "Dafür fehlen dir die Rechte.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
@@ -513,7 +571,7 @@ class SignupCog(commands.Cog):
         count = reset_signup_data(ws)
         await interaction.response.send_message(
             f"{count} Einträge zurückgesetzt.",
-            ephemeral=True
+            ephemeral=True,
         )
 
 
