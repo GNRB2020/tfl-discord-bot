@@ -326,12 +326,70 @@ def load_ratings_rows_with_index() -> list[tuple[int, dict]]:
     return list(enumerate(rows, start=2))
 
 
-def load_history_event_ids() -> set[str]:
-    rows = get_history_sheet().get_all_records()
+def load_history_rows() -> list[dict]:
+    return get_history_sheet().get_all_records()
+
+
+def get_match_elo_changes(
+    match_id: str,
+    scope: str = SCOPE_SEASON_OVERALL,
+) -> dict[str, str]:
+    selected_match_id = normalize_text(match_id)
+    changes: dict[str, str] = {}
+
+    if not selected_match_id:
+        return changes
+
+    for row in load_history_rows():
+        event_id = normalize_text(row.get("Rating Event ID"))
+
+        if not event_id.startswith(f"{selected_match_id}:"):
+            continue
+
+        if normalize_text(row.get("Elo Scope")) != scope:
+            continue
+
+        player_id = normalize_text(row.get("Player ID"))
+        elo_change = normalize_text(row.get("Elo Change"))
+
+        if player_id and elo_change:
+            changes[player_id] = elo_change
+
+    return changes
+
+
+def get_slot_elo_changes(
+    slot_id: str,
+    scope: str = SCOPE_SEASON_OVERALL,
+) -> dict[str, str]:
+    selected_slot_id = normalize_text(slot_id)
+    totals: dict[str, float] = {}
+
+    if not selected_slot_id:
+        return {}
+
+    for row in load_history_rows():
+        if normalize_text(row.get("Slot ID")) != selected_slot_id:
+            continue
+
+        if normalize_text(row.get("Elo Scope")) != scope:
+            continue
+
+        player_id = normalize_text(row.get("Player ID"))
+
+        if not player_id:
+            continue
+
+        try:
+            change = float(normalize_text(row.get("Elo Change")).replace(",", "."))
+        except Exception:
+            change = 0.0
+
+        totals[player_id] = totals.get(player_id, 0.0) + change
+
     return {
-        normalize_text(row.get("Rating Event ID"))
-        for row in rows
-        if normalize_text(row.get("Rating Event ID"))
+        player_id: f"{change:+.1f}"
+        for player_id, change in totals.items()
     }
 
 
@@ -551,6 +609,7 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
     ]
 
     history_rows: list[list] = []
+    elo_changes: dict[str, str] = {}
     processed = 0
     skipped = 0
 
@@ -610,6 +669,9 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
                 ]
             )
 
+            if scope == SCOPE_SEASON_OVERALL:
+                elo_changes[player["player_id"]] = f"{elo_change:+.1f}"
+
             upsert_rating_row(
                 player_id=player["player_id"],
                 player_name=player["name"],
@@ -629,6 +691,7 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
         "skipped": skipped,
         "match_id": match_id,
         "slot_id": slot_id,
+        "elo_changes": elo_changes,
     }
 
 
