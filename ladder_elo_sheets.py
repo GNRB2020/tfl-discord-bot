@@ -17,6 +17,13 @@ from zoneinfo import ZoneInfo
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+from sheet_guard import (
+    get_all_records_cached,
+    row_values_cached,
+    sheet_write_call,
+    invalidate_cache as invalidate_global_sheet_cache,
+)
+
 from ladder_elo import (
     START_ELO,
     SCOPE_SEASON_OVERALL,
@@ -116,6 +123,9 @@ SEED_COMPARISON_HEADERS = [
 ]
 
 _WORKSHEET_CACHE: dict[str, gspread.Worksheet] = {}
+_ELO_SHEETS_READY = False
+_LAST_ELO_SETUP_STATUS: dict | None = None
+
 
 
 def normalize_text(value) -> str:
@@ -167,17 +177,58 @@ def get_or_create_sheet(title: str, rows: int = 1000, cols: int = 30):
     try:
         sheet = spreadsheet.worksheet(title)
     except gspread.WorksheetNotFound:
-        sheet = spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+        sheet = sheet_write_call(
+            lambda: spreadsheet.add_worksheet(title=title, rows=rows, cols=cols),
+            invalidate_prefixes=[
+                f"records:{title}",
+                f"values:{title}",
+                f"row:{title}:",
+                f"col:{title}:",
+                f"cell:{title}:",
+            ],
+        )
 
     _WORKSHEET_CACHE[title] = sheet
     return sheet
 
 
+def invalidate_elo_cache(sheet_name: str | None = None):
+    if sheet_name is None:
+        for name in (
+            SETTINGS_SHEET_NAME,
+            RATINGS_SHEET_NAME,
+            RATING_HISTORY_SHEET_NAME,
+            SEED_COMPARISON_SHEET_NAME,
+            *CORE_SHEETS_REQUIRING_SEASON,
+        ):
+            invalidate_elo_cache(name)
+        return
+
+    invalidate_global_sheet_cache(f"records:{sheet_name}")
+    invalidate_global_sheet_cache(f"values:{sheet_name}")
+    invalidate_global_sheet_cache(f"row:{sheet_name}:")
+    invalidate_global_sheet_cache(f"col:{sheet_name}:")
+    invalidate_global_sheet_cache(f"cell:{sheet_name}:")
+
+
 def ensure_headers(sheet, required_headers: list[str]) -> list[str]:
-    existing_headers = sheet.row_values(1)
+    sheet_name = getattr(sheet, "title", "")
+    existing_headers = row_values_cached(
+        lambda: sheet,
+        sheet_name=sheet_name,
+        row=1,
+        ttl_seconds=300,
+    )
 
     if not existing_headers:
-        sheet.update("A1", [required_headers])
+        sheet_write_call(
+            lambda: sheet.update("A1", [required_headers]),
+            invalidate_prefixes=[
+                f"records:{sheet_name}",
+                f"values:{sheet_name}",
+                f"row:{sheet_name}:",
+            ],
+        )
         return required_headers[:]
 
     headers = existing_headers[:]
@@ -188,7 +239,15 @@ def ensure_headers(sheet, required_headers: list[str]) -> list[str]:
         end_col = len(headers) + len(missing_headers)
         start_a1 = gspread.utils.rowcol_to_a1(1, start_col)
         end_a1 = gspread.utils.rowcol_to_a1(1, end_col)
-        sheet.update(f"{start_a1}:{end_a1}", [missing_headers])
+
+        sheet_write_call(
+            lambda: sheet.update(f"{start_a1}:{end_a1}", [missing_headers]),
+            invalidate_prefixes=[
+                f"records:{sheet_name}",
+                f"values:{sheet_name}",
+                f"row:{sheet_name}:",
+            ],
+        )
         headers.extend(missing_headers)
 
     return headers
@@ -217,7 +276,11 @@ def ensure_settings_sheet() -> str:
         cols=len(SETTINGS_HEADERS),
     )
 
-    records = sheet.get_all_records()
+    records = get_all_records_cached(
+        lambda: sheet,
+        sheet_name=SETTINGS_SHEET_NAME,
+        ttl_seconds=60,
+    )
 
     for row_index, row in enumerate(records, start=2):
         if normalize_text(row.get("Key")) == ACTIVE_SEASON_KEY:
@@ -226,10 +289,24 @@ def ensure_settings_sheet() -> str:
             if value:
                 return value
 
-            sheet.update_cell(row_index, 2, DEFAULT_ACTIVE_SEASON)
+            sheet_write_call(
+                lambda: sheet.update_cell(row_index, 2, DEFAULT_ACTIVE_SEASON),
+                invalidate_prefixes=[
+                    f"records:{SETTINGS_SHEET_NAME}",
+                    f"values:{SETTINGS_SHEET_NAME}",
+                    f"row:{SETTINGS_SHEET_NAME}:",
+                    f"cell:{SETTINGS_SHEET_NAME}:",
+                ],
+            )
             return DEFAULT_ACTIVE_SEASON
 
-    sheet.append_row([ACTIVE_SEASON_KEY, DEFAULT_ACTIVE_SEASON], value_input_option="USER_ENTERED")
+    sheet_write_call(
+        lambda: sheet.append_row([ACTIVE_SEASON_KEY, DEFAULT_ACTIVE_SEASON], value_input_option="USER_ENTERED"),
+        invalidate_prefixes=[
+            f"records:{SETTINGS_SHEET_NAME}",
+            f"values:{SETTINGS_SHEET_NAME}",
+        ],
+    )
     return DEFAULT_ACTIVE_SEASON
 
 
@@ -242,20 +319,37 @@ def ensure_core_season_columns() -> list[str]:
 
     for sheet_name in CORE_SHEETS_REQUIRING_SEASON:
         sheet = get_or_create_sheet(sheet_name)
-        existing_headers = sheet.row_values(1)
+        existing_headers = row_values_cached(
+            lambda: sheet,
+            sheet_name=sheet_name,
+            row=1,
+            ttl_seconds=300,
+        )
 
         if not existing_headers:
             continue
 
         if "Season" not in existing_headers:
             next_col = len(existing_headers) + 1
-            sheet.update_cell(1, next_col, "Season")
+            sheet_write_call(
+                lambda: sheet.update_cell(1, next_col, "Season"),
+                invalidate_prefixes=[
+                    f"records:{sheet_name}",
+                    f"values:{sheet_name}",
+                    f"row:{sheet_name}:",
+                ],
+            )
             touched.append(sheet_name)
 
     return touched
 
 
-def ensure_ladder_elo_sheets() -> dict:
+def ensure_ladder_elo_sheets(force_refresh: bool = False) -> dict:
+    global _ELO_SHEETS_READY, _LAST_ELO_SETUP_STATUS
+
+    if _ELO_SHEETS_READY and _LAST_ELO_SETUP_STATUS is not None and not force_refresh:
+        return _LAST_ELO_SETUP_STATUS
+
     active_season = ensure_settings_sheet()
     season_columns_added = ensure_core_season_columns()
 
@@ -280,7 +374,7 @@ def ensure_ladder_elo_sheets() -> dict:
         cols=len(SEED_COMPARISON_HEADERS),
     )
 
-    return {
+    _LAST_ELO_SETUP_STATUS = {
         "active_season": active_season,
         "season_columns_added": season_columns_added,
         "sheets": [
@@ -291,6 +385,9 @@ def ensure_ladder_elo_sheets() -> dict:
         ],
         "checked_at": now_text(),
     }
+    _ELO_SHEETS_READY = True
+
+    return _LAST_ELO_SETUP_STATUS
 
 
 def scope_key_parts(scope: str, season: str, mode: str) -> tuple[str, str]:
@@ -322,12 +419,20 @@ def get_history_sheet():
 
 
 def load_ratings_rows_with_index() -> list[tuple[int, dict]]:
-    rows = get_ratings_sheet().get_all_records()
+    rows = get_all_records_cached(
+        get_ratings_sheet,
+        sheet_name=RATINGS_SHEET_NAME,
+        ttl_seconds=30,
+    )
     return list(enumerate(rows, start=2))
 
 
 def load_history_rows() -> list[dict]:
-    return get_history_sheet().get_all_records()
+    return get_all_records_cached(
+        get_history_sheet,
+        sheet_name=RATING_HISTORY_SHEET_NAME,
+        ttl_seconds=30,
+    )
 
 
 def get_match_elo_changes(
@@ -471,9 +576,22 @@ def upsert_rating_row(
     ]
 
     if row_index:
-        sheet.update(f"A{row_index}:L{row_index}", [values], value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: sheet.update(f"A{row_index}:L{row_index}", [values], value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{RATINGS_SHEET_NAME}",
+                f"values:{RATINGS_SHEET_NAME}",
+                f"row:{RATINGS_SHEET_NAME}:",
+            ],
+        )
     else:
-        sheet.append_row(values, value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: sheet.append_row(values, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{RATINGS_SHEET_NAME}",
+                f"values:{RATINGS_SHEET_NAME}",
+            ],
+        )
 
 
 def build_pairing_players(
@@ -568,7 +686,13 @@ def parse_match_players(match_row: dict) -> list[dict]:
 
 def append_history_rows(rows: list[list]):
     if rows:
-        get_history_sheet().append_rows(rows, value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: get_history_sheet().append_rows(rows, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{RATING_HISTORY_SHEET_NAME}",
+                f"values:{RATING_HISTORY_SHEET_NAME}",
+            ],
+        )
 
 
 def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict:
@@ -600,6 +724,7 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
 
     existing_event_ids = load_history_event_ids()
     created_at = now_text()
+    fallback_active_season = get_active_season()
 
     scopes = [
         SCOPE_SEASON_OVERALL,
@@ -700,10 +825,24 @@ def clear_elo_tables():
     history_sheet = get_history_sheet()
 
     if ratings_sheet.row_count > 1:
-        ratings_sheet.batch_clear([f"A2:L{ratings_sheet.row_count}"])
+        sheet_write_call(
+            lambda: ratings_sheet.batch_clear([f"A2:L{ratings_sheet.row_count}"]),
+            invalidate_prefixes=[
+                f"records:{RATINGS_SHEET_NAME}",
+                f"values:{RATINGS_SHEET_NAME}",
+                f"row:{RATINGS_SHEET_NAME}:",
+            ],
+        )
 
     if history_sheet.row_count > 1:
-        history_sheet.batch_clear([f"A2:R{history_sheet.row_count}"])
+        sheet_write_call(
+            lambda: history_sheet.batch_clear([f"A2:R{history_sheet.row_count}"]),
+            invalidate_prefixes=[
+                f"records:{RATING_HISTORY_SHEET_NAME}",
+                f"values:{RATING_HISTORY_SHEET_NAME}",
+                f"row:{RATING_HISTORY_SHEET_NAME}:",
+            ],
+        )
 
 
 def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]) -> dict:
@@ -775,7 +914,7 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
         season = (
             normalize_text(match_row.get("Season"))
             or normalize_text(schedule_row.get("Season"))
-            or get_active_season()
+            or fallback_active_season
         )
         mode = (
             normalize_text(schedule_row.get("Modus"))
@@ -913,16 +1052,29 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
     history_sheet = get_history_sheet()
 
     if rating_rows:
-        ratings_sheet.append_rows(rating_rows, value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: ratings_sheet.append_rows(rating_rows, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[
+                f"records:{RATINGS_SHEET_NAME}",
+                f"values:{RATINGS_SHEET_NAME}",
+            ],
+        )
 
     if history_rows:
         # In sinnvollen Blöcken schreiben, damit Google Sheets nicht an Payload-Größen scheitert.
         chunk_size = 500
 
         for index in range(0, len(history_rows), chunk_size):
-            history_sheet.append_rows(
-                history_rows[index:index + chunk_size],
-                value_input_option="USER_ENTERED",
+            chunk = history_rows[index:index + chunk_size]
+            sheet_write_call(
+                lambda chunk=chunk: history_sheet.append_rows(
+                    chunk,
+                    value_input_option="USER_ENTERED",
+                ),
+                invalidate_prefixes=[
+                    f"records:{RATING_HISTORY_SHEET_NAME}",
+                    f"values:{RATING_HISTORY_SHEET_NAME}",
+                ],
             )
 
     return {
