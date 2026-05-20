@@ -40,6 +40,33 @@ from ladder_elo import (
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
+
+ELO_SHEETS_PATCH_VERSION = "SAFE_V6_ECHT_NEU_KEIN_PLUS_IN_SHEET"
+print(f"[TFNL ELO] ladder_elo_sheets.py geladen: {ELO_SHEETS_PATCH_VERSION}")
+
+
+def format_elo_change_sheet(value) -> str:
+    """
+    Sheet-Wert für Ladder_RatingHistory / Spalte P.
+    WICHTIG: Kein führendes Pluszeichen, damit Google Sheets keinen #ERROR! erzeugt.
+    """
+    try:
+        return f"{float(value):.1f}"
+    except Exception:
+        return "0.0"
+
+
+def format_elo_change_display(value) -> str:
+    """
+    Discord-/Anzeige-Wert mit Vorzeichen.
+    """
+    try:
+        return f"{float(str(value).replace(',', '.').strip()):+.1f}"
+    except Exception:
+        return "+0.0"
+
+
+
 TFNL_SPREADSHEET_ID = os.getenv(
     "TFNL_SPREADSHEET_ID",
     "1TamFbS5cRCcgSJFoQEohXdv03tVhk0VynvleeiVBQsM",
@@ -458,7 +485,7 @@ def get_match_elo_changes(
         elo_change = normalize_text(row.get("Elo Change"))
 
         if player_id and elo_change:
-            changes[player_id] = elo_change
+            changes[player_id] = format_elo_change_display(elo_change)
 
     return changes
 
@@ -493,8 +520,17 @@ def get_slot_elo_changes(
         totals[player_id] = totals.get(player_id, 0.0) + change
 
     return {
-        player_id: f"{change:+.1f}"
+        player_id: format_elo_change_display(change)
         for player_id, change in totals.items()
+    }
+
+
+
+def load_history_event_ids() -> set[str]:
+    return {
+        normalize_text(row.get("Rating Event ID"))
+        for row in load_history_rows()
+        if normalize_text(row.get("Rating Event ID"))
     }
 
 
@@ -687,7 +723,7 @@ def parse_match_players(match_row: dict) -> list[dict]:
 def append_history_rows(rows: list[list]):
     if rows:
         sheet_write_call(
-            lambda: get_history_sheet().append_rows(rows, value_input_option="USER_ENTERED"),
+            lambda: get_history_sheet().append_rows(rows, value_input_option="RAW"),
             invalidate_prefixes=[
                 f"records:{RATING_HISTORY_SHEET_NAME}",
                 f"values:{RATING_HISTORY_SHEET_NAME}",
@@ -788,7 +824,7 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
                     format_elo(elo_before),
                     format_elo(opponent_elo),
                     format_elo(elo_after),
-                    f"{elo_change:+.1f}",
+                    format_elo_change_sheet(elo_change),
                     player["result_type"],
                     created_at,
                 ]
@@ -855,6 +891,7 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
     """
     ensure_ladder_elo_sheets()
     clear_elo_tables()
+    fallback_active_season = get_active_season()
 
     schedule_by_slot = {
         normalize_text(row.get("Slot ID")): row
@@ -1006,7 +1043,7 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
                         format_elo(elo_before),
                         format_elo(opponent_elo),
                         format_elo(elo_after),
-                        f"{elo_change:+.1f}",
+                        format_elo_change_sheet(elo_change),
                         result_type,
                         created_at,
                     ]
@@ -1069,7 +1106,7 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
             sheet_write_call(
                 lambda chunk=chunk: history_sheet.append_rows(
                     chunk,
-                    value_input_option="USER_ENTERED",
+                    value_input_option="RAW",
                 ),
                 invalidate_prefixes=[
                     f"records:{RATING_HISTORY_SHEET_NAME}",
