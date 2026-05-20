@@ -25,6 +25,8 @@ from ladder_elo_sheets import (
     process_match_elo,
     rebuild_elo_from_matches,
     build_standings_rows as build_elo_standings_rows,
+    get_match_elo_changes,
+    get_slot_elo_changes,
 )
 
 
@@ -1957,10 +1959,11 @@ def calculate_3way_result(players: list[dict]):
     return result
 
 
-def build_result_message(match_row: dict) -> str:
+def build_result_message(match_row: dict, elo_changes: dict[str, str] | None = None) -> str:
     match_id = normalize_text(match_row.get("Match ID"))
     matchtyp = normalize_text(match_row.get("Matchtyp"))
     players = get_match_players(match_row)
+    elo_changes = elo_changes or get_match_elo_changes(match_id)
 
     lines = [
         "**TFNL-Ergebnis veröffentlicht**",
@@ -1970,16 +1973,21 @@ def build_result_message(match_row: dict) -> str:
 
     for player in players:
         name = player["name"]
+        player_id = player["discord_id"]
         time_value = normalize_text(match_row.get(player["time_col"]))
         result = normalize_text(match_row.get(player["result_col"]))
-        points = normalize_text(match_row.get(player["points_col"]))
+        elo_change = normalize_text(elo_changes.get(player_id, "±0.0"))
 
-        lines.append(f"**{name}** — `{time_value}` — {result} ({points} Punkte)")
+        lines.append(f"**{name}** — `{time_value}` — {result} (ELO {elo_change})")
 
     return "\n".join(lines)
 
 
-def build_public_result_message(match_row: dict, schedule_row: dict | None = None) -> str:
+def build_public_result_message(
+    match_row: dict,
+    schedule_row: dict | None = None,
+    elo_changes: dict[str, str] | None = None,
+) -> str:
     slot_id = normalize_text(match_row.get("Slot ID"))
 
     if schedule_row is None:
@@ -1997,7 +2005,7 @@ def build_public_result_message(match_row: dict, schedule_row: dict | None = Non
         "",
     ]
 
-    return "\n".join(header) + build_result_message(match_row)
+    return "\n".join(header) + build_result_message(match_row, elo_changes=elo_changes)
 
 
 def build_slot_runner_message(schedule_row: dict) -> str:
@@ -2038,6 +2046,7 @@ def apply_result_to_match(match_id: str, result: dict[int, tuple[str, int]]):
 
 def collect_slot_results(slot_id: str) -> list[dict]:
     results = []
+    slot_elo_changes = get_slot_elo_changes(slot_id)
 
     for match in get_matches_for_slot(slot_id):
         match_id = normalize_text(match.get("Match ID"))
@@ -2057,6 +2066,7 @@ def collect_slot_results(slot_id: str) -> list[dict]:
                     "seconds": seconds,
                     "result": result_text,
                     "points": int_value(points),
+                    "elo_change": normalize_text(slot_elo_changes.get(player["discord_id"], "±0.0")),
                     "is_ff": time_value.upper() == "FF",
                 }
             )
@@ -2103,13 +2113,13 @@ def build_slot_overview_message(schedule_row: dict) -> str:
                     result["name"],
                     result["time"],
                     result["result"],
-                    result["points"],
+                    result["elo_change"],
                 ]
             )
 
         lines.append(
             build_discord_table(
-                ["#", "Spieler", "Zeit", "Ergebnis", "Pkt"],
+                ["#", "Spieler", "Zeit", "Ergebnis", "ELO"],
                 table_rows,
                 max_col_width=20,
             )
@@ -2377,52 +2387,61 @@ def rebuild_players_from_published_matches(season: str | None = None) -> dict[st
     }
 
 
+def get_player_forfeits_by_id() -> dict[str, int]:
+    return {
+        normalize_text(row.get("Discord ID")): int_value(row.get("Forfeits"))
+        for row in load_players_rows()
+        if normalize_text(row.get("Discord ID"))
+    }
+
+
 def build_standings_messages() -> list[str]:
-    rows = load_players_rows()
-
-    rows.sort(
-        key=lambda r: (
-            -int_value(r.get("Punkte")),
-            -int_value(r.get("Siege")),
-            -int_value(r.get("Remis")),
-            int_value(r.get("Forfeits")),
-            normalize_text(r.get("Discord Display Name")).lower(),
-        )
-    )
-
     timestamp = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
     active_season = get_active_season()
+    rows = build_elo_standings_rows(
+        scope=SCOPE_SEASON_OVERALL,
+        season=active_season,
+        mode="",
+        limit=None,
+    )
+    forfeits_by_id = get_player_forfeits_by_id()
 
     if not rows:
         return [
             f"**TFNL Gesamttabelle — {active_season}**\n"
             f"Stand: `{timestamp} Uhr`\n\n"
-            "Noch keine Einträge."
+            "Noch keine ELO-Einträge."
         ]
 
     table_rows = []
     for index, row in enumerate(rows, start=1):
+        wins = int_value(row.get("Wins"))
+        draws = int_value(row.get("Draws"))
+        losses = int_value(row.get("Lose"))
+        games = wins + draws + losses
+        player_id = normalize_text(row.get("Player ID"))
+
         table_rows.append(
             [
                 index,
-                normalize_text(row.get("Discord Display Name")),
-                int_value(row.get("Punkte")),
-                int_value(row.get("Starts")),
-                int_value(row.get("Siege")),
-                int_value(row.get("Remis")),
-                int_value(row.get("Niederlagen")),
-                int_value(row.get("Forfeits")),
+                normalize_text(row.get("Player Name")),
+                normalize_text(row.get("Elo")),
+                games,
+                wins,
+                draws,
+                losses,
+                forfeits_by_id.get(player_id, 0),
             ]
         )
 
     table = build_discord_table(
-        ["#", "Spieler", "Pkt", "St", "S", "R", "N", "FF"],
+        ["#", "Spieler", "ELO", "G", "S", "U", "N", "FF"],
         table_rows,
         max_col_width=18,
     )
 
     return [
-        f"**TFNL Gesamttabelle — {get_active_season()}**\n"
+        f"**TFNL Gesamttabelle — {active_season}**\n"
         f"Stand: `{timestamp} Uhr`\n"
         f"{table}"
     ]
@@ -2519,38 +2538,59 @@ def build_mode_standings(mode_name: str) -> list[dict]:
 
 
 def build_mode_standings_messages(mode_name: str) -> list[str]:
-    rows = build_mode_standings(mode_name)
     timestamp = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+    active_season = get_active_season()
 
-    if not rows:
+    elo_rows = build_elo_standings_rows(
+        scope=SCOPE_SEASON_MODE,
+        season=active_season,
+        mode=mode_name,
+        limit=None,
+    )
+
+    mode_stats = build_mode_standings(mode_name)
+    stats_by_id = {
+        normalize_text(row.get("discord_id")): row
+        for row in mode_stats
+        if normalize_text(row.get("discord_id"))
+    }
+
+    if not elo_rows:
         return [
             f"**TFNL Modus-Tabelle: {mode_name}**\n"
             f"Stand: `{timestamp} Uhr`\n\n"
-            "Keine abgeschlossenen Ergebnisse für diesen Modus gefunden."
+            "Keine abgeschlossenen ELO-Ergebnisse für diesen Modus gefunden."
         ]
 
     table_rows = []
-    for index, row in enumerate(rows, start=1):
-        best = seconds_to_timecode(row["best_seconds"]) if row["best_seconds"] is not None else "-"
-        avg = seconds_to_timecode(row["avg_seconds"]) if row["avg_seconds"] is not None else "-"
+    for index, row in enumerate(elo_rows, start=1):
+        player_id = normalize_text(row.get("Player ID"))
+        stats = stats_by_id.get(player_id, {})
+
+        wins = int_value(row.get("Wins"))
+        draws = int_value(row.get("Draws"))
+        losses = int_value(row.get("Lose"))
+        games = wins + draws + losses
+        best = seconds_to_timecode(stats.get("best_seconds")) if stats.get("best_seconds") is not None else "-"
+        avg = seconds_to_timecode(stats.get("avg_seconds")) if stats.get("avg_seconds") is not None else "-"
 
         table_rows.append(
             [
                 index,
-                row["name"],
-                row["points"],
-                row["starts"],
-                row["wins"],
-                row["draws"],
-                row["losses"],
-                row["forfeits"],
+                normalize_text(row.get("Player Name")),
+                normalize_text(row.get("Elo")),
+                games,
+                wins,
+                draws,
+                losses,
+                int_value(stats.get("forfeits")),
                 best,
                 avg,
             ]
         )
 
     table = build_discord_table(
-        ["#", "Spieler", "Pkt", "St", "S", "R", "N", "FF", "Best", "Ø"],
+        ["#", "Spieler", "ELO", "G", "S", "U", "N", "FF", "Best", "Ø"],
         table_rows,
         max_col_width=16,
     )
@@ -4140,7 +4180,12 @@ class LadderCog(commands.Cog):
                 ephemeral=True,
             )
 
-    async def publish_result_to_results_channel(self, match_row: dict, schedule_row: dict | None = None):
+    async def publish_result_to_results_channel(
+        self,
+        match_row: dict,
+        schedule_row: dict | None = None,
+        elo_changes: dict[str, str] | None = None,
+    ):
         match_id = normalize_text(match_row.get("Match ID"))
 
         async with self.result_publish_lock:
@@ -4159,7 +4204,7 @@ class LadderCog(commands.Cog):
                     pass
 
             try:
-                await channel.send(build_public_result_message(match_row, schedule_row))
+                await channel.send(build_public_result_message(match_row, schedule_row, elo_changes=elo_changes))
             except Exception as e:
                 await self.log_tfnl(
                     f"Ergebnis konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: {repr(e)}"
@@ -4229,8 +4274,11 @@ class LadderCog(commands.Cog):
             slot_id = normalize_text(updated_match.get("Slot ID"))
             _, schedule_row = find_schedule_row(slot_id)
 
+            elo_changes = {}
+
             try:
-                process_match_elo(updated_match, schedule_row=schedule_row)
+                elo_result = process_match_elo(updated_match, schedule_row=schedule_row)
+                elo_changes = elo_result.get("elo_changes", {}) if isinstance(elo_result, dict) else {}
             except Exception as e:
                 await self.log_tfnl(f"ELO-Verarbeitung fehlgeschlagen für `{match_id}` — {repr(e)}")
 
@@ -4239,11 +4287,11 @@ class LadderCog(commands.Cog):
         if schedule_row:
             try:
                 slot_channel = await self.get_or_create_slot_channel(schedule_row)
-                await slot_channel.send(build_result_message(updated_match))
+                await slot_channel.send(build_result_message(updated_match, elo_changes=elo_changes))
             except Exception as e:
                 await self.log_tfnl(f"Ergebnispost fehlgeschlagen für `{match_id}` — {repr(e)}")
 
-            await self.publish_result_to_results_channel(updated_match, schedule_row)
+            await self.publish_result_to_results_channel(updated_match, schedule_row, elo_changes=elo_changes)
 
             await self.complete_slot_if_ready(slot_id)
 
