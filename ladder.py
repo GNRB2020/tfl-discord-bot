@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v9-auto-evaluate-times-3min"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v10-public-combined-table-and-match-view"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -2293,6 +2293,82 @@ def collect_slot_results(slot_id: str, public_only_complete_matches: bool = Fals
     return results
 
 
+def collect_slot_match_groups(slot_id: str, public_only_complete_matches: bool = False) -> list[dict]:
+    """
+    Liefert Match-Gruppen für die Anzeige, damit erkennbar bleibt,
+    wer gegeneinander gespielt hat (1on1 / 3way).
+    """
+    groups = []
+    slot_elo_changes = get_slot_elo_changes(slot_id)
+
+    for match_index, match in enumerate(get_matches_for_slot(slot_id), start=1):
+        if public_only_complete_matches and not is_match_publicly_complete(match):
+            continue
+
+        players = []
+        for player in get_match_players(match):
+            time_value = normalize_text(match.get(player["time_col"]))
+            result_text = normalize_text(match.get(player["result_col"]))
+            points = normalize_text(match.get(player["points_col"]))
+            seconds = timecode_to_seconds(time_value)
+            players.append(
+                {
+                    "name": player["name"],
+                    "discord_id": player["discord_id"],
+                    "time": time_value,
+                    "seconds": seconds,
+                    "result": result_text,
+                    "points": int_value(points),
+                    "elo_change": normalize_text(slot_elo_changes.get(player["discord_id"], "±0.0")),
+                    "is_ff": time_value.upper() == "FF",
+                }
+            )
+
+        players.sort(
+            key=lambda r: (
+                r["is_ff"],
+                r["seconds"] if r["seconds"] is not None else 9999999,
+                r["name"].lower(),
+            )
+        )
+
+        match_type = normalize_text(match.get("Matchtyp"))
+        if not match_type:
+            match_type = "3way" if len(players) == 3 else "1on1"
+
+        groups.append(
+            {
+                "index": match_index,
+                "match_id": normalize_text(match.get("Match ID")),
+                "match_type": match_type,
+                "players": players,
+            }
+        )
+
+    return groups
+
+
+def build_public_match_group_lines(match_groups: list[dict]) -> list[str]:
+    lines: list[str] = []
+
+    for group in match_groups:
+        type_label = "3way" if group["match_type"].lower() == "3way" else "1on1"
+        names = " vs ".join(player["name"] for player in group["players"])
+        lines.append(f"**Match {group['index']} ({type_label}):** {names}")
+
+        for player in group["players"]:
+            lines.append(
+                f"- {player['name']}: `{player['time']}` | `{player['result']}` | `{player['elo_change']}`"
+            )
+
+        lines.append("")
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    return lines
+
+
 def build_slot_overview_message(schedule_row: dict) -> str:
     slot_id = normalize_text(schedule_row.get("Slot ID"))
     datum = normalize_text(schedule_row.get("Datum"))
@@ -2343,8 +2419,9 @@ def build_slot_overview_message(schedule_row: dict) -> str:
 def build_public_slot_results_message(schedule_row: dict, completed: bool = False) -> str:
     """
     Öffentlicher Ergebnis-Channel:
-    Eine Nachricht pro Slot. Sobald ein Ergebnis feststeht, wird diese Nachricht
-    erstellt oder editiert. Spätere Ergebnisse erscheinen im selben Discord-Post.
+    Eine Nachricht pro Slot. Sobald ein Match vollständig abgeschlossen ist,
+    wird diese Nachricht erstellt oder editiert. Die Ansicht kombiniert eine
+    kompakte Tabelle mit einer klaren Match-Ansicht (1on1 / 3way).
     """
     slot_id = normalize_text(schedule_row.get("Slot ID"))
     datum = normalize_text(schedule_row.get("Datum"))
@@ -2352,6 +2429,7 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
     modus = normalize_text(schedule_row.get("Modus"))
     seed_url = get_seed_url(schedule_row)
     results = collect_slot_results(slot_id, public_only_complete_matches=True)
+    match_groups = collect_slot_match_groups(slot_id, public_only_complete_matches=True)
 
     title = "**TFNL-Slot abgeschlossen**" if completed else "**TFNL-Slot Ergebnisse**"
 
@@ -2371,24 +2449,33 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
         lines.append("Noch kein vollständig abgeschlossenes Match gefunden.")
     else:
         table_rows = []
-        for index, result in enumerate(results, start=1):
-            table_rows.append(
-                [
-                    index,
-                    result["name"],
-                    result["time"],
-                    result["result"],
-                    result["elo_change"],
-                ]
-            )
+        running_no = 1
+        for group in match_groups:
+            match_label = f"M{group['index']}"
+            for player in group["players"]:
+                table_rows.append(
+                    [
+                        match_label,
+                        running_no,
+                        player["name"],
+                        player["time"],
+                        player["result"],
+                        player["elo_change"],
+                    ]
+                )
+                running_no += 1
 
         lines.append(
             build_discord_table(
-                ["#", "Spieler", "Zeit", "Ergebnis", "ELO"],
+                ["Match", "#", "Spieler", "Zeit", "Ergebnis", "ELO"],
                 table_rows,
                 max_col_width=20,
             )
         )
+
+        lines.append("")
+        lines.append("**Matchübersicht:**")
+        lines.extend(build_public_match_group_lines(match_groups))
 
     if not completed:
         lines.extend(["", "_Weitere vollständig abgeschlossene Matches werden in dieser Nachricht ergänzt._"])
