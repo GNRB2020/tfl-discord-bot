@@ -7,6 +7,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from sheet_guard import (
+    col_values_cached,
+    row_values_cached,
+    sheet_write_call,
+)
+
 import signup
 import asnyc
 import restinfo
@@ -57,6 +63,16 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
+PLAYER_PERFORMANCE_VERSION = "player-performance-v1"
+print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
+
+PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
+PLAYER_MODE_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_MODE_CACHE_TTL_SECONDS", "300"))
+
+_PLAYER_WORKSHEET_CACHE_BY_NAME = {}
+_PLAYER_WORKSHEET_CACHE_BY_GID = {}
+
+
 # =========================================================
 # UI HELFER
 # =========================================================
@@ -98,10 +114,45 @@ def get_name_candidates(member: discord.Member) -> list[str]:
 
 
 def get_worksheet_by_gid(workbook, gid: int):
+    gid = int(gid)
+
+    if gid in _PLAYER_WORKSHEET_CACHE_BY_GID:
+        return _PLAYER_WORKSHEET_CACHE_BY_GID[gid]
+
     for ws in workbook.worksheets():
-        if ws.id == gid:
-            return ws
+        _PLAYER_WORKSHEET_CACHE_BY_GID[int(ws.id)] = ws
+        _PLAYER_WORKSHEET_CACHE_BY_NAME[getattr(ws, "title", "")] = ws
+
+    if gid in _PLAYER_WORKSHEET_CACHE_BY_GID:
+        return _PLAYER_WORKSHEET_CACHE_BY_GID[gid]
+
     raise RuntimeError(f"Worksheet mit gid={gid} nicht gefunden.")
+
+
+def get_player_division_worksheet(div_number: int):
+    sheet_name = f"{int(div_number)}.DIV"
+
+    if sheet_name in _PLAYER_WORKSHEET_CACHE_BY_NAME:
+        return _PLAYER_WORKSHEET_CACHE_BY_NAME[sheet_name]
+
+    ws = restinfo.WB.worksheet(sheet_name)
+    _PLAYER_WORKSHEET_CACHE_BY_NAME[sheet_name] = ws
+    return ws
+
+
+def player_sheet_name(ws, fallback: str = "PlayerSheet") -> str:
+    return getattr(ws, "title", fallback)
+
+
+def player_invalidate_prefixes(ws, fallback: str = "PlayerSheet") -> list[str]:
+    sheet_name = player_sheet_name(ws, fallback)
+    return [
+        f"records:{sheet_name}",
+        f"values:{sheet_name}",
+        f"row:{sheet_name}:",
+        f"col:{sheet_name}:",
+        f"cell:{sheet_name}:",
+    ]
 
 
 def get_division_worksheet_for_name_candidates(name_candidates: list[str]):
@@ -118,8 +169,13 @@ def get_division_worksheet_for_name_candidates(name_candidates: list[str]):
         return None, None, None
 
     for div_number in range(1, 7):
-        ws = restinfo.WB.worksheet(f"{div_number}.DIV")
-        values = ws.col_values(12)  # Spalte L
+        ws = get_player_division_worksheet(div_number)
+        values = col_values_cached(
+            lambda: ws,
+            sheet_name=player_sheet_name(ws, f"{div_number}.DIV"),
+            col=12,  # Spalte L
+            ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+        )
 
         for idx, cell_value in enumerate(values, start=1):
             if normalize_name(cell_value) in targets:
@@ -134,7 +190,12 @@ def load_current_streichmodi_for_name_candidates(name_candidates: list[str]) -> 
     if ws is None or row_index is None:
         return "", ""
 
-    row = ws.row_values(row_index)
+    row = row_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws),
+        row=row_index,
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
 
     mode_1 = row[12].strip() if len(row) > 12 else ""  # M
     mode_2 = row[13].strip() if len(row) > 13 else ""  # N
@@ -154,7 +215,12 @@ def get_division_modes_for_streichmodus(div_number: int) -> list[str]:
         STREICHMODUS_CONFIG_WORKSHEET_GID,
     )
 
-    values = ws.col_values(col_index)
+    values = col_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws, "StreichmodusConfig"),
+        col=col_index,
+        ttl_seconds=PLAYER_MODE_CACHE_TTL_SECONDS,
+    )
 
     modes = []
     seen = set()
@@ -216,7 +282,12 @@ def load_streichmodus_state_for_name_candidates(name_candidates: list[str]) -> d
             "change_used": False,
         }
 
-    row = ws.row_values(row_index)
+    row = row_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws),
+        row=row_index,
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
 
     mode_1 = row[12].strip() if len(row) > 12 else ""  # M
     mode_2 = row[13].strip() if len(row) > 13 else ""  # N
@@ -257,7 +328,10 @@ def write_streichmodi_for_name_candidates(
         {"range": f"N{row_index}:N{row_index}", "values": [[mode_2]]},
     ]
 
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=player_invalidate_prefixes(ws),
+    )
 
     return row_index, div_number
 
@@ -308,7 +382,10 @@ def write_streichmodi_with_change_limit(
         )
         notify_change = True
 
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=player_invalidate_prefixes(ws),
+    )
 
     return {
         "row_index": row_index,
