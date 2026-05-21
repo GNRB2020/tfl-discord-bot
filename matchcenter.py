@@ -13,6 +13,13 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from sheet_guard import (
+    acell_cached,
+    col_values_cached,
+    get_all_values_cached,
+    sheet_write_call,
+)
+
 # =========================================================
 # ENV / CONFIG
 # =========================================================
@@ -30,6 +37,13 @@ TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 print("DEBUG matchcenter CREDS_FILE =", CREDS_FILE)
+
+MATCHCENTER_PERFORMANCE_VERSION = "matchcenter-performance-v1"
+print(f"[MATCHCENTER] geladen: {MATCHCENTER_PERFORMANCE_VERSION}")
+
+MATCHCENTER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("MATCHCENTER_SHEET_CACHE_TTL_SECONDS", "90"))
+MATCHCENTER_MODE_CACHE_TTL_SECONDS = int(os.getenv("MATCHCENTER_MODE_CACHE_TTL_SECONDS", "300"))
+
 
 DIVISION_SHEETS = {
     "Div 1": "1.DIV",
@@ -144,6 +158,8 @@ SCOPE = [
 SHEETS_ENABLED = True
 GC = None
 WB = None
+_WORKSHEET_NAME_CACHE = {}
+_WORKSHEET_GID_CACHE = {}
 
 try:
     CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
@@ -159,6 +175,37 @@ except Exception as e:
 def sheets_required():
     if not SHEETS_ENABLED or WB is None:
         raise RuntimeError("Google Sheets nicht verbunden.")
+
+
+def get_cached_worksheet_by_name(sheet_name: str):
+    sheets_required()
+
+    if sheet_name in _WORKSHEET_NAME_CACHE:
+        return _WORKSHEET_NAME_CACHE[sheet_name]
+
+    ws = WB.worksheet(sheet_name)
+    _WORKSHEET_NAME_CACHE[sheet_name] = ws
+    return ws
+
+
+def get_matchcenter_values(ws, ttl_seconds: int = MATCHCENTER_SHEET_CACHE_TTL_SECONDS, force_refresh: bool = False):
+    sheet_name = getattr(ws, "title", "MatchCenterSheet")
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=sheet_name,
+        ttl_seconds=ttl_seconds,
+        force_refresh=force_refresh,
+    )
+
+
+def matchcenter_invalidate_prefixes(sheet_name: str) -> list[str]:
+    return [
+        f"records:{sheet_name}",
+        f"values:{sheet_name}",
+        f"row:{sheet_name}:",
+        f"col:{sheet_name}:",
+        f"cell:{sheet_name}:",
+    ]
 
 
 # =========================================================
@@ -196,13 +243,19 @@ def get_div_ws_from_label(division_label: str):
     ws_name = DIVISION_SHEETS.get(division_label)
     if not ws_name:
         raise ValueError(f"Unbekannte Division: {division_label}")
-    return WB.worksheet(ws_name)
+    return get_cached_worksheet_by_name(ws_name)
 
 
 def get_worksheet_by_gid(workbook, gid: int):
+    if gid in _WORKSHEET_GID_CACHE:
+        return _WORKSHEET_GID_CACHE[gid]
+
     for ws in workbook.worksheets():
-        if ws.id == gid:
-            return ws
+        _WORKSHEET_GID_CACHE[int(ws.id)] = ws
+
+    if gid in _WORKSHEET_GID_CACHE:
+        return _WORKSHEET_GID_CACHE[gid]
+
     raise RuntimeError(f"Worksheet mit gid={gid} nicht gefunden.")
 
 
@@ -219,7 +272,12 @@ def get_runner_modes() -> list[str]:
     sheets_required()
 
     ws = get_worksheet_by_gid(WB, MODE_CONFIG_WORKSHEET_GID)
-    values = ws.col_values(ALL_MODES_COL)
+    values = col_values_cached(
+        lambda: ws,
+        sheet_name=getattr(ws, "title", "ModeConfig"),
+        col=ALL_MODES_COL,
+        ttl_seconds=MATCHCENTER_MODE_CACHE_TTL_SECONDS,
+    )
 
     out = []
     seen = set()
@@ -366,7 +424,7 @@ def cup_result_post_text(timestamp: str, round_label: str, p1: str, p2: str, res
 
 
 def collect_players_from_div_ws(ws) -> list[str]:
-    rows = ws.get_all_values()
+    rows = get_matchcenter_values(ws)
     seen = set()
     players = []
 
@@ -395,7 +453,7 @@ def get_division_players(division_label: str) -> list[str]:
 
 def get_league_home_matches(division_label: str, home_player: str):
     ws = get_div_ws_from_label(division_label)
-    rows = ws.get_all_values()
+    rows = get_matchcenter_values(ws)
 
     out = []
     seen = set()
@@ -437,12 +495,16 @@ def write_league_schedule(
     division_label: str,
 ):
     ws = get_div_ws_from_label(division_label)
+    sheet_name = getattr(ws, "title", DIVISION_SHEETS.get(division_label, division_label))
     reqs = [
         {"range": f"B{row_index}:C{row_index}", "values": [[timestamp, mode]]},
         {"range": f"G{row_index}:G{row_index}", "values": [[event_url]]},
         {"range": f"H{row_index}:H{row_index}", "values": [[entered_by]]},
     ]
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=matchcenter_invalidate_prefixes(sheet_name),
+    )
 
 
 def write_league_result(
@@ -455,13 +517,17 @@ def write_league_result(
     division_label: str,
 ):
     ws = get_div_ws_from_label(division_label)
+    sheet_name = getattr(ws, "title", DIVISION_SHEETS.get(division_label, division_label))
     reqs = [
         {"range": f"B{row_index}:C{row_index}", "values": [[timestamp, mode]]},
         {"range": f"E{row_index}:E{row_index}", "values": [[result]]},
         {"range": f"G{row_index}:G{row_index}", "values": [[racetime_link]]},
         {"range": f"H{row_index}:H{row_index}", "values": [[entered_by]]},
     ]
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=matchcenter_invalidate_prefixes(sheet_name),
+    )
 
 
 # =========================================================
@@ -499,8 +565,8 @@ def is_cup_match_open(round_label: str, result_value: str) -> bool:
 
 def get_open_cup_matches(selected_round: str | None = None):
     sheets_required()
-    ws = WB.worksheet(CUP_SHEET)
-    rows = ws.get_all_values()
+    ws = get_cached_worksheet_by_name(CUP_SHEET)
+    rows = get_matchcenter_values(ws)
 
     out = []
     seen = set()
@@ -555,27 +621,38 @@ def append_series_racetime(existing_text: str, score: str, link: str) -> str:
 
 
 def write_cup_schedule(row_index: int, timestamp: str, event_url: str, entered_meta: str):
-    ws = WB.worksheet(CUP_SHEET)
+    ws = get_cached_worksheet_by_name(CUP_SHEET)
     reqs = [
         {"range": f"E{row_index}:E{row_index}", "values": [[timestamp]]},
         {"range": f"F{row_index}:F{row_index}", "values": [[entered_meta]]},
     ]
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=matchcenter_invalidate_prefixes(CUP_SHEET),
+    )
 
 
 def write_cup_result_standard(row_index: int, result: str, racetime_link: str, entered_meta: str):
-    ws = WB.worksheet(CUP_SHEET)
+    ws = get_cached_worksheet_by_name(CUP_SHEET)
     reqs = [
         {"range": f"C{row_index}:C{row_index}", "values": [[result]]},
         {"range": f"E{row_index}:E{row_index}", "values": [[racetime_link]]},
         {"range": f"F{row_index}:F{row_index}", "values": [[entered_meta]]},
     ]
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=matchcenter_invalidate_prefixes(CUP_SHEET),
+    )
 
 
 def write_cup_result_series(row_index: int, series_score: str, racetime_link: str, entered_meta: str):
-    ws = WB.worksheet(CUP_SHEET)
-    existing_racetime = ws.acell(f"E{row_index}").value or ""
+    ws = get_cached_worksheet_by_name(CUP_SHEET)
+    existing_racetime = acell_cached(
+        lambda: ws,
+        sheet_name=CUP_SHEET,
+        cell=f"E{row_index}",
+        ttl_seconds=15,
+    ) or ""
     combined_racetime = append_series_racetime(existing_racetime, series_score, racetime_link)
 
     reqs = [
@@ -583,7 +660,10 @@ def write_cup_result_series(row_index: int, series_score: str, racetime_link: st
         {"range": f"E{row_index}:E{row_index}", "values": [[combined_racetime]]},
         {"range": f"F{row_index}:F{row_index}", "values": [[entered_meta]]},
     ]
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=matchcenter_invalidate_prefixes(CUP_SHEET),
+    )
 
 
 # =========================================================
