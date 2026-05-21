@@ -5,6 +5,8 @@ import unicodedata
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+from sheet_guard import get_all_values_cached
+
 
 DIV_COL_LEFT = 4
 DIV_COL_MARKER = 5
@@ -21,6 +23,12 @@ SCOPE = [
 GC = None
 WB = None
 SHEETS_ENABLED = True
+
+RESTINFO_PERFORMANCE_VERSION = "restinfo-performance-v1"
+print(f"[RESTINFO] geladen: {RESTINFO_PERFORMANCE_VERSION}")
+
+RESTINFO_SHEET_CACHE_TTL_SECONDS = int(os.getenv("RESTINFO_SHEET_CACHE_TTL_SECONDS", "120"))
+_WORKSHEET_CACHE = {}
 
 try:
     CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
@@ -48,7 +56,23 @@ def normalize_name(value: str) -> str:
 
 def _division_worksheet(div_number: str):
     sheets_required()
-    return WB.worksheet(f"{div_number}.DIV")
+    sheet_name = f"{div_number}.DIV"
+
+    if sheet_name in _WORKSHEET_CACHE:
+        return _WORKSHEET_CACHE[sheet_name]
+
+    ws = WB.worksheet(sheet_name)
+    _WORKSHEET_CACHE[sheet_name] = ws
+    return ws
+
+
+def _division_values(div_number: str):
+    ws = _division_worksheet(div_number)
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=getattr(ws, "title", f"{div_number}.DIV"),
+        ttl_seconds=RESTINFO_SHEET_CACHE_TTL_SECONDS,
+    )
 
 
 def _unique_players_from_column_l(rows: list[list[str]]) -> list[str]:
@@ -82,15 +106,12 @@ def _unique_players_from_column_l(rows: list[list[str]]) -> list[str]:
 # =========================================================
 
 def list_rest_players(div_number: str) -> list[str]:
-    ws = _division_worksheet(div_number)
-    rows = ws.get_all_values()
-
+    rows = _division_values(div_number)
     return _unique_players_from_column_l(rows)
 
 
 def list_restprogramm(div_number: str, player_name: str):
-    ws = _division_worksheet(div_number)
-    rows = ws.get_all_values()
+    rows = _division_values(div_number)
 
     matches = []
     target = normalize_name(player_name)
@@ -258,8 +279,7 @@ def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -
 # =========================================================
 
 def list_streichungen(div_number: str):
-    ws = _division_worksheet(div_number)
-    rows = ws.get_all_values()
+    rows = _division_values(div_number)
 
     entries = []
     seen = set()
