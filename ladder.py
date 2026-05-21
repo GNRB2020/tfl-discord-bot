@@ -86,11 +86,11 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v5-signup-doubleclick-guard"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v6-countdown-stable-10-to-1"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
-    os.getenv("TFNL_LOOP_INTERVAL_SECONDS", "30").strip()
+    os.getenv("TFNL_LOOP_INTERVAL_SECONDS", "10").strip()
 )
 
 SCHEDULE_SHEET_NAME = "Schedule"
@@ -4190,6 +4190,8 @@ class LadderCog(commands.Cog):
             await self.log_tfnl(f"Countdown nicht möglich: Keine Matches für Slot `{slot_id}` gefunden.")
             return False
 
+        countdown_start_dt = start_dt - timedelta(seconds=10)
+
         async def sleep_until(target: datetime):
             delay = (target - datetime.now(BERLIN_TZ)).total_seconds()
             if delay > 0:
@@ -4207,12 +4209,26 @@ class LadderCog(commands.Cog):
 
         async def countdown(user: discord.User, player_id: str):
             try:
-                # Muss vor Startzeit -10 Sekunden vorbereitet worden sein.
-                # Falls Discord/API kurz hängt, wird trotzdem bis zur Startmeldung durchgezogen.
-                message = None
+                # Wichtig:
+                # Der alte Countdown hat absolute Zielsekunden "nachgeholt".
+                # Wenn der Bot/Discord eine Edit-Verzögerung hatte, wurden dadurch
+                # sichtbare Sekunden übersprungen, z. B. 10 -> 8 -> 6.
+                #
+                # Neu:
+                # 1. Warten bis Startzeit -10 Sekunden.
+                # 2. 10 sofort anzeigen.
+                # 3. Danach strikt jede Sekunde um genau 1 herunterzählen.
+                # Damit sieht jeder Spieler 10,9,8,7,6,5,4,3,2,1.
+                await sleep_until(countdown_start_dt)
 
-                for value in range(10, 0, -1):
-                    await sleep_until(start_dt - timedelta(seconds=value))
+                message = await send_or_edit_countdown(
+                    user,
+                    None,
+                    "**TFNL Countdown**\nRace startet in `10`..."
+                )
+
+                for value in range(9, 0, -1):
+                    await asyncio.sleep(1)
                     message = await send_or_edit_countdown(
                         user,
                         message,
