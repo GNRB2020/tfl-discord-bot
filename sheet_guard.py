@@ -1,6 +1,7 @@
 # sheet_guard.py
 from __future__ import annotations
 
+import os
 import random
 import time
 from copy import deepcopy
@@ -17,6 +18,34 @@ except Exception:  # fallback, falls gspread beim Import noch nicht verfügbar i
 # ZENTRALER GOOGLE-SHEETS-SCHUTZ
 # =========================================================
 
+SHEET_GUARD_VERSION = "sheet-guard-optimized-v1"
+print(f"[SHEET_GUARD] geladen: {SHEET_GUARD_VERSION}")
+
+
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    """
+    Liest Integer-Werte aus ENV robust ein.
+    Ungültige Werte fallen auf den Default zurück.
+    """
+    raw = os.getenv(name, "").strip()
+
+    if raw == "":
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except Exception:
+            value = default
+
+    if minimum is not None:
+        value = max(minimum, value)
+
+    if maximum is not None:
+        value = min(maximum, value)
+
+    return value
+
+
 @dataclass
 class CacheEntry:
     created_at: float
@@ -29,9 +58,14 @@ _CACHE: dict[str, CacheEntry] = {}
 _QUOTA_COOLDOWN_UNTIL = 0.0
 _LAST_QUOTA_LOG_AT = 0.0
 
-DEFAULT_READ_TTL_SECONDS = 30
-DEFAULT_WRITE_RETRIES = 4
-DEFAULT_READ_RETRIES = 4
+# Per Render-ENV steuerbar.
+# Ziel: weniger echte Sheet-Reads, weniger Retry-Druck bei 429, stabilere Ladezeiten.
+DEFAULT_READ_TTL_SECONDS = _env_int("SHEET_GUARD_READ_TTL_SECONDS", 90, minimum=0, maximum=3600)
+DEFAULT_WRITE_RETRIES = _env_int("SHEET_GUARD_WRITE_RETRIES", 2, minimum=0, maximum=10)
+DEFAULT_READ_RETRIES = _env_int("SHEET_GUARD_READ_RETRIES", 2, minimum=0, maximum=10)
+DEFAULT_QUOTA_COOLDOWN_SECONDS = _env_int("SHEET_GUARD_QUOTA_COOLDOWN_SECONDS", 60, minimum=5, maximum=600)
+DEFAULT_RETRY_MAX_SLEEP_SECONDS = _env_int("SHEET_GUARD_RETRY_MAX_SLEEP_SECONDS", 8, minimum=1, maximum=60)
+DEFAULT_CACHE_MAX_ENTRIES = _env_int("SHEET_GUARD_CACHE_MAX_ENTRIES", 300, minimum=50, maximum=5000)
 
 
 def _now() -> float:
@@ -48,9 +82,10 @@ def _is_quota_error(exc: Exception) -> bool:
     )
 
 
-def _set_quota_cooldown(seconds: int = 60):
+def _set_quota_cooldown(seconds: int | None = None):
     global _QUOTA_COOLDOWN_UNTIL
-    _QUOTA_COOLDOWN_UNTIL = max(_QUOTA_COOLDOWN_UNTIL, _now() + seconds)
+    selected_seconds = seconds if seconds is not None else DEFAULT_QUOTA_COOLDOWN_SECONDS
+    _QUOTA_COOLDOWN_UNTIL = max(_QUOTA_COOLDOWN_UNTIL, _now() + selected_seconds)
 
 
 def is_quota_cooldown_active() -> bool:
@@ -90,7 +125,26 @@ def invalidate_cache(key_prefix: str | None = None):
             _CACHE.pop(key, None)
 
 
+def _prune_cache_if_needed():
+    """
+    Verhindert, dass der Prozess bei vielen dynamischen Keys unnötig Cache ansammelt.
+    Entfernt die ältesten Einträge, wenn das Limit überschritten wird.
+    """
+    if len(_CACHE) <= DEFAULT_CACHE_MAX_ENTRIES:
+        return
+
+    overflow = len(_CACHE) - DEFAULT_CACHE_MAX_ENTRIES
+    oldest_keys = sorted(_CACHE.keys(), key=lambda key: _CACHE[key].created_at)[:overflow]
+
+    for key in oldest_keys:
+        _CACHE.pop(key, None)
+
+
 def get_cache_value(key: str, ttl_seconds: int):
+    if ttl_seconds <= 0:
+        _CACHE.pop(key, None)
+        return None
+
     entry = _CACHE.get(key)
     if not entry:
         return None
@@ -104,11 +158,12 @@ def get_cache_value(key: str, ttl_seconds: int):
 
 def set_cache_value(key: str, value: Any):
     _CACHE[key] = CacheEntry(created_at=_now(), value=deepcopy(value))
+    _prune_cache_if_needed()
 
 
 def _sleep_for_retry(attempt: int):
     # Exponential Backoff mit Jitter, aber bewusst gedeckelt.
-    base = min(2 ** attempt, 16)
+    base = min(2 ** attempt, DEFAULT_RETRY_MAX_SLEEP_SECONDS)
     jitter = random.uniform(0.1, 0.7)
     time.sleep(base + jitter)
 
@@ -139,7 +194,7 @@ def run_sheet_call(
             if not _is_quota_error(exc):
                 raise
 
-            _set_quota_cooldown(60)
+            _set_quota_cooldown()
 
             if allow_stale_on_quota and stale_cache_key:
                 entry = _CACHE.get(stale_cache_key)
