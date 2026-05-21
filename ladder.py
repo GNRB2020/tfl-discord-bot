@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v13-colored-tables-rank-delta"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v16-n-red-ff-purple"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -1443,6 +1443,8 @@ ANSI_RESET = "\u001b[0m"
 ANSI_GREEN = "\u001b[32m"
 ANSI_YELLOW = "\u001b[33m"
 ANSI_LIGHT_RED = "\u001b[91m"
+ANSI_RED = "\u001b[31m"
+ANSI_PURPLE = "\u001b[35m"
 ANSI_DARK_RED = "\u001b[31m"
 
 
@@ -1511,10 +1513,10 @@ def color_stat_value(value, stat: str) -> str:
         return ansi_color(text, ANSI_YELLOW)
 
     if stat == "N":
-        return ansi_color(text, ANSI_LIGHT_RED)
+        return ansi_color(text, ANSI_RED)
 
     if stat == "FF":
-        return ansi_color(text, ANSI_DARK_RED)
+        return ansi_color(text, ANSI_PURPLE)
 
     return text
 
@@ -1530,6 +1532,11 @@ def visible_len(value) -> int:
     return len(strip_ansi(normalize_text(value)))
 
 
+def get_leading_ansi_color(value: str) -> str:
+    match = re.match(r"^(\x1b\[[0-9;]*m)", str(value or ""))
+    return match.group(1) if match else ""
+
+
 def visible_truncate(value, max_width: int) -> str:
     text = normalize_text(value).replace("\n", " / ")
     plain = strip_ansi(text)
@@ -1537,8 +1544,13 @@ def visible_truncate(value, max_width: int) -> str:
     if len(plain) <= max_width:
         return text
 
-    # Bei farbigen Zellen wird zum sicheren Kürzen die Farbe verworfen.
-    return plain[: max_width - 1] + "…"
+    truncated_plain = plain[: max_width - 1] + "…"
+    color = get_leading_ansi_color(text)
+
+    if color:
+        return f"{color}{truncated_plain}{ANSI_RESET}"
+
+    return truncated_plain
 
 
 def visible_ljust(value, width: int) -> str:
@@ -3137,13 +3149,13 @@ def build_standings_messages() -> list[str]:
         table_rows.append(
             [
                 index,
+                color_rank_delta(rank_deltas.get(player_id, 0)),
                 color_last_race_player_name(
                     normalize_text(row.get("Player Name")),
                     player_id,
                     last_race_player_ids,
                 ),
                 normalize_text(row.get("Elo")) or "1000.0",
-                color_rank_delta(rank_deltas.get(player_id, 0)),
                 games,
                 color_stat_value(wins, "S"),
                 color_stat_value(draws, "U"),
@@ -3153,7 +3165,7 @@ def build_standings_messages() -> list[str]:
         )
 
     table = build_discord_ansi_table(
-        ["#", "Spieler", "ELO", "+/-", "G", "S", "U", "N", "FF"],
+        ["#", "+/-", "Spieler", "ELO", "G", "S", "U", "N", "FF"],
         table_rows,
         max_col_width=18,
     )
@@ -3307,13 +3319,13 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
         table_rows.append(
             [
                 index,
+                color_rank_delta(rank_deltas.get(player_id, 0)),
                 color_last_race_player_name(
                     normalize_text(row.get("Player Name")),
                     player_id,
                     last_race_player_ids,
                 ),
                 normalize_text(row.get("Elo")) or "1000.0",
-                color_rank_delta(rank_deltas.get(player_id, 0)),
                 games,
                 color_stat_value(wins, "S"),
                 color_stat_value(draws, "U"),
@@ -3325,7 +3337,7 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
         )
 
     table = build_discord_ansi_table(
-        ["#", "Spieler", "ELO", "+/-", "G", "S", "U", "N", "FF", "Best", "Ø"],
+        ["#", "+/-", "Spieler", "ELO", "G", "S", "U", "N", "FF", "Best", "Ø"],
         table_rows,
         max_col_width=16,
     )
