@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v8-startup-quota-stagger"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v9-auto-evaluate-times-3min"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -95,6 +95,10 @@ TFNL_LOOP_INTERVAL_SECONDS = int(
 
 TFNL_STARTUP_STAGGER_SECONDS = int(
     os.getenv("TFNL_STARTUP_STAGGER_SECONDS", "45").strip()
+)
+
+TFNL_AUTO_EVALUATE_INTERVAL_MINUTES = int(
+    os.getenv("TFNL_AUTO_EVALUATE_INTERVAL_MINUTES", "3").strip()
 )
 
 SCHEDULE_SHEET_NAME = "Schedule"
@@ -520,17 +524,21 @@ def load_signup_rows_with_index(force_refresh: bool = False):
     ]
 
 
-def load_matches_rows_all():
-    return get_cached_records(MATCHES_SHEET_NAME, get_matches_sheet)
+def load_matches_rows_all(force_refresh: bool = False):
+    return get_cached_records(
+        MATCHES_SHEET_NAME,
+        get_matches_sheet,
+        force_refresh=force_refresh,
+    )
 
 
-def load_matches_rows():
-    return filter_rows_by_season(load_matches_rows_all())
+def load_matches_rows(force_refresh: bool = False):
+    return filter_rows_by_season(load_matches_rows_all(force_refresh=force_refresh))
 
 
-def load_matches_rows_with_index():
+def load_matches_rows_with_index(force_refresh: bool = False):
     selected_season = get_active_season()
-    rows = load_matches_rows_all()
+    rows = load_matches_rows_all(force_refresh=force_refresh)
     return [
         (index, row)
         for index, row in enumerate(rows, start=2)
@@ -2032,6 +2040,32 @@ def calculate_match_result(match_row: dict):
     return None
 
 
+def match_has_all_times(match_row: dict) -> bool:
+    players = get_match_players(match_row)
+
+    if not players:
+        return False
+
+    for player in players:
+        if not normalize_text(match_row.get(player["time_col"])):
+            return False
+
+    return True
+
+
+def match_needs_auto_evaluation(match_row: dict) -> bool:
+    if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
+        return False
+
+    if normalize_text(match_row.get("Status")).lower() == "finished":
+        return False
+
+    if not match_has_all_times(match_row):
+        return False
+
+    return calculate_match_result(match_row) is not None
+
+
 def calculate_1on1_result(players: list[dict]):
     p1, p2 = players[0], players[1]
 
@@ -3495,6 +3529,7 @@ class LadderCog(commands.Cog):
         self.slot_overview_publish_lock = asyncio.Lock()
         self.standings_publish_lock = asyncio.Lock()
         self.sheet_write_lock = asyncio.Lock()
+        self.auto_evaluate_matches_lock = asyncio.Lock()
 
         try:
             self.elo_sheet_setup_status = ensure_ladder_elo_sheets()
@@ -3512,10 +3547,14 @@ class LadderCog(commands.Cog):
         if not self.process_ladder_slots.is_running():
             self.process_ladder_slots.start()
 
+        if not self.auto_evaluate_finished_matches.is_running():
+            self.auto_evaluate_finished_matches.start()
+
     def cog_unload(self):
         self.update_schedule_channel.cancel()
         self.update_signup_channel.cancel()
         self.process_ladder_slots.cancel()
+        self.auto_evaluate_finished_matches.cancel()
 
     # =====================================================
     # PERSISTENT COMPONENT ROUTING
@@ -4934,6 +4973,36 @@ class LadderCog(commands.Cog):
         await self.log_tfnl(f"Slot `{slot_id}` manuell archiviert und Channel gelöscht.")
         return True
 
+    async def check_finished_matches_from_sheet(self) -> int:
+        """
+        Prüft regelmäßig die Matches-Tabelle:
+        Wenn alle Zeitspalten eines Matches gefüllt sind, wird das Match
+        automatisch mit derselben Logik gewertet wie bei Finish/Forfeit-Buttons.
+        """
+        evaluated = 0
+
+        async with self.auto_evaluate_matches_lock:
+            rows = load_matches_rows(force_refresh=True)
+
+            for match_row in rows:
+                if not match_needs_auto_evaluation(match_row):
+                    continue
+
+                match_id = normalize_text(match_row.get("Match ID"))
+
+                if not match_id:
+                    continue
+
+                await self.evaluate_match_if_complete(match_id)
+                evaluated += 1
+
+        if evaluated:
+            await self.log_tfnl(
+                f"Auto-Wertung: `{evaluated}` Match(es) mit vollständig gefüllten Zeitspalten gewertet."
+            )
+
+        return evaluated
+
     async def run_manual_process_step(self, step: str, slot_id: str) -> tuple[bool, str]:
         step = normalize_text(step).lower()
         slot_id = normalize_text(slot_id)
@@ -5049,6 +5118,31 @@ class LadderCog(commands.Cog):
         # Der Slot-Prozess ist der read-lastigste Task. Nach Deploy daher
         # erst starten, wenn Schedule-/Signup-Tasks zeitlich entzerrt wurden.
         await asyncio.sleep(TFNL_STARTUP_STAGGER_SECONDS + 30)
+
+    @tasks.loop(minutes=TFNL_AUTO_EVALUATE_INTERVAL_MINUTES)
+    async def auto_evaluate_finished_matches(self):
+        try:
+            await self.check_finished_matches_from_sheet()
+        except Exception as e:
+            error_text = repr(e)
+
+            if "Quota exceeded" in error_text or "[429]" in error_text:
+                if should_log_quota_warning(60):
+                    retry_seconds = seconds_until_quota_retry() or 60
+                    await self.log_tfnl(
+                        f"Google-Sheets-Quota erreicht bei Auto-Wertung. Nutze Cache und pausiert echte Sheet-Reads kurz. Neuer Versuch in ca. {retry_seconds} Sekunden."
+                    )
+
+                await asyncio.sleep(max(60, retry_seconds))
+                return
+
+            await self.log_tfnl(f"Fehler in auto_evaluate_finished_matches: {error_text}")
+
+    @auto_evaluate_finished_matches.before_loop
+    async def before_auto_evaluate_finished_matches(self):
+        await self.bot.wait_until_ready()
+        # Nach Deploy später starten als der normale Slot-Prozess.
+        await asyncio.sleep(TFNL_STARTUP_STAGGER_SECONDS + 45)
 
     # =====================================================
     # COMMANDS
