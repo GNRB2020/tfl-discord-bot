@@ -11,6 +11,7 @@ Dieses Modul:
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -42,7 +43,8 @@ BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 
 ELO_SHEETS_PATCH_VERSION = "SAFE_V6_ECHT_NEU_KEIN_PLUS_IN_SHEET"
-print(f"[TFNL ELO] ladder_elo_sheets.py geladen: {ELO_SHEETS_PATCH_VERSION}")
+ELO_SHEETS_PERFORMANCE_VERSION = "elo-sheets-performance-v1"
+print(f"[TFNL ELO] ladder_elo_sheets.py geladen: {ELO_SHEETS_PATCH_VERSION} | {ELO_SHEETS_PERFORMANCE_VERSION}")
 
 
 def format_elo_change_sheet(value) -> str:
@@ -150,8 +152,35 @@ SEED_COMPARISON_HEADERS = [
 ]
 
 _WORKSHEET_CACHE: dict[str, gspread.Worksheet] = {}
+_SPREADSHEET_CACHE = None
 _ELO_SHEETS_READY = False
 _LAST_ELO_SETUP_STATUS: dict | None = None
+_ACTIVE_SEASON_CACHE_VALUE: str | None = None
+_ACTIVE_SEASON_CACHE_AT: float = 0.0
+
+
+def env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.getenv(name, "").strip()
+
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except Exception:
+            value = default
+
+    if minimum is not None:
+        value = max(minimum, value)
+
+    if maximum is not None:
+        value = min(maximum, value)
+
+    return value
+
+
+ELO_READ_TTL_SECONDS = env_int("TFNL_ELO_READ_TTL_SECONDS", 90, minimum=0, maximum=3600)
+ELO_ACTIVE_SEASON_TTL_SECONDS = env_int("TFNL_ELO_ACTIVE_SEASON_TTL_SECONDS", 120, minimum=0, maximum=3600)
 
 
 
@@ -188,10 +217,15 @@ def format_elo(value) -> str:
 
 
 def get_spreadsheet():
+    global _SPREADSHEET_CACHE
+
+    if _SPREADSHEET_CACHE is not None:
+        return _SPREADSHEET_CACHE
+
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
     client = gspread.authorize(creds)
-    return client.open_by_key(TFNL_SPREADSHEET_ID)
-
+    _SPREADSHEET_CACHE = client.open_by_key(TFNL_SPREADSHEET_ID)
+    return _SPREADSHEET_CACHE
 
 def get_or_create_sheet(title: str, rows: int = 1000, cols: int = 30):
     cached = _WORKSHEET_CACHE.get(title)
@@ -338,7 +372,16 @@ def ensure_settings_sheet() -> str:
 
 
 def get_active_season() -> str:
-    return ensure_settings_sheet()
+    global _ACTIVE_SEASON_CACHE_VALUE, _ACTIVE_SEASON_CACHE_AT
+
+    if ELO_ACTIVE_SEASON_TTL_SECONDS > 0 and _ACTIVE_SEASON_CACHE_VALUE:
+        if time.time() - _ACTIVE_SEASON_CACHE_AT <= ELO_ACTIVE_SEASON_TTL_SECONDS:
+            return _ACTIVE_SEASON_CACHE_VALUE
+
+    value = ensure_settings_sheet()
+    _ACTIVE_SEASON_CACHE_VALUE = value
+    _ACTIVE_SEASON_CACHE_AT = time.time()
+    return value
 
 
 def ensure_core_season_columns() -> list[str]:
@@ -449,7 +492,7 @@ def load_ratings_rows_with_index() -> list[tuple[int, dict]]:
     rows = get_all_records_cached(
         get_ratings_sheet,
         sheet_name=RATINGS_SHEET_NAME,
-        ttl_seconds=30,
+        ttl_seconds=ELO_READ_TTL_SECONDS,
     )
     return list(enumerate(rows, start=2))
 
@@ -458,7 +501,7 @@ def load_history_rows() -> list[dict]:
     return get_all_records_cached(
         get_history_sheet,
         sheet_name=RATING_HISTORY_SHEET_NAME,
-        ttl_seconds=30,
+        ttl_seconds=ELO_READ_TTL_SECONDS,
     )
 
 
@@ -735,6 +778,12 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
     """
     Verarbeitet ein bereits mit Ergebnis versehenes Match.
     Idempotenz: Bereits vorhandene Rating Event IDs werden übersprungen.
+
+    Performance-v1:
+    - Ratings werden einmal geladen und im Speicher indiziert.
+    - Bestehende Rating-Zeilen werden gesammelt per batch_update geschrieben.
+    - Neue Rating-Zeilen werden gesammelt per append_rows geschrieben.
+    - History bleibt ein einzelner Append.
     """
     ensure_ladder_elo_sheets()
 
@@ -760,7 +809,6 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
 
     existing_event_ids = load_history_event_ids()
     created_at = now_text()
-    fallback_active_season = get_active_season()
 
     scopes = [
         SCOPE_SEASON_OVERALL,
@@ -769,22 +817,100 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
         SCOPE_ALLTIME_MODE,
     ]
 
+    ratings_sheet = get_ratings_sheet()
+    ratings_rows_with_index = load_ratings_rows_with_index()
+    ratings_by_key: dict[tuple[str, str, str, str], tuple[int | None, dict]] = {}
+
+    for row_index, row in ratings_rows_with_index:
+        key = (
+            normalize_text(row.get("Player ID")),
+            normalize_text(row.get("Season")),
+            normalize_text(row.get("Mode")),
+            normalize_text(row.get("Scope")),
+        )
+        ratings_by_key[key] = (row_index, row)
+
+    def get_rating_state(player_id: str, player_name: str, current_season: str, current_mode: str, scope: str) -> dict:
+        selected_season, selected_mode = scope_key_parts(scope, current_season, current_mode)
+        key = (normalize_text(player_id), selected_season, selected_mode, scope)
+        row_index, current = ratings_by_key.get(key, (None, None))
+
+        if current:
+            state = {
+                "row_index": row_index,
+                "player_id": normalize_text(current.get("Player ID")) or normalize_text(player_id),
+                "player_name": normalize_text(current.get("Player Name")) or normalize_text(player_name),
+                "season": selected_season,
+                "mode": selected_mode,
+                "scope": scope,
+                "elo": float_value(current.get("Elo"), START_ELO),
+                "wins": int_value(current.get("Wins")),
+                "draws": int_value(current.get("Draws")),
+                "lose": int_value(current.get("Lose")),
+            }
+        else:
+            state = {
+                "row_index": None,
+                "player_id": normalize_text(player_id),
+                "player_name": normalize_text(player_name),
+                "season": selected_season,
+                "mode": selected_mode,
+                "scope": scope,
+                "elo": float(START_ELO),
+                "wins": 0,
+                "draws": 0,
+                "lose": 0,
+            }
+
+        if normalize_text(player_name):
+            state["player_name"] = normalize_text(player_name)
+
+        ratings_by_key[key] = (state["row_index"], state)
+        return state
+
+    def build_rating_values(state: dict) -> list:
+        games = int(state["wins"]) + int(state["draws"]) + int(state["lose"])
+        winrate = calculate_winrate(
+            int(state["wins"]),
+            int(state["draws"]),
+            int(state["lose"]),
+        )
+
+        return [
+            normalize_text(state["player_id"]),
+            normalize_text(state["player_name"]),
+            normalize_text(state["season"]),
+            normalize_text(state["mode"]),
+            normalize_text(state["scope"]),
+            format_elo(state["elo"]),
+            int(state["wins"]),
+            int(state["draws"]),
+            int(state["lose"]),
+            games,
+            f"{winrate:.1f}",
+            created_at,
+        ]
+
     history_rows: list[list] = []
+    rating_updates: list[dict] = []
+    rating_appends: list[list] = []
+    changed_rating_keys: set[tuple[str, str, str, str]] = set()
     elo_changes: dict[str, str] = {}
     processed = 0
     skipped = 0
 
     for scope in scopes:
-        old_elos = {
-            player["player_id"]: get_rating_value(
+        old_elos = {}
+
+        for player in players:
+            state = get_rating_state(
                 player["player_id"],
+                player["name"],
                 season,
                 mode,
                 scope,
-                START_ELO,
             )
-            for player in players
-        }
+            old_elos[player["player_id"]] = float(state["elo"])
 
         for player in players:
             event_id = f"{match_id}:{scope}:{player['player_id']}"
@@ -798,9 +924,36 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
             if not opponents:
                 continue
 
+            state = get_rating_state(
+                player["player_id"],
+                player["name"],
+                season,
+                mode,
+                scope,
+            )
+
             opponent_elo = sum(old_elos[other["player_id"]] for other in opponents) / len(opponents)
             elo_before = old_elos[player["player_id"]]
             elo_after, elo_change = calculate_new_elo(elo_before, opponent_elo, player["score"])
+
+            result_type = player["result_type"]
+
+            if result_type == "Sieg":
+                state["wins"] += 1
+            elif result_type == "Remis":
+                state["draws"] += 1
+            else:
+                state["lose"] += 1
+
+            state["elo"] = elo_after
+
+            selected_season, selected_mode = scope_key_parts(scope, season, mode)
+            changed_rating_keys.add((
+                normalize_text(player["player_id"]),
+                selected_season,
+                selected_mode,
+                scope,
+            ))
 
             opponent_info = ", ".join(
                 f"{opponent['name']} ({round(old_elos[opponent['player_id']], 1)})"
@@ -825,25 +978,48 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
                     format_elo(opponent_elo),
                     format_elo(elo_after),
                     format_elo_change_sheet(elo_change),
-                    player["result_type"],
+                    result_type,
                     created_at,
                 ]
             )
 
             if scope == SCOPE_SEASON_OVERALL:
-                elo_changes[player["player_id"]] = f"{elo_change:+.1f}"
-
-            upsert_rating_row(
-                player_id=player["player_id"],
-                player_name=player["name"],
-                season=season,
-                mode=mode,
-                scope=scope,
-                elo=elo_after,
-                result_type=player["result_type"],
-            )
+                elo_changes[player["player_id"]] = format_elo_change_display(elo_change)
 
             processed += 1
+
+    for key in sorted(changed_rating_keys, key=lambda item: (item[3], item[1], item[2], item[0])):
+        row_index, state = ratings_by_key.get(key, (None, None))
+
+        if not state:
+            continue
+
+        values = build_rating_values(state)
+
+        if row_index:
+            rating_updates.append(
+                {
+                    "range": f"A{row_index}:L{row_index}",
+                    "values": [values],
+                }
+            )
+        else:
+            rating_appends.append(values)
+
+    if rating_updates:
+        sheet_write_call(
+            lambda: ratings_sheet.batch_update(rating_updates, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[],
+        )
+
+    if rating_appends:
+        sheet_write_call(
+            lambda: ratings_sheet.append_rows(rating_appends, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=[],
+        )
+
+    if rating_updates or rating_appends:
+        invalidate_elo_cache(RATINGS_SHEET_NAME)
 
     append_history_rows(history_rows)
 
