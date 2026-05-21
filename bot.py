@@ -1,22 +1,32 @@
 import os
 print("BOT FILE PATH:", os.path.abspath(__file__))
+
+import asyncio
+import datetime
+import sys
+import traceback
+from datetime import datetime as dt, timedelta
+
+import aiohttp
 import discord
+import gspread
 import pytz
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-import os
-import datetime
-import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import asyncio
-from aiohttp import web
-from datetime import datetime as dt, timedelta
-import aiohttp
-import sys
-import traceback
+
+from sheet_guard import (
+    col_values_cached,
+    get_all_values_cached,
+    sheet_write_call,
+)
 
 print("🔍 DEBUG: bot.py wurde geladen")
+
+BOT_PERFORMANCE_VERSION = "bot-performance-v1"
+print(f"[BOT] geladen: {BOT_PERFORMANCE_VERSION}")
 
 
 def _fatal(e: Exception):
@@ -24,17 +34,32 @@ def _fatal(e: Exception):
     traceback.print_exc()
     sys.exit(1)
 
+
 # =========================================================
 # .env laden / Konfiguration
 # =========================================================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 EVENT_CHANNEL_ID = int(os.getenv("EVENT_CHANNEL_ID", os.getenv("DISCORD_EVENT_CHANNEL_ID", "0")))
 RESTREAM_CHANNEL_ID = int(os.getenv("RESTREAM_CHANNEL_ID", "0"))
 SHOWRESTREAMS_CHANNEL_ID = int(os.getenv("SHOWRESTREAMS_CHANNEL_ID", "1277949546650931241"))
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
+TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
+RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
+ZSR_RESTREAM_URL = os.getenv("ZSR_RESTREAM_URL", "https://www.twitch.tv/zeldaspeedruns")
+SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
+API_BASE = os.getenv("TFL_API_BASE", "https://tfl-discord-api.onrender.com")
+
 print("DEBUG CREDS_FILE =", CREDS_FILE)
+
+BERLIN_TZ = pytz.timezone("Europe/Berlin")
+SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+BOT_SHEET_CACHE_TTL_SECONDS = int(os.getenv("BOT_SHEET_CACHE_TTL_SECONDS", "90"))
+BOT_PLAYER_CACHE_TTL_SECONDS = int(os.getenv("BOT_PLAYER_CACHE_TTL_SECONDS", "120"))
+BOT_WEB_RESULTS_CACHE_TTL_SECONDS = int(os.getenv("BOT_WEB_RESULTS_CACHE_TTL_SECONDS", "60"))
 
 # =========================================================
 # Discord Client erstellen
@@ -46,9 +71,6 @@ intents.members = True
 
 print("DEBUG Intents:", intents)
 
-# =========================================================
-# Discord Client + CommandTree
-# =========================================================
 
 DISABLED_MANUAL_COMMANDS = {
     "matchcenter",
@@ -101,276 +123,97 @@ class TFLBot(commands.Bot):
                 print(f"❌ FEHLER beim Laden von {ext}.py:")
                 traceback.print_exc()
 
-        print(
-            "TREE GLOBAL VOR COPY:",
-            [cmd.name for cmd in self.tree.get_commands()]
-        )
-
-        print(
-            "TREE GUILD VOR COPY:",
-            [cmd.name for cmd in self.tree.get_commands(guild=guild)]
-        )
+        print("TREE GLOBAL VOR COPY:", [cmd.name for cmd in self.tree.get_commands()])
+        print("TREE GUILD VOR COPY:", [cmd.name for cmd in self.tree.get_commands(guild=guild)])
 
         self.tree.copy_global_to(guild=guild)
 
-        print(
-            "TREE GUILD NACH COPY:",
-            [cmd.name for cmd in self.tree.get_commands(guild=guild)]
-        )
+        print("TREE GUILD NACH COPY:", [cmd.name for cmd in self.tree.get_commands(guild=guild)])
 
         remove_disabled_manual_commands(self.tree, guild)
 
-        print(
-            "TREE GUILD VOR SYNC:",
-            [cmd.name for cmd in self.tree.get_commands(guild=guild)]
-        )
+        print("TREE GUILD VOR SYNC:", [cmd.name for cmd in self.tree.get_commands(guild=guild)])
 
         synced = await self.tree.sync(guild=guild)
 
         print("✅ Slash Commands synchronisiert:")
         for cmd in synced:
             print(f" - /{cmd.name}")
-        
+
 
 client = TFLBot(command_prefix="!", intents=intents)
-
-# Wichtig: jetzt existiert tree wirklich
 tree = client.tree
 
 
-ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0"))
-TFL_ROLE_ID = int(os.getenv("TFL_ROLE_ID", "0"))
-
-RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "1275077562984435853"))
-BERLIN_TZ = pytz.timezone("Europe/Berlin")
-ZSR_RESTREAM_URL = os.getenv("ZSR_RESTREAM_URL", "https://www.twitch.tv/zeldaspeedruns")
-
-_last_restreamable_post_date = None
-_last_restreams_post_date = None
-
-# --- API-Cache ---
-_API_CACHE = {
-    "upcoming": {"ts": None, "data": []},
-    "results": {"ts": None, "data": []},
-}
-API_CACHE_TTL = datetime.timedelta(minutes=10)
-
 # =========================================================
-# Minimaler Webserver für Joomla/Frontend
+# Google Sheets
 # =========================================================
+SHEETS_ENABLED = True
+GC = None
+WB = None
+_WORKSHEET_CACHE_BY_NAME: dict[str, gspread.Worksheet] = {}
 
-_webserver_started = False
-_webapp_runner: web.AppRunner | None = None
-
-
-def _event_location(ev: discord.ScheduledEvent) -> str | None:
-    try:
-        if getattr(ev, "entity_metadata", None):
-            loc = getattr(ev.entity_metadata, "location", None)
-            if loc:
-                return loc
-        if getattr(ev, "location", None):
-            return ev.location
-        if getattr(ev, "channel", None) and ev.channel:
-            return ev.channel.name
-    except Exception:
-        pass
-    return None
+try:
+    CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+    GC = gspread.authorize(CREDS)
+    WB = GC.open(SPREADSHEET_TITLE)
+    print("✅ Google Sheets verbunden (ohne Master-Tab)")
+except Exception as e:
+    SHEETS_ENABLED = False
+    WB = None
+    print(f"⚠️ Google Sheets deaktiviert: {e}")
 
 
-async def _build_web_app(client: discord.Client) -> web.Application:
-    routes = web.RouteTableDef()
-
-    def add_cors(resp: web.StreamResponse) -> web.StreamResponse:
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "*"
-        return resp
-
-    # -------------------------------------------------------
-    # /health
-    # -------------------------------------------------------
-    @routes.get("/health")
-    async def health(_request: web.Request):
-        return add_cors(web.json_response({"status": "ok"}))
-
-    # -------------------------------------------------------
-    # /api/upcoming  (Cache only)
-    # -------------------------------------------------------
-    @routes.get("/api/upcoming")
-    async def api_upcoming(request: web.Request):
-        try:
-            n = int(request.query.get("n", "5"))
-        except:
-            n = 5
-        n = max(1, min(20, n))
-
-        cache = _API_CACHE["upcoming"]
-
-        # Wenn Browser sofort ruft, aber Cache noch leer ist
-        if not cache["data"]:
-            return add_cors(web.json_response({"items": [], "loading": True}))
-
-        # Sortieren nach Startzeit
-        data = sorted(
-            cache["data"],
-            key=lambda x: (x["start"] is None, x["start"])
-        )
-
-        return add_cors(web.json_response({"items": data[:n]}))
-
-      # -------------------------------------------------------
-    # /api/results  (ebenfalls Cache only)
-    # -------------------------------------------------------
-    @routes.get("/api/results")
-    async def api_results(request: web.Request):
-        try:
-            n = int(request.query.get("n", "5"))
-        except:
-            n = 5
-        n = max(1, min(20, n))
-
-        cache = _API_CACHE["results"]
-
-        if not cache["data"]:
-            return add_cors(web.json_response({"items": [], "loading": True}))
-
-        return add_cors(web.json_response({"items": cache["data"][:n]}))
-
-    # -------------------------------------------------------
-    # /api/results-db  (NEU – zieht Ergebnisse direkt aus Google Sheet)
-    # -------------------------------------------------------
-    @routes.get("/api/results-db")
-    async def api_results_db(request: web.Request):
-        division = request.query.get("division")
-        limit = int(request.query.get("limit", "336"))
-
-        # Division prüfen
-        if division not in ["1", "2", "3", "4", "5", "6"]:
-            return add_cors(web.json_response({"items": []}))
-
-        # ---------- ROBUSTER WORKSHEET-FINDER ----------
-        def find_ws(name: str):
-            # normalize: entfernt alle problematischen Zeichen
-            def norm(s: str):
-                return (
-                    s.replace(" ", "")
-                     .replace("\u00A0", "")   # non-breaking space
-                     .replace("\u2007", "")   # figure space
-                     .replace("\u202F", "")   # narrow no-break space
-                     .replace("\u2002", "")   # en space
-                     .replace("\u2003", "")   # em space
-                     .replace("\u2009", "")   # thin space
-                     .replace("\u200A", "")   # hair space
-                     .replace("\ufeff", "")   # zero width no-break
-                     .replace(".", "")
-                     .lower()
-                )
-
-            target = norm(name)
-
-            for ws in WB.worksheets():
-                if norm(ws.title) == target:
-                    return ws
-
-            raise KeyError(f"Worksheet '{name}' nicht gefunden.")
-        # -------------------------------------------------
-
-        # Sheet lesen
-        try:
-            ws = find_ws(f"{division}.DIV")
-            rows = ws.get_all_values()
-        except Exception as e:
-            print(f"[API] results-db ERROR: {e}")
-            return add_cors(web.json_response({"items": []}))
-
-        # Kopfzeile entfernen
-        data = rows[1:]
-        items = []
-
-        for row in data:
-            date = row[1].strip() if len(row) > 1 else ""
-            mode = row[2].strip() if len(row) > 2 else ""
-            p1 = row[3].strip() if len(row) > 3 else ""
-            score = row[4].strip() if len(row) > 4 else ""
-            p2 = row[5].strip() if len(row) > 5 else ""
-            link = row[6].strip() if len(row) > 6 else ""
-            reporter = row[7].strip() if len(row) > 7 else ""
-
-            # Nur fertige Ergebnisse ("vs" rausfiltern)
-            if score.lower() == "vs" or "vs" in score.lower():
-                continue
-
-            if not date or not p1 or not p2:
-                continue
-
-            items.append({
-                "date": date,
-                "player1": p1,
-                "score": score,
-                "player2": p2,
-                "mode": mode,
-                "link": link,
-                "reporter": reporter,
-            })
-
-        # Sortierung nach Datum DESC
-        def parse_date(d):
-            try:
-                return datetime.datetime.strptime(d, "%d.%m.%Y")
-            except:
-                return datetime.datetime.min
-
-        items.sort(key=lambda x: parse_date(x["date"]), reverse=True)
-
-        # Limit anwenden
-        return add_cors(web.json_response({"items": items[:limit]}))
+def sheets_required():
+    if not SHEETS_ENABLED or WB is None:
+        raise RuntimeError("Google Sheets nicht verbunden (SHEETS_ENABLED=False).")
 
 
+def get_div_ws(div_number: str):
+    sheets_required()
+    sheet_name = f"{div_number}.DIV"
 
-    # -------------------------------------------------------
-    # App bauen
-    # -------------------------------------------------------
-    app = web.Application()
-    app.add_routes(routes)
-    return app
+    if sheet_name in _WORKSHEET_CACHE_BY_NAME:
+        return _WORKSHEET_CACHE_BY_NAME[sheet_name]
 
-
-
-
-async def start_webserver(client: discord.Client):
-    global _webserver_started, _webapp_runner
-
-    if _webserver_started:
-        return
-
-    _webserver_started = True
-    app = await _build_web_app(client)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    _webapp_runner = runner
-
-    port = int(os.getenv("PORT", "10000"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-    print(f"[WEB] running on 0.0.0.0:{port}  endpoints: /health /api/upcoming /api/results")
+    ws = WB.worksheet(sheet_name)
+    _WORKSHEET_CACHE_BY_NAME[sheet_name] = ws
+    return ws
 
 
+def sheet_name(ws, fallback: str = "Sheet") -> str:
+    return getattr(ws, "title", fallback)
 
-# =========================================================
-# Google- & Sheet-Helfer
-# =========================================================
+
+def invalidate_prefixes_for_ws(ws, fallback: str = "Sheet") -> list[str]:
+    name = sheet_name(ws, fallback)
+    return [
+        f"records:{name}",
+        f"values:{name}",
+        f"row:{name}:",
+        f"col:{name}:",
+        f"cell:{name}:",
+    ]
+
+
+def get_div_values(div_number: str, force_refresh: bool = False):
+    ws = get_div_ws(div_number)
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=sheet_name(ws, f"{div_number}.DIV"),
+        ttl_seconds=BOT_SHEET_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+    )
+
+
 def _cell(row, idx0):
     return row[idx0].strip() if 0 <= idx0 < len(row) else ""
 
 
-
-# Spaltenkonstanten (Spaltennummern, 1-basiert, für get_all_values() -1)
 DIV_COL_LEFT = 4      # D
 DIV_COL_MARKER = 5    # E
 DIV_COL_RIGHT = 6     # F
+
 
 # =========================================================
 # Twitch-Namen Mapping
@@ -440,33 +283,8 @@ TWITCH_MAP = {
     "satono92": "satono92",
     "dergoatbuster": "dergoatbuster",
     "snack": "snack",
-    "mahony": "mahony19888",
     "hardy": "try_hardyy",
 }
-
-# =========================================================
-# Google Sheets
-# =========================================================
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
-
-SHEETS_ENABLED = True
-GC = WB = None
-
-try:
-    CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    GC = gspread.authorize(CREDS)
-    WB = GC.open(SPREADSHEET_TITLE)
-    print("✅ Google Sheets verbunden (ohne Master-Tab)")
-except Exception as e:
-    SHEETS_ENABLED = False
-    WB = None
-    print(f"⚠️ Google Sheets deaktiviert: {e}")
-
-
-def sheets_required():
-    if not SHEETS_ENABLED or WB is None:
-        raise RuntimeError("Google Sheets nicht verbunden (SHEETS_ENABLED=False).")
 
 
 # =========================================================
@@ -489,102 +307,179 @@ def has_tfl_role(member: discord.Member) -> bool:
 
 
 # =========================================================
-# /termin Modal
+# Minimaler Webserver für Joomla/Frontend
 # =========================================================
-class TerminModal(discord.ui.Modal, title="Neues TFL-Match eintragen"):
-    division = discord.ui.TextInput(
-        label="Division",
-        placeholder="z. B. 2. Division",
-        required=True,
-    )
-    datetime_str = discord.ui.TextInput(
-        label="Datum & Uhrzeit",
-        placeholder="DD.MM.YYYY HH:MM",
-        required=True,
-    )
-    spieler1 = discord.ui.TextInput(
-        label="Spieler 1",
-        placeholder="Name wie in Liste",
-        required=True,
-    )
-    spieler2 = discord.ui.TextInput(
-        label="Spieler 2",
-        placeholder="Name wie in Liste",
-        required=True,
-    )
-    modus = discord.ui.TextInput(
-        label="Modus",
-        placeholder="z. B. Casual Boots",
-        required=True,
-    )
+_webserver_started = False
+_webapp_runner: web.AppRunner | None = None
 
-    async def on_submit(self, interaction: discord.Interaction):
+_API_CACHE = {
+    "upcoming": {"ts": None, "data": []},
+    "results": {"ts": None, "data": []},
+}
+
+_RESULTS_DB_CACHE: dict[str, list[dict]] = {}
+
+
+def clear_results_db_cache():
+    _RESULTS_DB_CACHE.clear()
+
+
+def _event_location(ev: discord.ScheduledEvent) -> str | None:
+    try:
+        if getattr(ev, "entity_metadata", None):
+            loc = getattr(ev.entity_metadata, "location", None)
+            if loc:
+                return loc
+        if getattr(ev, "location", None):
+            return ev.location
+        if getattr(ev, "channel", None) and ev.channel:
+            return ev.channel.name
+    except Exception:
+        pass
+    return None
+
+
+def parse_div_result_date(date_text: str):
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y"):
         try:
-            parts = self.datetime_str.value.strip().split()
-            if len(parts) < 2:
-                await interaction.response.send_message(
-                    "❌ Formatfehler: Nutze `DD.MM.YYYY HH:MM`.",
-                    ephemeral=True,
-                )
-                return
+            return datetime.datetime.strptime(date_text, fmt)
+        except Exception:
+            pass
+    return datetime.datetime.min
 
-            datum_str, uhrzeit_str = parts[0], parts[1]
-            start_dt = BERLIN_TZ.localize(
-                dt.strptime(f"{datum_str} {uhrzeit_str}", "%d.%m.%Y %H:%M"),
-            )
-            end_dt = start_dt + timedelta(hours=1)
 
-            s1_key = self.spieler1.value.strip().lower()
-            s2_key = self.spieler2.value.strip().lower()
+def get_results_db_items(division: str) -> list[dict]:
+    if division in _RESULTS_DB_CACHE:
+        return _RESULTS_DB_CACHE[division]
 
-            if s1_key not in TWITCH_MAP or s2_key not in TWITCH_MAP:
-                msg = "❌ Fehlerhafte Spielernamen:"
-                if s1_key not in TWITCH_MAP:
-                    msg += f"\nSpieler 1: `{self.spieler1.value}` nicht erkannt"
-                if s2_key not in TWITCH_MAP:
-                    msg += f"\nSpieler 2: `{self.spieler2.value}` nicht erkannt"
-                await interaction.response.send_message(msg, ephemeral=True)
-                return
+    rows = get_div_values(division)
+    items = []
 
-            twitch1 = TWITCH_MAP[s1_key]
-            twitch2 = TWITCH_MAP[s2_key]
-            multistream_url = f"https://multistre.am/{twitch1}/{twitch2}/layout4"
+    for row in rows[1:]:
+        date = _cell(row, 1)
+        mode = _cell(row, 2)
+        p1 = _cell(row, 3)
+        score = _cell(row, 4)
+        p2 = _cell(row, 5)
+        link = _cell(row, 6)
+        reporter = _cell(row, 7)
 
-            await interaction.guild.create_scheduled_event(
-                name=(
-                    f"{self.division.value} | {self.spieler1.value} vs. "
-                    f"{self.spieler2.value} | {self.modus.value}"
-                ),
-                description=(
-                    f"Match in der {self.division.value} zwischen "
-                    f"{self.spieler1.value} und {self.spieler2.value}."
-                ),
-                start_time=start_dt,
-                end_time=end_dt,
-                entity_type=discord.EntityType.external,
-                location=multistream_url,  # FIX: richtiger Variablenname
-                privacy_level=discord.PrivacyLevel.guild_only,
-            )
+        if score.lower() == "vs" or "vs" in score.lower():
+            continue
 
-            await interaction.response.send_message(
-                "✅ Event wurde erstellt (kein Sheet-Eintrag).",
-                ephemeral=True,
-            )
+        if not date or not p1 or not p2:
+            continue
 
+        items.append({
+            "date": date,
+            "player1": p1,
+            "score": score,
+            "player2": p2,
+            "mode": mode,
+            "link": link,
+            "reporter": reporter,
+        })
+
+    items.sort(key=lambda x: parse_div_result_date(x["date"]), reverse=True)
+    _RESULTS_DB_CACHE[division] = items
+    return items
+
+
+async def _build_web_app(_client: discord.Client) -> web.Application:
+    routes = web.RouteTableDef()
+
+    def add_cors(resp: web.StreamResponse) -> web.StreamResponse:
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "*"
+        return resp
+
+    @routes.get("/health")
+    async def health(_request: web.Request):
+        return add_cors(web.json_response({"status": "ok"}))
+
+    @routes.get("/api/upcoming")
+    async def api_upcoming(request: web.Request):
+        try:
+            n = int(request.query.get("n", "5"))
+        except Exception:
+            n = 5
+        n = max(1, min(20, n))
+
+        cache = _API_CACHE["upcoming"]
+
+        if not cache["data"]:
+            return add_cors(web.json_response({"items": [], "loading": True}))
+
+        data = sorted(cache["data"], key=lambda x: (x["start"] is None, x["start"]))
+        return add_cors(web.json_response({"items": data[:n]}))
+
+    @routes.get("/api/results")
+    async def api_results(request: web.Request):
+        try:
+            n = int(request.query.get("n", "5"))
+        except Exception:
+            n = 5
+        n = max(1, min(20, n))
+
+        cache = _API_CACHE["results"]
+
+        if not cache["data"]:
+            return add_cors(web.json_response({"items": [], "loading": True}))
+
+        return add_cors(web.json_response({"items": cache["data"][:n]}))
+
+    @routes.get("/api/results-db")
+    async def api_results_db(request: web.Request):
+        division = request.query.get("division")
+
+        try:
+            limit = int(request.query.get("limit", "336"))
+        except Exception:
+            limit = 336
+
+        limit = max(1, min(336, limit))
+
+        if division not in ["1", "2", "3", "4", "5", "6"]:
+            return add_cors(web.json_response({"items": []}))
+
+        try:
+            items = get_results_db_items(division)
+            return add_cors(web.json_response({"items": items[:limit]}))
         except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Fehler beim Erstellen des Events: {e}",
-                ephemeral=True,
-            )
+            print(f"[API] results-db ERROR: {e}")
+            return add_cors(web.json_response({"items": []}))
+
+    app = web.Application()
+    app.add_routes(routes)
+    return app
+
+
+async def start_webserver(_client: discord.Client):
+    global _webserver_started, _webapp_runner
+
+    if _webserver_started:
+        return
+
+    _webserver_started = True
+    app = await _build_web_app(_client)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    _webapp_runner = runner
+
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    print(f"[WEB] running on 0.0.0.0:{port} endpoints: /health /api/upcoming /api/results /api/results-db")
 
 
 # =========================================================
-# /result Workflow
+# Ergebnis-/DIV-Helfer
 # =========================================================
 def load_open_games_for_result(div_number: str):
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
-    rows = ws.get_all_values()
+    rows = get_div_values(div_number)
 
     out = []
     for idx, row in enumerate(rows, start=1):
@@ -601,375 +496,109 @@ def load_open_games_for_result(div_number: str):
     return out
 
 
-def get_unique_heimspieler(div_number: str):
-    games = load_open_games_for_result(div_number)
-    heim_set = {g["heim"] for g in games if g["heim"]}
-    return sorted(list(heim_set))
+def _collect_players_from_rows(rows) -> list[str]:
+    seen = set()
+    players = []
+    d_idx0 = DIV_COL_LEFT - 1
+    f_idx0 = DIV_COL_RIGHT - 1
+
+    for row in rows[1:]:
+        p_left = _cell(row, d_idx0)
+        p_right = _cell(row, f_idx0)
+
+        for p in (p_left, p_right):
+            if not p:
+                continue
+            low = p.lower()
+            if low not in seen:
+                seen.add(low)
+                players.append(p)
+
+    return players
 
 
-def batch_update_result(
-    ws,
-    row_index,
-    now_str,
-    mode_val,
-    ergebnis,
-    raceroom_val,
-    reporter_name,
-):
+def list_div_players(div_number: str):
+    try:
+        rows = get_div_values(div_number)
+        return _collect_players_from_rows(rows)
+    except Exception:
+        return []
+
+
+def list_streichungen(div_number: str):
+    rows = get_div_values(div_number)
+
+    eintraege = []
+    max_row_index = min(9, len(rows))
+
+    for idx in range(1, max_row_index):
+        row = rows[idx]
+        spieler = _cell(row, 11)
+        modus_m = _cell(row, 12)
+        modus_n = _cell(row, 13)
+
+        if spieler:
+            eintraege.append({"spieler": spieler, "modus_m": modus_m, "modus_n": modus_n})
+
+    return eintraege
+
+
+def list_rest_players(div_number: str) -> list[str]:
+    rows = get_div_values(div_number)
+
+    players = []
+    seen = set()
+    max_row_index = min(9, len(rows))
+
+    for idx in range(1, max_row_index):
+        row = rows[idx]
+        name = _cell(row, 11)
+        if not name:
+            continue
+        low = name.lower()
+        if low not in seen:
+            seen.add(low)
+            players.append(name)
+
+    return players
+
+
+def list_restprogramm(div_number: str, player_name: str):
+    rows = get_div_values(div_number)
+    matches = []
+    target = player_name.lower()
+
+    for idx, row in enumerate(rows[1:], start=2):
+        heim = _cell(row, DIV_COL_LEFT - 1)
+        marker = _cell(row, DIV_COL_MARKER - 1)
+        gast = _cell(row, DIV_COL_RIGHT - 1)
+
+        if marker.lower() != "vs":
+            continue
+
+        if heim.lower() == target or gast.lower() == target:
+            matches.append({"row_index": idx, "heim": heim, "gast": gast})
+
+    return matches
+
+
+def batch_update_result(ws, row_index, now_str, mode_val, ergebnis, raceroom_val, reporter_name):
     reqs = [
         {"range": f"B{row_index}:C{row_index}", "values": [[now_str, mode_val]]},
         {"range": f"E{row_index}:E{row_index}", "values": [[ergebnis]]},
         {"range": f"G{row_index}:G{row_index}", "values": [[raceroom_val]]},
         {"range": f"H{row_index}:H{row_index}", "values": [[reporter_name]]},
     ]
-    ws.batch_update(reqs)
-
-
-class ResultDivisionSelect(discord.ui.Select):
-    def __init__(self, requester: discord.Member):
-        self.requester = requester
-        options = [
-            discord.SelectOption(label="Division 1", value="1"),
-            discord.SelectOption(label="Division 2", value="2"),
-            discord.SelectOption(label="Division 3", value="3"),
-            discord.SelectOption(label="Division 4", value="4"),
-            discord.SelectOption(label="Division 5", value="5"),
-            discord.SelectOption(label="Division 6", value="6"),
-        ]
-        super().__init__(
-            placeholder="Welche Division?",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        division = self.values[0]
-
-        try:
-            heimspieler_liste = get_unique_heimspieler(division)
-        except Exception as e:
-            print(f"[RESULT] Fehler beim Laden der Division {division}: {e}")
-            await interaction.response.send_message(
-                "❌ Fehler beim Laden der Division.",
-                ephemeral=True,
-            )
-            return
-
-        if not heimspieler_liste:
-            await interaction.response.edit_message(
-                content=f"Keine offenen Spiele in Division {division}.",
-                view=None,
-            )
-            return
-
-        view = ResultHomeSelectView(
-            division=division,
-            heimspieler_list=heimspieler_liste,
-            requester=self.requester,
-        )
-
-        await interaction.response.edit_message(
-            content=f"Division {division} ausgewählt.\nWer hat Heimrecht?",
-            view=view,
-        )
-
-
-class ResultDivisionSelectView(discord.ui.View):
-    def __init__(self, requester: discord.Member, timeout=180):
-        super().__init__(timeout=timeout)
-        self.add_item(ResultDivisionSelect(requester))
-
-
-class ResultHomeSelect(discord.ui.Select):
-    def __init__(self, division: str, heimspieler_list, requester: discord.Member):
-        self.division = division
-        self.requester = requester
-        options = [
-            discord.SelectOption(label=spieler, value=spieler)
-            for spieler in heimspieler_list
-        ]
-        super().__init__(
-            placeholder="Wer hat Heimrecht?",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        heim = self.values[0]
-
-        try:
-            alle_spiele = load_open_games_for_result(self.division)
-        except Exception as e:
-            print(f"[RESULT] Fehler beim Laden offener Spiele (Div {self.division}): {e}")
-            await interaction.response.send_message(
-                "❌ Fehler beim Laden der offenen Spiele.",
-                ephemeral=True,
-            )
-            return
-
-        spiele_dieses_heims = [g for g in alle_spiele if g["heim"] == heim]
-
-        if not spiele_dieses_heims:
-            await interaction.response.edit_message(
-                content=f"Keine offenen Spiele gefunden, in denen {heim} Heim ist.",
-                view=None,
-            )
-            return
-
-        view = ResultGameSelectView(
-            division=self.division,
-            heim=heim,
-            games=spiele_dieses_heims,
-            requester=self.requester,
-        )
-
-        await interaction.response.edit_message(
-            content=f"Heimrecht: {heim}\nBitte Spiel auswählen:",
-            view=view,
-        )
-
-
-class ResultHomeSelectView(discord.ui.View):
-    def __init__(
-        self,
-        division: str,
-        heimspieler_list,
-        requester: discord.Member,
-        timeout=180,
-    ):
-        super().__init__(timeout=timeout)
-        self.add_item(ResultHomeSelect(division, heimspieler_list, requester))
-
-
-class ResultGameSelect(discord.ui.Select):
-    def __init__(self, division: str, heim: str, games, requester: discord.Member):
-        self.division = division
-        self.heim = heim
-        self.games = games
-        self.requester = requester
-
-        options = []
-        for idx, g in enumerate(games):
-            label = f"{g['heim']} vs {g['auswaerts']} | Zeile {g['row_index']}"
-            options.append(discord.SelectOption(label=label[:100], value=str(idx)))
-
-        super().__init__(
-            placeholder="Bitte Spiel auswählen",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        sel_idx = int(self.values[0])
-        game_info = self.games[sel_idx]
-
-        modal = ResultEntryModal(
-            division=self.division,
-            row_index=game_info["row_index"],
-            heim=game_info["heim"],
-            auswaerts=game_info["auswaerts"],
-            requester=self.requester,
-        )
-        await interaction.response.send_modal(modal)
-
-
-class ResultGameSelectView(discord.ui.View):
-    def __init__(
-        self,
-        division: str,
-        heim: str,
-        games,
-        requester: discord.Member,
-        timeout=180,
-    ):
-        super().__init__(timeout=timeout)
-        self.add_item(ResultGameSelect(division, heim, games, requester))
-
-
-class ResultEntryModal(discord.ui.Modal, title="Ergebnis eintragen"):
-    def __init__(
-        self,
-        division: str,
-        row_index: int,
-        heim: str,
-        auswaerts: str,
-        requester: discord.Member,
-    ):
-        super().__init__(timeout=None)
-        self.division = division
-        self.row_index = row_index
-        self.heim = heim
-        self.auswaerts = auswaerts
-        self.requester = requester
-
-        short_heim = (heim[:12] + "…") if len(heim) > 12 else heim
-        short_aus = (auswaerts[:12] + "…") if len(auswaerts) > 12 else auswaerts
-
-        self.winner_input = discord.ui.TextInput(
-            label="Wer hat gewonnen?",
-            style=discord.TextStyle.short,
-            required=True,
-            max_length=1,
-            placeholder=f"1 = {short_heim}, 2 = {short_aus}, X = Unentschieden",
-        )
-        self.mode_input = discord.ui.TextInput(
-            label="Modus",
-            style=discord.TextStyle.short,
-            required=True,
-            placeholder="Ambrosia, Crosskeys o.Ä.",
-            max_length=50,
-        )
-        self.raceroom_input = discord.ui.TextInput(
-            label="Raceroom-Link",
-            style=discord.TextStyle.short,
-            required=True,
-            placeholder="https://raceroom.xyz/...",
-        )
-
-        self.add_item(self.winner_input)
-        self.add_item(self.mode_input)
-        self.add_item(self.raceroom_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=False)
-
-        winner_val = self.winner_input.value.strip().upper()
-        mode_val = self.mode_input.value.strip()
-        raceroom_val = self.raceroom_input.value.strip()
-
-        if winner_val == "1":
-            ergebnis = "2:0"
-        elif winner_val == "2":
-            ergebnis = "0:2"
-        elif winner_val == "X":
-            ergebnis = "1:1"
-        else:
-            await interaction.followup.send(
-                content="❌ Ungültiger Gewinner-Wert. Bitte nur 1 / 2 / X.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            sheets_required()
-            ws = WB.worksheet(f"{self.division}.DIV")
-
-            now = dt.now(BERLIN_TZ)
-            now_str = now.strftime("%d.%m.%Y %H:%M")
-
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                batch_update_result,
-                ws,
-                self.row_index,
-                now_str,
-                mode_val,
-                ergebnis,
-                raceroom_val,
-                str(self.requester),
-            )
-
-            channel = client.get_channel(RESULTS_CHANNEL_ID)
-            if channel is not None:
-                out_lines = [
-                    f"**[Division {self.division}]** {now_str}",
-                    f"**{self.heim}** vs **{self.auswaerts}** → **{ergebnis}**",
-                    f"Modus: {mode_val}",
-                    f"Raceroom: {raceroom_val}",
-                ]
-                try:
-                    await channel.send("\n".join(out_lines))
-                except Exception as send_err:
-                    await interaction.followup.send(
-                        content=(
-                            "⚠️ Ergebnis gespeichert, aber Channel-Post "
-                            f"fehlgeschlagen: {send_err}"
-                        ),
-                        ephemeral=True,
-                    )
-                    return
-            else:
-                await interaction.followup.send(
-                    content=(
-                        "⚠️ Ergebnis gespeichert, aber Ergebnischannel nicht gefunden."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            msg = (
-                f"✅ Ergebnis gespeichert & gepostet:\n"
-                f"{self.heim} vs {self.auswaerts} => {ergebnis}\n"
-                f"Modus: {mode_val}\n"
-                f"Raceroom: {raceroom_val}"
-            )
-            await interaction.followup.send(content=msg, ephemeral=True)
-
-        except Exception as e:
-            await interaction.followup.send(
-                content=f"❌ Konnte Ergebnis nicht verarbeiten: {e}",
-                ephemeral=True,
-            )
-            
-@tree.command(
-    name="result",
-    description="Ergebnis melden (nur Orga / Try Force League Rolle)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def result(interaction: discord.Interaction):
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        try:
-            await interaction.response.send_message(
-                "❌ Konnte Mitgliedsdaten nicht lesen.",
-                ephemeral=True,
-            )
-        except discord.NotFound:
-            print("[RESULT] Unknown interaction beim Senden (Mitgliedsdaten).")
-        return
-
-    if not has_tfl_role(member):
-        try:
-            await interaction.response.send_message(
-                "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-                ephemeral=True,
-            )
-        except discord.NotFound:
-            print("[RESULT] Unknown interaction beim Senden (keine Berechtigung).")
-        return
-
-    view = ResultDivisionSelectView(requester=member)
-
-    try:
-        await interaction.response.send_message(
-            "Bitte Division auswählen:",
-            view=view,
-            ephemeral=True,
-        )
-    except discord.NotFound:
-        print("[RESULT] Unknown interaction beim initialen Antwort-Senden (10062).")
+    sheet_write_call(lambda: ws.batch_update(reqs), invalidate_prefixes=invalidate_prefixes_for_ws(ws))
+    clear_results_db_cache()
 
 
 # =========================================================
 # /playerexit Workflow
 # =========================================================
-def list_div_players(div_number: str):
-    try:
-        sheets_required()
-        ws = WB.worksheet(f"{div_number}.DIV")
-        return _collect_players_from_div_ws(ws)
-    except Exception:
-        return []
-
-
 def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
-    rows = ws.get_all_values()
+    ws = get_div_ws(div_number)
+    rows = get_div_values(div_number)
 
     now_str = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
     batch_reqs = []
@@ -979,16 +608,8 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
         left_player = _cell(row, DIV_COL_LEFT - 1)
         right_player = _cell(row, DIV_COL_RIGHT - 1)
 
-        lp_match = (
-            left_player.lower() == quitting_player.lower()
-            if left_player
-            else False
-        )
-        rp_match = (
-            right_player.lower() == quitting_player.lower()
-            if right_player
-            else False
-        )
+        lp_match = left_player.lower() == quitting_player.lower() if left_player else False
+        rp_match = right_player.lower() == quitting_player.lower() if right_player else False
 
         if not (lp_match or rp_match):
             continue
@@ -1000,23 +621,20 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
             result_val = "2:0"
             strike_cells.append(f"F{idx}")
 
-        batch_reqs.append(
-            {"range": f"B{idx}:C{idx}", "values": [[now_str, "FF"]]},
-        )
-        batch_reqs.append(
-            {"range": f"E{idx}:E{idx}", "values": [[result_val]]},
-        )
+        batch_reqs.append({"range": f"B{idx}:C{idx}", "values": [[now_str, "FF"]]})
+        batch_reqs.append({"range": f"E{idx}:E{idx}", "values": [[result_val]]})
         batch_reqs.append({"range": f"G{idx}:G{idx}", "values": [["FF"]]})
         batch_reqs.append({"range": f"H{idx}:H{idx}", "values": [[reporter]]})
 
     if batch_reqs:
-        ws.batch_update(batch_reqs)
+        sheet_write_call(lambda: ws.batch_update(batch_reqs), invalidate_prefixes=invalidate_prefixes_for_ws(ws))
+        clear_results_db_cache()
 
     if strike_cells:
         style = {"textFormat": {"strikethrough": True}}
         for rng in strike_cells:
             try:
-                ws.format(rng, style)
+                sheet_write_call(lambda rng=rng: ws.format(rng, style), invalidate_prefixes=invalidate_prefixes_for_ws(ws))
             except Exception:
                 pass
 
@@ -1024,20 +642,8 @@ def playerexit_apply(div_number: str, quitting_player: str, reporter: str):
 class PlayerExitDivisionSelect(discord.ui.Select):
     def __init__(self, requester: discord.Member):
         self.requester = requester
-        options = [
-            discord.SelectOption(label="Division 1", value="1"),
-            discord.SelectOption(label="Division 2", value="2"),
-            discord.SelectOption(label="Division 3", value="3"),
-            discord.SelectOption(label="Division 4", value="4"),
-            discord.SelectOption(label="Division 5", value="5"),
-            discord.SelectOption(label="Division 6", value="6"),
-        ]
-        super().__init__(
-            placeholder="Welche Division?",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+        options = [discord.SelectOption(label=f"Division {i}", value=str(i)) for i in range(1, 7)]
+        super().__init__(placeholder="Welche Division?", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         div_number = self.values[0]
@@ -1047,32 +653,14 @@ class PlayerExitDivisionSelect(discord.ui.Select):
         except discord.InteractionResponded:
             pass
 
-        try:
-            players = list_div_players(div_number)
-        except Exception:
-            await interaction.followup.send(
-                "❌ Konnte Spieler nicht laden.",
-                ephemeral=True,
-            )
-            return
+        players = list_div_players(div_number)
 
         if not players:
-            await interaction.edit_original_response(
-                content=f"Keine Spieler in Division {div_number} gefunden.",
-                view=None,
-            )
+            await interaction.edit_original_response(content=f"Keine Spieler in Division {div_number} gefunden.", view=None)
             return
 
-        view = PlayerExitPlayerSelectView(
-            division=div_number,
-            players=players,
-            requester=self.requester,
-        )
-
-        await interaction.edit_original_response(
-            content=f"Division {div_number} gewählt.\nWelcher Spieler steigt aus?",
-            view=view,
-        )
+        view = PlayerExitPlayerSelectView(division=div_number, players=players, requester=self.requester)
+        await interaction.edit_original_response(content=f"Division {div_number} gewählt.\nWelcher Spieler steigt aus?", view=view)
 
 
 class PlayerExitDivisionSelectView(discord.ui.View):
@@ -1086,15 +674,8 @@ class PlayerExitPlayerSelect(discord.ui.Select):
         self.division = division
         self.players = players
         self.requester = requester
-
-        options = [discord.SelectOption(label=p, value=p) for p in players]
-
-        super().__init__(
-            placeholder="Spieler wählen (steigt aus)",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+        options = [discord.SelectOption(label=p[:100], value=p[:100]) for p in players[:25]]
+        super().__init__(placeholder="Spieler wählen (steigt aus)", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         quitting_player = self.values[0]
@@ -1105,12 +686,7 @@ class PlayerExitPlayerSelect(discord.ui.Select):
             pass
 
         try:
-            playerexit_apply(
-                div_number=self.division,
-                quitting_player=quitting_player,
-                reporter=str(self.requester),
-            )
-
+            playerexit_apply(self.division, quitting_player, str(self.requester))
             await interaction.followup.send(
                 content=(
                     f"✅ `{quitting_player}` in Division {self.division} ausgetragen.\n"
@@ -1119,325 +695,37 @@ class PlayerExitPlayerSelect(discord.ui.Select):
                 ),
                 ephemeral=True,
             )
-
-        except Exception:
-            await interaction.followup.send(
-                content="❌ Fehler beim Austragen.",
-                ephemeral=True,
-            )
+        except Exception as e:
+            await interaction.followup.send(content=f"❌ Fehler beim Austragen: {e}", ephemeral=True)
 
 
 class PlayerExitPlayerSelectView(discord.ui.View):
-    def __init__(
-        self,
-        division: str,
-        players,
-        requester: discord.Member,
-        timeout=180,
-    ):
+    def __init__(self, division: str, players, requester: discord.Member, timeout=180):
         super().__init__(timeout=timeout)
         self.add_item(PlayerExitPlayerSelect(division, players, requester))
 
-# =========================================================
-# Restprogramm-View (/rest)
-# =========================================================
-
-class RestDivisionSelect(discord.ui.Select):
-    def __init__(self, parent_view: "RestView"):
-        self.parent_view = parent_view
-        options = [
-            discord.SelectOption(label="Division 1", value="1"),
-            discord.SelectOption(label="Division 2", value="2"),
-            discord.SelectOption(label="Division 3", value="3"),
-            discord.SelectOption(label="Division 4", value="4"),
-            discord.SelectOption(label="Division 5", value="5"),
-            discord.SelectOption(label="Division 6", value="6"),
-        ]
-        super().__init__(
-            placeholder="Division wählen …",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        div_number = self.values[0]
-        self.parent_view.selected_division = div_number
-
-        # 👉 Auswahl im Dropdown sichtbar halten
-        for opt in self.options:
-            opt.default = (opt.value == div_number)
-
-        try:
-            players = list_rest_players(div_number)
-        except Exception as e:
-            await interaction.response.edit_message(
-                content=f"❌ Fehler beim Laden der Spieler für Division {div_number}: {e}",
-                view=None,
-            )
-            return
-
-        if not players:
-            await interaction.response.edit_message(
-                content=f"Keine Spieler in Division {div_number} für das Restprogramm gefunden.",
-                view=self.parent_view,
-            )
-            return
-
-        # vorhandenen Player-Select ggf. entfernen
-        if self.parent_view.player_select is not None:
-            self.parent_view.remove_item(self.parent_view.player_select)
-
-        self.parent_view.player_select = RestPlayerSelect(
-            parent_view=self.parent_view,
-            division=div_number,
-            players=players,
-        )
-        self.parent_view.add_item(self.parent_view.player_select)
-
-        await interaction.response.edit_message(
-            content=(
-                f"Division {div_number} gewählt.\n"
-                "Bitte nun einen Spieler wählen, um das Restprogramm zu sehen."
-            ),
-            view=self.parent_view,
-        )
-
-
-class RestPlayerSelect(discord.ui.Select):
-    def __init__(self, parent_view: "RestView", division: str, players: list[str]):
-        self.parent_view = parent_view
-        self.division = division
-
-        options = [
-            discord.SelectOption(label=p, value=p)
-            for p in players
-        ]
-
-        super().__init__(
-            placeholder="Spieler wählen …",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        player = self.values[0]
-        div_number = self.division
-
-        # 👉 Auswahl im Spieler-Dropdown sichtbar halten
-        for opt in self.options:
-            opt.default = (opt.value == player)
-
-        try:
-            matches = list_restprogramm(div_number, player)
-        except Exception as e:
-            await interaction.response.edit_message(
-                content=(
-                    f"❌ Fehler beim Ermitteln des Restprogramms für "
-                    f"{player} (Division {div_number}): {e}"
-                ),
-                view=self.parent_view,
-            )
-            return
-
-        if not matches:
-            text = (
-                f"Division {div_number} – Restprogramm für **{player}**:\n"
-                "Es sind keine offenen Spiele mehr in der Tabelle (E != 'vs')."
-            )
-        else:
-            lines = [
-                f"Division {div_number} – Restprogramm für **{player}**:",
-                "",
-            ]
-            for m in matches:
-                heim = m["heim"]
-                gast = m["gast"]
-                if heim.lower() == player.lower():
-                    info = f"**{heim} (H)** vs {gast}"
-                elif gast.lower() == player.lower():
-                    info = f"{heim} vs **{gast} (A)**"
-                else:
-                    info = f"{heim} vs {gast}"
-
-                lines.append(f"- {info}")
-
-            text = "\n".join(lines)
-
-        await interaction.response.edit_message(
-            content=text,
-            view=self.parent_view,
-        )
-
-
-class RestView(discord.ui.View):
-    def __init__(self, requester: discord.Member, timeout: int = 180):
-        super().__init__(timeout=timeout)
-        self.requester = requester
-        self.selected_division: str | None = None
-        self.player_select: RestPlayerSelect | None = None
-
-        self.add_item(RestDivisionSelect(self))
-
-
-
-
-# =========================================================
-# Spieler-Helfer für DIV-Tabs (wird weiter für spielplan/playerexit genutzt)
-# =========================================================
-def _collect_players_from_div_ws(ws) -> list[str]:
-    """
-    Liest alle Spielernamen aus Spalte D (Heim) und F (Gast),
-    entfernt Duplikate, behält Reihenfolge.
-    """
-    rows = ws.get_all_values()
-    seen = set()
-    players = []
-
-    D_idx0 = DIV_COL_LEFT - 1
-    F_idx0 = DIV_COL_RIGHT - 1
-
-    for r_idx in range(1, len(rows)):  # ab Zeile 2
-        row = rows[r_idx]
-        p_left = _cell(row, D_idx0)
-        p_right = _cell(row, F_idx0)
-
-        for p in (p_left, p_right):
-            if not p:
-                continue
-            low = p.lower()
-            if low not in seen:
-                seen.add(low)
-                players.append(p)
-
-    return players
-
-# =========================================================
-# Streichungen (L/M/N2-9) & Restprogramme
-# =========================================================
-
-def list_streichungen(div_number: str):
-    """
-    Liest Streichungen aus dem DIV-Tab:
-    - Spielername: L2-L9
-    - Streichmodus/-info: M2-M9 und N2-N9
-    """
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
-    rows = ws.get_all_values()
-
-    eintraege = []
-    # rows[0] = Zeile 1 -> wir wollen Zeile 2-9 => Index 1..8
-    max_row_index = min(9, len(rows))  # Obergrenze beachten
-    for idx in range(1, max_row_index):
-        row = rows[idx]
-        spieler = _cell(row, 11)  # L = Index 11 (0-basiert)
-        modus_m = _cell(row, 12)  # M
-        modus_n = _cell(row, 13)  # N
-
-        if spieler:
-            eintraege.append(
-                {
-                    "spieler": spieler,
-                    "modus_m": modus_m,
-                    "modus_n": modus_n,
-                },
-            )
-
-    return eintraege
-
-
-def list_rest_players(div_number: str) -> list[str]:
-    """
-    Liest die Spieler für das Restprogramm-Menü aus L2-L9.
-    Doppelte Einträge werden entfernt, Reihenfolge bleibt erhalten.
-    """
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
-    rows = ws.get_all_values()
-
-    players = []
-    seen = set()
-
-    max_row_index = min(9, len(rows))
-    for idx in range(1, max_row_index):
-        row = rows[idx]
-        name = _cell(row, 11)  # L
-        if not name:
-            continue
-        low = name.lower()
-        if low not in seen:
-            seen.add(low)
-            players.append(name)
-
-    return players
-
-
-def list_restprogramm(div_number: str, player_name: str):
-    """
-    Liefert alle offenen Spiele (E == 'vs') aus dem DIV-Tab,
-    an denen der angegebene Spieler beteiligt ist.
-    """
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
-    rows = ws.get_all_values()
-
-    matches = []
-    target = player_name.lower()
-
-    for idx, row in enumerate(rows[1:], start=2):  # ab Zeile 2
-        heim = _cell(row, DIV_COL_LEFT - 1)
-        marker = _cell(row, DIV_COL_MARKER - 1)
-        gast = _cell(row, DIV_COL_RIGHT - 1)
-
-        if marker.lower() != "vs":
-            continue
-
-        if heim.lower() == target or gast.lower() == target:
-            matches.append(
-                {
-                    "row_index": idx,
-                    "heim": heim,
-                    "gast": gast,
-                },
-            )
-
-    return matches
-
-        
 
 # =========================================================
 # Spielplan / Round Robin
 # =========================================================
-def _get_div_ws(div_number: str):
-    sheets_required()
-    ws_name = f"{div_number}.DIV"
-    return WB.worksheet(ws_name)
-
-
 def spielplan_read_players(div_number: str) -> list[str]:
-    ws = _get_div_ws(div_number)
-
-    # 8er Staffel: L2:L9
-    # 9er Staffel: L2:L10
-    values = ws.get("L2:L10")
+    ws = get_div_ws(div_number)
+    values = get_all_values_cached(
+        lambda: ws,
+        sheet_name=sheet_name(ws, f"{div_number}.DIV"),
+        ttl_seconds=BOT_PLAYER_CACHE_TTL_SECONDS,
+    )
 
     players = []
     seen = set()
 
-    for row in values:
-        if not row:
-            continue
-
-        name = row[0].strip()
+    for row in values[1:10]:
+        name = _cell(row, 11)
         if not name:
             continue
-
         key = name.lower()
         if key in seen:
             continue
-
         seen.add(key)
         players.append(name)
 
@@ -1458,15 +746,14 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
     n = len(work)
     half = n // 2
     rotation = work[:]
-
     rounds = []
 
     for _r in range(n - 1):
         left_half = rotation[:half]
         right_half = rotation[half:]
         right_rev = right_half[::-1]
-
         day_pairs = []
+
         for i in range(half):
             p1 = left_half[i]
             p2 = right_rev[i]
@@ -1475,7 +762,6 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
             day_pairs.append((p1, p2))
 
         rounds.append(day_pairs)
-
         fixed = rotation[0]
         tail = rotation[1:]
         tail = [tail[-1]] + tail[:-1]
@@ -1486,16 +772,20 @@ def spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
 
 def spielplan_build_matches(players: list[str]) -> list[list[tuple[str, str]]]:
     hinrunde = spielplan_build_rounds(players)
-
     rueckrunde = []
     for day in hinrunde:
         rueckrunde.append([(away, home) for (home, away) in day])
-
     return hinrunde + rueckrunde
 
 
 def spielplan_find_next_free_row(ws):
-    col_d = ws.col_values(4)
+    col_d = col_values_cached(
+        lambda: ws,
+        sheet_name=sheet_name(ws),
+        col=4,
+        ttl_seconds=BOT_SHEET_CACHE_TTL_SECONDS,
+    )
+
     for idx_1based, val in enumerate(col_d, start=1):
         if idx_1based == 1:
             continue
@@ -1507,13 +797,12 @@ def spielplan_find_next_free_row(ws):
 
 def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
     start_row = spielplan_find_next_free_row(ws)
-
     laufende_nummer = 1
     rows_to_write = []
 
     for matches_in_round in rounds:
         for (home, away) in matches_in_round:
-            row_data = [""] * 9  # A..I
+            row_data = [""] * 9
             row_data[0] = str(laufende_nummer)
             row_data[3] = home
             row_data[4] = "vs"
@@ -1526,14 +815,13 @@ def spielplan_write(ws, rounds: list[list[tuple[str, str]]]):
 
     end_row = start_row + len(rows_to_write) - 1
     cell_range = f"A{start_row}:I{end_row}"
-    ws.update(cell_range, rows_to_write)
+    sheet_write_call(lambda: ws.update(cell_range, rows_to_write), invalidate_prefixes=invalidate_prefixes_for_ws(ws))
     return len(rows_to_write)
 
 
 # =========================================================
 # Restream-Helfer
 # =========================================================
-
 _WEEKDAY_DE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 
@@ -1555,18 +843,15 @@ def _format_start_dt(ev: discord.ScheduledEvent, include_weekday: bool = False) 
 
 def _format_event_line_for_post(ev: discord.ScheduledEvent, include_weekday: bool = False) -> str:
     dt_str = _format_start_dt(ev, include_weekday=include_weekday)
-
     loc = _event_location(ev) or "kein Link"
     loc_display = f"<{loc}>" if loc != "kein Link" else loc
-
     name = ev.name or "Unbenanntes Event"
     return f"• {name} – {dt_str} – {loc_display}"
 
 
 def _filter_future_events(events: list[discord.ScheduledEvent], now_utc: datetime.datetime):
     return [
-        ev
-        for ev in events
+        ev for ev in events
         if ev.status in (discord.EventStatus.scheduled, discord.EventStatus.active)
         and ev.start_time
         and ev.start_time > now_utc
@@ -1574,319 +859,30 @@ def _filter_future_events(events: list[discord.ScheduledEvent], now_utc: datetim
 
 
 def _is_restream(ev: discord.ScheduledEvent) -> bool:
-    return "(restream)" in (ev.name or "").lower()
+    name = (ev.name or "").lower()
+    return "(restream)" in name or name.startswith("restream ")
 
 
-def _format_event_list(
-    title: str,
-    events: list[discord.ScheduledEvent],
-    now_utc: datetime.datetime,
-    include_weekday: bool = False,
-) -> str:
+def _format_event_list(title: str, events: list[discord.ScheduledEvent], now_utc: datetime.datetime, include_weekday: bool = False) -> str:
     events_sorted = sorted(events, key=lambda e: e.start_time or now_utc)
     lines = [title, ""]
     lines.extend(_format_event_line_for_post(ev, include_weekday=include_weekday) for ev in events_sorted)
     return "\n".join(lines)
 
 
-async def _post_restream_set(ev: discord.ScheduledEvent, restream_type: str, private_url: str | None = None):
-    if SHOWRESTREAMS_CHANNEL_ID == 0:
-        return
-
-    ch = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
-    if ch is None or not isinstance(ch, discord.TextChannel):
-        return
-
-    dt_str = _format_start_dt(ev, include_weekday=True)
-    event_link = f"https://discord.com/events/{GUILD_ID}/{ev.id}"
-
-    if restream_type.upper() == "ZSR":
-        restream_info = f"ZSR – <{ZSR_RESTREAM_URL}>"
-    else:
-        restream_info = f"Privat – <{private_url}>" if private_url else "Privat"
-
-    msg = (
-        "🔁 **Restream gesetzt**\n"
-        f"• **Event:** {ev.name}\n"
-        f"• **Zeit:** {dt_str}\n"
-        f"• **Restream:** {restream_info}\n"
-        f"• **Event-Link:** <{event_link}>"
-    )
-
-    await ch.send(msg)
-
-
-async def apply_restream_to_event(
-    ev: discord.ScheduledEvent,
-    restream_type: str,
-    private_url: str | None = None,
-):
-    new_name = ev.name or ""
-    if "(Restream)" not in new_name:
-        new_name = f"{new_name} (Restream)"
-
-    desc = ev.description or ""
-    line = ""
-    if restream_type.upper() == "ZSR":
-        line = f"Restream: ZSR – {ZSR_RESTREAM_URL}"
-    else:
-        if not private_url:
-            raise ValueError("Privater Restream ohne URL.")
-        line = f"Restream (Privat): {private_url}"
-
-    if line and line not in desc:
-        if desc.strip():
-            desc = desc.rstrip() + "\n\n" + line
-        else:
-            desc = line
-
-    await ev.edit(name=new_name, description=desc)
-
-
-class PrivateRestreamModal(discord.ui.Modal, title="Privater Restream-Link"):
-    def __init__(self, event: discord.ScheduledEvent):
-        super().__init__(timeout=None)
-        self.event = event
-
-        self.url_input = discord.ui.TextInput(
-            label="Link zum privaten Restream (Twitch o.Ä.)",
-            style=discord.TextStyle.short,
-            required=True,
-            placeholder="https://www.twitch.tv/dein_kanal",
-        )
-        self.add_item(self.url_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        url = self.url_input.value.strip()
-        if not url.lower().startswith(("http://", "https://")):
-            await interaction.response.send_message(
-                "❌ Bitte eine vollständige URL mit http(s) angeben.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            await apply_restream_to_event(self.event, "PRIVAT", private_url=url)
-            await _post_restream_set(self.event, "PRIVAT", private_url=url)
-            await interaction.response.send_message(
-                f"✅ Privater Restream für Event `{self.event.name}` gesetzt.",
-                ephemeral=True,
-            )
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Fehler beim Setzen des Restreams: {e}",
-                ephemeral=True,
-            )
-
-
-class PickView(discord.ui.View):
-    def __init__(self, events: list[discord.ScheduledEvent], requester: discord.Member):
-        super().__init__(timeout=180)
-        self.requester = requester
-        self.events_by_id: dict[str, discord.ScheduledEvent] = {
-            str(ev.id): ev for ev in events
-        }
-        self.selected_event_id: str | None = None
-
-        self.add_item(self.EventSelect(self))
-        self.add_item(self.SourceSelect(self))
-
-    class EventSelect(discord.ui.Select):
-        def __init__(self, parent_view: "PickView"):
-            self.parent_view = parent_view
-            options = []
-            for ev_id, ev in parent_view.events_by_id.items():
-                label = ev.name or "Unbenanntes Event"
-                if len(label) > 90:
-                    label = label[:87] + "..."
-                options.append(discord.SelectOption(label=label, value=ev_id))
-                if len(options) >= 25:
-                    break
-
-            super().__init__(
-                placeholder="Event wählen …",
-                min_values=1,
-                max_values=1,
-                options=options,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            self.parent_view.selected_event_id = self.values[0]
-            selected_label = None
-            for opt in self.options:
-                if opt.value == self.values[0]:
-                    selected_label = opt.label
-                    break
-
-            await interaction.response.send_message(
-                f"🎯 Event gesetzt: `{selected_label}`",
-                ephemeral=True,
-            )
-
-    class SourceSelect(discord.ui.Select):
-        def __init__(self, parent_view: "PickView"):
-            self.parent_view = parent_view
-            options = [
-                discord.SelectOption(label="ZSR", value="ZSR"),
-                discord.SelectOption(label="Privat", value="PRIVAT"),
-            ]
-            super().__init__(
-                placeholder="Restream-Quelle wählen …",
-                min_values=1,
-                max_values=1,
-                options=options,
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            if not self.parent_view.selected_event_id:
-                await interaction.response.send_message(
-                    "Bitte zuerst ein Event auswählen.",
-                    ephemeral=True,
-                )
-                return
-
-            ev = self.parent_view.events_by_id.get(self.parent_view.selected_event_id)
-            if ev is None:
-                await interaction.response.send_message(
-                    "Event nicht mehr gefunden.",
-                    ephemeral=True,
-                )
-                return
-
-            choice = self.values[0]
-
-            if choice == "ZSR":
-                try:
-                    await interaction.response.defer(ephemeral=True, thinking=False)
-                except discord.InteractionResponded:
-                    pass
-                try:
-                    await apply_restream_to_event(ev, "ZSR")
-                    await _post_restream_set(ev, "ZSR")
-                    await interaction.followup.send(
-                        f"✅ Restream über ZSR für Event `{ev.name}` gesetzt.",
-                        ephemeral=True,
-                    )
-                except Exception as e:
-                    await interaction.followup.send(
-                        f"❌ Fehler beim Setzen des Restreams: {e}",
-                        ephemeral=True,
-                    )
-            else:
-                await interaction.response.send_modal(PrivateRestreamModal(ev))
-
 # =========================================================
-# Hintergrund-Refresher + Auto-Posts
+# Hintergrund-Refresher + API Sync
 # =========================================================
-async def _maybe_post_restreamable(
-    now_utc: datetime.datetime,
-    now_berlin: datetime.datetime,
-    events: list[discord.ScheduledEvent],
-):
-    global _last_restreamable_post_date
-
-    if RESTREAM_CHANNEL_ID == 0:
-        return
-
-    today = now_berlin.date()
-    header = "📺 Restreambare Spiele (heute & Zukunft)"
-
-    if not (now_berlin.hour == 4 and now_berlin.minute < 30):
-        return
-    if _last_restreamable_post_date == today:
-        return
-
-    channel = client.get_channel(RESTREAM_CHANNEL_ID)
-    if channel is None or not isinstance(channel, discord.TextChannel):
-        return
-
-    future_events = _filter_future_events(events, now_utc)
-    upcoming = [ev for ev in future_events if not _is_restream(ev)]
-
-    if not upcoming:
-        _last_restreamable_post_date = today
-        print("[AUTO] 04:00 – keine restreambaren Events gefunden.")
-        return
-
-    text = _format_event_list(header, upcoming, now_utc)
-
-    try:
-        async for m in channel.history(limit=5):
-            if (
-                m.author.id == client.user.id
-                and m.created_at.astimezone(BERLIN_TZ).date() == today
-                and m.content.startswith(header)
-            ):
-                print("[AUTO] 04:00 – bereits ein Post im Channel, breche ab.")
-                _last_restreamable_post_date = today
-                return
-    except Exception as e:
-        print(f"[AUTO] 04:00 – Fehler beim Prüfen auf Doppelpost: {e}")
-
-    try:
-        await channel.send(text)
-        _last_restreamable_post_date = today
-        print(f"[AUTO] 04:00 – {len(upcoming)} restreambare Events gepostet.")
-    except Exception as e:
-        print(f"[AUTO] Fehler beim Posten der restreambaren Events: {e}")
-
-
-async def _maybe_post_restreams(
-    now_utc: datetime.datetime,
-    now_berlin: datetime.datetime,
-    events: list[discord.ScheduledEvent],
-):
-    global _last_restreams_post_date
-
-    if SHOWRESTREAMS_CHANNEL_ID == 0:
-        return
-
-    today = now_berlin.date()
-    if not (now_berlin.hour == 4 and now_berlin.minute >= 30):
-        return
-    if _last_restreams_post_date == today:
-        return
-
-    channel = client.get_channel(SHOWRESTREAMS_CHANNEL_ID)
-    if channel is None or not isinstance(channel, discord.TextChannel):
-        return
-
-    future_events = _filter_future_events(events, now_utc)
-    restream_events = [ev for ev in future_events if _is_restream(ev)]
-
-    if not restream_events:
-        _last_restreams_post_date = today
-        print("[AUTO] 04:30 – keine Restream-Events gefunden.")
-        return
-
-    text = _format_event_list("🔁 Geplante Restreams (heute & Zukunft)", restream_events, now_utc)
-
-    try:
-        await channel.send(text)
-        _last_restreams_post_date = today
-        print(f"[AUTO] 04:30 – {len(restream_events)} Restream-Events gepostet.")
-    except Exception as e:
-        print(f"[AUTO] Fehler beim Posten der Restream-Events: {e}")
-
-# =========================================================
-# Hintergrund-Refresher + Auto-Posts
-# =========================================================
-async def refresh_api_cache(client):
-    await client.wait_until_ready()
-
-    # 20 Sekunden warten, damit Discord sicher bereit ist
+async def refresh_api_cache(_client):
+    await _client.wait_until_ready()
     await asyncio.sleep(20)
-
     print("[CACHE] Hintergrund-Refresher gestartet (stabiler 5-Minuten-Modus)")
 
-    while not client.is_closed():
+    while not _client.is_closed():
         now = datetime.datetime.now(datetime.timezone.utc)
 
-        # =========================================================
-        # UPCOMING aktualisieren
-        # =========================================================
         try:
-            guild = client.get_guild(GUILD_ID) or await client.fetch_guild(GUILD_ID)
+            guild = _client.get_guild(GUILD_ID) or await _client.fetch_guild(GUILD_ID)
             events = await guild.fetch_scheduled_events()
 
             upcoming = []
@@ -1903,26 +899,13 @@ async def refresh_api_cache(client):
 
             _API_CACHE["upcoming"]["ts"] = now
             _API_CACHE["upcoming"]["data"] = upcoming
-
             print(f"[CACHE] Upcoming aktualisiert ({len(upcoming)} Events)")
 
         except Exception as e:
             print(f"[CACHE] Fehler UPCOMING: {e}")
 
-        # --------------------------------------------------------
-        # API aktualisieren (externen Server füttern)
-        # --------------------------------------------------------
         try:
-            await push_updates_to_api()
-            print("[SYNC] API-Sync durchgeführt")
-        except Exception as e:
-            print("[SYNC] Fehler beim API-Sync:", e)
-
-        # =========================================================
-        # RESULTS aktualisieren
-        # =========================================================
-        try:
-            ch = client.get_channel(RESULTS_CHANNEL_ID)
+            ch = _client.get_channel(RESULTS_CHANNEL_ID)
 
             if isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
                 new_results = []
@@ -1936,312 +919,111 @@ async def refresh_api_cache(client):
                         "jump_url": m.jump_url,
                     })
 
-                if len(new_results) > 0:
+                if new_results:
                     _API_CACHE["results"]["ts"] = now
                     _API_CACHE["results"]["data"] = new_results
                     print(f"[CACHE] Results aktualisiert ({len(new_results)} Einträge)")
                 else:
                     print("[CACHE] Results NICHT aktualisiert (0 Einträge)")
-
             else:
                 print("[CACHE] Ergebnischannel nicht gefunden oder falscher Typ")
 
         except Exception as e:
             print(f"[CACHE] Fehler RESULTS: {e}")
 
-        # =========================================================
-        # 5 Minuten warten
-        # =========================================================
+        try:
+            await push_updates_to_api()
+            print("[SYNC] API-Sync durchgeführt")
+        except Exception as e:
+            print("[SYNC] Fehler beim API-Sync:", e)
+
         await asyncio.sleep(300)
 
-# =========================================================
-# =========================================================
-# Push an externe API (api.py)
-# =========================================================
-async def push_updates_to_api():
-    api_base = "https://tfl-discord-api.onrender.com"
 
+async def push_updates_to_api():
     async with aiohttp.ClientSession() as session:
-        
-        # Upcoming
         try:
             payload_upcoming = {"items": _API_CACHE["upcoming"]["data"]}
-            async with session.post(f"{api_base}/api/update/upcoming", json=payload_upcoming, timeout=5) as r:
+            async with session.post(f"{API_BASE}/api/update/upcoming", json=payload_upcoming, timeout=5) as r:
                 print("[PUSH] upcoming ->", r.status)
         except Exception as e:
             print("[PUSH] Fehler upcoming:", e)
 
-        # Results
         try:
             payload_results = {"items": _API_CACHE["results"]["data"]}
-            async with session.post(f"{api_base}/api/update/results", json=payload_results, timeout=5) as r:
+            async with session.post(f"{API_BASE}/api/update/results", json=payload_results, timeout=5) as r:
                 print("[PUSH] results ->", r.status)
         except Exception as e:
             print("[PUSH] Fehler results:", e)
 
-        # -------------------------------------------------
-        # EXTERNE API (api.py) mit beiden Caches füttern
-        # -------------------------------------------------
-        try:
-            # Kein neuer Selbstaufruf! Daten werden nur EINMAL gepusht.
-            print("[SYNC] push_updates_to_api abgeschlossen")
-            print("Upcoming Count:", len(_API_CACHE["upcoming"]["data"]))
-            print("Results Count:", len(_API_CACHE["results"]["data"]))
-
-        except Exception as e:
-            print(f"[CACHE] Fehler beim Push an externe API: {e}")
-
-
+        print("[SYNC] push_updates_to_api abgeschlossen")
+        print("Upcoming Count:", len(_API_CACHE["upcoming"]["data"]))
+        print("Results Count:", len(_API_CACHE["results"]["data"]))
 
 
 # =========================================================
 # Slash Commands
 # =========================================================
-@tree.command(
-    name="termin",
-    description="Erstelle einen neuen Termin (nur Event, kein Sheet)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def termin(interaction: discord.Interaction):
-    await interaction.response.send_modal(TerminModal())
-
-
 @tree.command(name="add", description="Fügt einen neuen Spieler zur Liste hinzu")
 @app_commands.describe(name="Name", twitch="Twitch-Username")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def add(interaction: discord.Interaction, name: str, twitch: str):
     key = name.strip().lower()
     TWITCH_MAP[key] = twitch.strip()
-    await interaction.response.send_message(
-        f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.",
-        ephemeral=True,
-    )
+    await interaction.response.send_message(f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.", ephemeral=True)
 
 
-@tree.command(
-    name="playerexit",
-    description=(
-        "Spieler aus Division austragen und alle Spiele als FF gegen ihn "
-        "werten (nur Admin)"
-    ),
-)
+@tree.command(name="playerexit", description="Spieler aus Division austragen und alle Spiele als FF gegen ihn werten (nur Admin)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def playerexit(interaction: discord.Interaction):
     member = interaction.user
     if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True)
         return
 
     if not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.", ephemeral=True)
         return
 
     view = PlayerExitDivisionSelectView(requester=member)
-    await interaction.response.send_message(
-        "📤 Spieler-Exit starten:\nBitte Division auswählen.",
-        view=view,
-        ephemeral=True,
-    )
+    await interaction.response.send_message("📤 Spieler-Exit starten:\nBitte Division auswählen.", view=view, ephemeral=True)
 
 
-@tree.command(
-    name="streich",
-    description="Zeigt die Streichungen (L/M/N2-9) einer Division an",
-)
+@tree.command(name="help", description="Zeigt eine Übersicht aller verfügbaren Befehle")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.choices(
-    division=[
-        app_commands.Choice(name="Division 1", value="1"),
-        app_commands.Choice(name="Division 2", value="2"),
-        app_commands.Choice(name="Division 3", value="3"),
-        app_commands.Choice(name="Division 4", value="4"),
-        app_commands.Choice(name="Division 5", value="5"),
-        app_commands.Choice(name="Division 6", value="6"),
-    ],
-)
-async def streich(
-    interaction: discord.Interaction,
-    division: app_commands.Choice[str],
-):
-    member = interaction.user
-    if not isinstance(member, discord.Member) or not has_tfl_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    div_number = division.value
-
-    try:
-        eintraege = list_streichungen(div_number)
-    except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Fehler beim Lesen der Streichungen aus Division {div_number}: {e}",
-            ephemeral=True,
-        )
-        return
-
-    if not eintraege:
-        await interaction.response.send_message(
-            f"Keine Streichungen in Division {div_number} hinterlegt (L2-L9 leer).",
-            ephemeral=True,
-        )
-        return
-
-    lines = [f"📝 Streichungen in Division {div_number}:", ""]
-    for e in eintraege:
-        spieler = e["spieler"]
-        parts = []
-        if e["modus_m"]:
-            parts.append(e["modus_m"])
-        if e["modus_n"]:
-            parts.append(e["modus_n"])
-
-        if parts:
-            lines.append(f"- **{spieler}**: " + " | ".join(parts))
-        else:
-            lines.append(f"- **{spieler}**")
-
-    await interaction.response.send_message(
-        "\n".join(lines),
-        ephemeral=True,
-    )
-
-
-@tree.command(
-    name="rest",
-    description="Zeigt das Restprogramm eines Spielers an",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def rest(interaction: discord.Interaction):
-    member = interaction.user
-    if not isinstance(member, discord.Member) or not has_tfl_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    view = RestView(requester=member)
-    await interaction.response.send_message(
-        (
-            "🔎 Restprogramm-Ansicht\n\n"
-            "1️⃣ Division wählen\n"
-            "2️⃣ Spieler aus der Liste wählen (basierend auf L2-L9)\n\n"
-            "Das Restprogramm wird im selben Fenster angezeigt."
-        ),
-        view=view,
-        ephemeral=True,
-    )
-
-
-@tree.command(
-    name="help",
-    description="Zeigt eine Übersicht aller verfügbaren Befehle")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def help(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📖 TFL Bot Hilfe",
-        description="Aktive Befehle:",
-        color=0x00FFCC,
-    )
-
-    embed.add_field(
-        name="/player",
-        value="Zentrales Spielermenü für Planung, Ergebnisse, Qualifikation, Saisonmeldung und weitere Funktionen.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/playerexit",
-        value=(
-            "Admin: Spieler austragen (alle Spiele FF gegen ihn, Name "
-            "durchgestrichen)."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/spielplan",
-        value=(
-            "Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet "
-            "schreiben."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="/restreams",
-        value="Zeigt alle zukünftigen Events mit '(Restream)' im Titel.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/add",
-        value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).",
-        inline=False,
-    )
-    embed.add_field(
-        name="/sync",
-        value="Admin: Slash-Commands synchronisieren.",
-        inline=False,
-    )
-
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(title="📖 TFL Bot Hilfe", description="Aktive Befehle:", color=0x00FFCC)
+    embed.add_field(name="/player", value="Zentrales Spielermenü für Planung, Ergebnisse, Qualifikation, Saisonmeldung und weitere Funktionen.", inline=False)
+    embed.add_field(name="/playerexit", value="Admin: Spieler austragen (alle Spiele FF gegen ihn, Name durchgestrichen).", inline=False)
+    embed.add_field(name="/spielplan", value="Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet schreiben.", inline=False)
+    embed.add_field(name="/restreams", value="Zeigt alle zukünftigen Restream-Events.", inline=False)
+    embed.add_field(name="/add", value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).", inline=False)
+    embed.add_field(name="/sync", value="Admin: Slash-Commands synchronisieren.", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@tree.command(
-    name="spielplan",
-    description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden) und schreibt alles ins Sheet",
-)
+@tree.command(name="spielplan", description="(Admin) Erstellt Hin-/Rückrunde (jeder gg. jeden) und schreibt alles ins Sheet")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(division="Welche Division?")
-@app_commands.choices(
-    division=[
-        app_commands.Choice(name="Division 1", value="1"),
-        app_commands.Choice(name="Division 2", value="2"),
-        app_commands.Choice(name="Division 3", value="3"),
-        app_commands.Choice(name="Division 4", value="4"),
-        app_commands.Choice(name="Division 5", value="5"),
-        app_commands.Choice(name="Division 6", value="6"),
-    ],
-)
-async def spielplan(
-    interaction: discord.Interaction,
-    division: app_commands.Choice[str],
-):
+@app_commands.choices(division=[app_commands.Choice(name=f"Division {i}", value=str(i)) for i in range(1, 7)])
+async def spielplan(interaction: discord.Interaction, division: app_commands.Choice[str]):
     member = interaction.user
     if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("❌ Konnte Mitgliedsdaten nicht lesen.", ephemeral=True)
         return
 
     if not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.", ephemeral=True)
         return
 
     try:
         players = spielplan_read_players(division.value)
         if len(players) < 2:
-            await interaction.response.send_message(
-                (
-                    f"❌ Zu wenig Spieler in Division {division.value} gefunden "
-                    "(zu wenige Namen in D/F)."
-                ),
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"❌ Zu wenig Spieler in Division {division.value} gefunden.", ephemeral=True)
             return
 
         rounds = spielplan_build_matches(players)
-        ws = _get_div_ws(division.value)
+        ws = get_div_ws(division.value)
         written = spielplan_write(ws, rounds)
 
         preview_round = rounds[0] if rounds else []
@@ -2253,28 +1035,18 @@ async def spielplan(
             f"{written} Zeilen ins Tab `{division.value}.DIV` geschrieben.\n\n"
             f"Erster Spieltag (Beispiel):\n```{preview_txt}\n...```"
         )
-
         await interaction.response.send_message(msg, ephemeral=True)
 
     except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Fehler bei /spielplan: {e}",
-            ephemeral=True,
-        )
+        await interaction.response.send_message(f"❌ Fehler bei /spielplan: {e}", ephemeral=True)
 
 
-@tree.command(
-    name="sync",
-    description="(Admin) Slash-Commands für diese Guild synchronisieren",
-)
+@tree.command(name="sync", description="(Admin) Slash-Commands für diese Guild synchronisieren")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def sync_cmd(interaction: discord.Interaction):
     member = interaction.user
     if not isinstance(member, discord.Member) or not has_admin_role(member):
-        await interaction.response.send_message(
-            "⛔ Keine Berechtigung.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("⛔ Keine Berechtigung.", ephemeral=True)
         return
 
     try:
@@ -2283,167 +1055,39 @@ async def sync_cmd(interaction: discord.Interaction):
         remove_disabled_manual_commands(tree, guild)
         synced = await tree.sync(guild=guild)
         names = ", ".join(sorted(c.name for c in synced))
-
-        await interaction.followup.send(
-            f"✅ Synced {len(synced)} Commands: {names}",
-            ephemeral=True,
-        )
-
+        await interaction.followup.send(f"✅ Synced {len(synced)} Commands: {names}", ephemeral=True)
     except Exception as e:
         print(f"[SYNC] Fehler: {e}")
         try:
-            await interaction.followup.send(
-                "❌ Sync ist fehlgeschlagen. Bitte Logs prüfen.",
-                ephemeral=True,
-            )
+            await interaction.followup.send("❌ Sync ist fehlgeschlagen. Bitte Logs prüfen.", ephemeral=True)
         except Exception:
             pass
 
 
-@tree.command(
-    name="pick",
-    description="Restream für ein Event auswählen (ZSR oder privater Link)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def pick(interaction: discord.Interaction):
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        await interaction.response.send_message(
-            "❌ Konnte Mitgliedsdaten nicht lesen.",
-            ephemeral=True,
-        )
-        return
-
-    if not has_tfl_role(member):
-        await interaction.response.send_message(
-            "⛔ Du hast keine Berechtigung diesen Befehl zu nutzen.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        guild = interaction.guild
-        if guild is None:
-            await interaction.followup.send(
-                "❌ Konnte Guild nicht ermitteln.",
-                ephemeral=True,
-            )
-            return
-
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        events = await guild.fetch_scheduled_events()
-
-        future_events = _filter_future_events(events, now_utc)
-        selectable = [ev for ev in future_events if not _is_restream(ev)]
-
-        if not selectable:
-            await interaction.followup.send(
-                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
-                ephemeral=True,
-            )
-            return
-
-        view = PickView(selectable, requester=member)
-        await interaction.followup.send(
-            "Bitte Event wählen und anschließend die Restream-Quelle auswählen.",
-            view=view,
-            ephemeral=True,
-        )
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Fehler bei /pick: {e}",
-            ephemeral=True,
-        )
-
-
-@tree.command(
-    name="showpicks",
-    description="Zeigt alle zukünftigen Events ohne Restream (für /pick)",
-)
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def showpicks(interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        guild = interaction.guild
-        if guild is None:
-            await interaction.followup.send(
-                "❌ Konnte Guild nicht ermitteln.",
-                ephemeral=True,
-            )
-            return
-
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        events = await guild.fetch_scheduled_events()
-
-        future_events = _filter_future_events(events, now_utc)
-        selectable = [ev for ev in future_events if not _is_restream(ev)]
-
-        if not selectable:
-            await interaction.followup.send(
-                "📭 Es gibt aktuell keine zukünftigen Events ohne Restream.",
-                ephemeral=True,
-            )
-            return
-
-        text = _format_event_list(
-            "🎯 Events, die für /pick zur Verfügung stehen:",
-            selectable,
-            now_utc,
-            include_weekday=True,
-        )
-        await interaction.followup.send(text, ephemeral=True)
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Fehler bei /showpicks: {e}",
-            ephemeral=True,
-        )
-
-
-@tree.command(
-    name="restreams",
-    description="Zeigt alle zukünftigen Events mit '(Restream)' im Titel",
-)
+@tree.command(name="restreams", description="Zeigt alle zukünftigen Restream-Events")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def restreams(interaction: discord.Interaction):
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         if guild is None:
-            await interaction.followup.send(
-                "❌ Konnte Guild nicht ermitteln.",
-                ephemeral=True,
-            )
+            await interaction.followup.send("❌ Konnte Guild nicht ermitteln.", ephemeral=True)
             return
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         events = await guild.fetch_scheduled_events()
-
         future_events = _filter_future_events(events, now_utc)
         restream_events = [ev for ev in future_events if _is_restream(ev)]
 
         if not restream_events:
-            await interaction.followup.send(
-                "📭 Aktuell sind keine zukünftigen Restream-Events eingetragen.",
-                ephemeral=True,
-            )
+            await interaction.followup.send("📭 Aktuell sind keine zukünftigen Restream-Events eingetragen.", ephemeral=True)
             return
 
-        text = _format_event_list(
-            "🔁 Geplante Restreams (nur Events in der Zukunft)",
-            restream_events,
-            now_utc,
-        )
-
+        text = _format_event_list("🔁 Geplante Restreams (nur Events in der Zukunft)", restream_events, now_utc)
         await interaction.followup.send(text, ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Fehler bei /restreams: {e}",
-            ephemeral=True,
-        )
+        await interaction.followup.send(f"❌ Fehler bei /restreams: {e}", ephemeral=True)
 
 
 # =========================================================
@@ -2469,7 +1113,7 @@ async def on_ready():
 
     try:
         asyncio.create_task(start_webserver(client))
-        print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming)")
+        print("🌐 Webserver gestartet (/health, /api/results, /api/upcoming, /api/results-db)")
     except Exception as e:
         print(f"⚠️ Webserver-Start fehlgeschlagen: {e}")
 
@@ -2479,5 +1123,9 @@ async def on_ready():
         print("♻️ Background cache refresher gestartet")
 
     print("🤖 Bot bereit")
+
+
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN fehlt.")
 
 client.run(TOKEN)
