@@ -14,6 +14,47 @@ CACHE = {
 
 CACHE_FILE = "cache.json"
 
+API_PERFORMANCE_VERSION = "api-performance-v1"
+print(f"[API] geladen: {API_PERFORMANCE_VERSION}")
+
+RESULTS_DB_CACHE: dict[str, list[dict]] = {}
+_RESULTS_CACHE_SIGNATURE: tuple[int, int] | None = None
+
+
+def invalidate_results_db_cache():
+    global RESULTS_DB_CACHE, _RESULTS_CACHE_SIGNATURE
+    RESULTS_DB_CACHE = {}
+    _RESULTS_CACHE_SIGNATURE = None
+
+
+def get_results_signature(results_raw: list[dict]) -> tuple[int, int]:
+    if not results_raw:
+        return (0, 0)
+    return (len(results_raw), hash(json.dumps(results_raw, ensure_ascii=False, sort_keys=True)))
+
+
+def get_results_db_items_for_division(division: str) -> list[dict]:
+    global _RESULTS_CACHE_SIGNATURE
+
+    results_raw = CACHE.get("results", []) or []
+    signature = get_results_signature(results_raw)
+
+    if signature != _RESULTS_CACHE_SIGNATURE:
+        RESULTS_DB_CACHE.clear()
+        _RESULTS_CACHE_SIGNATURE = signature
+
+    if division in RESULTS_DB_CACHE:
+        return RESULTS_DB_CACHE[division]
+
+    items: list[dict] = []
+    for entry in results_raw:
+        item = parse_result_entry(entry, division=division)
+        if item is not None:
+            items.append(item)
+
+    RESULTS_DB_CACHE[division] = items
+    return items
+
 
 # =========================================================
 # LOAD + SAVE CACHE
@@ -24,6 +65,7 @@ def load_cache():
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 CACHE = json.load(f)
+                invalidate_results_db_cache()
                 print(
                     f"[API] Cache geladen "
                     f"({len(CACHE.get('upcoming', []))} upcoming, "
@@ -177,17 +219,9 @@ async def get_results_db(request: web.Request):
         limit = 50
     limit = max(1, min(336, limit))
 
-    results_raw = CACHE.get("results", []) or []
-    items: list[dict] = []
-
-    for entry in results_raw:
-        item = parse_result_entry(entry, division=division)
-        if item is not None:
-            items.append(item)
-
-    # Neueste zuerst: nach date-Feld sortieren (nur String-Vergleich)
-    # Wir sortieren einfach nach Eintrags-Reihenfolge rückwärts,
+    # Neueste zuerst: nach Eintrags-Reihenfolge rückwärts,
     # da CACHE["results"] vom Bot chronologisch gefüllt wird.
+    items = get_results_db_items_for_division(division)
     items = items[-limit:][::-1]
 
     return web.json_response({"items": items})
@@ -214,6 +248,7 @@ async def update_results(request):
         data = await request.json()
         items = data.get("items", [])
         CACHE["results"] = items
+        invalidate_results_db_cache()
         save_cache()
         print(f"[API] UPDATED results: {len(items)} Items")
         return web.json_response({"status": "ok"})
