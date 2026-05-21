@@ -2,6 +2,8 @@ import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+from sheet_guard import get_all_values_cached
+
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
 
@@ -13,6 +15,12 @@ SCOPE = [
 GC = None
 WB = None
 SHEETS_ENABLED = True
+
+STREICHINFO_PERFORMANCE_VERSION = "streichinfo-performance-v1"
+print(f"[STREICHINFO] geladen: {STREICHINFO_PERFORMANCE_VERSION}")
+
+STREICHINFO_SHEET_CACHE_TTL_SECONDS = int(os.getenv("STREICHINFO_SHEET_CACHE_TTL_SECONDS", "120"))
+_WORKSHEET_CACHE = {}
 
 try:
     CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
@@ -43,10 +51,29 @@ def normalize_name(value: str) -> str:
     )
 
 
-def list_streichungen(div_number: str):
+def _division_worksheet(div_number: str):
     sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
-    rows = ws.get_all_values()
+    sheet_name = f"{div_number}.DIV"
+
+    if sheet_name in _WORKSHEET_CACHE:
+        return _WORKSHEET_CACHE[sheet_name]
+
+    ws = WB.worksheet(sheet_name)
+    _WORKSHEET_CACHE[sheet_name] = ws
+    return ws
+
+
+def _division_values(div_number: str):
+    ws = _division_worksheet(div_number)
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=getattr(ws, "title", f"{div_number}.DIV"),
+        ttl_seconds=STREICHINFO_SHEET_CACHE_TTL_SECONDS,
+    )
+
+
+def list_streichungen(div_number: str):
+    rows = _division_values(div_number)
 
     eintraege = []
     max_row_index = min(9, len(rows))
@@ -70,9 +97,7 @@ def list_streichungen(div_number: str):
 
 
 def list_div_players(div_number: str) -> list[str]:
-    sheets_required()
-    ws = WB.worksheet(f"{div_number}.DIV")
-    rows = ws.get_all_values()
+    rows = _division_values(div_number)
 
     seen = set()
     players = []
