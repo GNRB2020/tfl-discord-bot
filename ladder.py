@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v11-table-stats-from-matches"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v13-colored-tables-rank-delta"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -99,6 +99,15 @@ TFNL_STARTUP_STAGGER_SECONDS = int(
 
 TFNL_AUTO_EVALUATE_INTERVAL_MINUTES = int(
     os.getenv("TFNL_AUTO_EVALUATE_INTERVAL_MINUTES", "3").strip()
+)
+
+TFNL_STANDINGS_PUBLISH_DELAY_SECONDS = int(
+    os.getenv("TFNL_STANDINGS_PUBLISH_DELAY_SECONDS", "120").strip()
+)
+
+TFNL_AUTO_PUBLISH_STANDINGS_AFTER_SLOT = (
+    os.getenv("TFNL_AUTO_PUBLISH_STANDINGS_AFTER_SLOT", "1").strip().lower()
+    not in ("0", "false", "no", "nein", "off")
 )
 
 SCHEDULE_SHEET_NAME = "Schedule"
@@ -1430,6 +1439,154 @@ def build_discord_table(headers: list[str], rows: list[list], max_col_width: int
     return "```text\n" + "\n".join(lines) + "\n```"
 
 
+ANSI_RESET = "\u001b[0m"
+ANSI_GREEN = "\u001b[32m"
+ANSI_YELLOW = "\u001b[33m"
+ANSI_LIGHT_RED = "\u001b[91m"
+ANSI_DARK_RED = "\u001b[31m"
+
+
+def strip_ansi(value: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", str(value or ""))
+
+
+def ansi_color(value, color: str) -> str:
+    text = normalize_text(value)
+
+    if text == "":
+        text = "0"
+
+    return f"{color}{text}{ANSI_RESET}"
+
+
+def parse_float_value(value, default: float = 0.0) -> float:
+    try:
+        text = normalize_text(value).replace(",", ".").replace("+", "")
+        if not text:
+            return default
+        return float(text)
+    except Exception:
+        return default
+
+
+def color_elo_change(value) -> str:
+    text = normalize_text(value)
+
+    if not text:
+        text = "±0.0"
+
+    number = parse_float_value(text.replace("±", ""), 0.0)
+
+    if number > 0:
+        return ansi_color(text, ANSI_GREEN)
+
+    if number < 0:
+        return ansi_color(text, ANSI_LIGHT_RED)
+
+    return ansi_color(text, ANSI_YELLOW)
+
+
+def color_rank_delta(value) -> str:
+    number = int_value(value)
+
+    if number > 0:
+        return ansi_color(f"+{number}", ANSI_GREEN)
+
+    if number < 0:
+        return ansi_color(str(number), ANSI_LIGHT_RED)
+
+    return ansi_color("0", ANSI_YELLOW)
+
+
+def color_stat_value(value, stat: str) -> str:
+    text = normalize_text(value)
+
+    if text == "":
+        text = "0"
+
+    if stat == "S":
+        return ansi_color(text, ANSI_GREEN)
+
+    if stat == "U":
+        return ansi_color(text, ANSI_YELLOW)
+
+    if stat == "N":
+        return ansi_color(text, ANSI_LIGHT_RED)
+
+    if stat == "FF":
+        return ansi_color(text, ANSI_DARK_RED)
+
+    return text
+
+
+def color_last_race_player_name(name: str, player_id: str, last_race_player_ids: set[str]) -> str:
+    if normalize_text(player_id) in last_race_player_ids:
+        return ansi_color(name, ANSI_YELLOW)
+
+    return normalize_text(name) or "0"
+
+
+def visible_len(value) -> int:
+    return len(strip_ansi(normalize_text(value)))
+
+
+def visible_truncate(value, max_width: int) -> str:
+    text = normalize_text(value).replace("\n", " / ")
+    plain = strip_ansi(text)
+
+    if len(plain) <= max_width:
+        return text
+
+    # Bei farbigen Zellen wird zum sicheren Kürzen die Farbe verworfen.
+    return plain[: max_width - 1] + "…"
+
+
+def visible_ljust(value, width: int) -> str:
+    text = normalize_text(value)
+    padding = max(0, width - visible_len(text))
+    return text + (" " * padding)
+
+
+def build_discord_ansi_table(headers: list[str], rows: list[list], max_col_width: int = 24) -> str:
+    string_rows = []
+
+    for row in rows:
+        string_row = []
+        for value in row:
+            text = normalize_text(value).replace("\n", " / ")
+            if text == "":
+                text = "0"
+            text = visible_truncate(text, max_col_width)
+            string_row.append(text)
+        string_rows.append(string_row)
+
+    widths = []
+    for index, header in enumerate(headers):
+        values = [normalize_text(header)]
+        for row in string_rows:
+            if index < len(row):
+                values.append(row[index])
+        widths.append(min(max(visible_len(value) for value in values), max_col_width))
+
+    def format_row(row_values: list[str]) -> str:
+        cells = []
+        for index, width in enumerate(widths):
+            value = row_values[index] if index < len(row_values) else "0"
+            if normalize_text(value) == "":
+                value = "0"
+            value = visible_truncate(value, width)
+            cells.append(visible_ljust(value, width))
+        return " | ".join(cells).rstrip()
+
+    separator = "-+-".join("-" * width for width in widths)
+    lines = [format_row(headers), separator]
+
+    for row in string_rows:
+        lines.append(format_row(row))
+
+    return "```ansi\n" + "\n".join(lines) + "\n```"
+
+
 def split_discord_message(message: str, limit: int = 1900) -> list[str]:
     """
     Discord erlaubt max. 2000 Zeichen pro Nachricht.
@@ -2400,12 +2557,12 @@ def build_slot_overview_message(schedule_row: dict) -> str:
                     result["name"],
                     result["time"],
                     result["result"],
-                    result["elo_change"],
+                    color_elo_change(result["elo_change"]),
                 ]
             )
 
         lines.append(
-            build_discord_table(
+            build_discord_ansi_table(
                 ["#", "Spieler", "Zeit", "Ergebnis", "ELO ges."],
                 table_rows,
                 max_col_width=20,
@@ -2460,13 +2617,13 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
                         player["name"],
                         player["time"],
                         player["result"],
-                        player["elo_change"],
+                        color_elo_change(player["elo_change"]),
                     ]
                 )
                 running_no += 1
 
         lines.append(
-            build_discord_table(
+            build_discord_ansi_table(
                 ["Match", "#", "Spieler", "Zeit", "Ergebnis", "ELO ges."],
                 table_rows,
                 max_col_width=20,
@@ -2775,6 +2932,119 @@ def rebuild_players_from_published_matches(season: str | None = None) -> dict[st
     }
 
 
+def get_latest_completed_slot_id_for_scope(mode_name: str | None = None) -> str:
+    requested_mode = get_canonical_mode_name(mode_name) if normalize_text(mode_name) else ""
+    schedule_modes = get_schedule_mode_map()
+    best_slot_id = ""
+    best_dt = None
+
+    for row in load_schedule_rows():
+        slot_id = normalize_text(row.get("Slot ID"))
+
+        if not slot_id:
+            continue
+
+        if requested_mode:
+            mode = normalize_text(schedule_modes.get(slot_id) or row.get("Modus"))
+            if get_canonical_mode_name(mode) != requested_mode:
+                continue
+
+        if not any(
+            normalize_text(match.get("Slot ID")) == slot_id
+            and normalize_text(match.get("Status")).lower() == "finished"
+            and normalize_text(match.get("Veröffentlicht")).lower() == "ja"
+            for match in load_matches_rows()
+        ):
+            continue
+
+        completed_dt = parse_completed_at(row.get(SCHEDULE_COMPLETED_AT_COL))
+        if completed_dt is None:
+            completed_dt = get_slot_start_dt(row)
+
+        if completed_dt is None:
+            continue
+
+        if best_dt is None or completed_dt > best_dt:
+            best_dt = completed_dt
+            best_slot_id = slot_id
+
+    return best_slot_id
+
+
+def get_slot_player_ids(slot_id: str) -> set[str]:
+    player_ids: set[str] = set()
+
+    if not normalize_text(slot_id):
+        return player_ids
+
+    for match in get_matches_for_slot(slot_id):
+        for player in get_match_players(match):
+            player_id = normalize_text(player.get("discord_id"))
+            if player_id:
+                player_ids.add(player_id)
+
+    return player_ids
+
+
+def calculate_rank_deltas(
+    rows: list[dict],
+    latest_slot_id: str,
+    scope: str,
+) -> dict[str, int]:
+    if not latest_slot_id:
+        return {}
+
+    slot_changes = get_slot_elo_changes(latest_slot_id, scope=scope)
+
+    if not slot_changes:
+        return {}
+
+    current_rank_by_id = {
+        normalize_text(row.get("Player ID")): index
+        for index, row in enumerate(rows, start=1)
+        if normalize_text(row.get("Player ID"))
+    }
+
+    previous_rows = []
+    for row in rows:
+        player_id = normalize_text(row.get("Player ID"))
+        current_elo = parse_float_value(row.get("Elo"), 1000.0)
+        change = parse_float_value(slot_changes.get(player_id), 0.0)
+        previous_elo = current_elo - change
+
+        previous_rows.append(
+            {
+                "player_id": player_id,
+                "name": normalize_text(row.get("Player Name")),
+                "previous_elo": previous_elo,
+            }
+        )
+
+    previous_rows.sort(
+        key=lambda row: (
+            -row["previous_elo"],
+            row["name"].lower(),
+        )
+    )
+
+    previous_rank_by_id = {
+        row["player_id"]: index
+        for index, row in enumerate(previous_rows, start=1)
+        if row["player_id"]
+    }
+
+    deltas: dict[str, int] = {}
+    for player_id, current_rank in current_rank_by_id.items():
+        previous_rank = previous_rank_by_id.get(player_id)
+
+        if previous_rank is None:
+            deltas[player_id] = 0
+        else:
+            deltas[player_id] = previous_rank - current_rank
+
+    return deltas
+
+
 def build_overall_match_stats() -> dict[str, dict]:
     """
     Statistikquelle für G/S/U/N/FF.
@@ -2838,6 +3108,13 @@ def build_standings_messages() -> list[str]:
         limit=None,
     )
     stats_by_id = build_overall_match_stats()
+    latest_slot_id = get_latest_completed_slot_id_for_scope()
+    last_race_player_ids = get_slot_player_ids(latest_slot_id)
+    rank_deltas = calculate_rank_deltas(
+        rows=rows,
+        latest_slot_id=latest_slot_id,
+        scope=SCOPE_SEASON_OVERALL,
+    )
 
     if not rows:
         return [
@@ -2855,22 +3132,28 @@ def build_standings_messages() -> list[str]:
         draws = int_value(stats.get("draws"))
         losses = int_value(stats.get("losses"))
         games = int_value(stats.get("starts"))
+        forfeits = int_value(stats.get("forfeits"))
 
         table_rows.append(
             [
                 index,
-                normalize_text(row.get("Player Name")),
-                normalize_text(row.get("Elo")),
+                color_last_race_player_name(
+                    normalize_text(row.get("Player Name")),
+                    player_id,
+                    last_race_player_ids,
+                ),
+                normalize_text(row.get("Elo")) or "1000.0",
+                color_rank_delta(rank_deltas.get(player_id, 0)),
                 games,
-                wins,
-                draws,
-                losses,
-                int_value(stats.get("forfeits")),
+                color_stat_value(wins, "S"),
+                color_stat_value(draws, "U"),
+                color_stat_value(losses, "N"),
+                color_stat_value(forfeits, "FF"),
             ]
         )
 
-    table = build_discord_table(
-        ["#", "Spieler", "ELO", "G", "S", "U", "N", "FF"],
+    table = build_discord_ansi_table(
+        ["#", "Spieler", "ELO", "+/-", "G", "S", "U", "N", "FF"],
         table_rows,
         max_col_width=18,
     )
@@ -2993,6 +3276,14 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
         if normalize_text(row.get("discord_id"))
     }
 
+    latest_slot_id = get_latest_completed_slot_id_for_scope(mode_name)
+    last_race_player_ids = get_slot_player_ids(latest_slot_id)
+    rank_deltas = calculate_rank_deltas(
+        rows=elo_rows,
+        latest_slot_id=latest_slot_id,
+        scope=SCOPE_SEASON_MODE,
+    )
+
     if not elo_rows:
         return [
             f"**TFNL Modus-Tabelle: {mode_name}**\n"
@@ -3009,26 +3300,32 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
         draws = int_value(stats.get("draws"))
         losses = int_value(stats.get("losses"))
         games = int_value(stats.get("starts"))
-        best = seconds_to_timecode(stats.get("best_seconds")) if stats.get("best_seconds") is not None else "-"
-        avg = seconds_to_timecode(stats.get("avg_seconds")) if stats.get("avg_seconds") is not None else "-"
+        forfeits = int_value(stats.get("forfeits"))
+        best = seconds_to_timecode(stats.get("best_seconds")) if stats.get("best_seconds") is not None else "0"
+        avg = seconds_to_timecode(stats.get("avg_seconds")) if stats.get("avg_seconds") is not None else "0"
 
         table_rows.append(
             [
                 index,
-                normalize_text(row.get("Player Name")),
-                normalize_text(row.get("Elo")),
+                color_last_race_player_name(
+                    normalize_text(row.get("Player Name")),
+                    player_id,
+                    last_race_player_ids,
+                ),
+                normalize_text(row.get("Elo")) or "1000.0",
+                color_rank_delta(rank_deltas.get(player_id, 0)),
                 games,
-                wins,
-                draws,
-                losses,
-                int_value(stats.get("forfeits")),
+                color_stat_value(wins, "S"),
+                color_stat_value(draws, "U"),
+                color_stat_value(losses, "N"),
+                color_stat_value(forfeits, "FF"),
                 best,
                 avg,
             ]
         )
 
-    table = build_discord_table(
-        ["#", "Spieler", "ELO", "G", "S", "U", "N", "FF", "Best", "Ø"],
+    table = build_discord_ansi_table(
+        ["#", "Spieler", "ELO", "+/-", "G", "S", "U", "N", "FF", "Best", "Ø"],
         table_rows,
         max_col_width=16,
     )
@@ -3667,6 +3964,7 @@ class LadderCog(commands.Cog):
         self.standings_publish_lock = asyncio.Lock()
         self.sheet_write_lock = asyncio.Lock()
         self.auto_evaluate_matches_lock = asyncio.Lock()
+        self.pending_standings_publish_task = None
 
         try:
             self.elo_sheet_setup_status = ensure_ladder_elo_sheets()
@@ -3692,6 +3990,9 @@ class LadderCog(commands.Cog):
         self.update_signup_channel.cancel()
         self.process_ladder_slots.cancel()
         self.auto_evaluate_finished_matches.cancel()
+
+        if self.pending_standings_publish_task and not self.pending_standings_publish_task.done():
+            self.pending_standings_publish_task.cancel()
 
     # =====================================================
     # PERSISTENT COMPONENT ROUTING
@@ -3871,6 +4172,29 @@ class LadderCog(commands.Cog):
             print("[TFNL] Anmeldung im Channel aktualisiert.")
         except Exception as e:
             print(f"[TFNL] Konnte Signup nicht senden: {repr(e)}")
+
+    async def delayed_publish_standings_to_channel(self, reason: str = ""):
+        delay = max(0, TFNL_STANDINGS_PUBLISH_DELAY_SECONDS)
+
+        if delay:
+            await self.log_tfnl(
+                f"Tabellenposting verzögert um `{delay}` Sekunden"
+                + (f" ({reason})." if reason else ".")
+            )
+            await asyncio.sleep(delay)
+
+        await self.publish_standings_to_channel()
+
+    def schedule_standings_publish(self, reason: str = ""):
+        if not TFNL_AUTO_PUBLISH_STANDINGS_AFTER_SLOT:
+            return
+
+        if self.pending_standings_publish_task and not self.pending_standings_publish_task.done():
+            return
+
+        self.pending_standings_publish_task = self.bot.loop.create_task(
+            self.delayed_publish_standings_to_channel(reason=reason)
+        )
 
     async def publish_standings_to_channel(self):
         async with self.standings_publish_lock:
@@ -4870,12 +5194,10 @@ class LadderCog(commands.Cog):
                 f"Öffentliche Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}"
             )
 
-        try:
-            await self.publish_standings_to_channel()
-        except Exception as e:
-            await self.log_tfnl(
-                f"Gesamttabelle konnte beim Slotabschluss nicht gepostet werden: `{slot_id}` — {repr(e)}"
-            )
+        # Tabellenposting nicht in dieselbe Google-Sheets-Spitze wie Matchwertung,
+        # ELO/History/Players/Slotabschluss drücken. Stattdessen verzögert und
+        # zusammengefasst posten.
+        self.schedule_standings_publish(reason=f"Slotabschluss `{slot_id}`")
 
         # Keine zusätzliche Modus-Tabelle automatisch in den Tabellenkanal posten.
         # Der Tabellenkanal wird dadurch nur einmal aktualisiert und nicht doppelt befüllt.
@@ -5119,7 +5441,9 @@ class LadderCog(commands.Cog):
         evaluated = 0
 
         async with self.auto_evaluate_matches_lock:
-            rows = load_matches_rows(force_refresh=True)
+            # Die Routine läuft ohnehin nur alle 3 Minuten.
+            # Kein force_refresh, damit nicht unnötig gegen die Sheets-Quota gelesen wird.
+            rows = load_matches_rows(force_refresh=False)
 
             for match_row in rows:
                 if not match_needs_auto_evaluation(match_row):
