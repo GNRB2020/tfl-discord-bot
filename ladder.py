@@ -85,7 +85,13 @@ TFNL_RESULTS_CHANNEL_ID = int(
 )
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
-TFNL_LOOP_INTERVAL_SECONDS = 5
+
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-performance-v1-loop-env-countdown-10"
+print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
+
+TFNL_LOOP_INTERVAL_SECONDS = int(
+    os.getenv("TFNL_LOOP_INTERVAL_SECONDS", "30").strip()
+)
 
 SCHEDULE_SHEET_NAME = "Schedule"
 SIGNUP_SHEET_NAME = "Signup"
@@ -928,8 +934,9 @@ def is_countdown_due(row: dict) -> bool:
         return False
 
     # Countdown-Tasks werden bewusst früh vorbereitet.
-    # Die Task schläft intern bis exakt Startzeit -5 Sekunden.
-    return datetime.now(BERLIN_TZ) >= start - timedelta(seconds=70)
+    # Die Task schläft intern bis exakt Startzeit -10 Sekunden.
+    # Die Vorbereitung passiert weiterhin nur einmal über den Status countdown_sent.
+    return datetime.now(BERLIN_TZ) >= start - timedelta(seconds=90)
 
 
 def is_start_due(row: dict) -> bool:
@@ -3990,7 +3997,7 @@ class LadderCog(commands.Cog):
                         f"Seed-Link: {seed_url}\n\n"
                         "Die Paarungen bleiben geheim bis zum Ergebnis.\n"
                         "Eine weitere DM kommt ungefähr 1 Minute vor Start.\n"
-                        "Direkt vor Start folgt ein kurzer Countdown von 5 bis 1."
+                        "Direkt vor Start folgt ein kurzer Countdown von 10 bis 1."
                     )
                 except Exception as e:
                     await self.log_tfnl(
@@ -4081,11 +4088,11 @@ class LadderCog(commands.Cog):
 
         async def countdown(user: discord.User, player_id: str):
             try:
-                # Muss vor Startzeit -5 Sekunden vorbereitet worden sein.
+                # Muss vor Startzeit -10 Sekunden vorbereitet worden sein.
                 # Falls Discord/API kurz hängt, wird trotzdem bis zur Startmeldung durchgezogen.
                 message = None
 
-                for value in range(5, 0, -1):
+                for value in range(10, 0, -1):
                     await sleep_until(start_dt - timedelta(seconds=value))
                     message = await send_or_edit_countdown(
                         user,
