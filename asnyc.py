@@ -9,6 +9,13 @@ from discord import app_commands
 from discord.ext import commands
 from oauth2client.service_account import ServiceAccountCredentials
 
+from sheet_guard import (
+    acell_cached,
+    get_all_values_cached,
+    row_values_cached,
+    sheet_write_call,
+)
+
 from matchcenter import (
     write_league_result,
     league_result_post_text,
@@ -64,6 +71,19 @@ NOT_ELIGIBLE_TEXT = (
     "Du bist für die Qualifikation nicht teilnahmeberechtigt! "
     "Nimm gerne an den Liveraces zur Quali (ohne Wertung) teil."
 )
+
+ASNYC_PERFORMANCE_VERSION = "asnyc-performance-v1"
+print(f"[ASNYC] geladen: {ASNYC_PERFORMANCE_VERSION}")
+
+ASNYC_SHEET_CACHE_TTL_SECONDS = int(os.getenv("ASNYC_SHEET_CACHE_TTL_SECONDS", "60"))
+ASNYC_SEED_CACHE_TTL_SECONDS = int(os.getenv("ASNYC_SEED_CACHE_TTL_SECONDS", "30"))
+ASNYC_SIGNUP_CACHE_TTL_SECONDS = int(os.getenv("ASNYC_SIGNUP_CACHE_TTL_SECONDS", "120"))
+
+_GSPREAD_CLIENT_CACHE = None
+_SPREADSHEET_CACHE: dict[str, gspread.Spreadsheet] = {}
+_WORKSHEET_CACHE_BY_KEY: dict[tuple[str, str], gspread.Worksheet] = {}
+_WORKSHEET_CACHE_BY_GID: dict[tuple[str, int], gspread.Worksheet] = {}
+
 
 # =========================================================
 # HILFSFUNKTIONEN
@@ -157,41 +177,112 @@ async def try_send_dm(member: discord.Member | discord.User | None, text: str):
 
 
 def get_gspread_client():
+    global _GSPREAD_CLIENT_CACHE
+
+    if _GSPREAD_CLIENT_CACHE is not None:
+        return _GSPREAD_CLIENT_CACHE
+
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    return gspread.authorize(creds)
+    _GSPREAD_CLIENT_CACHE = gspread.authorize(creds)
+    return _GSPREAD_CLIENT_CACHE
+
+
+def get_spreadsheet(spreadsheet_id: str):
+    if spreadsheet_id in _SPREADSHEET_CACHE:
+        return _SPREADSHEET_CACHE[spreadsheet_id]
+
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(spreadsheet_id)
+    _SPREADSHEET_CACHE[spreadsheet_id] = spreadsheet
+    return spreadsheet
+
+
+def get_cached_worksheet_by_name(spreadsheet_id: str, worksheet_name: str):
+    cache_key = (spreadsheet_id, worksheet_name)
+
+    if cache_key in _WORKSHEET_CACHE_BY_KEY:
+        return _WORKSHEET_CACHE_BY_KEY[cache_key]
+
+    spreadsheet = get_spreadsheet(spreadsheet_id)
+    ws = spreadsheet.worksheet(worksheet_name)
+    _WORKSHEET_CACHE_BY_KEY[cache_key] = ws
+    return ws
+
+
+def get_cached_worksheet_by_gid(spreadsheet_id: str, worksheet_gid: int):
+    cache_key = (spreadsheet_id, int(worksheet_gid))
+
+    if cache_key in _WORKSHEET_CACHE_BY_GID:
+        return _WORKSHEET_CACHE_BY_GID[cache_key]
+
+    spreadsheet = get_spreadsheet(spreadsheet_id)
+
+    for ws in spreadsheet.worksheets():
+        _WORKSHEET_CACHE_BY_GID[(spreadsheet_id, int(ws.id))] = ws
+        _WORKSHEET_CACHE_BY_KEY[(spreadsheet_id, ws.title)] = ws
+
+    if cache_key in _WORKSHEET_CACHE_BY_GID:
+        return _WORKSHEET_CACHE_BY_GID[cache_key]
+
+    raise RuntimeError(f"Worksheet mit gid/id {worksheet_gid} nicht gefunden.")
+
+
+def get_sheet_cache_name(ws, fallback: str) -> str:
+    return getattr(ws, "title", fallback)
+
+
+def invalidate_prefixes_for_ws(ws, fallback: str) -> list[str]:
+    sheet_name = get_sheet_cache_name(ws, fallback)
+    return [
+        f"records:{sheet_name}",
+        f"values:{sheet_name}",
+        f"row:{sheet_name}:",
+        f"col:{sheet_name}:",
+        f"cell:{sheet_name}:",
+    ]
+
+
+def get_quali_values(ws, force_refresh: bool = False):
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=get_sheet_cache_name(ws, QUALI_SHEET_NAME),
+        ttl_seconds=ASNYC_SHEET_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+    )
+
+
+def get_async_values(ws, force_refresh: bool = False):
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=get_sheet_cache_name(ws, "Async"),
+        ttl_seconds=ASNYC_SHEET_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+    )
 
 
 def get_quali_worksheet():
-    client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID)
-    return sheet.worksheet(QUALI_SHEET_NAME)
+    return get_cached_worksheet_by_name(SPREADSHEET_ID, QUALI_SHEET_NAME)
 
 
 def get_async_worksheet():
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(ASYNC_SPREADSHEET_ID)
-    for ws in spreadsheet.worksheets():
-        if ws.id == ASYNC_WORKSHEET_GID:
-            return ws
-    raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
+    return get_cached_worksheet_by_gid(ASYNC_SPREADSHEET_ID, ASYNC_WORKSHEET_GID)
 
 
 def get_signup_worksheet():
-    client = get_gspread_client()
-    sheet = client.open_by_key(SIGNUP_SPREADSHEET_ID)
-    for ws in sheet.worksheets():
-        if ws.id == SIGNUP_WORKSHEET_GID:
-            return ws
-    raise RuntimeError(f"Worksheet mit gid/id {SIGNUP_WORKSHEET_GID} nicht gefunden.")
+    return get_cached_worksheet_by_gid(SIGNUP_SPREADSHEET_ID, SIGNUP_WORKSHEET_GID)
 
 
 def is_runner_quali_eligible(runner_name: str) -> bool:
     ws = get_signup_worksheet()
-    rows = ws.get_all_values()
+    rows = get_all_values_cached(
+        lambda: ws,
+        sheet_name=get_sheet_cache_name(ws, "Signup"),
+        ttl_seconds=ASNYC_SIGNUP_CACHE_TTL_SECONDS,
+    )
     target = normalize_name(runner_name)
 
     for row in rows:
@@ -206,9 +297,19 @@ def is_runner_quali_eligible(runner_name: str) -> bool:
 
 def get_quali_seed(ws, quali_number: int) -> str:
     if quali_number == 1:
-        seed = ws.acell("D2").value
+        seed = acell_cached(
+            lambda: ws,
+            sheet_name=get_sheet_cache_name(ws, QUALI_SHEET_NAME),
+            cell="D2",
+            ttl_seconds=ASNYC_SEED_CACHE_TTL_SECONDS,
+        )
     elif quali_number == 2:
-        seed = ws.acell("F2").value
+        seed = acell_cached(
+            lambda: ws,
+            sheet_name=get_sheet_cache_name(ws, QUALI_SHEET_NAME),
+            cell="F2",
+            ttl_seconds=ASNYC_SEED_CACHE_TTL_SECONDS,
+        )
     else:
         raise ValueError("Ungültige Quali-Nummer.")
 
@@ -219,7 +320,7 @@ def get_quali_seed(ws, quali_number: int) -> str:
 
 
 def find_existing_runner_row(ws, runner_name: str):
-    all_values = ws.get_all_values()
+    all_values = get_quali_values(ws)
     for row_idx in range(START_ROW, len(all_values) + 1):
         row = all_values[row_idx - 1]
         name_in_b = safe_cell(row, 1)  # B
@@ -229,7 +330,7 @@ def find_existing_runner_row(ws, runner_name: str):
 
 
 def find_first_free_row(ws):
-    all_values = ws.get_all_values()
+    all_values = get_quali_values(ws)
     row_idx = START_ROW
     while True:
         if row_idx > len(all_values):
@@ -246,7 +347,10 @@ def get_or_create_runner_row(ws, runner_name: str):
     if existing is not None:
         return existing
     free_row = find_first_free_row(ws)
-    ws.update(f"B{free_row}", [[runner_name]])
+    sheet_write_call(
+        lambda: ws.update(f"B{free_row}", [[runner_name]]),
+        invalidate_prefixes=invalidate_prefixes_for_ws(ws, QUALI_SHEET_NAME),
+    )
     return free_row
 
 
@@ -263,7 +367,12 @@ def read_runner_status(ws, runner_name: str) -> dict:
             "q2_time": "",
         }
 
-    row = ws.row_values(row_idx)
+    row = row_values_cached(
+        lambda: ws,
+        sheet_name=get_sheet_cache_name(ws, QUALI_SHEET_NAME),
+        row=row_idx,
+        ttl_seconds=ASNYC_SHEET_CACHE_TTL_SECONDS,
+    )
     q1_async = safe_cell(row, 3)  # D
     q1_time = safe_cell(row, 4)   # E
     q2_async = safe_cell(row, 5)  # F
@@ -284,9 +393,15 @@ def write_quali_result(ws, runner_name: str, quali_number: int, async_value: str
     row_idx = get_or_create_runner_row(ws, runner_name)
 
     if quali_number == 1:
-        ws.update(f"D{row_idx}:E{row_idx}", [[async_value, race_time]])
+        sheet_write_call(
+            lambda: ws.update(f"D{row_idx}:E{row_idx}", [[async_value, race_time]]),
+            invalidate_prefixes=invalidate_prefixes_for_ws(ws, QUALI_SHEET_NAME),
+        )
     elif quali_number == 2:
-        ws.update(f"F{row_idx}:G{row_idx}", [[async_value, race_time]])
+        sheet_write_call(
+            lambda: ws.update(f"F{row_idx}:G{row_idx}", [[async_value, race_time]]),
+            invalidate_prefixes=invalidate_prefixes_for_ws(ws, QUALI_SHEET_NAME),
+        )
     else:
         raise ValueError("Ungültige Quali-Nummer.")
 
@@ -294,7 +409,7 @@ def write_quali_result(ws, runner_name: str, quali_number: int, async_value: str
 
 
 def get_quali_results(ws, quali_number: int):
-    all_values = ws.get_all_values()
+    all_values = get_quali_values(ws)
     results = []
 
     for row_idx in range(START_ROW, len(all_values) + 1):
@@ -332,7 +447,7 @@ def get_quali_stats_for_runner(ws, runner_name: str, quali_number: int):
 
 
 def get_overall_results(ws):
-    all_values = ws.get_all_values()
+    all_values = get_quali_values(ws)
     results = []
 
     for row_idx in range(START_ROW, len(all_values) + 1):
@@ -368,7 +483,7 @@ def get_overall_stats_for_runner(ws, runner_name: str):
 
 
 def get_async_open_entries_for_runner(ws, runner_name: str):
-    rows = ws.get_all_values()
+    rows = get_async_values(ws)
     target = runner_name.strip().lower()
     entries = []
 
@@ -414,15 +529,26 @@ def get_async_open_entries_for_runner(ws, runner_name: str):
 
 def write_async_runner_result(ws, sheet_row: int, side: int, vod_link: str, final_time: str):
     if side == 1:
-        ws.update(f"D{sheet_row}:E{sheet_row}", [[vod_link, final_time]])
+        sheet_write_call(
+            lambda: ws.update(f"D{sheet_row}:E{sheet_row}", [[vod_link, final_time]]),
+            invalidate_prefixes=invalidate_prefixes_for_ws(ws, "Async"),
+        )
     elif side == 2:
-        ws.update(f"G{sheet_row}:H{sheet_row}", [[vod_link, final_time]])
+        sheet_write_call(
+            lambda: ws.update(f"G{sheet_row}:H{sheet_row}", [[vod_link, final_time]]),
+            invalidate_prefixes=invalidate_prefixes_for_ws(ws, "Async"),
+        )
     else:
         raise ValueError("Ungültige Seite.")
 
 
 def read_async_entry(ws, sheet_row: int) -> dict:
-    row = ws.row_values(sheet_row)
+    row = row_values_cached(
+        lambda: ws,
+        sheet_name=get_sheet_cache_name(ws, "Async"),
+        row=sheet_row,
+        ttl_seconds=ASNYC_SHEET_CACHE_TTL_SECONDS,
+    )
     return {
         "player1": safe_cell(row, 1),   # B
         "vod1": safe_cell(row, 3),      # D
