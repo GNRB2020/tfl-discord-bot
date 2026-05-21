@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v10-public-combined-table-and-match-view"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v11-table-stats-from-matches"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -2406,7 +2406,7 @@ def build_slot_overview_message(schedule_row: dict) -> str:
 
         lines.append(
             build_discord_table(
-                ["#", "Spieler", "Zeit", "Ergebnis", "ELO"],
+                ["#", "Spieler", "Zeit", "Ergebnis", "ELO ges."],
                 table_rows,
                 max_col_width=20,
             )
@@ -2467,7 +2467,7 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
 
         lines.append(
             build_discord_table(
-                ["Match", "#", "Spieler", "Zeit", "Ergebnis", "ELO"],
+                ["Match", "#", "Spieler", "Zeit", "Ergebnis", "ELO ges."],
                 table_rows,
                 max_col_width=20,
             )
@@ -2775,11 +2775,56 @@ def rebuild_players_from_published_matches(season: str | None = None) -> dict[st
     }
 
 
+def build_overall_match_stats() -> dict[str, dict]:
+    """
+    Statistikquelle für G/S/U/N/FF.
+    ELO bleibt in Ladder_Ratings, aber die Spielstatistiken werden aus Matches
+    berechnet. Dadurch können ELO und Games nicht mehr auseinanderlaufen.
+    """
+    stats_by_id: dict[str, dict] = {}
+
+    for match in load_matches_rows():
+        if normalize_text(match.get("Veröffentlicht")).lower() != "ja":
+            continue
+
+        if normalize_text(match.get("Status")).lower() != "finished":
+            continue
+
+        for player in get_match_players(match):
+            player_id = player["discord_id"]
+            player_name = player["name"]
+            time_value = normalize_text(match.get(player["time_col"]))
+            result_text = normalize_text(match.get(player["result_col"]))
+
+            if not player_id:
+                continue
+
+            if player_id not in stats_by_id:
+                stats_by_id[player_id] = {
+                    "discord_id": player_id,
+                    "name": player_name,
+                    "starts": 0,
+                    "wins": 0,
+                    "draws": 0,
+                    "losses": 0,
+                    "forfeits": 0,
+                }
+
+            row = stats_by_id[player_id]
+            row["name"] = player_name
+            row["starts"] += 1
+            row["wins"] += 1 if result_text == "Sieg" else 0
+            row["draws"] += 1 if result_text == "Remis" else 0
+            row["losses"] += 1 if result_text == "Niederlage" else 0
+            row["forfeits"] += 1 if time_value.upper() == "FF" else 0
+
+    return stats_by_id
+
+
 def get_player_forfeits_by_id() -> dict[str, int]:
     return {
-        normalize_text(row.get("Discord ID")): int_value(row.get("Forfeits"))
-        for row in load_players_rows()
-        if normalize_text(row.get("Discord ID"))
+        player_id: int_value(stats.get("forfeits"))
+        for player_id, stats in build_overall_match_stats().items()
     }
 
 
@@ -2792,7 +2837,7 @@ def build_standings_messages() -> list[str]:
         mode="",
         limit=None,
     )
-    forfeits_by_id = get_player_forfeits_by_id()
+    stats_by_id = build_overall_match_stats()
 
     if not rows:
         return [
@@ -2803,11 +2848,13 @@ def build_standings_messages() -> list[str]:
 
     table_rows = []
     for index, row in enumerate(rows, start=1):
-        wins = int_value(row.get("Wins"))
-        draws = int_value(row.get("Draws"))
-        losses = int_value(row.get("Lose"))
-        games = wins + draws + losses
         player_id = normalize_text(row.get("Player ID"))
+        stats = stats_by_id.get(player_id, {})
+
+        wins = int_value(stats.get("wins"))
+        draws = int_value(stats.get("draws"))
+        losses = int_value(stats.get("losses"))
+        games = int_value(stats.get("starts"))
 
         table_rows.append(
             [
@@ -2818,7 +2865,7 @@ def build_standings_messages() -> list[str]:
                 wins,
                 draws,
                 losses,
-                forfeits_by_id.get(player_id, 0),
+                int_value(stats.get("forfeits")),
             ]
         )
 
@@ -2864,6 +2911,9 @@ def build_mode_standings(mode_name: str) -> list[dict]:
             continue
 
         if normalize_text(match.get("Veröffentlicht")).lower() != "ja":
+            continue
+
+        if normalize_text(match.get("Status")).lower() != "finished":
             continue
 
         for player in get_match_players(match):
@@ -2955,10 +3005,10 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
         player_id = normalize_text(row.get("Player ID"))
         stats = stats_by_id.get(player_id, {})
 
-        wins = int_value(row.get("Wins"))
-        draws = int_value(row.get("Draws"))
-        losses = int_value(row.get("Lose"))
-        games = wins + draws + losses
+        wins = int_value(stats.get("wins"))
+        draws = int_value(stats.get("draws"))
+        losses = int_value(stats.get("losses"))
+        games = int_value(stats.get("starts"))
         best = seconds_to_timecode(stats.get("best_seconds")) if stats.get("best_seconds") is not None else "-"
         avg = seconds_to_timecode(stats.get("avg_seconds")) if stats.get("avg_seconds") is not None else "-"
 
