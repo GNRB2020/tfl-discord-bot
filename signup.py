@@ -31,12 +31,25 @@ SIGNUP_CACHE_TTL_SECONDS = int(os.getenv("SIGNUP_SHEET_CACHE_TTL_SECONDS", "45")
 SIGNUP_STATUS_CACHE_TTL_SECONDS = int(os.getenv("SIGNUP_STATUS_CACHE_TTL_SECONDS", "15"))
 SIGNUP_SHEET_CACHE_NAME = "SeasonSignup"
 
+SIGNUP_PERFORMANCE_VERSION = "signup-performance-v1"
+print(f"[SIGNUP] geladen: {SIGNUP_PERFORMANCE_VERSION}")
+
+_WORKSHEET_CACHE = None
+_NAME_COLUMN_CACHE: list[str] | None = None
+_NAME_ROW_CACHE: dict[str, int] = {}
+
+
 
 # =========================================================
 # GOOGLE SHEET
 # =========================================================
 
 def get_worksheet():
+    global _WORKSHEET_CACHE
+
+    if _WORKSHEET_CACHE is not None:
+        return _WORKSHEET_CACHE
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -47,7 +60,39 @@ def get_worksheet():
     )
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID)
-    return sheet.get_worksheet_by_id(WORKSHEET_GID)
+    _WORKSHEET_CACHE = sheet.get_worksheet_by_id(WORKSHEET_GID)
+    return _WORKSHEET_CACHE
+
+
+def _clear_local_signup_caches():
+    global _NAME_COLUMN_CACHE, _NAME_ROW_CACHE
+    _NAME_COLUMN_CACHE = None
+    _NAME_ROW_CACHE = {}
+
+
+def _get_name_column(ws) -> list[str]:
+    global _NAME_COLUMN_CACHE
+
+    if _NAME_COLUMN_CACHE is not None:
+        return list(_NAME_COLUMN_CACHE)
+
+    names = col_values_cached(
+        lambda: ws,
+        sheet_name=SIGNUP_SHEET_CACHE_NAME,
+        col=1,
+        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
+    )
+    _NAME_COLUMN_CACHE = list(names)
+    _NAME_ROW_CACHE.clear()
+
+    for i, cell in enumerate(_NAME_COLUMN_CACHE, start=1):
+        normalized = normalize_name(cell)
+        if normalized:
+            _NAME_ROW_CACHE[normalized] = i
+
+    return list(_NAME_COLUMN_CACHE)
+
+
 
 
 def is_signup_open(ws) -> bool:
@@ -69,28 +114,13 @@ def normalize_yes_no(value: str) -> str:
 
 
 def find_name_row(ws, name: str) -> Optional[int]:
-    names = col_values_cached(
-        lambda: ws,
-        sheet_name=SIGNUP_SHEET_CACHE_NAME,
-        col=1,
-        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
-    )
+    _get_name_column(ws)
     target = normalize_name(name)
-
-    for i, cell in enumerate(names, start=1):
-        if normalize_name(cell) == target:
-            return i
-
-    return None
+    return _NAME_ROW_CACHE.get(target)
 
 
 def find_free_row(ws) -> int:
-    names = col_values_cached(
-        lambda: ws,
-        sheet_name=SIGNUP_SHEET_CACHE_NAME,
-        col=1,
-        ttl_seconds=SIGNUP_CACHE_TTL_SECONDS,
-    )
+    names = _get_name_column(ws)
 
     for i, cell in enumerate(names, start=1):
         if not cell.strip():
@@ -121,6 +151,7 @@ def write_row(ws, row, name, twitch, league, cup, restream, commentary, tracker)
         ),
         invalidate_prefixes=_signup_invalidate_prefixes(),
     )
+    _clear_local_signup_caches()
 
 
 def process_signup(name, twitch, league, cup, restream, commentary, tracker):
@@ -248,6 +279,7 @@ def reset_signup_data(ws):
             lambda: ws.batch_update(updates, value_input_option="USER_ENTERED"),
             invalidate_prefixes=_signup_invalidate_prefixes(),
         )
+        _clear_local_signup_caches()
 
     return count
 
