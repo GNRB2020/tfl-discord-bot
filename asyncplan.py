@@ -6,6 +6,12 @@ import discord
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+from sheet_guard import (
+    col_values_cached,
+    get_all_values_cached,
+    sheet_write_call,
+)
+
 from matchcenter import (
     get_div_ws_from_label,
     _cell,
@@ -28,6 +34,16 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+ASYNCPLAN_PERFORMANCE_VERSION = "asyncplan-performance-v1"
+print(f"[ASYNCPLAN] geladen: {ASYNCPLAN_PERFORMANCE_VERSION}")
+
+ASYNCPLAN_SHEET_CACHE_TTL_SECONDS = int(os.getenv("ASYNCPLAN_SHEET_CACHE_TTL_SECONDS", "90"))
+ASYNCPLAN_ASYNC_COL_CACHE_TTL_SECONDS = int(os.getenv("ASYNCPLAN_ASYNC_COL_CACHE_TTL_SECONDS", "30"))
+
+_GSPREAD_CLIENT_CACHE = None
+_SPREADSHEET_CACHE = None
+_ASYNC_WORKSHEET_CACHE = None
+
 
 def menu_embed(title: str, description: str) -> discord.Embed:
     return discord.Embed(
@@ -42,17 +58,64 @@ def menu_embed(title: str, description: str) -> discord.Embed:
 # =========================================================
 
 def get_gspread_client() -> gspread.Client:
+    global _GSPREAD_CLIENT_CACHE
+
+    if _GSPREAD_CLIENT_CACHE is not None:
+        return _GSPREAD_CLIENT_CACHE
+
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    return gspread.authorize(creds)
+    _GSPREAD_CLIENT_CACHE = gspread.authorize(creds)
+    return _GSPREAD_CLIENT_CACHE
+
+
+def get_async_spreadsheet():
+    global _SPREADSHEET_CACHE
+
+    if _SPREADSHEET_CACHE is not None:
+        return _SPREADSHEET_CACHE
+
+    client = get_gspread_client()
+    _SPREADSHEET_CACHE = client.open_by_key(ASYNC_SPREADSHEET_ID)
+    return _SPREADSHEET_CACHE
 
 
 def get_async_worksheet():
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(ASYNC_SPREADSHEET_ID)
+    global _ASYNC_WORKSHEET_CACHE
+
+    if _ASYNC_WORKSHEET_CACHE is not None:
+        return _ASYNC_WORKSHEET_CACHE
+
+    spreadsheet = get_async_spreadsheet()
+
     for ws in spreadsheet.worksheets():
-        if ws.id == ASYNC_WORKSHEET_GID:
-            return ws
+        if int(ws.id) == int(ASYNC_WORKSHEET_GID):
+            _ASYNC_WORKSHEET_CACHE = ws
+            return _ASYNC_WORKSHEET_CACHE
+
     raise RuntimeError(f"Worksheet mit gid/id {ASYNC_WORKSHEET_GID} nicht gefunden.")
+
+
+def sheet_cache_name(ws, fallback: str = "AsyncPlan") -> str:
+    return getattr(ws, "title", fallback)
+
+
+def invalidate_prefixes_for_ws(ws, fallback: str = "AsyncPlan") -> list[str]:
+    name = sheet_cache_name(ws, fallback)
+    return [
+        f"records:{name}",
+        f"values:{name}",
+        f"row:{name}:",
+        f"col:{name}:",
+        f"cell:{name}:",
+    ]
+
+
+def get_cached_sheet_values(ws, fallback: str = "AsyncPlan", ttl_seconds: int = ASYNCPLAN_SHEET_CACHE_TTL_SECONDS):
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=sheet_cache_name(ws, fallback),
+        ttl_seconds=ttl_seconds,
+    )
 
 
 def append_async_row(
@@ -81,7 +144,12 @@ def append_async_row(
     """
     ws = get_async_worksheet()
 
-    col_a = ws.col_values(1)
+    col_a = col_values_cached(
+        lambda: ws,
+        sheet_name=sheet_cache_name(ws, "Async"),
+        col=1,
+        ttl_seconds=ASYNCPLAN_ASYNC_COL_CACHE_TTL_SECONDS,
+    )
     row_index = 1
     while row_index <= len(col_a):
         if not (col_a[row_index - 1] or "").strip():
@@ -100,7 +168,10 @@ def append_async_row(
         {"range": f"L{row_index}:L{row_index}", "values": [[division]]},
         {"range": f"M{row_index}:M{row_index}", "values": [[mode]]},
     ]
-    ws.batch_update(reqs)
+    sheet_write_call(
+        lambda: ws.batch_update(reqs),
+        invalidate_prefixes=invalidate_prefixes_for_ws(ws, "Async"),
+    )
     return row_index
 
 
@@ -126,7 +197,7 @@ def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[d
     # League
     for division_label in [f"Div {i}" for i in range(1, 7)]:
         ws = get_div_ws_from_label(division_label)
-        rows = ws.get_all_values()
+        rows = get_cached_sheet_values(ws, division_label)
 
         for idx, row in enumerate(rows, start=1):
             if idx == 1:
