@@ -86,11 +86,15 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v7-public-only-complete-matches"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v8-startup-quota-stagger"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
     os.getenv("TFNL_LOOP_INTERVAL_SECONDS", "10").strip()
+)
+
+TFNL_STARTUP_STAGGER_SECONDS = int(
+    os.getenv("TFNL_STARTUP_STAGGER_SECONDS", "45").strip()
 )
 
 SCHEDULE_SHEET_NAME = "Schedule"
@@ -5006,7 +5010,9 @@ class LadderCog(commands.Cog):
     @update_schedule_channel.before_loop
     async def before_update_schedule_channel(self):
         await self.bot.wait_until_ready()
-        await self.publish_schedule_to_channel()
+        # Nach Deploy sind alle Sheet-Caches leer. Deshalb nicht gleichzeitig
+        # mit Signup-Update und Slot-Prozess echte Reads feuern.
+        await asyncio.sleep(TFNL_STARTUP_STAGGER_SECONDS)
 
     @tasks.loop(minutes=2)
     async def update_signup_channel(self):
@@ -5015,7 +5021,8 @@ class LadderCog(commands.Cog):
     @update_signup_channel.before_loop
     async def before_update_signup_channel(self):
         await self.bot.wait_until_ready()
-        await self.publish_signup_to_channel()
+        # Signup-Ansicht startet bewusst versetzt nach Schedule.
+        await asyncio.sleep(TFNL_STARTUP_STAGGER_SECONDS + 15)
 
     @tasks.loop(seconds=TFNL_LOOP_INTERVAL_SECONDS)
     async def process_ladder_slots(self):
@@ -5031,7 +5038,7 @@ class LadderCog(commands.Cog):
                         f"Google-Sheets-Quota erreicht. Nutze Cache und pausiert echte Sheet-Reads kurz. Neuer Versuch in ca. {retry_seconds} Sekunden."
                     )
 
-                await asyncio.sleep(30)
+                await asyncio.sleep(max(60, retry_seconds))
                 return
 
             await self.log_tfnl(f"Fehler in process_ladder_slots: {error_text}")
@@ -5039,6 +5046,9 @@ class LadderCog(commands.Cog):
     @process_ladder_slots.before_loop
     async def before_process_ladder_slots(self):
         await self.bot.wait_until_ready()
+        # Der Slot-Prozess ist der read-lastigste Task. Nach Deploy daher
+        # erst starten, wenn Schedule-/Signup-Tasks zeitlich entzerrt wurden.
+        await asyncio.sleep(TFNL_STARTUP_STAGGER_SECONDS + 30)
 
     # =====================================================
     # COMMANDS
