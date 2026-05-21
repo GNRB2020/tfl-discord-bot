@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-performance-v1-loop-env-countdown-10"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v4-public-live-single-message-per-slot"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -1408,6 +1408,51 @@ def build_discord_table(headers: list[str], rows: list[list], max_col_width: int
     return "```text\n" + "\n".join(lines) + "\n```"
 
 
+def split_discord_message(message: str, limit: int = 1900) -> list[str]:
+    """
+    Discord erlaubt max. 2000 Zeichen pro Nachricht.
+    Tabellen werden nicht mehr auf Top 20 begrenzt; zu lange Ausgaben werden
+    deshalb sauber auf mehrere Discord-Nachrichten verteilt.
+    """
+    text = normalize_text(message)
+
+    if not text:
+        return [""]
+
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    current = ""
+
+    for line in text.splitlines():
+        candidate = line if not current else current + "\n" + line
+
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+            current = ""
+
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
+
+        current = line
+
+    if current:
+        chunks.append(current)
+
+    return chunks or [text[:limit]]
+
+
+async def send_discord_message_chunks(send_callable, message: str):
+    for chunk in split_discord_message(message):
+        await send_callable(chunk)
+
+
 def build_signup_line(row: dict) -> str:
     slot_id = normalize_text(row.get("Slot ID"))
     datum = normalize_text(row.get("Datum"))
@@ -2216,6 +2261,62 @@ def build_slot_overview_message(schedule_row: dict) -> str:
         )
 
     lines.extend(["", "Der Channel wird 60 Minuten nach Abschluss gelöscht."])
+    return "\n".join(lines)
+
+
+def build_public_slot_results_message(schedule_row: dict, completed: bool = False) -> str:
+    """
+    Öffentlicher Ergebnis-Channel:
+    Eine Nachricht pro Slot. Sobald ein Ergebnis feststeht, wird diese Nachricht
+    erstellt oder editiert. Spätere Ergebnisse erscheinen im selben Discord-Post.
+    """
+    slot_id = normalize_text(schedule_row.get("Slot ID"))
+    datum = normalize_text(schedule_row.get("Datum"))
+    slot = normalize_text(schedule_row.get("Slot"))
+    modus = normalize_text(schedule_row.get("Modus"))
+    seed_url = get_seed_url(schedule_row)
+    results = collect_slot_results(slot_id)
+
+    title = "**TFNL-Slot abgeschlossen**" if completed else "**TFNL-Slot Ergebnisse**"
+
+    lines = [
+        title,
+        f"Slot ID: `{slot_id}`",
+        "",
+        f"Datum: `{datum}`",
+        f"Slot: `{slot}`",
+        f"Modus: `{modus}`",
+        f"Seed: {seed_url if seed_url else '`nicht eingetragen`'}",
+        "",
+        "**Bisherige Ergebnisse:**" if not completed else "**Endstand:**",
+    ]
+
+    if not results:
+        lines.append("Noch keine Ergebnisse gefunden.")
+    else:
+        table_rows = []
+        for index, result in enumerate(results, start=1):
+            table_rows.append(
+                [
+                    index,
+                    result["name"],
+                    result["time"],
+                    result["result"],
+                    result["elo_change"],
+                ]
+            )
+
+        lines.append(
+            build_discord_table(
+                ["#", "Spieler", "Zeit", "Ergebnis", "ELO"],
+                table_rows,
+                max_col_width=20,
+            )
+        )
+
+    if not completed:
+        lines.extend(["", "_Weitere Ergebnisse werden in dieser Nachricht ergänzt._"])
+
     return "\n".join(lines)
 
 
@@ -3277,7 +3378,7 @@ class UndoFinishView(discord.ui.View):
 # =========================================================
 
 
-def build_elo_table_message(scope: str, season: str, mode: str = "", limit: int = 20) -> str:
+def build_elo_table_message(scope: str, season: str, mode: str = "", limit: int | None = None) -> str:
     rows = build_elo_standings_rows(scope=scope, season=season, mode=mode, limit=limit)
 
     scope_titles = {
@@ -3333,7 +3434,7 @@ def build_elo_table_message(scope: str, season: str, mode: str = "", limit: int 
         )
     )
 
-    if len(rows) >= limit:
+    if limit is not None and len(rows) >= limit:
         lines.append("")
         lines.append(f"_Anzeige begrenzt auf Top {limit}._")
 
@@ -3576,7 +3677,7 @@ class LadderCog(commands.Cog):
                 messages.extend(build_all_mode_standings_messages())
 
                 for message in messages:
-                    await channel.send(message)
+                    await send_discord_message_chunks(channel.send, message)
 
             except Exception as e:
                 await self.log_tfnl(f"Gesamttabellen konnten nicht gepostet werden: {repr(e)}")
@@ -3603,7 +3704,7 @@ class LadderCog(commands.Cog):
             messages = build_mode_standings_messages(mode_name)
 
             for message in messages:
-                await channel.send(message)
+                await send_discord_message_chunks(channel.send, message)
 
         except Exception as e:
             await self.log_tfnl(
@@ -4346,13 +4447,27 @@ class LadderCog(commands.Cog):
                 ephemeral=True,
             )
 
-    async def publish_result_to_results_channel(
-        self,
-        match_row: dict,
-        schedule_row: dict | None = None,
-        elo_changes: dict[str, str] | None = None,
-    ):
-        match_id = normalize_text(match_row.get("Match ID"))
+    async def find_public_slot_results_message(self, channel, slot_id: str):
+        if not slot_id:
+            return None
+
+        try:
+            async for message in channel.history(limit=100):
+                content = message.content or ""
+                if (
+                    self.bot.user
+                    and message.author.id == self.bot.user.id
+                    and "TFNL-Slot" in content
+                    and slot_id in content
+                ):
+                    return message
+        except Exception:
+            return None
+
+        return None
+
+    async def upsert_public_slot_results_message(self, schedule_row: dict, completed: bool = False):
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
 
         async with self.result_publish_lock:
             try:
@@ -4361,51 +4476,32 @@ class LadderCog(commands.Cog):
                 await self.log_tfnl(f"Ergebnis-Channel konnte nicht geladen werden: {repr(e)}")
                 return
 
-            if match_id:
-                try:
-                    async for message in channel.history(limit=100):
-                        if self.bot.user and message.author.id == self.bot.user.id and match_id in (message.content or ""):
-                            return
-                except Exception:
-                    pass
+            content = build_public_slot_results_message(schedule_row, completed=completed)
+            existing_message = await self.find_public_slot_results_message(channel, slot_id)
 
             try:
-                await channel.send(build_public_result_message(match_row, schedule_row, elo_changes=elo_changes))
+                if existing_message is not None:
+                    await existing_message.edit(content=content)
+                else:
+                    await channel.send(content)
             except Exception as e:
                 await self.log_tfnl(
-                    f"Ergebnis konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: {repr(e)}"
+                    f"Öffentliche Slot-Ergebnisnachricht konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
                 )
+
+    async def publish_result_to_results_channel(
+        self,
+        match_row: dict,
+        schedule_row: dict | None = None,
+        elo_changes: dict[str, str] | None = None,
+    ):
+        if not schedule_row:
+            return
+
+        await self.upsert_public_slot_results_message(schedule_row, completed=False)
 
     async def publish_slot_overview_to_results_channel(self, schedule_row: dict):
-        slot_id = normalize_text(schedule_row.get("Slot ID"))
-
-        async with self.slot_overview_publish_lock:
-            try:
-                channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
-            except Exception as e:
-                await self.log_tfnl(f"Ergebnis-Channel konnte für Slotübersicht nicht geladen werden: {repr(e)}")
-                return
-
-            if slot_id:
-                try:
-                    async for message in channel.history(limit=100):
-                        content = message.content or ""
-                        if (
-                            self.bot.user
-                            and message.author.id == self.bot.user.id
-                            and "TFNL-Slot abgeschlossen" in content
-                            and slot_id in content
-                        ):
-                            return
-                except Exception:
-                    pass
-
-            try:
-                await channel.send(build_slot_overview_message(schedule_row))
-            except Exception as e:
-                await self.log_tfnl(
-                    f"Slot-Gesamtübersicht konnte nicht in Kanal `{TFNL_RESULTS_CHANNEL_ID}` gepostet werden: `{slot_id}` — {repr(e)}"
-                )
+        await self.upsert_public_slot_results_message(schedule_row, completed=True)
 
     async def post_slot_runners_to_channel(self, schedule_row: dict):
         try:
@@ -4518,7 +4614,7 @@ class LadderCog(commands.Cog):
         try:
             slot_channel = await self.get_or_create_slot_channel(updated_schedule_row)
             slot_overview_message = build_slot_overview_message(updated_schedule_row)
-            await slot_channel.send(slot_overview_message)
+            await send_discord_message_chunks(slot_channel.send, slot_overview_message)
         except Exception as e:
             await self.log_tfnl(
                 f"Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}"
@@ -4926,7 +5022,7 @@ class LadderCog(commands.Cog):
                 scope=scope,
                 season=season,
                 mode=modus,
-                limit=20,
+                limit=None,
             )
         except Exception as e:
             await interaction.followup.send(
@@ -4935,7 +5031,8 @@ class LadderCog(commands.Cog):
             )
             return
 
-        await interaction.followup.send(message, ephemeral=True)
+        for chunk in split_discord_message(message):
+            await interaction.followup.send(chunk, ephemeral=True)
 
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.command(
@@ -5308,7 +5405,8 @@ class LadderCog(commands.Cog):
             return
 
         for message in messages:
-            await interaction.followup.send(message, ephemeral=False)
+            for chunk in split_discord_message(message):
+                await interaction.followup.send(chunk, ephemeral=False)
 
     @ladder_mode_standings.error
     async def ladder_mode_standings_error(
