@@ -9,6 +9,11 @@ from discord import app_commands
 from discord.ext import commands
 from oauth2client.service_account import ServiceAccountCredentials
 
+from sheet_guard import (
+    get_all_values_cached,
+    sheet_write_call,
+)
+
 # =========================
 # ANPASSEN
 # =========================
@@ -28,6 +33,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+SCHEDULE_PERFORMANCE_VERSION = "schedule-performance-v1"
+print(f"[SCHEDULE] geladen: {SCHEDULE_PERFORMANCE_VERSION}")
+
+SCHEDULE_SHEET_CACHE_TTL_SECONDS = int(os.getenv("SCHEDULE_SHEET_CACHE_TTL_SECONDS", "60"))
+
 
 # =========================
 # GOOGLE SHEETS
@@ -39,27 +49,66 @@ SCOPE = [
 
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
+_GSPREAD_CLIENT_CACHE = None
+_SPREADSHEET_CACHE = None
+_CUP_WORKSHEET_CACHE = None
+
 
 def get_gspread_client() -> gspread.Client:
+    global _GSPREAD_CLIENT_CACHE
+
+    if _GSPREAD_CLIENT_CACHE is not None:
+        return _GSPREAD_CLIENT_CACHE
+
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    return gspread.authorize(creds)
+    _GSPREAD_CLIENT_CACHE = gspread.authorize(creds)
+    return _GSPREAD_CLIENT_CACHE
+
+
+def get_spreadsheet():
+    global _SPREADSHEET_CACHE
+
+    if _SPREADSHEET_CACHE is not None:
+        return _SPREADSHEET_CACHE
+
+    client = get_gspread_client()
+    _SPREADSHEET_CACHE = client.open_by_key(SPREADSHEET_ID)
+    print("DEBUG schedule spreadsheet geöffnet:", _SPREADSHEET_CACHE.title)
+    return _SPREADSHEET_CACHE
 
 
 def get_cup_worksheet():
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    global _CUP_WORKSHEET_CACHE
 
-    print("DEBUG spreadsheet geöffnet:", spreadsheet.title)
+    if _CUP_WORKSHEET_CACHE is not None:
+        return _CUP_WORKSHEET_CACHE
+
+    spreadsheet = get_spreadsheet()
 
     for ws in spreadsheet.worksheets():
-        print("DEBUG worksheet:", ws.title, "| id:", ws.id)
-        if ws.id == WORKSHEET_GID:
-            print("DEBUG passendes worksheet gefunden:", ws.title)
-            return ws
+        if int(ws.id) == int(WORKSHEET_GID):
+            print("DEBUG schedule passendes worksheet gefunden:", ws.title)
+            _CUP_WORKSHEET_CACHE = ws
+            return _CUP_WORKSHEET_CACHE
 
     raise RuntimeError(
         f"Worksheet mit gid/id {WORKSHEET_GID} nicht gefunden."
     )
+
+
+def get_schedule_sheet_cache_name(ws) -> str:
+    return getattr(ws, "title", "CupSchedule")
+
+
+def schedule_invalidate_prefixes(ws) -> list[str]:
+    sheet_name = get_schedule_sheet_cache_name(ws)
+    return [
+        f"records:{sheet_name}",
+        f"values:{sheet_name}",
+        f"row:{sheet_name}:",
+        f"col:{sheet_name}:",
+        f"cell:{sheet_name}:",
+    ]
 
 
 # =========================
@@ -146,7 +195,11 @@ def load_open_matches():
     E = Datum/Uhrzeit
     """
     ws = get_cup_worksheet()
-    values = ws.get_all_values()
+    values = get_all_values_cached(
+        lambda: ws,
+        sheet_name=get_schedule_sheet_cache_name(ws),
+        ttl_seconds=SCHEDULE_SHEET_CACHE_TTL_SECONDS,
+    )
 
     matches = []
 
@@ -305,7 +358,10 @@ class CupTerminModal(discord.ui.Modal, title="Cuptermin eintragen"):
 
         try:
             ws = get_cup_worksheet()
-            ws.update_cell(self.match_data["row"], 5, start_dt.strftime(DATETIME_FORMAT))
+            sheet_write_call(
+                lambda: ws.update_cell(self.match_data["row"], 5, start_dt.strftime(DATETIME_FORMAT)),
+                invalidate_prefixes=schedule_invalidate_prefixes(ws),
+            )
         except Exception as e:
             await interaction.response.send_message(
                 f"Event wurde erstellt, aber Spalte E konnte nicht geschrieben werden: {e}",
@@ -352,7 +408,10 @@ class CupResultModal(discord.ui.Modal, title="Cupresult eintragen"):
 
         try:
             ws = get_cup_worksheet()
-            ws.update_cell(self.match_data["row"], 3, result_text)
+            sheet_write_call(
+                lambda: ws.update_cell(self.match_data["row"], 3, result_text),
+                invalidate_prefixes=schedule_invalidate_prefixes(ws),
+            )
         except Exception as e:
             await interaction.response.send_message(
                 f"Ergebnis konnte nicht gespeichert werden: {e}",
