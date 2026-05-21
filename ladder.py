@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v6-countdown-stable-10-to-1"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v7-public-only-complete-matches"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -2189,11 +2189,38 @@ def apply_result_to_match(match_id: str, result: dict[int, tuple[str, int]]):
     update_match_cells(match_id, values)
 
 
-def collect_slot_results(slot_id: str) -> list[dict]:
+def is_match_publicly_complete(match: dict) -> bool:
+    """
+    Schutzregel für öffentliche Ergebnis-Ausgaben:
+    Ein Match darf öffentlich erst sichtbar werden, wenn alle Spieler dieses
+    Matches einen Abschlusswert haben. Bei 1on1 also beide Spieler, bei 3way
+    alle drei Spieler. Einzelzeiten laufender Matches dürfen niemals öffentlich
+    auftauchen.
+    """
+    players = get_match_players(match)
+
+    if not players:
+        return False
+
+    for player in players:
+        time_value = normalize_text(match.get(player["time_col"]))
+        if not time_value:
+            return False
+
+    status = normalize_text(match.get("Status")).lower()
+    published = normalize_text(match.get("Veröffentlicht")).lower()
+
+    return status == "finished" or published == "ja"
+
+
+def collect_slot_results(slot_id: str, public_only_complete_matches: bool = False) -> list[dict]:
     results = []
     slot_elo_changes = get_slot_elo_changes(slot_id)
 
     for match in get_matches_for_slot(slot_id):
+        if public_only_complete_matches and not is_match_publicly_complete(match):
+            continue
+
         match_id = normalize_text(match.get("Match ID"))
 
         for player in get_match_players(match):
@@ -2218,6 +2245,7 @@ def collect_slot_results(slot_id: str) -> list[dict]:
 
     results.sort(
         key=lambda r: (
+            r["match_id"],
             r["is_ff"],
             r["seconds"] if r["seconds"] is not None else 9999999,
             r["name"].lower(),
@@ -2285,7 +2313,7 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
     slot = normalize_text(schedule_row.get("Slot"))
     modus = normalize_text(schedule_row.get("Modus"))
     seed_url = get_seed_url(schedule_row)
-    results = collect_slot_results(slot_id)
+    results = collect_slot_results(slot_id, public_only_complete_matches=True)
 
     title = "**TFNL-Slot abgeschlossen**" if completed else "**TFNL-Slot Ergebnisse**"
 
@@ -2298,11 +2326,11 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
         f"Modus: `{modus}`",
         f"Seed: {seed_url if seed_url else '`nicht eingetragen`'}",
         "",
-        "**Bisherige Ergebnisse:**" if not completed else "**Endstand:**",
+        "**Bisherige vollständig abgeschlossene Matches:**" if not completed else "**Endstand:**",
     ]
 
     if not results:
-        lines.append("Noch keine Ergebnisse gefunden.")
+        lines.append("Noch kein vollständig abgeschlossenes Match gefunden.")
     else:
         table_rows = []
         for index, result in enumerate(results, start=1):
@@ -2325,7 +2353,7 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
         )
 
     if not completed:
-        lines.extend(["", "_Weitere Ergebnisse werden in dieser Nachricht ergänzt._"])
+        lines.extend(["", "_Weitere vollständig abgeschlossene Matches werden in dieser Nachricht ergänzt._"])
 
     return "\n".join(lines)
 
