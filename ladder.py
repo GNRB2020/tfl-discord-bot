@@ -86,7 +86,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v4-public-live-single-message-per-slot"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v5-signup-doubleclick-guard"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -195,11 +195,17 @@ def invalidate_sheet_cache(sheet_name: str | None = None):
     invalidate_global_sheet_cache(f"cell:{sheet_name}:")
 
 
-def get_cached_records(sheet_name: str, sheet_getter, ttl_seconds: int = SHEET_READ_CACHE_TTL_SECONDS):
+def get_cached_records(
+    sheet_name: str,
+    sheet_getter,
+    ttl_seconds: int = SHEET_READ_CACHE_TTL_SECONDS,
+    force_refresh: bool = False,
+):
     return get_all_records_cached(
         sheet_getter,
         sheet_name=sheet_name,
         ttl_seconds=ttl_seconds,
+        force_refresh=force_refresh,
     )
 # =========================================================
 # MODE / PRESET MAPPING
@@ -488,17 +494,21 @@ def load_schedule_rows_with_index():
     ]
 
 
-def load_signup_rows_all():
-    return get_cached_records(SIGNUP_SHEET_NAME, get_signup_sheet)
+def load_signup_rows_all(force_refresh: bool = False):
+    return get_cached_records(
+        SIGNUP_SHEET_NAME,
+        get_signup_sheet,
+        force_refresh=force_refresh,
+    )
 
 
-def load_signup_rows():
-    return filter_rows_by_season(load_signup_rows_all())
+def load_signup_rows(force_refresh: bool = False):
+    return filter_rows_by_season(load_signup_rows_all(force_refresh=force_refresh))
 
 
-def load_signup_rows_with_index():
+def load_signup_rows_with_index(force_refresh: bool = False):
     selected_season = get_active_season()
-    rows = load_signup_rows_all()
+    rows = load_signup_rows_all(force_refresh=force_refresh)
     return [
         (index, row)
         for index, row in enumerate(rows, start=2)
@@ -1711,8 +1721,8 @@ def format_signup_names_for_slot(slot_id: str) -> str:
     return ", ".join(names)
 
 
-def user_already_signed_up(slot_id: str, user_id: int) -> bool:
-    rows = load_signup_rows()
+def user_already_signed_up(slot_id: str, user_id: int, force_refresh: bool = False) -> bool:
+    rows = load_signup_rows(force_refresh=force_refresh)
 
     for row in rows:
         if (
@@ -1727,7 +1737,7 @@ def user_already_signed_up(slot_id: str, user_id: int) -> bool:
 
 def cancel_signup(slot_id: str, user_id: int) -> bool:
     sheet = get_signup_sheet()
-    rows_with_index = load_signup_rows_with_index()
+    rows_with_index = load_signup_rows_with_index(force_refresh=True)
 
     status_col = get_header_index(sheet, SIGNUP_SHEET_NAME, "Status")
 
@@ -3811,7 +3821,7 @@ class LadderCog(commands.Cog):
             )
             return
 
-        if user_already_signed_up(slot_id, member.id):
+        if user_already_signed_up(slot_id, member.id, force_refresh=True):
             await interaction.followup.send(
                 "Du bist für diesen Slot bereits angemeldet.",
                 ephemeral=True,
@@ -3836,7 +3846,15 @@ class LadderCog(commands.Cog):
             return
 
         try:
-            append_signup(slot_id, member.id, member.display_name)
+            async with self.sheet_write_lock:
+                if user_already_signed_up(slot_id, member.id, force_refresh=True):
+                    await interaction.followup.send(
+                        "Du bist für diesen Slot bereits angemeldet.",
+                        ephemeral=True,
+                    )
+                    return
+
+                append_signup(slot_id, member.id, member.display_name)
         except Exception as e:
             await interaction.followup.send(
                 f"Anmeldung fehlgeschlagen: Sheet konnte nicht beschrieben werden.\n```{repr(e)}```",
