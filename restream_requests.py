@@ -12,6 +12,12 @@ from oauth2client.service_account import ServiceAccountCredentials
 from discord import app_commands
 from discord.ext import commands
 
+from sheet_guard import (
+    get_all_records_cached,
+    row_values_cached,
+    sheet_write_call,
+)
+
 
 # =========================================================
 # CONFIG
@@ -67,6 +73,11 @@ RESTREAM_REQUEST_HEADERS = [
 ]
 
 RESTREAM_REQUESTS_WORKSHEET_CACHE = None
+
+RESTREAM_REQUESTS_PERFORMANCE_VERSION = "restream-requests-performance-v1"
+print(f"[RESTREAM_REQUESTS] geladen: {RESTREAM_REQUESTS_PERFORMANCE_VERSION}")
+
+RESTREAM_REQUESTS_CACHE_TTL_SECONDS = int(os.getenv("RESTREAM_REQUESTS_CACHE_TTL_SECONDS", "60"))
 
 
 # Zielkanal: tägliche kompakte Liste der Spiele, die für Restreams auswählbar sind
@@ -166,13 +177,48 @@ def get_restream_requests_sheet():
             f"Restream-Requests-Worksheet mit GID `{RESTREAM_REQUESTS_WORKSHEET_GID}` wurde nicht gefunden."
         )
 
-    existing_headers = worksheet.row_values(1)
+    existing_headers = row_values_cached(
+        lambda: worksheet,
+        sheet_name=getattr(worksheet, "title", "RestreamRequests"),
+        row=1,
+        ttl_seconds=300,
+    )
 
     if existing_headers != RESTREAM_REQUEST_HEADERS:
-        worksheet.update("A1", [RESTREAM_REQUEST_HEADERS])
+        sheet_write_call(
+            lambda: worksheet.update("A1", [RESTREAM_REQUEST_HEADERS]),
+            invalidate_prefixes=restream_request_invalidate_prefixes(worksheet),
+        )
 
     RESTREAM_REQUESTS_WORKSHEET_CACHE = worksheet
     return worksheet
+
+
+def restream_request_sheet_name(sheet=None) -> str:
+    if sheet is None:
+        sheet = RESTREAM_REQUESTS_WORKSHEET_CACHE
+    return getattr(sheet, "title", "RestreamRequests")
+
+
+def restream_request_invalidate_prefixes(sheet=None) -> list[str]:
+    sheet_name = restream_request_sheet_name(sheet)
+    return [
+        f"records:{sheet_name}",
+        f"values:{sheet_name}",
+        f"row:{sheet_name}:",
+        f"col:{sheet_name}:",
+        f"cell:{sheet_name}:",
+    ]
+
+
+def load_restream_request_records(force_refresh: bool = False) -> list[dict]:
+    sheet = get_restream_requests_sheet()
+    return get_all_records_cached(
+        lambda: sheet,
+        sheet_name=restream_request_sheet_name(sheet),
+        ttl_seconds=RESTREAM_REQUESTS_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+    )
 
 
 def serialize_bool(value: bool) -> str:
@@ -290,8 +336,7 @@ def row_to_restream_request(row: dict) -> RestreamRequest:
 
 
 def find_restream_request_row(request_id: str):
-    sheet = get_restream_requests_sheet()
-    records = sheet.get_all_records()
+    records = load_restream_request_records()
 
     for row_index, row in enumerate(records, start=2):
         if str(row.get("Request ID") or "").strip() == request_id:
@@ -308,9 +353,15 @@ def save_restream_request(req: RestreamRequest):
     values = restream_request_to_row(req, created_at=created_at)
 
     if row_index:
-        sheet.update(f"A{row_index}:V{row_index}", [values], value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: sheet.update(f"A{row_index}:V{row_index}", [values], value_input_option="USER_ENTERED"),
+            invalidate_prefixes=restream_request_invalidate_prefixes(sheet),
+        )
     else:
-        sheet.append_row(values, value_input_option="USER_ENTERED")
+        sheet_write_call(
+            lambda: sheet.append_row(values, value_input_option="USER_ENTERED"),
+            invalidate_prefixes=restream_request_invalidate_prefixes(sheet),
+        )
 
     REQUESTS[req.request_id] = req
 
