@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v17-season-final-ff-penalty-robust-countdown"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v18-active-runners-status"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -2564,6 +2564,60 @@ def build_public_match_group_lines(match_groups: list[dict]) -> list[str]:
     return lines
 
 
+def get_slot_active_runner_counts(slot_id: str) -> tuple[int, int]:
+    """
+    Rückgabe: (aktiv, gesamt)
+    Aktiv = Spieler ohne Finish-Zeit und ohne FF.
+    Gesamt = alle Spieler, die in Matches dieses Slots eingeteilt sind.
+    """
+    active = 0
+    total = 0
+    seen_player_ids: set[str] = set()
+
+    for match in get_matches_for_slot(slot_id):
+        for player in get_match_players(match):
+            player_id = normalize_text(player.get("discord_id"))
+            player_key = player_id or f"{normalize_text(match.get('Match ID'))}:{player.get('no')}"
+
+            if player_key in seen_player_ids:
+                continue
+
+            seen_player_ids.add(player_key)
+            total += 1
+
+            time_value = normalize_text(match.get(player["time_col"]))
+
+            if not time_value:
+                active += 1
+
+    return active, total
+
+
+def build_slot_active_status_line(slot_id: str) -> str:
+    active, total = get_slot_active_runner_counts(slot_id)
+
+    if total <= 0:
+        return "Aktive Runner: `0/0`"
+
+    return f"Aktive Runner: `{active}/{total}`"
+
+
+def build_slot_active_status_message(schedule_row: dict) -> str:
+    slot_id = normalize_text(schedule_row.get("Slot ID"))
+    datum = normalize_text(schedule_row.get("Datum"))
+    slot = normalize_text(schedule_row.get("Slot"))
+    startzeit = normalize_text(schedule_row.get("Startzeit"))
+    modus = normalize_text(schedule_row.get("Modus"))
+
+    return (
+        "**TFNL-Aktivitätsstatus**\n"
+        f"Slot ID: `{slot_id}`\n"
+        f"`{datum} | {slot} | {startzeit} Uhr | {modus}`\n\n"
+        f"{build_slot_active_status_line(slot_id)}\n"
+        "_Finish oder FF reduziert den aktiven Zähler._"
+    )
+
+
 def build_slot_overview_message(schedule_row: dict) -> str:
     slot_id = normalize_text(schedule_row.get("Slot ID"))
     datum = normalize_text(schedule_row.get("Datum"))
@@ -2580,6 +2634,7 @@ def build_slot_overview_message(schedule_row: dict) -> str:
         f"Slot: `{slot}`",
         f"Modus: `{modus}`",
         f"Seed: {seed_url if seed_url else '`nicht eingetragen`'}",
+        build_slot_active_status_line(slot_id),
         "",
         "**Gesamtübersicht:**",
     ]
@@ -2636,6 +2691,7 @@ def build_public_slot_results_message(schedule_row: dict, completed: bool = Fals
         f"Slot: `{slot}`",
         f"Modus: `{modus}`",
         f"Seed: {seed_url if seed_url else '`nicht eingetragen`'}",
+        build_slot_active_status_line(slot_id),
         "",
         "**Bisherige vollständig abgeschlossene Matches:**" if not completed else "**Endstand:**",
     ]
@@ -5078,6 +5134,8 @@ class LadderCog(commands.Cog):
                 ephemeral=True,
             )
 
+            await self.refresh_slot_active_outputs(schedule_row)
+
             await self.evaluate_match_if_complete(match_id)
 
         except Exception as e:
@@ -5127,12 +5185,18 @@ class LadderCog(commands.Cog):
                 },
             )
 
+            slot_id = normalize_text(match_row.get("Slot ID"))
+            _, schedule_row = find_schedule_row(slot_id)
+
             await interaction.followup.send(
                 "Finish wurde zurückgenommen. Die Zeitmessung läuft weiter.\n"
                 "Du kannst erneut finishen oder forfeiten.",
                 view=RaceControlView(match_id, player_no),
                 ephemeral=True,
             )
+
+            if schedule_row:
+                await self.refresh_slot_active_outputs(schedule_row)
 
         except Exception as e:
             await interaction.followup.send(
@@ -5178,7 +5242,13 @@ class LadderCog(commands.Cog):
                 },
             )
 
+            slot_id = normalize_text(match_row.get("Slot ID"))
+            _, schedule_row = find_schedule_row(slot_id)
+
             await interaction.followup.send("Forfeit wurde eingetragen: `FF`.", ephemeral=True)
+
+            if schedule_row:
+                await self.refresh_slot_active_outputs(schedule_row)
 
             await self.evaluate_match_if_complete(match_id)
 
@@ -5248,9 +5318,76 @@ class LadderCog(commands.Cog):
         try:
             slot_channel = await self.get_or_create_slot_channel(schedule_row)
             await slot_channel.send(build_slot_runner_message(schedule_row))
+            await self.upsert_slot_active_status_message(schedule_row)
         except Exception as e:
             slot_id = normalize_text(schedule_row.get("Slot ID"))
             await self.log_tfnl(f"Teilnehmerliste konnte nicht gepostet werden: `{slot_id}` — {repr(e)}")
+
+    async def find_slot_active_status_message(self, channel, slot_id: str):
+        if not slot_id:
+            return None
+
+        try:
+            async for message in channel.history(limit=75):
+                content = message.content or ""
+                if (
+                    self.bot.user
+                    and message.author.id == self.bot.user.id
+                    and "TFNL-Aktivitätsstatus" in content
+                    and slot_id in content
+                ):
+                    return message
+        except Exception:
+            return None
+
+        return None
+
+    async def upsert_slot_active_status_message(self, schedule_row: dict):
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
+
+        if not slot_id:
+            return
+
+        try:
+            slot_channel = await self.get_or_create_slot_channel(schedule_row)
+        except Exception as e:
+            await self.log_tfnl(
+                f"Aktivitätsstatus konnte nicht geladen werden: `{slot_id}` — {repr(e)}"
+            )
+            return
+
+        content = build_slot_active_status_message(schedule_row)
+        existing_message = await self.find_slot_active_status_message(slot_channel, slot_id)
+
+        try:
+            if existing_message is not None:
+                await existing_message.edit(content=content)
+            else:
+                await slot_channel.send(content)
+        except Exception as e:
+            await self.log_tfnl(
+                f"Aktivitätsstatus konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
+            )
+
+    async def refresh_slot_active_outputs(self, schedule_row: dict):
+        if not schedule_row:
+            return
+
+        try:
+            await self.upsert_slot_active_status_message(schedule_row)
+        except Exception as e:
+            slot_id = normalize_text(schedule_row.get("Slot ID"))
+            await self.log_tfnl(
+                f"Aktivitätsstatus im Racechannel konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
+            )
+
+        try:
+            await self.upsert_public_slot_results_message(schedule_row, completed=False)
+        except Exception as e:
+            slot_id = normalize_text(schedule_row.get("Slot ID"))
+            await self.log_tfnl(
+                f"Aktivitätsstatus im Ergebnis-Channel konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
+            )
 
     async def evaluate_match_if_complete(self, match_id: str):
         async with self.sheet_write_lock:
