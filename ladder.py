@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v24-dmtest-preppause"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v26-safe-ansi-splitting"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -1628,10 +1628,14 @@ def build_discord_ansi_table(headers: list[str], rows: list[list], max_col_width
 def split_discord_message(message: str, limit: int = 1900) -> list[str]:
     """
     Discord erlaubt max. 2000 Zeichen pro Nachricht.
-    Tabellen werden nicht mehr auf Top 20 begrenzt; zu lange Ausgaben werden
-    deshalb sauber auf mehrere Discord-Nachrichten verteilt.
+
+    Wichtig für TFNL:
+    Viele Tabellen nutzen ```ansi-Codeblöcke. Wenn eine lange Nachricht
+    stumpf mitten im Codeblock getrennt wird, zeigt Discord rohe ANSI-Codes
+    wie \x1b[33m an. Diese Funktion schließt Codeblöcke vor einem Split
+    sauber und öffnet sie im nächsten Chunk erneut.
     """
-    text = normalize_text(message)
+    text = str(message or "")
 
     if not text:
         return [""]
@@ -1639,30 +1643,74 @@ def split_discord_message(message: str, limit: int = 1900) -> list[str]:
     if len(text) <= limit:
         return [text]
 
-    chunks = []
-    current = ""
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    in_codeblock = False
+    codeblock_lang = ""
 
-    for line in text.splitlines():
-        candidate = line if not current else current + "\n" + line
+    def current_text(extra_line: str | None = None, close_if_code: bool = False) -> str:
+        lines = list(current_lines)
 
-        if len(candidate) <= limit:
-            current = candidate
-            continue
+        if extra_line is not None:
+            lines.append(extra_line)
 
-        if current:
-            chunks.append(current)
-            current = ""
+        if close_if_code and in_codeblock:
+            lines.append("```")
 
-        while len(line) > limit:
-            chunks.append(line[:limit])
-            line = line[limit:]
+        return "\n".join(lines)
 
-        current = line
+    def flush_current():
+        nonlocal current_lines
 
-    if current:
-        chunks.append(current)
+        if not current_lines:
+            return
 
-    return chunks or [text[:limit]]
+        chunk = current_text(close_if_code=True)
+
+        if chunk:
+            chunks.append(chunk)
+
+        current_lines = []
+
+        if in_codeblock:
+            current_lines = [f"```{codeblock_lang}".rstrip()]
+
+    for raw_line in text.splitlines():
+        line = raw_line
+
+        # Falls eine einzelne Tabellenzeile extrem lang ist, wird sie ohne
+        # Farbcodes hart gekürzt. Das verhindert defekte Discord-Nachrichten.
+        if len(line) > limit - 20:
+            line = strip_ansi(line)[: limit - 20] + "…"
+
+        candidate = current_text(extra_line=line, close_if_code=True)
+
+        if current_lines and len(candidate) > limit:
+            flush_current()
+
+        # Wenn selbst der neue Chunk zu groß wäre, Zeile defensiv kürzen.
+        candidate_after_flush = current_text(extra_line=line, close_if_code=True)
+
+        if len(candidate_after_flush) > limit:
+            safe_width = max(20, limit - len(current_text(close_if_code=True)) - 5)
+            line = strip_ansi(line)[:safe_width] + "…"
+
+        current_lines.append(line)
+
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            if in_codeblock:
+                in_codeblock = False
+                codeblock_lang = ""
+            else:
+                in_codeblock = True
+                codeblock_lang = stripped[3:].strip()
+
+    if current_lines:
+        chunks.append(current_text(close_if_code=in_codeblock))
+
+    return chunks or [strip_ansi(text)[:limit]]
 
 
 async def send_discord_message_chunks(send_callable, message: str):
@@ -5572,17 +5620,14 @@ class LadderCog(commands.Cog):
         if not updated_schedule_row:
             updated_schedule_row = schedule_row
 
-        # Erst posten, dann completed setzen.
-        # Dadurch kann ein fehlgeschlagener Post später erneut versucht werden.
-        try:
-            slot_channel = await self.get_or_create_slot_channel(updated_schedule_row)
-            slot_overview_message = build_slot_overview_message(updated_schedule_row)
-            await send_discord_message_chunks(slot_channel.send, slot_overview_message)
-        except Exception as e:
-            await self.log_tfnl(
-                f"Slot-Gesamtübersicht konnte nicht gepostet werden: `{slot_id}` — {repr(e)}"
-            )
-            return False
+        # Private Racechannel:
+        # Match-Ergebnisse werden bereits in evaluate_match_if_complete() gepostet.
+        # Deshalb hier KEINE zusätzliche Slot-Gesamtübersicht mehr in denselben
+        # privaten Channel senden. Bei 1-Match-Slots wirkte das wie ein doppelter
+        # Ergebnispost.
+        #
+        # Öffentlich im Ergebnis-Channel wird weiterhin per Upsert editiert,
+        # also eine Slot-Nachricht statt Dopplung.
 
         try:
             await self.publish_slot_overview_to_results_channel(updated_schedule_row)
