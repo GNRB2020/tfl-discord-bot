@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v19-countdown-in-racecontrol-dm"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v22-dm-flow-test-command"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -3981,23 +3981,20 @@ def archive_season(
     return stats
 
 
-def build_race_control_countdown_content(start_unix: int, value: int | None = None, started: bool = False) -> str:
+def build_countdown_dm_content(start_unix: int, value: int | None = None, started: bool = False) -> str:
     if started:
         return (
             "🔴 **TFNL-RACE GESTARTET** 🔴\n\n"
             f"Offizieller Start war: <t:{start_unix}:T>\n"
             "Zeitmessung läuft exakt ab der geplanten Startzeit.\n\n"
-            "Klicke `Finish`, sobald du fertig bist.\n"
-            "Klicke `Forfeit`, wenn du aufgibst."
+            "Die Race-Control-DM mit Finish-/Forfeit-Buttons folgt jetzt."
         )
 
     if value is None:
         return (
             "🔴 **TFNL COUNTDOWN VORBEREITET** 🔴\n\n"
             f"Offizieller Start: <t:{start_unix}:T>\n"
-            "Die Zeitmessung läuft exakt ab der geplanten Startzeit.\n\n"
-            "Die Finish-/Forfeit-Buttons sind in dieser Nachricht.\n"
-            "Finish vor dem offiziellen Start wird vom Bot abgelehnt."
+            "Die Zeitmessung läuft exakt ab der geplanten Startzeit."
         )
 
     return (
@@ -4007,8 +4004,23 @@ def build_race_control_countdown_content(start_unix: int, value: int | None = No
         f"        START IN {value:02d}\n"
         f"████████████████████{ANSI_RESET}\n"
         "```\n"
-        f"Offizieller Start: <t:{start_unix}:T>\n\n"
-        "Die Finish-/Forfeit-Buttons sind in dieser Nachricht."
+        f"Offizieller Start: <t:{start_unix}:T>"
+    )
+
+
+def build_race_control_dm_content(schedule_row: dict) -> str:
+    slot_id = normalize_text(schedule_row.get("Slot ID"))
+    start_dt = get_slot_start_dt(schedule_row)
+    start_unix = int(start_dt.timestamp()) if start_dt else int(datetime.now(BERLIN_TZ).timestamp())
+
+    return (
+        "🔴 **TFNL RACE-CONTROL** 🔴\n\n"
+        "Das Race ist gestartet.\n"
+        f"Offizieller Start: <t:{start_unix}:T>\n"
+        "Zeitmessung läuft exakt ab der geplanten Startzeit.\n\n"
+        f"{build_slot_active_status_line(slot_id)}\n\n"
+        "Klicke `Finish`, sobald du fertig bist.\n"
+        "Klicke `Forfeit`, wenn du aufgibst."
     )
 
 
@@ -4084,15 +4096,23 @@ class ConfirmForfeitView(discord.ui.View):
         )
 
 
-class UndoFinishView(discord.ui.View):
-    def __init__(self, match_id: str, player_no: int):
-        super().__init__(timeout=None)
+class TfnlDmTestView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
 
         self.add_item(
             discord.ui.Button(
-                label="Undo Finish",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"tfnl_undo_finish:{match_id}:{player_no}",
+                label="Finish",
+                style=discord.ButtonStyle.success,
+                disabled=True,
+            )
+        )
+
+        self.add_item(
+            discord.ui.Button(
+                label="Forfeit",
+                style=discord.ButtonStyle.danger,
+                disabled=True,
             )
         )
 
@@ -4179,6 +4199,7 @@ class LadderCog(commands.Cog):
         self.sheet_write_lock = asyncio.Lock()
         self.auto_evaluate_matches_lock = asyncio.Lock()
         self.pending_standings_publish_task = None
+        self.race_control_dm_messages = {}
 
         try:
             self.elo_sheet_setup_status = ensure_ladder_elo_sheets()
@@ -4890,8 +4911,8 @@ class LadderCog(commands.Cog):
                         f"Startzeit: `{normalize_text(schedule_row.get('Startzeit'))} Uhr`\n"
                         f"Seed-Link: {seed_url}\n\n"
                         "Die Paarungen bleiben geheim bis zum Ergebnis.\n"
-                        "Eine weitere DM kommt ungefähr 1 Minute vor Start.\n"
-                        "Direkt vor Start folgt ein kurzer Countdown von 10 bis 1."
+                        "Kurz vor Start kommt zuerst der Countdown.\n"
+                        "Nach Countdown-Ende folgt die Race-Control-DM mit Finish-/Forfeit-Buttons und Runnercounter."
                     )
                 except Exception as e:
                     await self.log_tfnl(
@@ -4904,50 +4925,17 @@ class LadderCog(commands.Cog):
         return True
 
     async def send_prestart_dms(self, schedule_row: dict):
+        """
+        v20:
+        Diese separate 1-Minuten-DM wird bewusst nicht mehr gesendet.
+        Grund: Der Countdown muss in der letzten Bot-DM laufen.
+        Die Race-Control-DM aus send_countdown_dms übernimmt Hinweis, Countdown und Buttons.
+        """
         slot_id = normalize_text(schedule_row.get("Slot ID"))
-        start_dt = get_slot_start_dt(schedule_row)
 
-        if not start_dt:
-            await self.log_tfnl(f"1-Minuten-DM nicht möglich: Startzeit fehlt für Slot `{slot_id}`.")
-            return False
+        if slot_id:
+            update_schedule_cell(slot_id, SCHEDULE_PRESTART_DM_COL, "Ja")
 
-        if was_prestart_dm_sent(schedule_row):
-            return True
-
-        matches = get_matches_for_slot(slot_id)
-        sent_to = set()
-
-        if not matches:
-            await self.log_tfnl(
-                f"1-Minuten-DM nicht möglich: Keine Matches für Slot `{slot_id}` gefunden."
-            )
-            return False
-
-        for match in matches:
-            for player in get_match_players(match):
-                player_id = player["discord_id"]
-
-                if player_id in sent_to:
-                    continue
-
-                sent_to.add(player_id)
-
-                try:
-                    user = await self.bot.fetch_user(int(player_id))
-                    await user.send(
-                        "**TFNL Race startet in ungefähr 1 Minute.**\n\n"
-                        f"Slot: `{normalize_text(schedule_row.get('Slot'))}`\n"
-                        f"Modus: `{normalize_text(schedule_row.get('Modus'))}`\n"
-                        f"Startzeit: `{normalize_text(schedule_row.get('Startzeit'))} Uhr`\n\n"
-                        "Der kurze Countdown folgt direkt vor dem Start.\n"
-                        "Sobald der Countdown abgelaufen ist, ist das Race gestartet."
-                    )
-                except Exception as e:
-                    await self.log_tfnl(
-                        f"1-Minuten-DM konnte nicht gesendet werden: Slot `{slot_id}`, Spieler `{player_id}` — {repr(e)}"
-                    )
-
-        update_schedule_cell(slot_id, SCHEDULE_PRESTART_DM_COL, "Ja")
         return True
 
     async def send_countdown_dms(self, schedule_row: dict):
@@ -4988,30 +4976,26 @@ class LadderCog(commands.Cog):
             user: discord.User,
             message,
             content: str,
-            view: discord.ui.View | None = None,
         ):
             if message is None:
-                return await user.send(content, view=view)
+                return await user.send(content)
 
             try:
-                await message.edit(content=content, view=view)
+                await message.edit(content=content)
                 return message
             except Exception:
-                return await user.send(content, view=view)
+                return await user.send(content)
 
         async def countdown(user: discord.User, player_id: str, match_id: str, player_no: int):
             try:
                 countdown_deadline, start_deadline = build_monotonic_deadlines()
-                race_view = RaceControlView(match_id, player_no)
 
-                # Wichtig:
-                # Die Countdown-Nachricht IST ab jetzt auch die Race-Control-DM.
-                # Dadurch wird danach keine neue letzte DM über den Countdown gelegt.
+                # Reihenfolge v21:
+                # Seed-DM -> Countdown-DM -> Race gestartet -> danach Race-Control-DM.
                 message = await send_or_edit_countdown(
                     user,
                     None,
-                    build_race_control_countdown_content(start_unix),
-                    view=race_view,
+                    build_countdown_dm_content(start_unix),
                 )
 
                 await sleep_until_monotonic(countdown_deadline)
@@ -5027,8 +5011,7 @@ class LadderCog(commands.Cog):
                     message = await send_or_edit_countdown(
                         user,
                         message,
-                        build_race_control_countdown_content(start_unix, value=value),
-                        view=race_view,
+                        build_countdown_dm_content(start_unix, value=value),
                     )
 
                 await sleep_until_monotonic(start_deadline)
@@ -5036,8 +5019,7 @@ class LadderCog(commands.Cog):
                 await send_or_edit_countdown(
                     user,
                     message,
-                    build_race_control_countdown_content(start_unix, started=True),
-                    view=race_view,
+                    build_countdown_dm_content(start_unix, started=True),
                 )
 
             except Exception as e:
@@ -5075,7 +5057,6 @@ class LadderCog(commands.Cog):
 
     async def send_start_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
-        status = normalize_text(schedule_row.get("Status")).lower()
         matches = get_matches_for_slot(slot_id)
 
         for match in matches:
@@ -5083,28 +5064,22 @@ class LadderCog(commands.Cog):
 
             update_match_cell(match_id, "Status", "running")
 
-            # Normalfall:
-            # Die Race-Control-DM mit Finish/FF-Buttons wurde bereits in
-            # send_countdown_dms erstellt und dort heruntergezählt.
-            # Deshalb hier KEINE neue DM mehr senden, sonst liegt der Countdown
-            # wieder in einer vorherigen Nachricht.
-            if status == "countdown_sent":
-                continue
-
-            # Fallback nur für manuelles /ladder_step start ohne vorherigen Countdown.
             for player in get_match_players(match):
                 try:
                     user = await self.bot.fetch_user(int(player["discord_id"]))
-                    await user.send(
-                        build_race_control_countdown_content(
-                            int(get_slot_start_dt(schedule_row).timestamp()) if get_slot_start_dt(schedule_row) else int(datetime.now(BERLIN_TZ).timestamp()),
-                            started=True,
-                        ),
-                        view=RaceControlView(match_id, player["no"]),
+                    player_no = int(player["no"])
+                    message = await user.send(
+                        build_race_control_dm_content(schedule_row),
+                        view=RaceControlView(match_id, player_no),
                     )
+                    self.race_control_dm_messages[(slot_id, normalize_text(player["discord_id"]))] = {
+                        "message": message,
+                        "match_id": match_id,
+                        "player_no": player_no,
+                    }
                 except Exception as e:
                     await self.log_tfnl(
-                        f"Start-DM konnte nicht gesendet werden: Match `{match_id}`, Spieler `{player['discord_id']}` — {repr(e)}"
+                        f"Race-Control-DM konnte nicht gesendet werden: Match `{match_id}`, Spieler `{player['discord_id']}` — {repr(e)}"
                     )
 
         update_schedule_status(slot_id, "running")
@@ -5437,6 +5412,40 @@ class LadderCog(commands.Cog):
                 f"Aktivitätsstatus konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
             )
 
+    async def refresh_race_control_dm_messages(self, schedule_row: dict):
+        slot_id = normalize_text(schedule_row.get("Slot ID"))
+
+        if not slot_id:
+            return
+
+        cached_items = [
+            (key, value) for key, value in self.race_control_dm_messages.items()
+            if key[0] == slot_id
+        ]
+
+        if not cached_items:
+            return
+
+        content = build_race_control_dm_content(schedule_row)
+
+        for key, data in cached_items:
+            try:
+                message = data.get("message")
+                match_id = normalize_text(data.get("match_id"))
+                player_no = int(data.get("player_no"))
+
+                if message is None or not match_id:
+                    continue
+
+                await message.edit(
+                    content=content,
+                    view=RaceControlView(match_id, player_no),
+                )
+            except Exception as e:
+                await self.log_tfnl(
+                    f"Race-Control-DM konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
+                )
+
     async def refresh_slot_active_outputs(self, schedule_row: dict):
         if not schedule_row:
             return
@@ -5455,6 +5464,14 @@ class LadderCog(commands.Cog):
             slot_id = normalize_text(schedule_row.get("Slot ID"))
             await self.log_tfnl(
                 f"Aktivitätsstatus im Ergebnis-Channel konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
+            )
+
+        try:
+            await self.refresh_race_control_dm_messages(schedule_row)
+        except Exception as e:
+            slot_id = normalize_text(schedule_row.get("Slot ID"))
+            await self.log_tfnl(
+                f"Runnercounter in Race-Control-DMs konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
             )
 
     async def evaluate_match_if_complete(self, match_id: str):
@@ -5709,10 +5726,10 @@ class LadderCog(commands.Cog):
                 await self.publish_signup_to_channel()
                 continue
 
-            if status in ("seed_sent", "countdown_sent") and is_prestart_dm_due(row) and not was_prestart_dm_sent(row):
-                await self.send_prestart_dms(row)
-                await self.publish_signup_to_channel()
-
+            # v20:
+            # Keine separate 1-Minuten-DM mehr senden.
+            # Der Countdown muss die letzte Bot-DM sein und läuft in der Race-Control-DM.
+            # Eine nachträgliche Prestart-DM würde den Countdown wieder nach oben schieben.
             if status == "seed_sent" and is_countdown_due(row):
                 await self.send_countdown_dms(row)
                 await self.publish_signup_to_channel()
@@ -5994,6 +6011,140 @@ class LadderCog(commands.Cog):
     # =====================================================
 
     @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def run_dm_flow_test(
+        self,
+        interaction: discord.Interaction,
+        countdown_seconds: int = 10,
+        active: int = 10,
+        total: int = 10,
+    ):
+        """
+        Persönlicher DM-Ablauftest ohne Sheet-Wertung:
+        Seed-DM -> Countdown-DM -> Race gestartet -> Race-Control-DM.
+        """
+        countdown_seconds = max(3, min(int(countdown_seconds), 30))
+        active = max(0, int(active))
+        total = max(1, int(total))
+
+        if active > total:
+            active = total
+
+        now = datetime.now(BERLIN_TZ)
+        start_dt = now + timedelta(seconds=countdown_seconds)
+        start_unix = int(start_dt.timestamp())
+
+        seed_url = "https://alttpr.com/h/TEST-DM-FLOW"
+
+        await interaction.user.send(
+            "**TFNL Seed für deinen Slot**\n\n"
+            f"Datum: `{start_dt.strftime('%d.%m.%Y')}`\n"
+            "Slot: `DM-Test`\n"
+            "Modus: `Ambrosia`\n"
+            f"Startzeit: `{start_dt.strftime('%H:%M')} Uhr`\n"
+            f"Seed-Link: {seed_url}\n\n"
+            "Die Paarungen bleiben geheim bis zum Ergebnis.\n"
+            "Dies ist ein persönlicher Testlauf ohne Sheet-Wertung."
+        )
+
+        countdown_message = await interaction.user.send(
+            build_countdown_dm_content(start_unix)
+        )
+
+        async def sleep_until_monotonic(target_mono: float):
+            while True:
+                remaining = target_mono - time.monotonic()
+
+                if remaining <= 0:
+                    return
+
+                await asyncio.sleep(min(remaining, 0.25))
+
+        start_deadline = time.monotonic() + countdown_seconds
+
+        for value in range(countdown_seconds, 0, -1):
+            target = start_deadline - value
+            await sleep_until_monotonic(target)
+
+            if time.monotonic() >= start_deadline - 0.10:
+                break
+
+            try:
+                await countdown_message.edit(
+                    content=build_countdown_dm_content(start_unix, value=value)
+                )
+            except Exception:
+                countdown_message = await interaction.user.send(
+                    build_countdown_dm_content(start_unix, value=value)
+                )
+
+        await sleep_until_monotonic(start_deadline)
+
+        try:
+            await countdown_message.edit(
+                content=build_countdown_dm_content(start_unix, started=True)
+            )
+        except Exception:
+            await interaction.user.send(
+                build_countdown_dm_content(start_unix, started=True)
+            )
+
+        await interaction.user.send(
+            "🔴 **TFNL RACE-CONTROL** 🔴\n\n"
+            "Das Race ist gestartet.\n"
+            f"Offizieller Start: <t:{start_unix}:T>\n"
+            "Zeitmessung läuft exakt ab der geplanten Startzeit.\n\n"
+            f"🔴 **AKTIVE RUNNER: `{active}/{total}`**\n\n"
+            "Klicke `Finish`, sobald du fertig bist.\n"
+            "Klicke `Forfeit`, wenn du aufgibst.\n\n"
+            "_DM-Test: Die Buttons sind deaktiviert und schreiben nichts ins Sheet._",
+            view=TfnlDmTestView(),
+        )
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="tfnl_dmtest",
+        description="Testet nur für dich den TFNL-DM-Ablauf Seed -> Countdown -> Race-Control.",
+    )
+    @app_commands.describe(
+        countdown="Countdown-Länge in Sekunden, Standard 10.",
+        active="Aktive Runner im Testcounter, Standard 10.",
+        total="Gesamtzahl Runner im Testcounter, Standard 10.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def tfnl_dmtest(
+        self,
+        interaction: discord.Interaction,
+        countdown: int = 10,
+        active: int = 10,
+        total: int = 10,
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            await self.run_dm_flow_test(
+                interaction=interaction,
+                countdown_seconds=countdown,
+                active=active,
+                total=total,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "DM-Test konnte nicht gesendet werden. Bitte prüfe, ob du Bot-DMs erlaubst.",
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            await interaction.followup.send(
+                f"DM-Test fehlgeschlagen:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "DM-Test wurde an dich gesendet. Der Test verändert keine Sheets und keine Wertung.",
+            ephemeral=True,
+        )
+
     @app_commands.command(
         name="laddertable",
         description="Zeigt die neue TFNL-ELO-Tabelle.",
