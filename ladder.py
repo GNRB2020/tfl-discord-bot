@@ -2,6 +2,7 @@ import os
 import re
 import random
 import asyncio
+import time
 from copy import deepcopy
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -86,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v16-n-red-ff-purple"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v17-season-final-ff-penalty-robust-countdown"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -108,6 +109,14 @@ TFNL_STANDINGS_PUBLISH_DELAY_SECONDS = int(
 TFNL_AUTO_PUBLISH_STANDINGS_AFTER_SLOT = (
     os.getenv("TFNL_AUTO_PUBLISH_STANDINGS_AFTER_SLOT", "1").strip().lower()
     not in ("0", "false", "no", "nein", "off")
+)
+
+TFNL_FF_PENALTY_FREE_COUNT = int(
+    os.getenv("TFNL_FF_PENALTY_FREE_COUNT", "4").strip()
+)
+
+TFNL_FF_PENALTY_POINTS = int(
+    os.getenv("TFNL_FF_PENALTY_POINTS", "2").strip()
 )
 
 SCHEDULE_SHEET_NAME = "Schedule"
@@ -1498,6 +1507,23 @@ def color_rank_delta(value) -> str:
         return ansi_color(str(number), ANSI_LIGHT_RED)
 
     return ansi_color("0", ANSI_YELLOW)
+
+
+def calculate_ff_penalty(forfeits: int) -> int:
+    return max(0, int_value(forfeits) - TFNL_FF_PENALTY_FREE_COUNT) * TFNL_FF_PENALTY_POINTS
+
+
+def color_penalty_value(value) -> str:
+    penalty = int_value(value)
+
+    if penalty > 0:
+        return ansi_color(f"-{penalty}", ANSI_RED)
+
+    return ansi_color("0", ANSI_YELLOW)
+
+
+def color_final_score(value) -> str:
+    return normalize_text(value) or "0"
 
 
 def color_stat_value(value, stat: str) -> str:
@@ -3177,6 +3203,95 @@ def build_standings_messages() -> list[str]:
     ]
 
 
+def build_final_season_standings_messages() -> list[str]:
+    """
+    Saison-Endwertung:
+    Live-ELO/Pairing bleibt unverändert. Der FF-Abzug wird ausschließlich
+    in dieser Endwertung berechnet.
+    """
+    timestamp = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+    active_season = get_active_season()
+    rows = build_elo_standings_rows(
+        scope=SCOPE_SEASON_OVERALL,
+        season=active_season,
+        mode="",
+        limit=None,
+    )
+    stats_by_id = build_overall_match_stats()
+
+    if not rows:
+        return [
+            f"**TFNL Saison-Endwertung — {active_season}**\n"
+            f"Stand: `{timestamp} Uhr`\n\n"
+            "Noch keine ELO-Einträge."
+        ]
+
+    final_rows = []
+
+    for row in rows:
+        player_id = normalize_text(row.get("Player ID"))
+        stats = stats_by_id.get(player_id, {})
+
+        forfeits = int_value(stats.get("forfeits"))
+        penalty = calculate_ff_penalty(forfeits)
+        base_score = parse_float_value(row.get("Elo"), 1000.0)
+        final_score = base_score - penalty
+
+        final_rows.append(
+            {
+                "player_id": player_id,
+                "player_name": normalize_text(row.get("Player Name")),
+                "base_score": base_score,
+                "final_score": final_score,
+                "penalty": penalty,
+                "games": int_value(stats.get("starts")),
+                "wins": int_value(stats.get("wins")),
+                "draws": int_value(stats.get("draws")),
+                "losses": int_value(stats.get("losses")),
+                "forfeits": forfeits,
+            }
+        )
+
+    final_rows.sort(
+        key=lambda row: (
+            -row["final_score"],
+            -row["base_score"],
+            row["player_name"].lower(),
+        )
+    )
+
+    table_rows = []
+
+    for index, row in enumerate(final_rows, start=1):
+        table_rows.append(
+            [
+                index,
+                row["player_name"] or "0",
+                f"{row['base_score']:.1f}",
+                color_penalty_value(row["penalty"]),
+                f"{row['final_score']:.1f}",
+                row["games"],
+                color_stat_value(row["wins"], "S"),
+                color_stat_value(row["draws"], "U"),
+                color_stat_value(row["losses"], "N"),
+                color_stat_value(row["forfeits"], "FF"),
+            ]
+        )
+
+    table = build_discord_ansi_table(
+        ["#", "Spieler", "Score", "FF-Abzug", "Endscore", "G", "S", "U", "N", "FF"],
+        table_rows,
+        max_col_width=16,
+    )
+
+    return [
+        f"**TFNL Saison-Endwertung — {active_season}**\n"
+        f"Stand: `{timestamp} Uhr`\n"
+        f"FF-Abzug erst zur Endwertung: `(FF - {TFNL_FF_PENALTY_FREE_COUNT}) * {TFNL_FF_PENALTY_POINTS}`, mindestens `0`.\n"
+        f"{table}"
+    ]
+
+
 # =========================================================
 # MODE STANDINGS
 # =========================================================
@@ -4236,6 +4351,35 @@ class LadderCog(commands.Cog):
             except Exception as e:
                 await self.log_tfnl(f"Gesamttabellen konnten nicht gepostet werden: {repr(e)}")
 
+    async def publish_final_season_standings_to_channel(self, clear_existing: bool = False):
+        try:
+            channel = await self.get_text_channel(TFNL_STANDINGS_CHANNEL_ID)
+        except Exception as e:
+            await self.log_tfnl(f"Konnte Standings-Channel für Saison-Endwertung nicht laden: {repr(e)}")
+            return
+
+        if clear_existing:
+            try:
+                async for message in channel.history(limit=100):
+                    if self.bot.user and message.author.id == self.bot.user.id:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        try:
+            messages = build_final_season_standings_messages()
+
+            for message in messages:
+                await send_discord_message_chunks(channel.send, message)
+
+        except Exception as e:
+            await self.log_tfnl(
+                f"Saison-Endwertung konnte nicht gepostet werden: {repr(e)}"
+            )
+
     async def publish_mode_standings_to_channel(self, mode_name: str, clear_existing: bool = False):
         try:
             channel = await self.get_text_channel(TFNL_STANDINGS_CHANNEL_ID)
@@ -4735,11 +4879,23 @@ class LadderCog(commands.Cog):
             return False
 
         countdown_start_dt = start_dt - timedelta(seconds=10)
+        start_unix = int(start_dt.timestamp())
 
-        async def sleep_until(target: datetime):
-            delay = (target - datetime.now(BERLIN_TZ)).total_seconds()
-            if delay > 0:
-                await asyncio.sleep(delay)
+        def build_monotonic_deadlines():
+            now_wall = datetime.now(BERLIN_TZ)
+            now_mono = time.monotonic()
+            start_delay = max(0.0, (start_dt - now_wall).total_seconds())
+            countdown_delay = max(0.0, (countdown_start_dt - now_wall).total_seconds())
+            return now_mono + countdown_delay, now_mono + start_delay
+
+        async def sleep_until_monotonic(target_mono: float):
+            while True:
+                remaining = target_mono - time.monotonic()
+
+                if remaining <= 0:
+                    return
+
+                await asyncio.sleep(min(remaining, 0.25))
 
         async def send_or_edit_countdown(user: discord.User, message, content: str):
             if message is None:
@@ -4753,38 +4909,45 @@ class LadderCog(commands.Cog):
 
         async def countdown(user: discord.User, player_id: str):
             try:
-                # Wichtig:
-                # Der alte Countdown hat absolute Zielsekunden "nachgeholt".
-                # Wenn der Bot/Discord eine Edit-Verzögerung hatte, wurden dadurch
-                # sichtbare Sekunden übersprungen, z. B. 10 -> 8 -> 6.
-                #
-                # Neu:
-                # 1. Warten bis Startzeit -10 Sekunden.
-                # 2. 10 sofort anzeigen.
-                # 3. Danach strikt jede Sekunde um genau 1 herunterzählen.
-                # Damit sieht jeder Spieler 10,9,8,7,6,5,4,3,2,1.
-                await sleep_until(countdown_start_dt)
+                countdown_deadline, start_deadline = build_monotonic_deadlines()
 
+                # Nachricht früh anlegen. Dadurch hängt die kritische Sekunde 10
+                # nicht mehr an einer neuen DM-Erstellung direkt vor Start.
                 message = await send_or_edit_countdown(
                     user,
                     None,
-                    "**TFNL Countdown**\nRace startet in `10`..."
+                    "**TFNL Countdown vorbereitet**\n"
+                    f"Offizieller Start: <t:{start_unix}:T>\n"
+                    "Die Zeitmessung läuft exakt ab der geplanten Startzeit."
                 )
 
-                for value in range(9, 0, -1):
-                    await asyncio.sleep(1)
+                await sleep_until_monotonic(countdown_deadline)
+
+                for value in range(10, 0, -1):
+                    target = start_deadline - value
+                    await sleep_until_monotonic(target)
+
+                    # Wenn Discord/Edit-Latenz extrem hoch ist, ist die offizielle
+                    # Startzeit trotzdem maßgeblich. Kurz vor Start wird nicht mehr
+                    # versucht, veraltete Sekunden nachzuschieben.
+                    if time.monotonic() >= start_deadline - 0.10:
+                        break
+
                     message = await send_or_edit_countdown(
                         user,
                         message,
-                        f"**TFNL Countdown**\nRace startet in `{value}`..."
+                        "**TFNL Countdown**\n"
+                        f"Race startet in `{value}`...\n"
+                        f"Offizieller Start: <t:{start_unix}:T>"
                     )
 
-                await sleep_until(start_dt)
+                await sleep_until_monotonic(start_deadline)
 
                 await send_or_edit_countdown(
                     user,
                     message,
-                    "**TFNL Countdown abgelaufen – das Race ist gestartet.**"
+                    "**TFNL Countdown abgelaufen – das Race ist gestartet.**\n"
+                    f"Offizieller Start war: <t:{start_unix}:T>"
                 )
 
             except Exception as e:
@@ -5536,9 +5699,13 @@ class LadderCog(commands.Cog):
             await self.publish_standings_to_channel()
             return True, "Gesamtranking wurde neu gepostet/aktualisiert."
 
+        if step in ("final_standings", "season_final", "endwertung", "finalranking"):
+            await self.publish_final_season_standings_to_channel(clear_existing=False)
+            return True, "Saison-Endwertung mit FF-Abzug wurde gepostet."
+
         return False, (
             "Unbekannter Schritt. Erlaubt: `open_signup`, `pair`, `seed`, `countdown`, "
-            "`start`, `finalize`, `complete`, `archive`, `schedule`, `signup`, `standings`."
+            "`start`, `finalize`, `complete`, `archive`, `schedule`, `signup`, `standings`, `final_standings`."
         )
 
     # =====================================================
@@ -6003,6 +6170,47 @@ class LadderCog(commands.Cog):
 
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     @app_commands.command(
+        name="tfnl_final_standings",
+        description="Postet die TFNL-Saison-Endwertung mit FF-Abzug.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def tfnl_final_standings(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            await self.publish_final_season_standings_to_channel(clear_existing=False)
+        except Exception as e:
+            await interaction.followup.send(
+                f"Fehler beim Posten der Saison-Endwertung:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "TFNL-Saison-Endwertung wurde gepostet. Live-ELO und Pairing bleiben unverändert.",
+            ephemeral=True,
+        )
+
+    @tfnl_final_standings.error
+    async def tfnl_final_standings_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        if isinstance(error, app_commands.MissingPermissions):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Dieser Command ist nur für Administratoren verfügbar.",
+                    ephemeral=True,
+                )
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
         name="ladder_mode_standings",
         description="Postet die TFNL-Tabelle für einen bestimmten Modus.",
     )
@@ -6316,7 +6524,7 @@ class LadderCog(commands.Cog):
     )
     @app_commands.describe(
         slot_id="Exakte Slot ID aus dem Schedule",
-        step="open_signup, pair, seed, prestart, countdown, start, finalize, complete, archive, schedule, signup, standings",
+        step="open_signup, pair, seed, prestart, countdown, start, finalize, complete, archive, schedule, signup, standings, final_standings",
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def ladder_step(
