@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v23-dmtest-seedpause"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v24-dmtest-preppause"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -6018,6 +6018,7 @@ class LadderCog(commands.Cog):
         active: int = 10,
         total: int = 10,
         seedpause_seconds: int = 20,
+        preppause_seconds: int = 20,
     ):
         """
         Persönlicher DM-Ablauftest ohne Sheet-Wertung:
@@ -6025,6 +6026,7 @@ class LadderCog(commands.Cog):
         """
         countdown_seconds = max(3, min(int(countdown_seconds), 30))
         seedpause_seconds = max(0, min(int(seedpause_seconds), 300))
+        preppause_seconds = max(0, min(int(preppause_seconds), 300))
         active = max(0, int(active))
         total = max(1, int(total))
 
@@ -6032,7 +6034,9 @@ class LadderCog(commands.Cog):
             active = total
 
         now = datetime.now(BERLIN_TZ)
-        start_dt = now + timedelta(seconds=countdown_seconds)
+        start_dt = now + timedelta(
+            seconds=seedpause_seconds + preppause_seconds + countdown_seconds
+        )
         start_unix = int(start_dt.timestamp())
 
         seed_url = "https://alttpr.com/h/TEST-DM-FLOW"
@@ -6054,6 +6058,9 @@ class LadderCog(commands.Cog):
         countdown_message = await user.send(
             build_countdown_dm_content(start_unix)
         )
+
+        if preppause_seconds > 0:
+            await asyncio.sleep(preppause_seconds)
 
         async def sleep_until_monotonic(target_mono: float):
             while True:
@@ -6111,7 +6118,8 @@ class LadderCog(commands.Cog):
         description="Testet nur für dich den TFNL-DM-Ablauf Seed -> Countdown -> Race-Control.",
     )
     @app_commands.describe(
-        seedpause="Pause zwischen Seed-DM und Countdown-DM in Sekunden, Standard 20.",
+        seedpause="Pause zwischen Seed-DM und Countdown-Vorbereitung in Sekunden, Standard 20.",
+        preppause="Pause zwischen Countdown-Vorbereitung und echtem Countdown in Sekunden, Standard 20.",
         countdown="Countdown-Länge in Sekunden, Standard 10.",
         active="Aktive Runner im Testcounter, Standard 10.",
         total="Gesamtzahl Runner im Testcounter, Standard 10.",
@@ -6121,6 +6129,7 @@ class LadderCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         seedpause: int = 20,
+        preppause: int = 20,
         countdown: int = 10,
         active: int = 10,
         total: int = 10,
@@ -6128,6 +6137,7 @@ class LadderCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         seedpause = max(0, min(int(seedpause), 300))
+        preppause = max(0, min(int(preppause), 300))
         countdown = max(3, min(int(countdown), 30))
 
         async def run_background_dmtest():
@@ -6138,6 +6148,7 @@ class LadderCog(commands.Cog):
                     active=active,
                     total=total,
                     seedpause_seconds=seedpause,
+                    preppause_seconds=preppause,
                 )
             except Exception as e:
                 try:
@@ -6151,7 +6162,9 @@ class LadderCog(commands.Cog):
 
         await interaction.followup.send(
             "DM-Test gestartet.\n"
-            f"Seed-DM kommt sofort, Countdown-DM nach `{seedpause}` Sekunden, Countdown läuft `{countdown}` Sekunden.\n"
+            f"Seed-DM kommt sofort.\n"
+            f"Countdown-Vorbereitung kommt nach `{seedpause}` Sekunden.\n"
+            f"Echter Countdown startet `{preppause}` Sekunden danach und läuft `{countdown}` Sekunden.\n"
             "Der Test verändert keine Sheets und keine Wertung.",
             ephemeral=True,
         )
