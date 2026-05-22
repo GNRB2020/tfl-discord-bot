@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v22-dm-flow-test-command"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v23-dmtest-seedpause"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -6013,16 +6013,18 @@ class LadderCog(commands.Cog):
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def run_dm_flow_test(
         self,
-        interaction: discord.Interaction,
+        user: discord.User,
         countdown_seconds: int = 10,
         active: int = 10,
         total: int = 10,
+        seedpause_seconds: int = 20,
     ):
         """
         Persönlicher DM-Ablauftest ohne Sheet-Wertung:
         Seed-DM -> Countdown-DM -> Race gestartet -> Race-Control-DM.
         """
         countdown_seconds = max(3, min(int(countdown_seconds), 30))
+        seedpause_seconds = max(0, min(int(seedpause_seconds), 300))
         active = max(0, int(active))
         total = max(1, int(total))
 
@@ -6035,7 +6037,7 @@ class LadderCog(commands.Cog):
 
         seed_url = "https://alttpr.com/h/TEST-DM-FLOW"
 
-        await interaction.user.send(
+        await user.send(
             "**TFNL Seed für deinen Slot**\n\n"
             f"Datum: `{start_dt.strftime('%d.%m.%Y')}`\n"
             "Slot: `DM-Test`\n"
@@ -6046,7 +6048,10 @@ class LadderCog(commands.Cog):
             "Dies ist ein persönlicher Testlauf ohne Sheet-Wertung."
         )
 
-        countdown_message = await interaction.user.send(
+        if seedpause_seconds > 0:
+            await asyncio.sleep(seedpause_seconds)
+
+        countdown_message = await user.send(
             build_countdown_dm_content(start_unix)
         )
 
@@ -6073,7 +6078,7 @@ class LadderCog(commands.Cog):
                     content=build_countdown_dm_content(start_unix, value=value)
                 )
             except Exception:
-                countdown_message = await interaction.user.send(
+                countdown_message = await user.send(
                     build_countdown_dm_content(start_unix, value=value)
                 )
 
@@ -6084,11 +6089,11 @@ class LadderCog(commands.Cog):
                 content=build_countdown_dm_content(start_unix, started=True)
             )
         except Exception:
-            await interaction.user.send(
+            await user.send(
                 build_countdown_dm_content(start_unix, started=True)
             )
 
-        await interaction.user.send(
+        await user.send(
             "🔴 **TFNL RACE-CONTROL** 🔴\n\n"
             "Das Race ist gestartet.\n"
             f"Offizieller Start: <t:{start_unix}:T>\n"
@@ -6106,6 +6111,7 @@ class LadderCog(commands.Cog):
         description="Testet nur für dich den TFNL-DM-Ablauf Seed -> Countdown -> Race-Control.",
     )
     @app_commands.describe(
+        seedpause="Pause zwischen Seed-DM und Countdown-DM in Sekunden, Standard 20.",
         countdown="Countdown-Länge in Sekunden, Standard 10.",
         active="Aktive Runner im Testcounter, Standard 10.",
         total="Gesamtzahl Runner im Testcounter, Standard 10.",
@@ -6114,34 +6120,39 @@ class LadderCog(commands.Cog):
     async def tfnl_dmtest(
         self,
         interaction: discord.Interaction,
+        seedpause: int = 20,
         countdown: int = 10,
         active: int = 10,
         total: int = 10,
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        try:
-            await self.run_dm_flow_test(
-                interaction=interaction,
-                countdown_seconds=countdown,
-                active=active,
-                total=total,
-            )
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "DM-Test konnte nicht gesendet werden. Bitte prüfe, ob du Bot-DMs erlaubst.",
-                ephemeral=True,
-            )
-            return
-        except Exception as e:
-            await interaction.followup.send(
-                f"DM-Test fehlgeschlagen:\n```{repr(e)}```",
-                ephemeral=True,
-            )
-            return
+        seedpause = max(0, min(int(seedpause), 300))
+        countdown = max(3, min(int(countdown), 30))
+
+        async def run_background_dmtest():
+            try:
+                await self.run_dm_flow_test(
+                    user=interaction.user,
+                    countdown_seconds=countdown,
+                    active=active,
+                    total=total,
+                    seedpause_seconds=seedpause,
+                )
+            except Exception as e:
+                try:
+                    await self.log_tfnl(
+                        f"DM-Test fehlgeschlagen für `{interaction.user.id}` — {repr(e)}"
+                    )
+                except Exception:
+                    pass
+
+        self.bot.loop.create_task(run_background_dmtest())
 
         await interaction.followup.send(
-            "DM-Test wurde an dich gesendet. Der Test verändert keine Sheets und keine Wertung.",
+            "DM-Test gestartet.\n"
+            f"Seed-DM kommt sofort, Countdown-DM nach `{seedpause}` Sekunden, Countdown läuft `{countdown}` Sekunden.\n"
+            "Der Test verändert keine Sheets und keine Wertung.",
             ephemeral=True,
         )
 
