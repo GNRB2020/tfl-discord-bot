@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v26-safe-ansi-splitting"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v27-signup-without-ladder-role"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -1628,14 +1628,10 @@ def build_discord_ansi_table(headers: list[str], rows: list[list], max_col_width
 def split_discord_message(message: str, limit: int = 1900) -> list[str]:
     """
     Discord erlaubt max. 2000 Zeichen pro Nachricht.
-
-    Wichtig für TFNL:
-    Viele Tabellen nutzen ```ansi-Codeblöcke. Wenn eine lange Nachricht
-    stumpf mitten im Codeblock getrennt wird, zeigt Discord rohe ANSI-Codes
-    wie \x1b[33m an. Diese Funktion schließt Codeblöcke vor einem Split
-    sauber und öffnet sie im nächsten Chunk erneut.
+    Tabellen werden nicht mehr auf Top 20 begrenzt; zu lange Ausgaben werden
+    deshalb sauber auf mehrere Discord-Nachrichten verteilt.
     """
-    text = str(message or "")
+    text = normalize_text(message)
 
     if not text:
         return [""]
@@ -1643,74 +1639,30 @@ def split_discord_message(message: str, limit: int = 1900) -> list[str]:
     if len(text) <= limit:
         return [text]
 
-    chunks: list[str] = []
-    current_lines: list[str] = []
-    in_codeblock = False
-    codeblock_lang = ""
+    chunks = []
+    current = ""
 
-    def current_text(extra_line: str | None = None, close_if_code: bool = False) -> str:
-        lines = list(current_lines)
+    for line in text.splitlines():
+        candidate = line if not current else current + "\n" + line
 
-        if extra_line is not None:
-            lines.append(extra_line)
+        if len(candidate) <= limit:
+            current = candidate
+            continue
 
-        if close_if_code and in_codeblock:
-            lines.append("```")
+        if current:
+            chunks.append(current)
+            current = ""
 
-        return "\n".join(lines)
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
 
-    def flush_current():
-        nonlocal current_lines
+        current = line
 
-        if not current_lines:
-            return
+    if current:
+        chunks.append(current)
 
-        chunk = current_text(close_if_code=True)
-
-        if chunk:
-            chunks.append(chunk)
-
-        current_lines = []
-
-        if in_codeblock:
-            current_lines = [f"```{codeblock_lang}".rstrip()]
-
-    for raw_line in text.splitlines():
-        line = raw_line
-
-        # Falls eine einzelne Tabellenzeile extrem lang ist, wird sie ohne
-        # Farbcodes hart gekürzt. Das verhindert defekte Discord-Nachrichten.
-        if len(line) > limit - 20:
-            line = strip_ansi(line)[: limit - 20] + "…"
-
-        candidate = current_text(extra_line=line, close_if_code=True)
-
-        if current_lines and len(candidate) > limit:
-            flush_current()
-
-        # Wenn selbst der neue Chunk zu groß wäre, Zeile defensiv kürzen.
-        candidate_after_flush = current_text(extra_line=line, close_if_code=True)
-
-        if len(candidate_after_flush) > limit:
-            safe_width = max(20, limit - len(current_text(close_if_code=True)) - 5)
-            line = strip_ansi(line)[:safe_width] + "…"
-
-        current_lines.append(line)
-
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            if in_codeblock:
-                in_codeblock = False
-                codeblock_lang = ""
-            else:
-                in_codeblock = True
-                codeblock_lang = stripped[3:].strip()
-
-    if current_lines:
-        chunks.append(current_text(close_if_code=in_codeblock))
-
-    return chunks or [strip_ansi(text)[:limit]]
+    return chunks or [text[:limit]]
 
 
 async def send_discord_message_chunks(send_callable, message: str):
@@ -2297,10 +2249,18 @@ def match_has_all_times(match_row: dict) -> bool:
 
 
 def match_needs_auto_evaluation(match_row: dict) -> bool:
-    if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
-        return False
+    """
+    Ein Match braucht Auto-Wertung, wenn alle Abschlusswerte vorhanden sind,
+    es aber noch nicht sauber veröffentlicht wurde.
 
-    if normalize_text(match_row.get("Status")).lower() == "finished":
+    Wichtig:
+    Status `finished` allein darf NICHT zum Überspringen führen.
+    Genau dieser Zustand kann entstehen, wenn ein Match teilweise geschrieben
+    wurde, aber `Veröffentlicht` leer geblieben ist oder ein Folgepost scheiterte.
+    Dann muss die Auto-Routine das Match erneut sauber durch evaluate_match_if_complete()
+    laufen lassen können.
+    """
+    if normalize_text(match_row.get("Veröffentlicht")).lower() == "ja":
         return False
 
     if not match_has_all_times(match_row):
@@ -4633,22 +4593,13 @@ class LadderCog(commands.Cog):
             )
             return
 
-        role = member.guild.get_role(TFNL_LADDER_ROLE_ID)
-
-        if role is None:
-            await interaction.followup.send(
-                "Anmeldung fehlgeschlagen: Ladder-Rolle wurde nicht gefunden.",
-                ephemeral=True,
-            )
-            return
-
-        if role not in member.roles:
-            await interaction.followup.send(
-                "Du hast keine Berechtigung für die TFNL-Ladder.",
-                ephemeral=True,
-            )
-            return
-
+        # v27:
+        # Die Ladder-Rolle ist KEINE Voraussetzung mehr für die Raceanmeldung.
+        # Entscheidend ist nur:
+        # - User ist Servermitglied
+        # - Anmeldung ist geöffnet
+        # - Bot-DM funktioniert
+        # - User ist noch nicht angemeldet
         _, schedule_row = find_schedule_row(slot_id)
 
         if not schedule_row:
@@ -5559,6 +5510,13 @@ class LadderCog(commands.Cog):
 
         if schedule_row:
             try:
+                await self.refresh_slot_active_outputs(schedule_row)
+            except Exception as e:
+                await self.log_tfnl(
+                    f"Aktivitätsstatus nach Auto-Wertung konnte nicht aktualisiert werden: `{slot_id}` — {repr(e)}"
+                )
+
+            try:
                 slot_channel = await self.get_or_create_slot_channel(schedule_row)
                 await slot_channel.send(build_result_message(updated_match, elo_changes=elo_changes))
             except Exception as e:
@@ -5883,9 +5841,10 @@ class LadderCog(commands.Cog):
         evaluated = 0
 
         async with self.auto_evaluate_matches_lock:
-            # Die Routine läuft ohnehin nur alle 3 Minuten.
-            # Kein force_refresh, damit nicht unnötig gegen die Sheets-Quota gelesen wird.
-            rows = load_matches_rows(force_refresh=False)
+            # Die Routine läuft nur alle 3 Minuten.
+            # Hier bewusst force_refresh=True, damit manuell im Sheet eingetragene
+            # Zeiten/FFs zuverlässig erkannt werden und nicht im Cache hängen bleiben.
+            rows = load_matches_rows(force_refresh=True)
 
             for match_row in rows:
                 if not match_needs_auto_evaluation(match_row):
