@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v27-signup-without-ladder-role"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v28-safe-discord-codeblock-splitting"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -1625,12 +1625,7 @@ def build_discord_ansi_table(headers: list[str], rows: list[list], max_col_width
     return "```ansi\n" + "\n".join(lines) + "\n```"
 
 
-def split_discord_message(message: str, limit: int = 1900) -> list[str]:
-    """
-    Discord erlaubt max. 2000 Zeichen pro Nachricht.
-    Tabellen werden nicht mehr auf Top 20 begrenzt; zu lange Ausgaben werden
-    deshalb sauber auf mehrere Discord-Nachrichten verteilt.
-    """
+def split_plain_discord_message(message: str, limit: int = 1900) -> list[str]:
     text = normalize_text(message)
 
     if not text:
@@ -1639,7 +1634,7 @@ def split_discord_message(message: str, limit: int = 1900) -> list[str]:
     if len(text) <= limit:
         return [text]
 
-    chunks = []
+    chunks: list[str] = []
     current = ""
 
     for line in text.splitlines():
@@ -1663,6 +1658,152 @@ def split_discord_message(message: str, limit: int = 1900) -> list[str]:
         chunks.append(current)
 
     return chunks or [text[:limit]]
+
+
+def split_discord_message(message: str, limit: int = 1900) -> list[str]:
+    """
+    Discord erlaubt max. 2000 Zeichen pro Nachricht.
+
+    Wichtig für ANSI-Tabellen:
+    Niemals innerhalb eines ```ansi-Codeblocks stumpf splitten.
+    Sonst fehlt im zweiten Chunk der öffnende Codeblock und Discord zeigt
+    rohe ANSI-Codes wie ESC[32m an. Jeder Chunk wird deshalb als gültige,
+    geschlossene Discord-Nachricht ausgegeben.
+    """
+    text = normalize_text(message)
+
+    if not text:
+        return [""]
+
+    if len(text) <= limit:
+        return [text]
+
+    if "```" not in text:
+        return split_plain_discord_message(text, limit=limit)
+
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    in_code_block = False
+    code_lang = ""
+
+    def chunk_text(lines: list[str]) -> str:
+        return "\n".join(lines).strip("\n")
+
+    def current_with_line(line: str, close_if_code: bool = True) -> str:
+        lines = current_lines + [line]
+
+        if close_if_code and in_code_block:
+            # Wenn der aktuelle Chunk mitten in einem Codeblock endet,
+            # muss er für Discord gültig geschlossen werden.
+            if not line.strip().startswith("```"):
+                lines = lines + ["```"]
+
+        return chunk_text(lines)
+
+    def flush_current():
+        nonlocal current_lines
+
+        if not current_lines:
+            return
+
+        lines = current_lines[:]
+
+        if in_code_block:
+            # Offenen Codeblock für diesen Discord-Chunk schließen.
+            if not lines[-1].strip().startswith("```") or len(lines[-1].strip()) > 3:
+                lines.append("```")
+
+        chunk = chunk_text(lines)
+
+        if chunk:
+            chunks.append(chunk)
+
+        current_lines = []
+
+        if in_code_block:
+            # Nächster Discord-Chunk muss den Codeblock wieder öffnen,
+            # damit ANSI-Farben weiterhin sauber gerendert werden.
+            current_lines = [f"```{code_lang}".rstrip()]
+
+    def append_long_line_safely(line: str):
+        nonlocal current_lines
+
+        overhead = 16
+
+        if in_code_block:
+            overhead += len(code_lang)
+
+        max_part_len = max(200, limit - overhead)
+
+        remaining = line
+
+        while len(remaining) > max_part_len:
+            part = remaining[:max_part_len]
+            remaining = remaining[max_part_len:]
+
+            if current_lines:
+                flush_current()
+
+            if in_code_block and not current_lines:
+                current_lines = [f"```{code_lang}".rstrip()]
+
+            current_lines.append(part)
+            flush_current()
+
+        if remaining:
+            if current_lines:
+                candidate = current_with_line(remaining)
+
+                if len(candidate) > limit:
+                    flush_current()
+
+            current_lines.append(remaining)
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        is_fence = stripped.startswith("```")
+
+        candidate = current_with_line(line)
+
+        if current_lines and len(candidate) > limit:
+            flush_current()
+
+        if len(line) > limit - 20:
+            append_long_line_safely(line)
+        else:
+            current_lines.append(line)
+
+        if is_fence:
+            fence_lang = stripped[3:].strip()
+
+            if in_code_block:
+                # Gerade wurde ein schließender Fence verarbeitet.
+                in_code_block = False
+                code_lang = ""
+            else:
+                # Gerade wurde ein öffnender Fence verarbeitet.
+                in_code_block = True
+                code_lang = fence_lang
+
+    if current_lines:
+        if in_code_block:
+            current_lines.append("```")
+
+        chunk = chunk_text(current_lines)
+
+        if chunk:
+            chunks.append(chunk)
+
+    # Finale Absicherung: Kein Chunk über Discord-Limit.
+    safe_chunks: list[str] = []
+
+    for chunk in chunks:
+        if len(chunk) <= limit:
+            safe_chunks.append(chunk)
+        else:
+            safe_chunks.extend(split_plain_discord_message(chunk, limit=limit))
+
+    return safe_chunks or [text[:limit]]
 
 
 async def send_discord_message_chunks(send_callable, message: str):
