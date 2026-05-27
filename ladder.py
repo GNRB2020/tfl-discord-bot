@@ -1996,38 +1996,79 @@ def get_open_signup_slots():
 
 def build_schedule_embed(days: int = 5) -> discord.Embed:
     upcoming = get_upcoming_schedule(days=days)
-
-    if not upcoming:
-        description = f"Keine offenen TFNL-Slots in den nächsten {days} Tagen gefunden."
-    else:
-        table_rows = []
-        for row in upcoming:
-            table_rows.append(
-                [
-                    normalize_text(row.get("Datum")),
-                    normalize_text(row.get("Slot")),
-                    normalize_text(row.get("Startzeit")),
-                    normalize_text(row.get("Modus")),
-                    normalize_text(row.get("Status")) or "planned",
-                ]
-            )
-
-        description = build_discord_table(
-            ["Datum", "Slot", "Start", "Modus", "Status"],
-            table_rows,
-            max_col_width=18,
-        )
-
     now = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
 
     embed = discord.Embed(
-        title="TFNL-Spielplan",
-        description=description,
+        title="🗓️ TFNL-Spielplan",
         color=discord.Color.dark_teal(),
     )
 
+    if not upcoming:
+        embed.description = (
+            f"**Keine offenen TFNL-Slots in den nächsten `{days}` Tagen gefunden.**\n\n"
+            "Beendete, archivierte und abgesagte Slots werden ausgeblendet."
+        )
+        embed.set_footer(text=f"Aktualisiert: {now} Uhr")
+        return embed
+
+    weekday_names = {
+        0: "Montag",
+        1: "Dienstag",
+        2: "Mittwoch",
+        3: "Donnerstag",
+        4: "Freitag",
+        5: "Samstag",
+        6: "Sonntag",
+    }
+
+    status_icons = {
+        "planned": "🟢",
+        "open": "🟢",
+        "signup_open": "🟢",
+        "paired": "🟡",
+        "countdown_sent": "🟠",
+        "running": "🔴",
+        "completed": "⚫",
+        "cancelled": "⚪",
+        "archived": "⚫",
+    }
+
+    grouped: dict[str, list[dict]] = {}
+
+    for row in upcoming:
+        datum = normalize_text(row.get("Datum"))
+        grouped.setdefault(datum, []).append(row)
+
+    for datum, rows in grouped.items():
+        parsed_date = parse_german_date(datum)
+        weekday = weekday_names.get(parsed_date.weekday(), "") if parsed_date else ""
+        field_name = f"📅 {weekday}, {datum}" if weekday else f"📅 {datum}"
+
+        lines = []
+        for row in sorted(rows, key=lambda r: normalize_text(r.get("Startzeit"))):
+            startzeit = normalize_text(row.get("Startzeit"))
+            slot = normalize_text(row.get("Slot"))
+            modus = normalize_text(row.get("Modus"))
+            status = normalize_text(row.get("Status")).lower() or "planned"
+            status_icon = status_icons.get(status, "🔹")
+
+            lines.append(
+                f"{status_icon} `{startzeit} Uhr` **{slot}** — {modus} `[{status}]`"
+            )
+
+        embed.add_field(
+            name=field_name,
+            value="\n".join(lines) or "Keine Slots",
+            inline=False,
+        )
+
+    embed.description = (
+        f"Offene TFNL-Slots der nächsten `{days}` Tage.\n"
+        "🟢 geplant/offen · 🟡 gepaart · 🔴 läuft · ⚪ abgesagt"
+    )
     embed.set_footer(text=f"Beendete Slots werden ausgeblendet | Aktualisiert: {now} Uhr")
     return embed
+
 
 
 def build_signup_embed(open_slots: list[dict]) -> discord.Embed:
