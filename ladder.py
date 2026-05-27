@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v28-safe-discord-codeblock-splitting"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v29-live-plus-archive-reads"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -502,17 +502,21 @@ def get_players_sheet():
     )
 
 
-def load_schedule_rows_all():
-    return get_cached_records(SCHEDULE_SHEET_NAME, get_schedule_sheet)
+def load_schedule_rows_all(force_refresh: bool = False):
+    return get_cached_records(
+        SCHEDULE_SHEET_NAME,
+        get_schedule_sheet,
+        force_refresh=force_refresh,
+    )
 
 
-def load_schedule_rows():
-    return filter_rows_by_season(load_schedule_rows_all())
+def load_schedule_rows(force_refresh: bool = False):
+    return filter_rows_by_season(load_schedule_rows_all(force_refresh=force_refresh))
 
 
-def load_schedule_rows_with_index():
+def load_schedule_rows_with_index(force_refresh: bool = False):
     selected_season = get_active_season()
-    rows = load_schedule_rows_all()
+    rows = load_schedule_rows_all(force_refresh=force_refresh)
     return [
         (index, row)
         for index, row in enumerate(rows, start=2)
@@ -580,6 +584,111 @@ def load_players_rows_with_index():
         for index, row in enumerate(rows, start=2)
         if row_matches_season(row, selected_season)
     ]
+
+
+def get_archive_sheet_name_for_source(source_sheet_name: str) -> str:
+    mapping = {
+        SCHEDULE_SHEET_NAME: ARCHIVE_SCHEDULE_SHEET_NAME,
+        SIGNUP_SHEET_NAME: ARCHIVE_SIGNUP_SHEET_NAME,
+        MATCHES_SHEET_NAME: ARCHIVE_MATCHES_SHEET_NAME,
+        PLAYERS_SHEET_NAME: ARCHIVE_PLAYERS_SHEET_NAME,
+    }
+    return mapping.get(source_sheet_name, "")
+
+
+def load_archive_rows_for_source(source_sheet_name: str, force_refresh: bool = False) -> list[dict]:
+    """
+    Liest das passende Archive_* Sheet, falls es existiert.
+    Fehlende Archive-Sheets liefern bewusst [] zurück.
+    Diese Funktion erstellt keine Archive-Sheets.
+    """
+    archive_name = get_archive_sheet_name_for_source(source_sheet_name)
+
+    if not archive_name:
+        return []
+
+    try:
+        spreadsheet = get_tfnl_spreadsheet()
+        archive_sheet = spreadsheet.worksheet(archive_name)
+    except gspread.WorksheetNotFound:
+        return []
+
+    return get_all_records_cached(
+        lambda archive_sheet=archive_sheet: archive_sheet,
+        sheet_name=archive_name,
+        ttl_seconds=SHEET_READ_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+    )
+
+
+def merge_live_and_archive_rows(source_sheet_name: str, live_rows: list[dict], archive_rows: list[dict]) -> list[dict]:
+    """
+    Kombiniert Archive + Live ohne Dopplungen.
+    Falls eine Zeile in beiden Bereichen existiert, gewinnt Live.
+    Dadurch bleibt delete_from_live=False ungefährlich, und delete_from_live=True
+    funktioniert ebenfalls sauber.
+    """
+    merged: dict[str, dict] = {}
+
+    for row in archive_rows:
+        season = get_active_season_for_row(row)
+        key = get_archive_unique_key(source_sheet_name, row, season)
+        if key:
+            merged[key] = row
+
+    for row in live_rows:
+        season = get_active_season_for_row(row)
+        key = get_archive_unique_key(source_sheet_name, row, season)
+        if key:
+            merged[key] = row
+
+    return list(merged.values())
+
+
+def load_schedule_rows_all_combined(force_refresh: bool = False) -> list[dict]:
+    return merge_live_and_archive_rows(
+        SCHEDULE_SHEET_NAME,
+        live_rows=load_schedule_rows_all(force_refresh=force_refresh),
+        archive_rows=load_archive_rows_for_source(SCHEDULE_SHEET_NAME, force_refresh=force_refresh),
+    )
+
+
+def load_schedule_rows_combined(season: str | None = None, force_refresh: bool = False) -> list[dict]:
+    return filter_rows_by_season(
+        load_schedule_rows_all_combined(force_refresh=force_refresh),
+        season,
+    )
+
+
+def load_matches_rows_all_combined(force_refresh: bool = False) -> list[dict]:
+    return merge_live_and_archive_rows(
+        MATCHES_SHEET_NAME,
+        live_rows=load_matches_rows_all(force_refresh=force_refresh),
+        archive_rows=load_archive_rows_for_source(MATCHES_SHEET_NAME, force_refresh=force_refresh),
+    )
+
+
+def load_matches_rows_combined(season: str | None = None, force_refresh: bool = False) -> list[dict]:
+    return filter_rows_by_season(
+        load_matches_rows_all_combined(force_refresh=force_refresh),
+        season,
+    )
+
+
+def load_signup_rows_all_combined(force_refresh: bool = False) -> list[dict]:
+    return merge_live_and_archive_rows(
+        SIGNUP_SHEET_NAME,
+        live_rows=load_signup_rows_all(force_refresh=force_refresh),
+        archive_rows=load_archive_rows_for_source(SIGNUP_SHEET_NAME, force_refresh=force_refresh),
+    )
+
+
+def load_players_rows_all_combined(force_refresh: bool = False) -> list[dict]:
+    return merge_live_and_archive_rows(
+        PLAYERS_SHEET_NAME,
+        live_rows=load_players_rows_all(),
+        archive_rows=load_archive_rows_for_source(PLAYERS_SHEET_NAME, force_refresh=force_refresh),
+    )
 
 
 def append_signup(slot_id: str, user_id: int, display_name: str):
@@ -2123,6 +2232,13 @@ def get_matches_for_slot(slot_id: str) -> list[dict]:
     ]
 
 
+def get_matches_for_slot_combined(slot_id: str) -> list[dict]:
+    return [
+        row for row in load_matches_rows_combined()
+        if normalize_text(row.get("Slot ID")) == slot_id
+    ]
+
+
 def get_match_players(row: dict) -> list[dict]:
     players = []
 
@@ -2146,7 +2262,7 @@ def get_match_players(row: dict) -> list[dict]:
 
 
 def get_last_opponents(limit: int = 5) -> dict[str, set[str]]:
-    rows = load_matches_rows_all()
+    rows = load_matches_rows_all_combined()
     last_opponents: dict[str, list[str]] = {}
 
     for row in reversed(rows):
@@ -2723,7 +2839,7 @@ def get_slot_active_runner_counts(slot_id: str) -> tuple[int, int]:
     total = 0
     seen_player_ids: set[str] = set()
 
-    for match in get_matches_for_slot(slot_id):
+    for match in get_matches_for_slot_combined(slot_id):
         for player in get_match_players(match):
             player_id = normalize_text(player.get("discord_id"))
             player_key = player_id or f"{normalize_text(match.get('Match ID'))}:{player.get('no')}"
@@ -3059,7 +3175,7 @@ def rebuild_players_from_published_matches(season: str | None = None) -> dict[st
     Sie kann mehrfach ausgeführt werden, ohne Punkte doppelt zu zählen.
     """
     selected_season = normalize_text(season) or get_active_season()
-    matches = filter_rows_by_season(load_matches_rows_all(), selected_season)
+    matches = load_matches_rows_combined(selected_season)
     standings: dict[str, dict] = {}
     processed_matches = 0
     processed_player_results = 0
@@ -3178,10 +3294,11 @@ def rebuild_players_from_published_matches(season: str | None = None) -> dict[st
 def get_latest_completed_slot_id_for_scope(mode_name: str | None = None) -> str:
     requested_mode = get_canonical_mode_name(mode_name) if normalize_text(mode_name) else ""
     schedule_modes = get_schedule_mode_map()
+    matches = load_matches_rows_combined()
     best_slot_id = ""
     best_dt = None
 
-    for row in load_schedule_rows():
+    for row in load_schedule_rows_combined():
         slot_id = normalize_text(row.get("Slot ID"))
 
         if not slot_id:
@@ -3196,7 +3313,7 @@ def get_latest_completed_slot_id_for_scope(mode_name: str | None = None) -> str:
             normalize_text(match.get("Slot ID")) == slot_id
             and normalize_text(match.get("Status")).lower() == "finished"
             and normalize_text(match.get("Veröffentlicht")).lower() == "ja"
-            for match in load_matches_rows()
+            for match in matches
         ):
             continue
 
@@ -3220,7 +3337,7 @@ def get_slot_player_ids(slot_id: str) -> set[str]:
     if not normalize_text(slot_id):
         return player_ids
 
-    for match in get_matches_for_slot(slot_id):
+    for match in get_matches_for_slot_combined(slot_id):
         for player in get_match_players(match):
             player_id = normalize_text(player.get("discord_id"))
             if player_id:
@@ -3296,7 +3413,7 @@ def build_overall_match_stats() -> dict[str, dict]:
     """
     stats_by_id: dict[str, dict] = {}
 
-    for match in load_matches_rows():
+    for match in load_matches_rows_combined():
         if normalize_text(match.get("Veröffentlicht")).lower() != "ja":
             continue
 
@@ -3502,7 +3619,7 @@ def build_final_season_standings_messages() -> list[str]:
 # =========================================================
 
 def get_schedule_mode_map() -> dict[str, str]:
-    rows = load_schedule_rows()
+    rows = load_schedule_rows_combined()
 
     return {
         normalize_text(row.get("Slot ID")): normalize_text(row.get("Modus"))
@@ -3514,7 +3631,7 @@ def get_schedule_mode_map() -> dict[str, str]:
 def build_mode_standings(mode_name: str) -> list[dict]:
     requested_mode = get_canonical_mode_name(mode_name)
     schedule_modes = get_schedule_mode_map()
-    matches = load_matches_rows()
+    matches = load_matches_rows_combined()
 
     standings = {}
 
@@ -3670,7 +3787,7 @@ def build_mode_standings_messages(mode_name: str) -> list[str]:
 
 def get_completed_match_modes() -> list[str]:
     schedule_modes = get_schedule_mode_map()
-    matches = load_matches_rows()
+    matches = load_matches_rows_combined()
     modes_by_canonical: dict[str, str] = {}
 
     for match in matches:
@@ -6376,8 +6493,8 @@ class LadderCog(commands.Cog):
 
         try:
             stats = rebuild_elo_from_matches(
-                matches_rows=load_matches_rows_all(),
-                schedule_rows=load_schedule_rows_all(),
+                matches_rows=load_matches_rows_all_combined(force_refresh=True),
+                schedule_rows=load_schedule_rows_all_combined(force_refresh=True),
             )
         except Exception as e:
             await interaction.followup.send(
