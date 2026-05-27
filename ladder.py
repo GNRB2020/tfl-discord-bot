@@ -2036,8 +2036,12 @@ def build_signup_embed(open_slots: list[dict]) -> discord.Embed:
     if not open_slots:
         description = (
             "Aktuell ist keine Anmeldung geöffnet.\n\n"
-            "Early öffnet um `18:15 Uhr`.\n"
-            "Late öffnet um `20:15 Uhr`."
+            "**Racezeiten:**\n"
+            "Mo–Do: `18:00` & `21:00 Uhr`\n"
+            "Fr: `15:00`, `18:00` & `21:00 Uhr`\n"
+            "Sa: `12:00`, `15:00`, `18:00` & `21:00 Uhr`\n"
+            "So: `12:00`, `15:00` & `21:00 Uhr`\n\n"
+            "`18:00 Uhr` sonntags bleibt frei fürs deutsche Weekly."
         )
         title = "TFNL-Anmeldung"
     else:
