@@ -1100,11 +1100,23 @@ class CupRoundSelect(discord.ui.Select):
 
 
 class LeagueWinnerSelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, player1: str | None = None, player2: str | None = None):
         options = [
-            discord.SelectOption(label="Spieler 1", value="spieler1"),
-            discord.SelectOption(label="Spieler 2", value="spieler2"),
-            discord.SelectOption(label="Remis", value="remis"),
+            discord.SelectOption(
+                label=(player1 or "Spieler 1")[:100],
+                value="spieler1",
+                description="Spieler 1 gewinnt",
+            ),
+            discord.SelectOption(
+                label=(player2 or "Spieler 2")[:100],
+                value="spieler2",
+                description="Spieler 2 gewinnt",
+            ),
+            discord.SelectOption(
+                label="Remis",
+                value="remis",
+                description="Unentschieden",
+            ),
         ]
         super().__init__(placeholder="Wer hat gewonnen?", min_values=1, max_values=1, options=options, row=1)
 
@@ -1457,7 +1469,7 @@ class LeagueResultViewStep2(BaseFlowView):
     def __init__(self, cog, author_id: int, state: MatchCenterState):
         super().__init__(cog, author_id)
         self.state = state
-        self.add_item(LeagueWinnerSelect())
+        self.add_item(LeagueWinnerSelect(state.player1, state.player2))
 
     @discord.ui.button(label="Racetime-Link", style=discord.ButtonStyle.secondary, row=2)
     async def racetime_button(self, interaction: discord.Interaction, button: discord.ui.Button):
