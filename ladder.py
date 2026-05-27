@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v29-live-plus-archive-reads"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v30-quota-safe-rebuild-and-standings"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -202,9 +202,14 @@ SCOPE = [
 
 HEADER_CACHE = {}
 WORKSHEET_CACHE = {}
+SPREADSHEET_CACHE = None
 
+# Rebuild + Tabellenposting liest live + archivierte Sheets.
+# 45 Sekunden waren für größere Seasons zu knapp, weil direkt nach einem
+# Rebuild mehrere Tabellen nacheinander gebaut werden. 300 Sekunden reduziert
+# Google-Sheets-Reads deutlich, ohne den laufenden Slotbetrieb zu verfälschen.
 SHEET_READ_CACHE_TTL_SECONDS = int(
-    os.getenv("TFNL_SHEET_CACHE_TTL_SECONDS", "45").strip()
+    os.getenv("TFNL_SHEET_CACHE_TTL_SECONDS", "300").strip()
 )
 
 
@@ -312,9 +317,15 @@ def normalize_text(value) -> str:
 
 
 def get_tfnl_spreadsheet():
+    global SPREADSHEET_CACHE
+
+    if SPREADSHEET_CACHE is not None:
+        return SPREADSHEET_CACHE
+
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
     client = gspread.authorize(creds)
-    return client.open_by_key(TFNL_SPREADSHEET_ID)
+    SPREADSHEET_CACHE = client.open_by_key(TFNL_SPREADSHEET_ID)
+    return SPREADSHEET_CACHE
 
 
 def ensure_header_column(sheet, sheet_name: str, column_name: str):
@@ -607,11 +618,15 @@ def load_archive_rows_for_source(source_sheet_name: str, force_refresh: bool = F
     if not archive_name:
         return []
 
-    try:
-        spreadsheet = get_tfnl_spreadsheet()
-        archive_sheet = spreadsheet.worksheet(archive_name)
-    except gspread.WorksheetNotFound:
-        return []
+    archive_sheet = WORKSHEET_CACHE.get(archive_name)
+
+    if archive_sheet is None:
+        try:
+            spreadsheet = get_tfnl_spreadsheet()
+            archive_sheet = spreadsheet.worksheet(archive_name)
+            WORKSHEET_CACHE[archive_name] = archive_sheet
+        except gspread.WorksheetNotFound:
+            return []
 
     return get_all_records_cached(
         lambda archive_sheet=archive_sheet: archive_sheet,
@@ -4697,6 +4712,19 @@ class LadderCog(commands.Cog):
             self.delayed_publish_standings_to_channel(reason=reason)
         )
 
+    def preload_standings_source_cache(self, force_refresh: bool = False):
+        """
+        Lädt die teuren Tabellenquellen einmal vor.
+
+        Wichtig für Quota:
+        Tabellenposts bauen Gesamt- und mehrere Modus-Tabellen. Ohne Preload
+        können Live/Archive-Reads an verschiedenen Stellen erneut ausgelöst werden.
+        Durch den Preload plus Worksheet-/Spreadsheet-Cache werden Schedule, Matches
+        und Archive-Daten in einem Lauf wiederverwendet.
+        """
+        load_schedule_rows_all_combined(force_refresh=force_refresh)
+        load_matches_rows_all_combined(force_refresh=force_refresh)
+
     async def publish_standings_to_channel(self):
         async with self.standings_publish_lock:
             try:
@@ -4716,6 +4744,8 @@ class LadderCog(commands.Cog):
                 pass
 
             try:
+                self.preload_standings_source_cache(force_refresh=False)
+
                 messages = build_standings_messages()
                 messages.extend(build_all_mode_standings_messages())
 
@@ -6492,9 +6522,13 @@ class LadderCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
+            # Quellen genau einmal frisch laden und danach für Folgeausgaben im Cache halten.
+            matches_rows = load_matches_rows_all_combined(force_refresh=True)
+            schedule_rows = load_schedule_rows_all_combined(force_refresh=True)
+
             stats = rebuild_elo_from_matches(
-                matches_rows=load_matches_rows_all_combined(force_refresh=True),
-                schedule_rows=load_schedule_rows_all_combined(force_refresh=True),
+                matches_rows=matches_rows,
+                schedule_rows=schedule_rows,
             )
         except Exception as e:
             await interaction.followup.send(
@@ -6505,6 +6539,41 @@ class LadderCog(commands.Cog):
 
         await interaction.followup.send(
             "TFNL-ELO-Rebuild abgeschlossen.\n"
+            f"Verarbeitete Matches: `{stats.get('processed_matches', 0)}`\n"
+            f"Rating-Events: `{stats.get('processed_events', 0)}`\n"
+            f"Übersprungene Matches: `{stats.get('skipped_matches', 0)}`",
+            ephemeral=True,
+        )
+
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.command(
+        name="tfnl_elo_rebuild_publish",
+        description="Admin: Baut TFNL-ELO neu auf und postet danach die Tabellen quota-schonend.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def tfnl_elo_rebuild_publish(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            matches_rows = load_matches_rows_all_combined(force_refresh=True)
+            schedule_rows = load_schedule_rows_all_combined(force_refresh=True)
+
+            stats = rebuild_elo_from_matches(
+                matches_rows=matches_rows,
+                schedule_rows=schedule_rows,
+            )
+
+            # Direkt danach posten, ohne die Quellen erneut frisch aus Google zu ziehen.
+            await self.publish_standings_to_channel()
+        except Exception as e:
+            await interaction.followup.send(
+                f"ELO-Rebuild + Tabellenposting fehlgeschlagen:\n```{repr(e)}```",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "TFNL-ELO-Rebuild abgeschlossen und Tabellen neu gepostet.\n"
             f"Verarbeitete Matches: `{stats.get('processed_matches', 0)}`\n"
             f"Rating-Events: `{stats.get('processed_events', 0)}`\n"
             f"Übersprungene Matches: `{stats.get('skipped_matches', 0)}`",
