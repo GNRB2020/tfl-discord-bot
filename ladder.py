@@ -6455,6 +6455,7 @@ class LadderCog(commands.Cog):
         description="Testet nur für dich den TFNL-DM-Ablauf Seed -> Countdown -> Race-Control.",
     )
     @app_commands.describe(
+        user="Optional: User, der die Test-DM erhalten soll. Leer = du selbst.",
         seedpause="Pause zwischen Seed-DM und Countdown-Vorbereitung in Sekunden, Standard 20.",
         preppause="Pause zwischen Countdown-Vorbereitung und echtem Countdown in Sekunden, Standard 20.",
         countdown="Countdown-Länge in Sekunden, Standard 10.",
@@ -6465,6 +6466,7 @@ class LadderCog(commands.Cog):
     async def tfnl_dmtest(
         self,
         interaction: discord.Interaction,
+        user: discord.Member = None,
         seedpause: int = 20,
         preppause: int = 20,
         countdown: int = 10,
@@ -6473,6 +6475,8 @@ class LadderCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
+        target_user = user or interaction.user
+
         seedpause = max(0, min(int(seedpause), 300))
         preppause = max(0, min(int(preppause), 300))
         countdown = max(3, min(int(countdown), 30))
@@ -6480,7 +6484,7 @@ class LadderCog(commands.Cog):
         async def run_background_dmtest():
             try:
                 await self.run_dm_flow_test(
-                    user=interaction.user,
+                    user=target_user,
                     countdown_seconds=countdown,
                     active=active,
                     total=total,
@@ -6490,7 +6494,7 @@ class LadderCog(commands.Cog):
             except Exception as e:
                 try:
                     await self.log_tfnl(
-                        f"DM-Test fehlgeschlagen für `{interaction.user.id}` — {repr(e)}"
+                        f"DM-Test fehlgeschlagen für `{target_user.id}` — gestartet von `{interaction.user.id}` — {repr(e)}"
                     )
                 except Exception:
                     pass
@@ -6499,6 +6503,7 @@ class LadderCog(commands.Cog):
 
         await interaction.followup.send(
             "DM-Test gestartet.\n"
+            f"Empfänger: {target_user.mention}\n"
             f"Seed-DM kommt sofort.\n"
             f"Countdown-Vorbereitung kommt nach `{seedpause}` Sekunden.\n"
             f"Echter Countdown startet `{preppause}` Sekunden danach und läuft `{countdown}` Sekunden.\n"
