@@ -113,6 +113,41 @@ EVENT_TITLE_FILTERS = (
     "TFL Cup",
 )
 
+# Rolle, die Restream-Commands zusätzlich zu Administratoren ausführen darf.
+RESTREAM_COMMAND_ROLE_ID = int(os.getenv("RESTREAM_COMMAND_ROLE_ID", "1277956884824981567"))
+
+
+def member_has_restream_command_permission(member) -> bool:
+    if member is None:
+        return False
+
+    guild_permissions = getattr(member, "guild_permissions", None)
+    if guild_permissions and getattr(guild_permissions, "administrator", False):
+        return True
+
+    for role in getattr(member, "roles", []) or []:
+        try:
+            if int(role.id) == RESTREAM_COMMAND_ROLE_ID:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def restream_prefix_permission():
+    async def predicate(ctx: commands.Context) -> bool:
+        return ctx.guild is not None and member_has_restream_command_permission(ctx.author)
+
+    return commands.check(predicate)
+
+
+def restream_slash_permission():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        return interaction.guild is not None and member_has_restream_command_permission(interaction.user)
+
+    return app_commands.check(predicate)
+
 
 # =========================================================
 # STATE
@@ -967,6 +1002,30 @@ class RestreamRequestsCog(commands.Cog):
         self.bot = bot
         self.daily_task: asyncio.Task | None = None
 
+    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.CheckFailure):
+            await ctx.reply(
+                "Du darfst diesen Restream-Command nicht ausführen.",
+                mention_author=False,
+            )
+            return
+        raise error
+
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CheckFailure):
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Du darfst diesen Restream-Command nicht ausführen.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Du darfst diesen Restream-Command nicht ausführen.",
+                    ephemeral=True,
+                )
+            return
+        raise error
+
     async def cog_load(self):
         self.daily_task = asyncio.create_task(self.daily_restreamable_loop())
         print("✅ restream_requests daily loop gestartet")
@@ -1230,7 +1289,7 @@ class RestreamRequestsCog(commands.Cog):
         )
 
     @commands.command(name="restreamables")
-    @commands.has_permissions(administrator=True)
+    @restream_prefix_permission()
     async def manual_restreamables(self, ctx: commands.Context):
         """
         Admin-Testbefehl:
@@ -1248,7 +1307,7 @@ class RestreamRequestsCog(commands.Cog):
         description="Postet die restreambaren Spiele sofort neu.",
     )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
-    @app_commands.default_permissions(administrator=True)
+    @restream_slash_permission()
     async def restreamables_slash(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -1269,7 +1328,7 @@ class RestreamRequestsCog(commands.Cog):
         description="Postet einen Restream ohne Spieler-DMs direkt in #restreams und aktualisiert das Event.",
     )
     @app_commands.guilds(discord.Object(id=GUILD_ID))
-    @app_commands.default_permissions(administrator=True)
+    @restream_slash_permission()
     @app_commands.describe(
         event_id="Discord-Event-ID des Spiels",
         ziel="Restream-Ziel",
