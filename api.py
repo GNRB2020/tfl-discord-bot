@@ -17,7 +17,7 @@ CACHE = {
 
 CACHE_FILE = "cache.json"
 
-API_PERFORMANCE_VERSION = "api-performance-v2-ranking-endpoints"
+API_PERFORMANCE_VERSION = "api-performance-v3-ranking-results-counts"
 print(f"[API] geladen: {API_PERFORMANCE_VERSION}")
 
 RESULTS_DB_CACHE: dict[str, list[dict]] = {}
@@ -296,14 +296,8 @@ async def get_results_db(request: web.Request):
 
 async def get_tfnl_season_ranking(request: web.Request):
     """
-    Neue Route für den Joomla-Beitrag:
+    Route für den Joomla-Beitrag:
     /api/tfnl-season-ranking
-
-    Erwartetes Frontend-Format:
-    {"items": [...]}
-
-    Die Daten müssen vom Bot/Ranking-Prozess per
-    POST /api/update/tfnl-season-ranking aktualisiert werden.
     """
     ensure_cache_keys()
     limit = parse_limit(request, default=5000, maximum=20000)
@@ -317,22 +311,26 @@ async def get_tfnl_season_ranking(request: web.Request):
 
 async def get_tfnl_overall_ranking(request: web.Request):
     """
-    Neue Route für den Joomla-Beitrag:
+    Route für den Joomla-Beitrag:
     /api/tfnl-overall-ranking
-
-    Erwartetes Frontend-Format:
-    {"items": [...]}
-
-    Die Daten müssen vom Bot/Ranking-Prozess per
-    POST /api/update/tfnl-overall-ranking aktualisiert werden.
     """
     ensure_cache_keys()
     limit = parse_limit(request, default=5000, maximum=20000)
     items = CACHE.get("tfnl_overall_ranking", []) or []
 
+    alltime_match_count = 0
+    for item in items:
+        try:
+            alltime_match_count = max(alltime_match_count, int(item.get("match_count_total") or 0))
+        except Exception:
+            pass
+
     return web.json_response({
         "items": items[:limit],
-        "count": len(items)
+        "count": len(items),
+        "meta": {
+            "alltime_match_count": alltime_match_count
+        }
     })
 
 
