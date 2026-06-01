@@ -17,7 +17,7 @@ CACHE = {
 
 CACHE_FILE = "cache.json"
 
-API_PERFORMANCE_VERSION = "api-performance-v4-results-limit-accordion-ready"
+API_PERFORMANCE_VERSION = "api-performance-v5-10-seasons-ready"
 print(f"[API] geladen: {API_PERFORMANCE_VERSION}")
 
 RESULTS_DB_CACHE: dict[str, list[dict]] = {}
@@ -343,7 +343,7 @@ async def get_tfnl_results(request: web.Request):
     Gibt veröffentlichte TFNL-Ergebnisse aus der Ladder-History aus.
     """
     ensure_cache_keys()
-    limit = parse_limit(request, default=5000, maximum=10000)
+    limit = parse_limit(request, default=50000, maximum=100000)
     season = str(request.query.get("season", "") or "").strip()
     mode = str(request.query.get("mode", "") or "").strip()
 
