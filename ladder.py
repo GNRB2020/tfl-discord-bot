@@ -85,9 +85,23 @@ TFNL_RESULTS_CHANNEL_ID = int(
     os.getenv("TFNL_RESULTS_CHANNEL_ID", "1503146168589353001").strip()
 )
 
+TFNL_RESULTS_CHANNEL_CLEANUP_HOUR = int(
+    os.getenv("TFNL_RESULTS_CHANNEL_CLEANUP_HOUR", "3").strip()
+)
+
+TFNL_RESULTS_CHANNEL_INFO_MESSAGE = os.getenv(
+    "TFNL_RESULTS_CHANNEL_INFO_MESSAGE",
+    (
+        "**TFNL Ergebnisse & Tabellen**\n\n"
+        "Dieser Kanal wird täglich um `03:00 Uhr` bereinigt, damit der Discord-Verlauf übersichtlich bleibt.\n\n"
+        "Dauerhafte Ergebnisse, Tabellen und Übersichten findet ihr auf:\n"
+        "https://www.tryforceleague.de"
+    ),
+).strip()
+
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v34-dmtest-seed-hash-visible"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v36-nightly-results-channel-cleanup"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -4663,6 +4677,7 @@ class LadderCog(commands.Cog):
         self.auto_evaluate_matches_lock = asyncio.Lock()
         self.pending_standings_publish_task = None
         self.race_control_dm_messages = {}
+        self.last_results_channel_cleanup_date = None
 
         try:
             self.elo_sheet_setup_status = ensure_ladder_elo_sheets()
@@ -4683,11 +4698,15 @@ class LadderCog(commands.Cog):
         if not self.auto_evaluate_finished_matches.is_running():
             self.auto_evaluate_finished_matches.start()
 
+        if not self.cleanup_results_channel_daily.is_running():
+            self.cleanup_results_channel_daily.start()
+
     def cog_unload(self):
         self.update_schedule_channel.cancel()
         self.update_signup_channel.cancel()
         self.process_ladder_slots.cancel()
         self.auto_evaluate_finished_matches.cancel()
+        self.cleanup_results_channel_daily.cancel()
 
         if self.pending_standings_publish_task and not self.pending_standings_publish_task.done():
             self.pending_standings_publish_task.cancel()
@@ -4772,6 +4791,56 @@ class LadderCog(commands.Cog):
             await channel.send(f"`TFNL` {message}")
         except Exception as e:
             print(f"[TFNL] Log konnte nicht gesendet werden: {repr(e)}")
+
+    async def purge_results_channel_and_post_info(self, reason: str = "nightly_cleanup"):
+        """
+        Bereinigt den öffentlichen TFNL-Ergebnis-Channel vollständig und setzt danach
+        eine dauerhafte Info-Nachricht neu.
+
+        Ziel:
+        Der Ergebnis-Channel bleibt als Tages-/Live-Verlauf nutzbar, läuft aber nicht
+        über Wochen mit alten Slot-Ergebnissen voll. Dauerhafte Ergebnisse liegen auf
+        der Website.
+        """
+        try:
+            channel = await self.get_text_channel(TFNL_RESULTS_CHANNEL_ID)
+        except Exception as e:
+            await self.log_tfnl(
+                f"Ergebnis-Channel konnte für Bereinigung nicht geladen werden: {repr(e)}"
+            )
+            return
+
+        deleted_count = 0
+
+        try:
+            async for message in channel.history(limit=None, oldest_first=False):
+                try:
+                    await message.delete()
+                    deleted_count += 1
+                    if deleted_count % 25 == 0:
+                        await asyncio.sleep(1)
+                except discord.NotFound:
+                    continue
+                except discord.Forbidden:
+                    await self.log_tfnl(
+                        "Ergebnis-Channel-Bereinigung abgebrochen: Bot hat keine Löschrechte."
+                    )
+                    return
+                except Exception as e:
+                    await self.log_tfnl(
+                        f"Einzelne Nachricht im Ergebnis-Channel konnte nicht gelöscht werden: {repr(e)}"
+                    )
+                    await asyncio.sleep(1)
+
+            await channel.send(TFNL_RESULTS_CHANNEL_INFO_MESSAGE)
+            await self.log_tfnl(
+                f"Ergebnis-Channel bereinigt (`{deleted_count}` Nachricht(en) gelöscht, Grund `{reason}`)."
+            )
+
+        except Exception as e:
+            await self.log_tfnl(
+                f"Ergebnis-Channel-Bereinigung fehlgeschlagen: {repr(e)}"
+            )
 
     async def publish_schedule_to_channel(self):
         try:
@@ -6513,6 +6582,26 @@ class LadderCog(commands.Cog):
         await self.bot.wait_until_ready()
         # Nach Deploy später starten als der normale Slot-Prozess.
         await asyncio.sleep(TFNL_STARTUP_STAGGER_SECONDS + 45)
+
+    @tasks.loop(minutes=5)
+    async def cleanup_results_channel_daily(self):
+        now = datetime.now(BERLIN_TZ)
+        cleanup_hour = max(0, min(TFNL_RESULTS_CHANNEL_CLEANUP_HOUR, 23))
+
+        if now.hour != cleanup_hour:
+            return
+
+        if self.last_results_channel_cleanup_date == now.date():
+            return
+
+        self.last_results_channel_cleanup_date = now.date()
+        await self.purge_results_channel_and_post_info(reason="daily_03_cleanup")
+
+    @cleanup_results_channel_daily.before_loop
+    async def before_cleanup_results_channel_daily(self):
+        await self.bot.wait_until_ready()
+        # Start bewusst nach den anderen Tasks, damit Deploy-Spitzen nicht alles gleichzeitig auslösen.
+        await asyncio.sleep(TFNL_STARTUP_STAGGER_SECONDS + 60)
 
     # =====================================================
     # COMMANDS
