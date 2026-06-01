@@ -22,10 +22,11 @@ from sheet_guard import (
     get_all_values_cached,
     sheet_write_call,
 )
+from tfnl_ranking_api_sync import publish_tfnl_rankings_to_api
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
-BOT_PERFORMANCE_VERSION = "bot-performance-v1"
+BOT_PERFORMANCE_VERSION = "bot-performance-v2-ranking-sync"
 print(f"[BOT] geladen: {BOT_PERFORMANCE_VERSION}")
 
 
@@ -944,21 +945,45 @@ async def push_updates_to_api():
     async with aiohttp.ClientSession() as session:
         try:
             payload_upcoming = {"items": _API_CACHE["upcoming"]["data"]}
-            async with session.post(f"{API_BASE}/api/update/upcoming", json=payload_upcoming, timeout=5) as r:
+            async with session.post(
+                f"{API_BASE}/api/update/upcoming",
+                json=payload_upcoming,
+                timeout=5,
+            ) as r:
                 print("[PUSH] upcoming ->", r.status)
+
         except Exception as e:
             print("[PUSH] Fehler upcoming:", e)
 
         try:
             payload_results = {"items": _API_CACHE["results"]["data"]}
-            async with session.post(f"{API_BASE}/api/update/results", json=payload_results, timeout=5) as r:
+            async with session.post(
+                f"{API_BASE}/api/update/results",
+                json=payload_results,
+                timeout=5,
+            ) as r:
                 print("[PUSH] results ->", r.status)
+
         except Exception as e:
             print("[PUSH] Fehler results:", e)
 
-        print("[SYNC] push_updates_to_api abgeschlossen")
-        print("Upcoming Count:", len(_API_CACHE["upcoming"]["data"]))
-        print("Results Count:", len(_API_CACHE["results"]["data"]))
+    try:
+        ranking_result = await publish_tfnl_rankings_to_api(api_base=API_BASE)
+
+        print(
+            "[PUSH] tfnl rankings -> "
+            f"season={ranking_result.get('season_status')} "
+            f"overall={ranking_result.get('overall_status')} "
+            f"season_count={ranking_result.get('season_count')} "
+            f"overall_count={ranking_result.get('overall_count')}"
+        )
+
+    except Exception as e:
+        print("[PUSH] Fehler tfnl rankings:", e)
+
+    print("[SYNC] push_updates_to_api abgeschlossen")
+    print("Upcoming Count:", len(_API_CACHE["upcoming"]["data"]))
+    print("Results Count:", len(_API_CACHE["results"]["data"]))
 
 
 # =========================================================
