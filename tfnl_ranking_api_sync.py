@@ -1,512 +1,315 @@
-# api.py – VERSION MIT /api/results-db + TFNL Ranking Endpoints
-import os
-import asyncio
-from aiohttp import web
-import json
+"""
+tfnl_ranking_api_sync.py
 
-# =========================================================
-# GLOBAL CACHE
-# =========================================================
-CACHE = {
-    "upcoming": [],
-    "results": [],
-    "tfnl_season_ranking": [],
-    "tfnl_overall_ranking": [],
-    "tfnl_results": []
+Sendet TFNL-ELO-Rankings aus Google Sheets an die Website-API.
+
+Erwartete Datenquelle:
+- Ladder_Ratings aus ladder_elo_sheets.py
+
+Erwartete API-Ziele:
+- POST /api/update/tfnl-season-ranking
+- POST /api/update/tfnl-overall-ranking
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import aiohttp
+
+from ladder_elo import (
+    SCOPE_SEASON_OVERALL,
+    SCOPE_SEASON_MODE,
+    SCOPE_ALLTIME_OVERALL,
+    SCOPE_ALLTIME_MODE,
+)
+
+from ladder_elo_sheets import (
+    load_ratings_rows_with_index,
+    load_history_rows,
+    normalize_text,
+    int_value,
+    float_value,
+)
+
+
+DEFAULT_API_BASE = "https://tfl-discord-api.onrender.com"
+
+SEASON_SCOPES = {
+    SCOPE_SEASON_OVERALL,
+    SCOPE_SEASON_MODE,
 }
 
-CACHE_FILE = "cache.json"
-
-API_PERFORMANCE_VERSION = "api-performance-v2-ranking-endpoints"
-print(f"[API] geladen: {API_PERFORMANCE_VERSION}")
-
-RESULTS_DB_CACHE: dict[str, list[dict]] = {}
-_RESULTS_CACHE_SIGNATURE: tuple[int, int] | None = None
+OVERALL_SCOPES = {
+    SCOPE_ALLTIME_OVERALL,
+    SCOPE_ALLTIME_MODE,
+}
 
 
-def ensure_cache_keys():
-    """
-    Sorgt dafür, dass alte cache.json-Dateien ohne neue Keys weiter funktionieren.
-    """
-    CACHE.setdefault("upcoming", [])
-    CACHE.setdefault("results", [])
-    CACHE.setdefault("tfnl_season_ranking", [])
-    CACHE.setdefault("tfnl_overall_ranking", [])
-    CACHE.setdefault("tfnl_results", [])
+def _get_api_base(api_base: str | None = None) -> str:
+    selected = (
+        api_base
+        or os.getenv("TFL_API_BASE")
+        or os.getenv("API_BASE")
+        or DEFAULT_API_BASE
+    )
+
+    return selected.rstrip("/")
 
 
-def invalidate_results_db_cache():
-    global RESULTS_DB_CACHE, _RESULTS_CACHE_SIGNATURE
-    RESULTS_DB_CACHE = {}
-    _RESULTS_CACHE_SIGNATURE = None
+def _rating_row_to_api_item(row: dict[str, Any]) -> dict[str, Any] | None:
+    player_id = normalize_text(row.get("Player ID"))
+    player_name = normalize_text(row.get("Player Name"))
+    season = normalize_text(row.get("Season"))
+    mode = normalize_text(row.get("Mode")) or "ALL"
+    scope = normalize_text(row.get("Scope"))
 
-
-def get_results_signature(results_raw: list[dict]) -> tuple[int, int]:
-    if not results_raw:
-        return (0, 0)
-    return (len(results_raw), hash(json.dumps(results_raw, ensure_ascii=False, sort_keys=True)))
-
-
-def get_results_db_items_for_division(division: str) -> list[dict]:
-    global _RESULTS_CACHE_SIGNATURE
-
-    results_raw = CACHE.get("results", []) or []
-    signature = get_results_signature(results_raw)
-
-    if signature != _RESULTS_CACHE_SIGNATURE:
-        RESULTS_DB_CACHE.clear()
-        _RESULTS_CACHE_SIGNATURE = signature
-
-    if division in RESULTS_DB_CACHE:
-        return RESULTS_DB_CACHE[division]
-
-    items: list[dict] = []
-    for entry in results_raw:
-        item = parse_result_entry(entry, division=division)
-        if item is not None:
-            items.append(item)
-
-    RESULTS_DB_CACHE[division] = items
-    return items
-
-
-# =========================================================
-# LOAD + SAVE CACHE
-# =========================================================
-def load_cache():
-    global CACHE
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    CACHE.update(loaded)
-
-                ensure_cache_keys()
-                invalidate_results_db_cache()
-
-                print(
-                    f"[API] Cache geladen "
-                    f"({len(CACHE.get('upcoming', []))} upcoming, "
-                    f"{len(CACHE.get('results', []))} results, "
-                    f"{len(CACHE.get('tfnl_season_ranking', []))} season-ranking, "
-                    f"{len(CACHE.get('tfnl_overall_ranking', []))} overall-ranking, "
-                    f"{len(CACHE.get('tfnl_results', []))} tfnl-results)"
-                )
-        except Exception as e:
-            ensure_cache_keys()
-            print(f"[API] Fehler beim Laden des Cache: {e}")
-    else:
-        ensure_cache_keys()
-
-
-def save_cache():
-    ensure_cache_keys()
-    try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(CACHE, f, ensure_ascii=False, indent=2)
-        print("[API] Cache gespeichert")
-    except Exception as e:
-        print(f"[API] Fehler beim Speichern des Cache: {e}")
-
-
-# =========================================================
-# HELFER: Discord-Result-Post -> strukturiertes Item
-# =========================================================
-def parse_result_entry(entry: dict, division: str | None = None) -> dict | None:
-    """
-    Erwartetes Format im 'content' (aus dem Bot):
-
-    Zeile 1: **[Division X]** 07.12.2025 10:47
-    Zeile 2: **Crackerito** vs **Steinchen** → **2:0**
-    Zeile 3: Modus: crosskeys
-    Zeile 4: Raceroom: https://...
-
-    division:
-        - None  -> keine Filterung
-        - "1"–"6" -> nur, wenn [Division X] passt
-    """
-    content = entry.get("content", "") or ""
-    if not content.strip():
+    if not player_id and not player_name:
         return None
 
-    lines = content.splitlines()
-    if not lines:
+    if not scope:
         return None
 
-    header = lines[0].strip()
+    elo = float_value(row.get("Elo"), 1000.0)
+    wins = int_value(row.get("Wins"))
+    draws = int_value(row.get("Draws"))
+    lose = int_value(row.get("Lose"))
+    games = int_value(row.get("Games"))
 
-    # Division filtern (falls gewünscht)
-    if division is not None:
-        marker = f"Division {division}"
-        if marker not in header:
-            return None
+    if games <= 0:
+        games = wins + draws + lose
 
-    # Header: **[Division X]** 07.12.2025 10:47
-    header_clean = header.replace("*", "").strip()
-    # nach ']' splitten, alles dahinter ist Datum(+Uhrzeit)
-    if "]" in header_clean:
-        parts = header_clean.split("]")
-        date_part = parts[-1].strip()  # "07.12.2025 10:47"
-    else:
-        date_part = header_clean
-
-    date_str = date_part
-
-    player1 = ""
-    player2 = ""
-    score = ""
-    mode = ""
-    link = ""
-
-    # Zeile 2: **Crackerito** vs **Steinchen** → **2:0**
-    if len(lines) >= 2:
-        line2 = lines[1].replace("*", "").strip()
-        # auf Pfeil splitten
-        if "→" in line2:
-            left, right = line2.split("→", 1)
-            score = right.strip()
-        else:
-            left = line2
-
-        if "vs" in left:
-            p_parts = left.split("vs", 1)
-            player1 = p_parts[0].strip()
-            player2 = p_parts[1].strip()
-
-    # Zeile 3: Modus: ...
-    if len(lines) >= 3:
-        line3 = lines[2].replace("*", "").strip()
-        if line3.lower().startswith("modus:"):
-            mode = line3.split(":", 1)[1].strip()
-
-    # Zeile 4: Raceroom: ...
-    if len(lines) >= 4:
-        line4 = lines[3].replace("*", "").strip()
-        if ":" in line4:
-            _, rest = line4.split(":", 1)
-            link = rest.strip()
-
-    # Nur fertige Ergebnisse (kein "vs" als Ergebnis)
-    if score.lower() == "vs" or "vs" in score.lower():
-        return None
-
-    # Minimale Plausibilitätsprüfung
-    if not date_str or not player1 or not player2 or not score:
-        return None
-
-    reporter = entry.get("author", "")
+    winrate = float_value(row.get("Winrate"), 0.0)
 
     return {
-        "date": date_str,
-        "player1": player1,
-        "score": score,
-        "player2": player2,
+        "player_id": player_id,
+        "player_name": player_name or player_id or "Unbekannt",
+        "season": season,
         "mode": mode,
-        "link": link,
-        "reporter": reporter,
+        "scope": scope,
+        "elo": elo,
+        "wins": wins,
+        "draws": draws,
+        "lose": lose,
+        "games": games,
+        "winrate": winrate,
+        "updated_at": normalize_text(row.get("Updated At")),
     }
 
 
-def parse_limit(request: web.Request, default: int = 500, maximum: int = 5000) -> int:
-    try:
-        limit = int(request.query.get("limit", str(default)))
-    except Exception:
-        limit = default
-
-    return max(1, min(maximum, limit))
-
-
-def normalize_items_payload(data: dict) -> list[dict]:
+def build_tfnl_ranking_payloads() -> dict[str, list[dict[str, Any]]]:
     """
-    Akzeptiert:
-    - {"items": [...]}
-    - {"rows": [...]}
-    - direkt eine Liste wird außerhalb abgefangen
+    Baut beide Website-Payloads direkt aus Ladder_Ratings.
+
+    Rückgabe:
+    {
+      "season": [...],
+      "overall": [...]
+    }
     """
-    if isinstance(data, dict):
-        items = data.get("items")
-        if isinstance(items, list):
-            return items
+    rows_with_index = load_ratings_rows_with_index()
 
-        rows = data.get("rows")
-        if isinstance(rows, list):
-            return rows
+    season_items: list[dict[str, Any]] = []
+    overall_items: list[dict[str, Any]] = []
 
-    return []
+    for _row_index, row in rows_with_index:
+        item = _rating_row_to_api_item(row)
 
+        if item is None:
+            continue
 
-# =========================================================
-# GET ENDPOINTS (Frontend / Matchcenter)
-# =========================================================
-async def health(request):
-    ensure_cache_keys()
-    return web.json_response({
-        "status": "ok",
-        "version": API_PERFORMANCE_VERSION,
-        "counts": {
-            "upcoming": len(CACHE.get("upcoming", [])),
-            "results": len(CACHE.get("results", [])),
-            "tfnl_season_ranking": len(CACHE.get("tfnl_season_ranking", [])),
-            "tfnl_overall_ranking": len(CACHE.get("tfnl_overall_ranking", [])),
-            "tfnl_results": len(CACHE.get("tfnl_results", [])),
-        }
-    })
+        scope = item["scope"]
 
+        if scope in SEASON_SCOPES:
+            season_items.append(item)
+        elif scope in OVERALL_SCOPES:
+            overall_items.append(item)
 
-async def get_upcoming(request):
-    ensure_cache_keys()
-    limit = parse_limit(request, default=20, maximum=200)
-    return web.json_response({
-        "items": CACHE.get("upcoming", [])[:limit]
-    })
+    season_items.sort(
+        key=lambda item: (
+            str(item.get("season", "")),
+            str(item.get("scope", "")),
+            str(item.get("mode", "")),
+            -float(item.get("elo", 0)),
+            str(item.get("player_name", "")).lower(),
+        )
+    )
 
+    overall_items.sort(
+        key=lambda item: (
+            str(item.get("scope", "")),
+            str(item.get("mode", "")),
+            -float(item.get("elo", 0)),
+            str(item.get("player_name", "")).lower(),
+        )
+    )
 
-async def get_results(request):
-    ensure_cache_keys()
-    limit = parse_limit(request, default=20, maximum=200)
-    return web.json_response({
-        "items": CACHE.get("results", [])[:limit]
-    })
+    return {
+        "season": season_items,
+        "overall": overall_items,
+    }
 
 
-async def get_results_db(request: web.Request):
+def _history_row_to_result_player(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "player_id": normalize_text(row.get("Player ID")),
+        "player_name": normalize_text(row.get("Player Name")) or "Unbekannt",
+        "placement": int_value(row.get("Placement")),
+        "score": float_value(row.get("Score"), 0.0),
+        "result_type": normalize_text(row.get("Result Type")),
+        "elo_before": float_value(row.get("Elo Before"), 1000.0),
+        "elo_after": float_value(row.get("Elo After"), 1000.0),
+        "elo_change": float_value(row.get("Elo Change"), 0.0),
+    }
+
+
+def build_tfnl_results_payload() -> list[dict[str, Any]]:
     """
-    Route:
-    /api/results-db?division=1&limit=50
+    Baut veröffentlichte TFNL-Ergebnisse aus Ladder_RatingHistory.
 
-    - division: "1"–"6"
-    - limit: max. Anzahl Einträge
+    Wichtig:
+    - Es wird nur season_overall genutzt, damit jedes Match nicht vierfach
+      durch die unterschiedlichen ELO-Scopes auftaucht.
+    - Gruppierung erfolgt primär über Rating Event ID.
     """
-    ensure_cache_keys()
+    history_rows = load_history_rows()
+    grouped: dict[str, dict[str, Any]] = {}
 
-    division = request.query.get("division")
-    if division not in ["1", "2", "3", "4", "5", "6"]:
-        return web.json_response({"items": []})
+    for row in history_rows:
+        scope = normalize_text(row.get("Elo Scope"))
+        if scope != SCOPE_SEASON_OVERALL:
+            continue
 
-    limit = parse_limit(request, default=50, maximum=336)
+        event_id = normalize_text(row.get("Rating Event ID"))
+        if not event_id:
+            continue
 
-    # Neueste zuerst: nach Eintrags-Reihenfolge rückwärts,
-    # da CACHE["results"] vom Bot chronologisch gefüllt wird.
-    items = get_results_db_items_for_division(division)
-    items = items[-limit:][::-1]
+        item = grouped.setdefault(event_id, {
+            "id": event_id,
+            "rating_event_id": event_id,
+            "season": normalize_text(row.get("Season")),
+            "slot_id": normalize_text(row.get("Slot ID")),
+            "date": normalize_text(row.get("Date")),
+            "mode": normalize_text(row.get("Mode")),
+            "race_type": normalize_text(row.get("Race Type")),
+            "created_at": normalize_text(row.get("Created At")),
+            "players": [],
+        })
 
-    return web.json_response({"items": items})
+        player = _history_row_to_result_player(row)
+
+        if player["player_id"] or player["player_name"]:
+            item["players"].append(player)
+
+    results: list[dict[str, Any]] = []
+
+    for item in grouped.values():
+        players = item["players"]
+        players.sort(key=lambda player: (
+            int(player.get("placement") or 999),
+            str(player.get("player_name", "")).lower(),
+        ))
+
+        winner = next(
+            (player for player in players if int(player.get("placement") or 999) == 1),
+            players[0] if players else None,
+        )
+
+        item["winner_name"] = winner.get("player_name") if winner else ""
+        item["player_count"] = len(players)
+        item["result_text"] = " · ".join(
+            f"{player.get('placement')}. {player.get('player_name')}"
+            for player in players
+            if player.get("player_name")
+        )
+
+        results.append(item)
+
+    results.sort(
+        key=lambda item: (
+            str(item.get("date", "")),
+            str(item.get("created_at", "")),
+            str(item.get("id", "")),
+        ),
+        reverse=True,
+    )
+
+    return results
 
 
-async def get_tfnl_season_ranking(request: web.Request):
+async def _post_items(
+    session: aiohttp.ClientSession,
+    url: str,
+    items: list[dict[str, Any]],
+    timeout_seconds: int,
+) -> tuple[int, str]:
+    async with session.post(
+        url,
+        json={"items": items},
+        timeout=timeout_seconds,
+    ) as response:
+        text = await response.text()
+        return response.status, text[:500]
+
+
+async def publish_tfnl_rankings_to_api(
+    api_base: str | None = None,
+    timeout_seconds: int = 15,
+) -> dict[str, Any]:
     """
-    Neue Route für den Joomla-Beitrag:
-    /api/tfnl-season-ranking
+    Veröffentlicht Season- und Overall-Ranking an die API.
 
-    Erwartetes Frontend-Format:
-    {"items": [...]}
-
-    Die Daten müssen vom Bot/Ranking-Prozess per
-    POST /api/update/tfnl-season-ranking aktualisiert werden.
+    Diese Funktion ist für den Bot gedacht und kann z. B. im bestehenden
+    push_updates_to_api() nach upcoming/results aufgerufen werden.
     """
-    ensure_cache_keys()
-    limit = parse_limit(request, default=5000, maximum=20000)
-    items = CACHE.get("tfnl_season_ranking", []) or []
+    base = _get_api_base(api_base)
+    payloads = build_tfnl_ranking_payloads()
+    tfnl_results = build_tfnl_results_payload()
 
-    return web.json_response({
-        "items": items[:limit],
-        "count": len(items)
-    })
+    result: dict[str, Any] = {
+        "api_base": base,
+        "season_count": len(payloads["season"]),
+        "overall_count": len(payloads["overall"]),
+        "results_count": len(tfnl_results),
+        "season_status": None,
+        "overall_status": None,
+        "results_status": None,
+        "ok": False,
+    }
 
+    async with aiohttp.ClientSession() as session:
+        season_status, season_text = await _post_items(
+            session=session,
+            url=f"{base}/api/update/tfnl-season-ranking",
+            items=payloads["season"],
+            timeout_seconds=timeout_seconds,
+        )
 
-async def get_tfnl_overall_ranking(request: web.Request):
-    """
-    Neue Route für den Joomla-Beitrag:
-    /api/tfnl-overall-ranking
+        overall_status, overall_text = await _post_items(
+            session=session,
+            url=f"{base}/api/update/tfnl-overall-ranking",
+            items=payloads["overall"],
+            timeout_seconds=timeout_seconds,
+        )
 
-    Erwartetes Frontend-Format:
-    {"items": [...]}
+        results_status, results_text = await _post_items(
+            session=session,
+            url=f"{base}/api/update/tfnl-results",
+            items=tfnl_results,
+            timeout_seconds=timeout_seconds,
+        )
 
-    Die Daten müssen vom Bot/Ranking-Prozess per
-    POST /api/update/tfnl-overall-ranking aktualisiert werden.
-    """
-    ensure_cache_keys()
-    limit = parse_limit(request, default=5000, maximum=20000)
-    items = CACHE.get("tfnl_overall_ranking", []) or []
+    result["season_status"] = season_status
+    result["overall_status"] = overall_status
+    result["results_status"] = results_status
+    result["season_response"] = season_text
+    result["overall_response"] = overall_text
+    result["results_response"] = results_text
+    result["ok"] = (
+        200 <= season_status < 300
+        and 200 <= overall_status < 300
+        and 200 <= results_status < 300
+    )
 
-    return web.json_response({
-        "items": items[:limit],
-        "count": len(items)
-    })
-
-
-
-async def get_tfnl_results(request: web.Request):
-    """
-    Route für den Joomla-Beitrag:
-    /api/tfnl-results
-
-    Gibt veröffentlichte TFNL-Ergebnisse aus der Ladder-History aus.
-    """
-    ensure_cache_keys()
-    limit = parse_limit(request, default=200, maximum=5000)
-    season = str(request.query.get("season", "") or "").strip()
-    mode = str(request.query.get("mode", "") or "").strip()
-
-    items = CACHE.get("tfnl_results", []) or []
-
-    if season:
-        items = [item for item in items if str(item.get("season", "")).strip() == season]
-
-    if mode and mode.upper() != "ALL":
-        items = [item for item in items if str(item.get("mode", "")).strip() == mode]
-
-    return web.json_response({
-        "items": items[:limit],
-        "count": len(items)
-    })
-
-
-# =========================================================
-# UPDATE ENDPOINTS (Bot -> API)
-# =========================================================
-async def update_upcoming(request):
-    ensure_cache_keys()
-    try:
-        data = await request.json()
-        items = normalize_items_payload(data)
-        CACHE["upcoming"] = items
-        save_cache()
-        print(f"[API] UPDATED upcoming: {len(items)} Items")
-        return web.json_response({"status": "ok", "count": len(items)})
-    except Exception as e:
-        print(f"[API] Fehler beim Update upcoming: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-
-async def update_results(request):
-    ensure_cache_keys()
-    try:
-        data = await request.json()
-        items = normalize_items_payload(data)
-        CACHE["results"] = items
-        invalidate_results_db_cache()
-        save_cache()
-        print(f"[API] UPDATED results: {len(items)} Items")
-        return web.json_response({"status": "ok", "count": len(items)})
-    except Exception as e:
-        print(f"[API] Fehler beim Update results: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-
-async def update_tfnl_season_ranking(request):
-    ensure_cache_keys()
-    try:
-        data = await request.json()
-
-        if isinstance(data, list):
-            items = data
-        else:
-            items = normalize_items_payload(data)
-
-        CACHE["tfnl_season_ranking"] = items
-        save_cache()
-        print(f"[API] UPDATED tfnl_season_ranking: {len(items)} Items")
-        return web.json_response({"status": "ok", "count": len(items)})
-    except Exception as e:
-        print(f"[API] Fehler beim Update tfnl_season_ranking: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-
-async def update_tfnl_overall_ranking(request):
-    ensure_cache_keys()
-    try:
-        data = await request.json()
-
-        if isinstance(data, list):
-            items = data
-        else:
-            items = normalize_items_payload(data)
-
-        CACHE["tfnl_overall_ranking"] = items
-        save_cache()
-        print(f"[API] UPDATED tfnl_overall_ranking: {len(items)} Items")
-        return web.json_response({"status": "ok", "count": len(items)})
-    except Exception as e:
-        print(f"[API] Fehler beim Update tfnl_overall_ranking: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-
-
-async def update_tfnl_results(request):
-    ensure_cache_keys()
-    try:
-        data = await request.json()
-
-        if isinstance(data, list):
-            items = data
-        else:
-            items = normalize_items_payload(data)
-
-        CACHE["tfnl_results"] = items
-        save_cache()
-        print(f"[API] UPDATED tfnl_results: {len(items)} Items")
-        return web.json_response({"status": "ok", "count": len(items)})
-    except Exception as e:
-        print(f"[API] Fehler beim Update tfnl_results: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-
-# =========================================================
-# START SERVER
-# =========================================================
-async def start():
-    load_cache()
-
-    # CORS MIDDLEWARE
-    @web.middleware
-    async def cors_middleware(request, handler):
-        if request.method == "OPTIONS":
-            response = web.Response(status=204)
-        else:
-            response = await handler(request)
-
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        return response
-
-    app = web.Application(middlewares=[cors_middleware])
-
-    # Public GET Routes
-    app.router.add_get("/health", health)
-    app.router.add_get("/api/upcoming", get_upcoming)
-    app.router.add_get("/api/results", get_results)
-    app.router.add_get("/api/results-db", get_results_db)
-
-    # TFNL Ranking GET Routes für Joomla
-    app.router.add_get("/api/tfnl-season-ranking", get_tfnl_season_ranking)
-    app.router.add_get("/api/tfnl-overall-ranking", get_tfnl_overall_ranking)
-    app.router.add_get("/api/tfnl-results", get_tfnl_results)
-
-    # Bot → API update routes
-    app.router.add_post("/api/update/upcoming", update_upcoming)
-    app.router.add_post("/api/update/results", update_results)
-
-    # Bot/Ranking-Prozess → API update routes
-    app.router.add_post("/api/update/tfnl-season-ranking", update_tfnl_season_ranking)
-    app.router.add_post("/api/update/tfnl-overall-ranking", update_tfnl_overall_ranking)
-    app.router.add_post("/api/update/tfnl-results", update_tfnl_results)
-
-    port = int(os.getenv("PORT", "10000"))
-    print(f"[API] STARTING on port {port}")
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-    print("[API] RUNNING...")
-    while True:
-        await asyncio.sleep(3600)
-
-
-if __name__ == "__main__":
-    asyncio.run(start())
+    return result
