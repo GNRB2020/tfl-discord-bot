@@ -1,4 +1,4 @@
-# api.py – VERSION MIT /api/results-db
+# api.py – VERSION MIT /api/results-db + TFNL Ranking Endpoints
 import os
 import asyncio
 from aiohttp import web
@@ -9,16 +9,28 @@ import json
 # =========================================================
 CACHE = {
     "upcoming": [],
-    "results": []
+    "results": [],
+    "tfnl_season_ranking": [],
+    "tfnl_overall_ranking": []
 }
 
 CACHE_FILE = "cache.json"
 
-API_PERFORMANCE_VERSION = "api-performance-v1"
+API_PERFORMANCE_VERSION = "api-performance-v2-ranking-endpoints"
 print(f"[API] geladen: {API_PERFORMANCE_VERSION}")
 
 RESULTS_DB_CACHE: dict[str, list[dict]] = {}
 _RESULTS_CACHE_SIGNATURE: tuple[int, int] | None = None
+
+
+def ensure_cache_keys():
+    """
+    Sorgt dafür, dass alte cache.json-Dateien ohne neue Keys weiter funktionieren.
+    """
+    CACHE.setdefault("upcoming", [])
+    CACHE.setdefault("results", [])
+    CACHE.setdefault("tfnl_season_ranking", [])
+    CACHE.setdefault("tfnl_overall_ranking", [])
 
 
 def invalidate_results_db_cache():
@@ -64,18 +76,29 @@ def load_cache():
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                CACHE = json.load(f)
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    CACHE.update(loaded)
+
+                ensure_cache_keys()
                 invalidate_results_db_cache()
+
                 print(
                     f"[API] Cache geladen "
                     f"({len(CACHE.get('upcoming', []))} upcoming, "
-                    f"{len(CACHE.get('results', []))} results)"
+                    f"{len(CACHE.get('results', []))} results, "
+                    f"{len(CACHE.get('tfnl_season_ranking', []))} season-ranking, "
+                    f"{len(CACHE.get('tfnl_overall_ranking', []))} overall-ranking)"
                 )
         except Exception as e:
+            ensure_cache_keys()
             print(f"[API] Fehler beim Laden des Cache: {e}")
+    else:
+        ensure_cache_keys()
 
 
 def save_cache():
+    ensure_cache_keys()
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(CACHE, f, ensure_ascii=False, indent=2)
@@ -182,42 +205,82 @@ def parse_result_entry(entry: dict, division: str | None = None) -> dict | None:
     }
 
 
+def parse_limit(request: web.Request, default: int = 500, maximum: int = 5000) -> int:
+    try:
+        limit = int(request.query.get("limit", str(default)))
+    except Exception:
+        limit = default
+
+    return max(1, min(maximum, limit))
+
+
+def normalize_items_payload(data: dict) -> list[dict]:
+    """
+    Akzeptiert:
+    - {"items": [...]}
+    - {"rows": [...]}
+    - direkt eine Liste wird außerhalb abgefangen
+    """
+    if isinstance(data, dict):
+        items = data.get("items")
+        if isinstance(items, list):
+            return items
+
+        rows = data.get("rows")
+        if isinstance(rows, list):
+            return rows
+
+    return []
+
+
 # =========================================================
 # GET ENDPOINTS (Frontend / Matchcenter)
 # =========================================================
 async def health(request):
-    return web.json_response({"status": "ok"})
+    ensure_cache_keys()
+    return web.json_response({
+        "status": "ok",
+        "version": API_PERFORMANCE_VERSION,
+        "counts": {
+            "upcoming": len(CACHE.get("upcoming", [])),
+            "results": len(CACHE.get("results", [])),
+            "tfnl_season_ranking": len(CACHE.get("tfnl_season_ranking", [])),
+            "tfnl_overall_ranking": len(CACHE.get("tfnl_overall_ranking", [])),
+        }
+    })
 
 
 async def get_upcoming(request):
+    ensure_cache_keys()
+    limit = parse_limit(request, default=20, maximum=200)
     return web.json_response({
-        "items": CACHE.get("upcoming", [])[:20]
+        "items": CACHE.get("upcoming", [])[:limit]
     })
 
 
 async def get_results(request):
+    ensure_cache_keys()
+    limit = parse_limit(request, default=20, maximum=200)
     return web.json_response({
-        "items": CACHE.get("results", [])[:20]
+        "items": CACHE.get("results", [])[:limit]
     })
 
 
 async def get_results_db(request: web.Request):
     """
-    Neue Route:
+    Route:
     /api/results-db?division=1&limit=50
 
     - division: "1"–"6"
     - limit: max. Anzahl Einträge
     """
+    ensure_cache_keys()
+
     division = request.query.get("division")
     if division not in ["1", "2", "3", "4", "5", "6"]:
         return web.json_response({"items": []})
 
-    try:
-        limit = int(request.query.get("limit", "50"))
-    except Exception:
-        limit = 50
-    limit = max(1, min(336, limit))
+    limit = parse_limit(request, default=50, maximum=336)
 
     # Neueste zuerst: nach Eintrags-Reihenfolge rückwärts,
     # da CACHE["results"] vom Bot chronologisch gefüllt wird.
@@ -227,33 +290,115 @@ async def get_results_db(request: web.Request):
     return web.json_response({"items": items})
 
 
+async def get_tfnl_season_ranking(request: web.Request):
+    """
+    Neue Route für den Joomla-Beitrag:
+    /api/tfnl-season-ranking
+
+    Erwartetes Frontend-Format:
+    {"items": [...]}
+
+    Die Daten müssen vom Bot/Ranking-Prozess per
+    POST /api/update/tfnl-season-ranking aktualisiert werden.
+    """
+    ensure_cache_keys()
+    limit = parse_limit(request, default=5000, maximum=20000)
+    items = CACHE.get("tfnl_season_ranking", []) or []
+
+    return web.json_response({
+        "items": items[:limit],
+        "count": len(items)
+    })
+
+
+async def get_tfnl_overall_ranking(request: web.Request):
+    """
+    Neue Route für den Joomla-Beitrag:
+    /api/tfnl-overall-ranking
+
+    Erwartetes Frontend-Format:
+    {"items": [...]}
+
+    Die Daten müssen vom Bot/Ranking-Prozess per
+    POST /api/update/tfnl-overall-ranking aktualisiert werden.
+    """
+    ensure_cache_keys()
+    limit = parse_limit(request, default=5000, maximum=20000)
+    items = CACHE.get("tfnl_overall_ranking", []) or []
+
+    return web.json_response({
+        "items": items[:limit],
+        "count": len(items)
+    })
+
+
 # =========================================================
 # UPDATE ENDPOINTS (Bot -> API)
 # =========================================================
 async def update_upcoming(request):
+    ensure_cache_keys()
     try:
         data = await request.json()
-        items = data.get("items", [])
+        items = normalize_items_payload(data)
         CACHE["upcoming"] = items
         save_cache()
         print(f"[API] UPDATED upcoming: {len(items)} Items")
-        return web.json_response({"status": "ok"})
+        return web.json_response({"status": "ok", "count": len(items)})
     except Exception as e:
         print(f"[API] Fehler beim Update upcoming: {e}")
         return web.json_response({"error": str(e)}, status=500)
 
 
 async def update_results(request):
+    ensure_cache_keys()
     try:
         data = await request.json()
-        items = data.get("items", [])
+        items = normalize_items_payload(data)
         CACHE["results"] = items
         invalidate_results_db_cache()
         save_cache()
         print(f"[API] UPDATED results: {len(items)} Items")
-        return web.json_response({"status": "ok"})
+        return web.json_response({"status": "ok", "count": len(items)})
     except Exception as e:
         print(f"[API] Fehler beim Update results: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def update_tfnl_season_ranking(request):
+    ensure_cache_keys()
+    try:
+        data = await request.json()
+
+        if isinstance(data, list):
+            items = data
+        else:
+            items = normalize_items_payload(data)
+
+        CACHE["tfnl_season_ranking"] = items
+        save_cache()
+        print(f"[API] UPDATED tfnl_season_ranking: {len(items)} Items")
+        return web.json_response({"status": "ok", "count": len(items)})
+    except Exception as e:
+        print(f"[API] Fehler beim Update tfnl_season_ranking: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def update_tfnl_overall_ranking(request):
+    ensure_cache_keys()
+    try:
+        data = await request.json()
+
+        if isinstance(data, list):
+            items = data
+        else:
+            items = normalize_items_payload(data)
+
+        CACHE["tfnl_overall_ranking"] = items
+        save_cache()
+        print(f"[API] UPDATED tfnl_overall_ranking: {len(items)} Items")
+        return web.json_response({"status": "ok", "count": len(items)})
+    except Exception as e:
+        print(f"[API] Fehler beim Update tfnl_overall_ranking: {e}")
         return web.json_response({"error": str(e)}, status=500)
 
 
@@ -266,7 +411,11 @@ async def start():
     # CORS MIDDLEWARE
     @web.middleware
     async def cors_middleware(request, handler):
-        response = await handler(request)
+        if request.method == "OPTIONS":
+            response = web.Response(status=204)
+        else:
+            response = await handler(request)
+
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -280,9 +429,17 @@ async def start():
     app.router.add_get("/api/results", get_results)
     app.router.add_get("/api/results-db", get_results_db)
 
+    # TFNL Ranking GET Routes für Joomla
+    app.router.add_get("/api/tfnl-season-ranking", get_tfnl_season_ranking)
+    app.router.add_get("/api/tfnl-overall-ranking", get_tfnl_overall_ranking)
+
     # Bot → API update routes
     app.router.add_post("/api/update/upcoming", update_upcoming)
     app.router.add_post("/api/update/results", update_results)
+
+    # Bot/Ranking-Prozess → API update routes
+    app.router.add_post("/api/update/tfnl-season-ranking", update_tfnl_season_ranking)
+    app.router.add_post("/api/update/tfnl-overall-ranking", update_tfnl_overall_ranking)
 
     port = int(os.getenv("PORT", "10000"))
     print(f"[API] STARTING on port {port}")
