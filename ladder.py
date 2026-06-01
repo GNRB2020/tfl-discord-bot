@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v30-quota-safe-rebuild-and-standings"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v31-transient-google-error-backoff"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -211,6 +211,55 @@ SPREADSHEET_CACHE = None
 SHEET_READ_CACHE_TTL_SECONDS = int(
     os.getenv("TFNL_SHEET_CACHE_TTL_SECONDS", "300").strip()
 )
+
+TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS = int(
+    os.getenv("TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS", "30").strip()
+)
+
+TFNL_TRANSIENT_ERROR_LOG_COOLDOWN_SECONDS = int(
+    os.getenv("TFNL_TRANSIENT_ERROR_LOG_COOLDOWN_SECONDS", "3600").strip()
+)
+
+TRANSIENT_GOOGLE_ERROR_LOG_AT: dict[str, float] = {}
+
+
+def is_transient_google_api_error(error_text: str) -> bool:
+    """
+    Erkennt temporäre Google-/Netzwerkfehler, die bei späterem Versuch
+    normalerweise von allein verschwinden. Diese Fehler dürfen den Admin-Log
+    nicht im Minutentakt fluten.
+    """
+    value = normalize_text(error_text).lower()
+
+    transient_markers = (
+        "[500]",
+        "internal error encountered",
+        "[502]",
+        "[503]",
+        "backend error",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "connectionreseterror",
+        "protocolerror",
+        "read timed out",
+        "timed out",
+        "timeout",
+        "ssl",
+    )
+
+    return any(marker in value for marker in transient_markers)
+
+
+def should_log_transient_google_error(scope: str) -> bool:
+    now = time.monotonic()
+    last = TRANSIENT_GOOGLE_ERROR_LOG_AT.get(scope, 0.0)
+
+    if now - last >= TFNL_TRANSIENT_ERROR_LOG_COOLDOWN_SECONDS:
+        TRANSIENT_GOOGLE_ERROR_LOG_AT[scope] = now
+        return True
+
+    return False
 
 
 def invalidate_sheet_cache(sheet_name: str | None = None):
@@ -1996,79 +2045,38 @@ def get_open_signup_slots():
 
 def build_schedule_embed(days: int = 5) -> discord.Embed:
     upcoming = get_upcoming_schedule(days=days)
+
+    if not upcoming:
+        description = f"Keine offenen TFNL-Slots in den nächsten {days} Tagen gefunden."
+    else:
+        table_rows = []
+        for row in upcoming:
+            table_rows.append(
+                [
+                    normalize_text(row.get("Datum")),
+                    normalize_text(row.get("Slot")),
+                    normalize_text(row.get("Startzeit")),
+                    normalize_text(row.get("Modus")),
+                    normalize_text(row.get("Status")) or "planned",
+                ]
+            )
+
+        description = build_discord_table(
+            ["Datum", "Slot", "Start", "Modus", "Status"],
+            table_rows,
+            max_col_width=18,
+        )
+
     now = datetime.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
 
     embed = discord.Embed(
-        title="🗓️ TFNL-Spielplan",
+        title="TFNL-Spielplan",
+        description=description,
         color=discord.Color.dark_teal(),
     )
 
-    if not upcoming:
-        embed.description = (
-            f"**Keine offenen TFNL-Slots in den nächsten `{days}` Tagen gefunden.**\n\n"
-            "Beendete, archivierte und abgesagte Slots werden ausgeblendet."
-        )
-        embed.set_footer(text=f"Aktualisiert: {now} Uhr")
-        return embed
-
-    weekday_names = {
-        0: "Montag",
-        1: "Dienstag",
-        2: "Mittwoch",
-        3: "Donnerstag",
-        4: "Freitag",
-        5: "Samstag",
-        6: "Sonntag",
-    }
-
-    status_icons = {
-        "planned": "🟢",
-        "open": "🟢",
-        "signup_open": "🟢",
-        "paired": "🟡",
-        "countdown_sent": "🟠",
-        "running": "🔴",
-        "completed": "⚫",
-        "cancelled": "⚪",
-        "archived": "⚫",
-    }
-
-    grouped: dict[str, list[dict]] = {}
-
-    for row in upcoming:
-        datum = normalize_text(row.get("Datum"))
-        grouped.setdefault(datum, []).append(row)
-
-    for datum, rows in grouped.items():
-        parsed_date = parse_german_date(datum)
-        weekday = weekday_names.get(parsed_date.weekday(), "") if parsed_date else ""
-        field_name = f"📅 {weekday}, {datum}" if weekday else f"📅 {datum}"
-
-        lines = []
-        for row in sorted(rows, key=lambda r: normalize_text(r.get("Startzeit"))):
-            startzeit = normalize_text(row.get("Startzeit"))
-            slot = normalize_text(row.get("Slot"))
-            modus = normalize_text(row.get("Modus"))
-            status = normalize_text(row.get("Status")).lower() or "planned"
-            status_icon = status_icons.get(status, "🔹")
-
-            lines.append(
-                f"{status_icon} `{startzeit} Uhr` **{slot}** — {modus} `[{status}]`"
-            )
-
-        embed.add_field(
-            name=field_name,
-            value="\n".join(lines) or "Keine Slots",
-            inline=False,
-        )
-
-    embed.description = (
-        f"Offene TFNL-Slots der nächsten `{days}` Tage.\n"
-        "🟢 geplant/offen · 🟡 gepaart · 🔴 läuft · ⚪ abgesagt"
-    )
     embed.set_footer(text=f"Beendete Slots werden ausgeblendet | Aktualisiert: {now} Uhr")
     return embed
-
 
 
 def build_signup_embed(open_slots: list[dict]) -> discord.Embed:
@@ -2076,13 +2084,9 @@ def build_signup_embed(open_slots: list[dict]) -> discord.Embed:
 
     if not open_slots:
         description = (
-            "**Aktuell ist keine Anmeldung geöffnet.**\n\n"
-            "**Racezeiten:**\n"
-            "🟩 **Mo–Do**  `18:00` & `21:00 Uhr`\n"
-            "🟨 **Fr**     `15:00`, `18:00` & `21:00 Uhr`\n"
-            "🟦 **Sa**     `12:00`, `15:00`, `18:00` & `21:00 Uhr`\n"
-            "🟪 **So**     `12:00`, `15:00` & `21:00 Uhr`\n\n"
-            "⚔️ `18:00 Uhr` sonntags bleibt frei fürs deutsche Weekly."
+            "Aktuell ist keine Anmeldung geöffnet.\n\n"
+            "Early öffnet um `18:15 Uhr`.\n"
+            "Late öffnet um `20:15 Uhr`."
         )
         title = "TFNL-Anmeldung"
     else:
@@ -6309,6 +6313,16 @@ class LadderCog(commands.Cog):
                 await asyncio.sleep(max(60, retry_seconds))
                 return
 
+            if is_transient_google_api_error(error_text):
+                if should_log_transient_google_error("process_ladder_slots"):
+                    await self.log_tfnl(
+                        "Temporärer Google-Sheets/API-Fehler in `process_ladder_slots`. "
+                        f"Wird automatisch erneut versucht. Details: {error_text}"
+                    )
+
+                await asyncio.sleep(max(5, TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS))
+                return
+
             await self.log_tfnl(f"Fehler in process_ladder_slots: {error_text}")
 
     @process_ladder_slots.before_loop
@@ -6333,6 +6347,16 @@ class LadderCog(commands.Cog):
                     )
 
                 await asyncio.sleep(max(60, retry_seconds))
+                return
+
+            if is_transient_google_api_error(error_text):
+                if should_log_transient_google_error("auto_evaluate_finished_matches"):
+                    await self.log_tfnl(
+                        "Temporärer Google-Sheets/API-Fehler in `auto_evaluate_finished_matches`. "
+                        f"Wird automatisch erneut versucht. Details: {error_text}"
+                    )
+
+                await asyncio.sleep(max(5, TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS))
                 return
 
             await self.log_tfnl(f"Fehler in auto_evaluate_finished_matches: {error_text}")
@@ -6455,7 +6479,6 @@ class LadderCog(commands.Cog):
         description="Testet nur für dich den TFNL-DM-Ablauf Seed -> Countdown -> Race-Control.",
     )
     @app_commands.describe(
-        user="Optional: User, der die Test-DM erhalten soll. Leer = du selbst.",
         seedpause="Pause zwischen Seed-DM und Countdown-Vorbereitung in Sekunden, Standard 20.",
         preppause="Pause zwischen Countdown-Vorbereitung und echtem Countdown in Sekunden, Standard 20.",
         countdown="Countdown-Länge in Sekunden, Standard 10.",
@@ -6466,7 +6489,6 @@ class LadderCog(commands.Cog):
     async def tfnl_dmtest(
         self,
         interaction: discord.Interaction,
-        user: discord.Member = None,
         seedpause: int = 20,
         preppause: int = 20,
         countdown: int = 10,
@@ -6475,8 +6497,6 @@ class LadderCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        target_user = user or interaction.user
-
         seedpause = max(0, min(int(seedpause), 300))
         preppause = max(0, min(int(preppause), 300))
         countdown = max(3, min(int(countdown), 30))
@@ -6484,7 +6504,7 @@ class LadderCog(commands.Cog):
         async def run_background_dmtest():
             try:
                 await self.run_dm_flow_test(
-                    user=target_user,
+                    user=interaction.user,
                     countdown_seconds=countdown,
                     active=active,
                     total=total,
@@ -6494,7 +6514,7 @@ class LadderCog(commands.Cog):
             except Exception as e:
                 try:
                     await self.log_tfnl(
-                        f"DM-Test fehlgeschlagen für `{target_user.id}` — gestartet von `{interaction.user.id}` — {repr(e)}"
+                        f"DM-Test fehlgeschlagen für `{interaction.user.id}` — {repr(e)}"
                     )
                 except Exception:
                     pass
@@ -6503,7 +6523,6 @@ class LadderCog(commands.Cog):
 
         await interaction.followup.send(
             "DM-Test gestartet.\n"
-            f"Empfänger: {target_user.mention}\n"
             f"Seed-DM kommt sofort.\n"
             f"Countdown-Vorbereitung kommt nach `{seedpause}` Sekunden.\n"
             f"Echter Countdown startet `{preppause}` Sekunden danach und läuft `{countdown}` Sekunden.\n"
