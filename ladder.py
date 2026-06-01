@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v32-v31-transient-fix-on-current-base"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v33-ladderstart-hotfix"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -135,6 +135,7 @@ DEFAULT_ACTIVE_SEASON = os.getenv("TFNL_ACTIVE_SEASON", "TFNL-S1").strip()
 SCHEDULE_ANNOUNCEMENT_COL = "Signup Announcement Sent"
 SCHEDULE_COMPLETED_AT_COL = "Completed At"
 SCHEDULE_PRESTART_DM_COL = "Prestart DM Sent"
+SCHEDULE_SEED_HASH_COL = "Seed Hash"
 
 SAHASRAHBOT_PRESET_BASE_URL = (
     "https://raw.githubusercontent.com/tcprescott/sahasrahbot/master/presets/alttpr"
@@ -524,6 +525,7 @@ def get_schedule_sheet():
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_ANNOUNCEMENT_COL)
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_COMPLETED_AT_COL)
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_PRESTART_DM_COL)
+    ensure_header_column(sheet, SCHEDULE_SHEET_NAME, SCHEDULE_SEED_HASH_COL)
     ensure_header_column(sheet, SCHEDULE_SHEET_NAME, "Season")
 
     WORKSHEET_CACHE[SCHEDULE_SHEET_NAME] = sheet
@@ -1280,6 +1282,68 @@ def force_quickswap_flags(settings: dict):
     settings["quickSwap"] = True
 
 
+def normalize_seed_hash_value(value) -> str:
+    """
+    pyz3r/ALTTPR kann den Hash je nach Version unterschiedlich liefern:
+    als Liste, Tuple, Dict, String oder Callable. Wir normalisieren das für
+    die Seed-DM auf eine gut lesbare Kurzform.
+    """
+    if callable(value):
+        try:
+            value = value()
+        except TypeError:
+            return ""
+        except Exception:
+            return ""
+
+    if isinstance(value, dict):
+        preferred_keys = ("hash", "code", "hash_code", "hashCode", "items")
+        for key in preferred_keys:
+            if key in value:
+                return normalize_seed_hash_value(value.get(key))
+        value = list(value.values())
+
+    if isinstance(value, (list, tuple, set)):
+        parts = [normalize_text(part) for part in value if normalize_text(part)]
+        return " / ".join(parts)
+
+    text = normalize_text(value)
+
+    if not text:
+        return ""
+
+    text = text.strip("[](){}")
+    text = text.replace("'", "").replace('"', "")
+    text = re.sub(r"\s*,\s*", " / ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def extract_seed_hash_from_seed(seed) -> str:
+    """Best-effort-Auslesen des ALTTPR-Seed-Hashes für die Runner-DM."""
+    for attr in (
+        "hash",
+        "code",
+        "hash_code",
+        "hashCode",
+        "hash_icons",
+        "hashIcons",
+        "file_hash",
+        "fileHash",
+    ):
+        if hasattr(seed, attr):
+            seed_hash = normalize_seed_hash_value(getattr(seed, attr))
+            if seed_hash:
+                return seed_hash
+
+    data = getattr(seed, "data", None)
+    seed_hash = normalize_seed_hash_value(data)
+    if seed_hash:
+        return seed_hash
+
+    return ""
+
+
 def get_tfnl_generation_endpoint(customizer_enabled: bool) -> str:
     return "/api/customizer" if customizer_enabled else "/api/randomizer"
 
@@ -1485,6 +1549,8 @@ async def generate_alttpr_seed_for_mode(mode_name: str) -> tuple[str, dict]:
         )
 
     seed_url = str(getattr(seed, "url", "") or "").strip()
+    seed_hash = extract_seed_hash_from_seed(seed)
+    diagnostics["seed_hash"] = seed_hash
 
     if not seed_url:
         raise RuntimeError(f"ALTTPR hat keine Seed URL geliefert: {preset_key}")
@@ -1553,6 +1619,14 @@ def signup_announcement_already_sent(row: dict) -> bool:
 def get_seed_url(row: dict) -> str:
     for key in ("Seed URL", "Seed url", "Seed Url", "SeedURL", "Seed"):
         value = normalize_text(row.get(key))
+        if value:
+            return value
+    return ""
+
+
+def get_seed_hash(row: dict) -> str:
+    for key in (SCHEDULE_SEED_HASH_COL, "SeedHash", "Seed Hash", "Hash", "Hash Code", "Seed Code"):
+        value = normalize_seed_hash_value(row.get(key))
         if value:
             return value
     return ""
@@ -4472,6 +4546,19 @@ class ConfirmForfeitView(discord.ui.View):
         )
 
 
+class UndoFinishView(discord.ui.View):
+    def __init__(self, match_id: str, player_no: int):
+        super().__init__(timeout=120)
+
+        self.add_item(
+            discord.ui.Button(
+                label="Undo Finish",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"tfnl_undo_finish:{match_id}:{player_no}",
+            )
+        )
+
+
 class TfnlDmTestView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -5242,6 +5329,10 @@ class LadderCog(commands.Cog):
 
         update_schedule_cell(slot_id, "Seed URL", seed_url)
 
+        seed_hash = normalize_seed_hash_value(diagnostics.get("seed_hash"))
+        if seed_hash:
+            update_schedule_cell(slot_id, SCHEDULE_SEED_HASH_COL, seed_hash)
+
         matches = get_matches_for_slot(slot_id)
 
         for match in matches:
@@ -5252,6 +5343,7 @@ class LadderCog(commands.Cog):
 
         await self.log_tfnl(
             f"Seed erzeugt für Slot `{slot_id}`: {seed_url}"
+            + (f" | Hash: `{seed_hash}`" if seed_hash else "")
         )
 
         return seed_url
@@ -5266,6 +5358,14 @@ class LadderCog(commands.Cog):
                 f"Seed URL fehlt weiterhin für Slot `{slot_id}`. Seed-DMs wurden nicht gesendet."
             )
             return False
+
+        # Nach Seed-Erzeugung Schedule-Zeile frisch laden, damit der ggf.
+        # neu gespeicherte Seed Hash direkt in der DM erscheint.
+        _, refreshed_schedule_row = find_schedule_row(slot_id)
+        if refreshed_schedule_row:
+            schedule_row = refreshed_schedule_row
+
+        seed_hash = get_seed_hash(schedule_row)
 
         matches = get_matches_for_slot(slot_id)
         sent_to = set()
@@ -5291,7 +5391,8 @@ class LadderCog(commands.Cog):
                         f"Slot: `{normalize_text(schedule_row.get('Slot'))}`\n"
                         f"Modus: `{normalize_text(schedule_row.get('Modus'))}`\n"
                         f"Startzeit: `{normalize_text(schedule_row.get('Startzeit'))} Uhr`\n"
-                        f"Seed-Link: {seed_url}\n\n"
+                        f"Seed-Link: {seed_url}\n"
+                        f"Seed-Hash: `{seed_hash or 'nicht verfügbar'}`\n\n"
                         "Die Paarungen bleiben geheim bis zum Ergebnis.\n"
                         "Kurz vor Start kommt zuerst der Countdown.\n"
                         "Nach Countdown-Ende folgt die Race-Control-DM mit Finish-/Forfeit-Buttons und Runnercounter."
