@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v30-quota-safe-rebuild-and-standings"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v32-v31-transient-fix-on-current-base"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -211,6 +211,56 @@ SPREADSHEET_CACHE = None
 SHEET_READ_CACHE_TTL_SECONDS = int(
     os.getenv("TFNL_SHEET_CACHE_TTL_SECONDS", "300").strip()
 )
+
+TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS = int(
+    os.getenv("TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS", "30").strip()
+)
+
+TFNL_TRANSIENT_ERROR_LOG_COOLDOWN_SECONDS = int(
+    os.getenv("TFNL_TRANSIENT_ERROR_LOG_COOLDOWN_SECONDS", "3600").strip()
+)
+
+TRANSIENT_GOOGLE_ERROR_LOG_AT: dict[str, float] = {}
+
+
+def is_transient_google_api_error(error_text: str) -> bool:
+    """
+    Erkennt temporäre Google-/Netzwerkfehler, die bei späterem Versuch
+    normalerweise von allein verschwinden. Diese Fehler dürfen den Admin-Log
+    nicht im Minutentakt fluten.
+    """
+    value = normalize_text(error_text).lower()
+
+    transient_markers = (
+        "[500]",
+        "internal error encountered",
+        "[502]",
+        "[503]",
+        "backend error",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "connectionreseterror",
+        "protocolerror",
+        "read timed out",
+        "timed out",
+        "timeout",
+        "ssl",
+    )
+
+    return any(marker in value for marker in transient_markers)
+
+
+def should_log_transient_google_error(scope: str) -> bool:
+    now = time.monotonic()
+    last = TRANSIENT_GOOGLE_ERROR_LOG_AT.get(scope, 0.0)
+
+    if now - last >= TFNL_TRANSIENT_ERROR_LOG_COOLDOWN_SECONDS:
+        TRANSIENT_GOOGLE_ERROR_LOG_AT[scope] = now
+        return True
+
+    return False
+
 
 
 def invalidate_sheet_cache(sheet_name: str | None = None):
@@ -6309,6 +6359,16 @@ class LadderCog(commands.Cog):
                 await asyncio.sleep(max(60, retry_seconds))
                 return
 
+            if is_transient_google_api_error(error_text):
+                if should_log_transient_google_error("process_ladder_slots"):
+                    await self.log_tfnl(
+                        "Temporärer Google-Sheets/API-Fehler in `process_ladder_slots`. "
+                        f"Wird automatisch erneut versucht. Details: {error_text}"
+                    )
+
+                await asyncio.sleep(max(5, TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS))
+                return
+
             await self.log_tfnl(f"Fehler in process_ladder_slots: {error_text}")
 
     @process_ladder_slots.before_loop
@@ -6333,6 +6393,16 @@ class LadderCog(commands.Cog):
                     )
 
                 await asyncio.sleep(max(60, retry_seconds))
+                return
+
+            if is_transient_google_api_error(error_text):
+                if should_log_transient_google_error("auto_evaluate_finished_matches"):
+                    await self.log_tfnl(
+                        "Temporärer Google-Sheets/API-Fehler in `auto_evaluate_finished_matches`. "
+                        f"Wird automatisch erneut versucht. Details: {error_text}"
+                    )
+
+                await asyncio.sleep(max(5, TFNL_TRANSIENT_ERROR_BACKOFF_SECONDS))
                 return
 
             await self.log_tfnl(f"Fehler in auto_evaluate_finished_matches: {error_text}")
