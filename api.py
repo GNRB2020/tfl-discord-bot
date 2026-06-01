@@ -11,7 +11,8 @@ CACHE = {
     "upcoming": [],
     "results": [],
     "tfnl_season_ranking": [],
-    "tfnl_overall_ranking": []
+    "tfnl_overall_ranking": [],
+    "tfnl_results": []
 }
 
 CACHE_FILE = "cache.json"
@@ -31,6 +32,7 @@ def ensure_cache_keys():
     CACHE.setdefault("results", [])
     CACHE.setdefault("tfnl_season_ranking", [])
     CACHE.setdefault("tfnl_overall_ranking", [])
+    CACHE.setdefault("tfnl_results", [])
 
 
 def invalidate_results_db_cache():
@@ -88,7 +90,8 @@ def load_cache():
                     f"({len(CACHE.get('upcoming', []))} upcoming, "
                     f"{len(CACHE.get('results', []))} results, "
                     f"{len(CACHE.get('tfnl_season_ranking', []))} season-ranking, "
-                    f"{len(CACHE.get('tfnl_overall_ranking', []))} overall-ranking)"
+                    f"{len(CACHE.get('tfnl_overall_ranking', []))} overall-ranking, "
+                    f"{len(CACHE.get('tfnl_results', []))} tfnl-results)"
                 )
         except Exception as e:
             ensure_cache_keys()
@@ -246,6 +249,7 @@ async def health(request):
             "results": len(CACHE.get("results", [])),
             "tfnl_season_ranking": len(CACHE.get("tfnl_season_ranking", [])),
             "tfnl_overall_ranking": len(CACHE.get("tfnl_overall_ranking", [])),
+            "tfnl_results": len(CACHE.get("tfnl_results", [])),
         }
     })
 
@@ -332,6 +336,33 @@ async def get_tfnl_overall_ranking(request: web.Request):
     })
 
 
+
+async def get_tfnl_results(request: web.Request):
+    """
+    Route für den Joomla-Beitrag:
+    /api/tfnl-results
+
+    Gibt veröffentlichte TFNL-Ergebnisse aus der Ladder-History aus.
+    """
+    ensure_cache_keys()
+    limit = parse_limit(request, default=200, maximum=5000)
+    season = str(request.query.get("season", "") or "").strip()
+    mode = str(request.query.get("mode", "") or "").strip()
+
+    items = CACHE.get("tfnl_results", []) or []
+
+    if season:
+        items = [item for item in items if str(item.get("season", "")).strip() == season]
+
+    if mode and mode.upper() != "ALL":
+        items = [item for item in items if str(item.get("mode", "")).strip() == mode]
+
+    return web.json_response({
+        "items": items[:limit],
+        "count": len(items)
+    })
+
+
 # =========================================================
 # UPDATE ENDPOINTS (Bot -> API)
 # =========================================================
@@ -402,6 +433,26 @@ async def update_tfnl_overall_ranking(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+
+async def update_tfnl_results(request):
+    ensure_cache_keys()
+    try:
+        data = await request.json()
+
+        if isinstance(data, list):
+            items = data
+        else:
+            items = normalize_items_payload(data)
+
+        CACHE["tfnl_results"] = items
+        save_cache()
+        print(f"[API] UPDATED tfnl_results: {len(items)} Items")
+        return web.json_response({"status": "ok", "count": len(items)})
+    except Exception as e:
+        print(f"[API] Fehler beim Update tfnl_results: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # =========================================================
 # START SERVER
 # =========================================================
@@ -432,6 +483,7 @@ async def start():
     # TFNL Ranking GET Routes für Joomla
     app.router.add_get("/api/tfnl-season-ranking", get_tfnl_season_ranking)
     app.router.add_get("/api/tfnl-overall-ranking", get_tfnl_overall_ranking)
+    app.router.add_get("/api/tfnl-results", get_tfnl_results)
 
     # Bot → API update routes
     app.router.add_post("/api/update/upcoming", update_upcoming)
@@ -440,6 +492,7 @@ async def start():
     # Bot/Ranking-Prozess → API update routes
     app.router.add_post("/api/update/tfnl-season-ranking", update_tfnl_season_ranking)
     app.router.add_post("/api/update/tfnl-overall-ranking", update_tfnl_overall_ranking)
+    app.router.add_post("/api/update/tfnl-results", update_tfnl_results)
 
     port = int(os.getenv("PORT", "10000"))
     print(f"[API] STARTING on port {port}")
