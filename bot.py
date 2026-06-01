@@ -26,7 +26,7 @@ from tfnl_ranking_api_sync import publish_tfnl_rankings_to_api
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
-BOT_PERFORMANCE_VERSION = "bot-performance-v2-ranking-sync"
+BOT_PERFORMANCE_VERSION = "bot-performance-v3-ranking-results-sync"
 print(f"[BOT] geladen: {BOT_PERFORMANCE_VERSION}")
 
 
@@ -971,15 +971,17 @@ async def push_updates_to_api():
         ranking_result = await publish_tfnl_rankings_to_api(api_base=API_BASE)
 
         print(
-            "[PUSH] tfnl rankings -> "
+            "[PUSH] tfnl frontend -> "
             f"season={ranking_result.get('season_status')} "
             f"overall={ranking_result.get('overall_status')} "
+            f"results={ranking_result.get('results_status')} "
             f"season_count={ranking_result.get('season_count')} "
-            f"overall_count={ranking_result.get('overall_count')}"
+            f"overall_count={ranking_result.get('overall_count')} "
+            f"results_count={ranking_result.get('results_count')}"
         )
 
     except Exception as e:
-        print("[PUSH] Fehler tfnl rankings:", e)
+        print("[PUSH] Fehler tfnl frontend:", e)
 
     print("[SYNC] push_updates_to_api abgeschlossen")
     print("Upcoming Count:", len(_API_CACHE["upcoming"]["data"]))
