@@ -87,7 +87,7 @@ TFNL_RESULTS_CHANNEL_ID = int(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v33-ladderstart-hotfix"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v34-dmtest-seed-hash-visible"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -6548,6 +6548,7 @@ class LadderCog(commands.Cog):
         start_unix = int(start_dt.timestamp())
 
         seed_url = "https://alttpr.com/h/TEST-DM-FLOW"
+        seed_hash = "Hammer / Gloves / Pendant / Compass / Big Key"
 
         await user.send(
             "**TFNL Seed für deinen Slot**\n\n"
@@ -6555,7 +6556,8 @@ class LadderCog(commands.Cog):
             "Slot: `DM-Test`\n"
             "Modus: `Ambrosia`\n"
             f"Startzeit: `{start_dt.strftime('%H:%M')} Uhr`\n"
-            f"Seed-Link: {seed_url}\n\n"
+            f"Seed-Link: {seed_url}\n"
+            f"Seed-Hash: `{seed_hash}`\n\n"
             "Die Paarungen bleiben geheim bis zum Ergebnis.\n"
             "Dies ist ein persönlicher Testlauf ohne Sheet-Wertung."
         )
