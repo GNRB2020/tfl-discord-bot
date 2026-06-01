@@ -123,7 +123,6 @@ SEED_COMPARISON_HEADERS = [
 ]
 
 _WORKSHEET_CACHE: dict[str, gspread.Worksheet] = {}
-_SPREADSHEET_CACHE = None
 _ELO_SHEETS_READY = False
 _LAST_ELO_SETUP_STATUS: dict | None = None
 
@@ -162,15 +161,9 @@ def format_elo(value) -> str:
 
 
 def get_spreadsheet():
-    global _SPREADSHEET_CACHE
-
-    if _SPREADSHEET_CACHE is not None:
-        return _SPREADSHEET_CACHE
-
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
     client = gspread.authorize(creds)
-    _SPREADSHEET_CACHE = client.open_by_key(TFNL_SPREADSHEET_ID)
-    return _SPREADSHEET_CACHE
+    return client.open_by_key(TFNL_SPREADSHEET_ID)
 
 
 def get_or_create_sheet(title: str, rows: int = 1000, cols: int = 30):
@@ -429,7 +422,7 @@ def load_ratings_rows_with_index() -> list[tuple[int, dict]]:
     rows = get_all_records_cached(
         get_ratings_sheet,
         sheet_name=RATINGS_SHEET_NAME,
-        ttl_seconds=300,
+        ttl_seconds=30,
     )
     return list(enumerate(rows, start=2))
 
@@ -438,8 +431,29 @@ def load_history_rows() -> list[dict]:
     return get_all_records_cached(
         get_history_sheet,
         sheet_name=RATING_HISTORY_SHEET_NAME,
-        ttl_seconds=300,
+        ttl_seconds=30,
     )
+
+
+def load_history_event_ids(force_refresh: bool = False) -> set[str]:
+    """
+    Idempotenz-Schutz für process_match_elo().
+
+    Fehlte im aktuellen Stand, obwohl process_match_elo() die Funktion aufruft.
+    Dadurch brach die ELO-Verarbeitung nach Matchabschluss mit NameError ab.
+    """
+    rows = get_all_records_cached(
+        get_history_sheet,
+        sheet_name=RATING_HISTORY_SHEET_NAME,
+        ttl_seconds=300,
+        force_refresh=force_refresh,
+    )
+
+    return {
+        normalize_text(row.get("Rating Event ID"))
+        for row in rows
+        if normalize_text(row.get("Rating Event ID"))
+    }
 
 
 def get_match_elo_changes(
@@ -1069,7 +1083,7 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
 
     if history_rows:
         # In sinnvollen Blöcken schreiben, damit Google Sheets nicht an Payload-Größen scheitert.
-        chunk_size = 1000
+        chunk_size = 500
 
         for index in range(0, len(history_rows), chunk_size):
             chunk = history_rows[index:index + chunk_size]
