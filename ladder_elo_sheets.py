@@ -160,6 +160,28 @@ def format_elo(value) -> str:
     return str(round(float_value(value), 1))
 
 
+def format_elo_change(value) -> str:
+    """
+    Anzeigeformat für Discord/interne Rückgaben.
+    Beispiel: +16.0, -16.0, +0.0
+    """
+    return f"{float_value(value, 0.0):+.1f}"
+
+
+def format_elo_change_for_sheet(value) -> str:
+    """
+    Google Sheets interpretiert Werte mit führendem Plus bei USER_ENTERED
+    teilweise als Formel. Dadurch entsteht in der Spalte `Elo Change`
+    der Zellfehler `ERROR!`.
+
+    Ein führender Apostroph erzwingt Textspeicherung. In Google Sheets wird
+    der Apostroph nicht angezeigt; sichtbar bleibt also normal `+16.0`.
+    Negative Werte brauchen den Schutz nicht, werden aber ebenfalls sauber
+    als Text behandelt.
+    """
+    return "'" + format_elo_change(value)
+
+
 def get_spreadsheet():
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
     client = gspread.authorize(creds)
@@ -809,14 +831,14 @@ def process_match_elo(match_row: dict, schedule_row: dict | None = None) -> dict
                     format_elo(elo_before),
                     format_elo(opponent_elo),
                     format_elo(elo_after),
-                    f"{elo_change:+.1f}",
+                    format_elo_change_for_sheet(elo_change),
                     player["result_type"],
                     created_at,
                 ]
             )
 
             if scope == SCOPE_SEASON_OVERALL:
-                elo_changes[player["player_id"]] = f"{elo_change:+.1f}"
+                elo_changes[player["player_id"]] = format_elo_change(elo_change)
 
             upsert_rating_row(
                 player_id=player["player_id"],
@@ -1027,7 +1049,7 @@ def rebuild_elo_from_matches(matches_rows: list[dict], schedule_rows: list[dict]
                         format_elo(elo_before),
                         format_elo(opponent_elo),
                         format_elo(elo_after),
-                        f"{elo_change:+.1f}",
+                        format_elo_change_for_sheet(elo_change),
                         result_type,
                         created_at,
                     ]
