@@ -37,6 +37,10 @@ from ladder_elo_sheets import (
 
 from sheet_guard import get_all_records_cached
 
+MATCHES_SHEET_NAME = "Matches"
+ARCHIVE_MATCHES_SHEET_NAME = "Archive_Matches"
+
+
 
 DEFAULT_API_BASE = "https://tfl-discord-api.onrender.com"
 
@@ -288,19 +292,127 @@ def _make_time_index_key(
     )
 
 
+
+def load_match_rows_for_time_index() -> list[dict[str, Any]]:
+    """
+    Lädt Racezeiten zusätzlich direkt aus Matches + Archive_Matches.
+
+    Dort stehen die produktiven Zeitspalten:
+    - Zeit Spieler 1
+    - Zeit Spieler 2
+    - Zeit Spieler 3
+
+    Ladder_SeedComparison ist nicht in jedem Datenstand befüllt.
+    """
+    rows: list[dict[str, Any]] = []
+
+    for sheet_name in (MATCHES_SHEET_NAME, ARCHIVE_MATCHES_SHEET_NAME):
+        try:
+            loaded_rows = get_all_records_cached(
+                lambda sheet_name=sheet_name: get_or_create_sheet(sheet_name),
+                sheet_name=sheet_name,
+                ttl_seconds=30,
+            )
+            rows.extend(loaded_rows)
+        except Exception as exc:
+            print(f"[TFNL_RESULTS] {sheet_name} konnte für Zeiten nicht geladen werden: {exc}")
+
+    return rows
+
+
+def _add_time_index_entry(
+    index: dict[tuple[str, str, str, str], dict[str, str]],
+    season: str,
+    slot_id: str,
+    player_id: str,
+    player_name: str,
+    time_value: str,
+    status: str = "",
+    winner_time: str = "",
+    gap_to_winner: str = "",
+) -> None:
+    season = normalize_text(season)
+    slot_id = normalize_text(slot_id)
+    player_id = normalize_text(player_id)
+    player_name = normalize_text(player_name)
+    time_value = normalize_text(time_value)
+
+    if not season or not slot_id:
+        return
+
+    if not player_id and not player_name:
+        return
+
+    value = {
+        "time": time_value,
+        "race_time": time_value,
+        "status": normalize_text(status),
+        "winner_time": normalize_text(winner_time),
+        "gap_to_winner": normalize_text(gap_to_winner),
+    }
+
+    if player_id:
+        index[_make_time_index_key(season, slot_id, player_id, "", "id")] = value
+
+    if player_name:
+        index[_make_time_index_key(season, slot_id, "", player_name, "name")] = value
+
+
+def add_match_times_to_index(
+    index: dict[tuple[str, str, str, str], dict[str, str]],
+) -> None:
+    """
+    Ergänzt Zeiten aus dem Matches-Sheet.
+
+    Das ist der entscheidende Fallback, wenn Ladder_SeedComparison leer ist.
+    """
+    added = 0
+
+    for row in load_match_rows_for_time_index():
+        season = normalize_text(row.get("Season"))
+        slot_id = normalize_text(row.get("Slot ID"))
+
+        for player_no in (1, 2, 3):
+            player_id = normalize_text(row.get(f"Spieler {player_no} Discord ID"))
+            player_name = normalize_text(row.get(f"Spieler {player_no} Name"))
+            time_value = normalize_text(row.get(f"Zeit Spieler {player_no}"))
+            result_type = normalize_text(row.get(f"Ergebnis Spieler {player_no}"))
+
+            if not time_value:
+                continue
+
+            _add_time_index_entry(
+                index=index,
+                season=season,
+                slot_id=slot_id,
+                player_id=player_id,
+                player_name=player_name,
+                time_value=time_value,
+                status=result_type,
+            )
+            added += 1
+
+    print(f"[TFNL_RESULTS] Zeiten aus Matches ergänzt: {added}")
+
 def build_seed_time_index() -> dict[tuple[str, str, str, str], dict[str, str]]:
     """
     Baut einen Lookup für Runnerzeiten.
 
-    Primärer Schlüssel:
-    - Season + Slot ID + Player ID
+    Primär:
+    - Ladder_SeedComparison
 
     Fallback:
+    - Matches / Archive_Matches mit "Zeit Spieler 1/2/3"
+
+    Schlüssel:
+    - Season + Slot ID + Player ID
     - Season + Slot ID + Player Name
     """
     index: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    seed_rows = load_seed_comparison_rows()
+    seed_added = 0
 
-    for row in load_seed_comparison_rows():
+    for row in seed_rows:
         season = normalize_text(row.get("Season"))
         slot_id = normalize_text(row.get("Slot ID"))
         player_id = normalize_text(row.get("Player ID"))
@@ -310,27 +422,27 @@ def build_seed_time_index() -> dict[tuple[str, str, str, str], dict[str, str]]:
         winner_time = normalize_text(row.get("Winner Time"))
         gap_to_winner = normalize_text(row.get("Gap To Winner"))
 
-        if not season or not slot_id:
+        if not time_value:
             continue
 
-        if not player_id and not player_name:
-            continue
+        _add_time_index_entry(
+            index=index,
+            season=season,
+            slot_id=slot_id,
+            player_id=player_id,
+            player_name=player_name,
+            time_value=time_value,
+            status=status,
+            winner_time=winner_time,
+            gap_to_winner=gap_to_winner,
+        )
+        seed_added += 1
 
-        value = {
-            "time": time_value,
-            "status": status,
-            "winner_time": winner_time,
-            "gap_to_winner": gap_to_winner,
-        }
+    print(f"[TFNL_RESULTS] Zeiten aus SeedComparison ergänzt: {seed_added}")
 
-        if player_id:
-            index[_make_time_index_key(season, slot_id, player_id, "", "id")] = value
-
-        if player_name:
-            index[_make_time_index_key(season, slot_id, "", player_name, "name")] = value
+    add_match_times_to_index(index)
 
     return index
-
 
 def _lookup_player_time(
     time_index: dict[tuple[str, str, str, str], dict[str, str]],
