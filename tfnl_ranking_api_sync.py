@@ -26,12 +26,16 @@ from ladder_elo import (
 )
 
 from ladder_elo_sheets import (
+    SEED_COMPARISON_SHEET_NAME,
+    get_or_create_sheet,
     load_ratings_rows_with_index,
     load_history_rows,
     normalize_text,
     int_value,
     float_value,
 )
+
+from sheet_guard import get_all_records_cached
 
 
 DEFAULT_API_BASE = "https://tfl-discord-api.onrender.com"
@@ -242,9 +246,135 @@ def build_tfnl_ranking_payloads() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def _history_row_to_result_player(row: dict[str, Any]) -> dict[str, Any]:
+
+def load_seed_comparison_rows() -> list[dict[str, Any]]:
+    """
+    Lädt die tatsächlichen Runnerzeiten aus Ladder_SeedComparison.
+
+    Ladder_RatingHistory enthält die ELO-Änderungen, aber keine Zeitspalte.
+    Die Racezeiten stehen in Ladder_SeedComparison in der Spalte "Time".
+    """
+    try:
+        return get_all_records_cached(
+            lambda: get_or_create_sheet(SEED_COMPARISON_SHEET_NAME),
+            sheet_name=SEED_COMPARISON_SHEET_NAME,
+            ttl_seconds=30,
+        )
+    except Exception as exc:
+        print(f"[TFNL_RESULTS] SeedComparison konnte nicht geladen werden: {exc}")
+        return []
+
+
+def _make_time_index_key(
+    season: str,
+    slot_id: str,
+    player_id: str,
+    player_name: str,
+    key_type: str,
+) -> tuple[str, str, str, str]:
+    if key_type == "id":
+        return (
+            "id",
+            normalize_text(season),
+            normalize_text(slot_id),
+            normalize_text(player_id),
+        )
+
+    return (
+        "name",
+        normalize_text(season),
+        normalize_text(slot_id),
+        normalize_text(player_name).lower(),
+    )
+
+
+def build_seed_time_index() -> dict[tuple[str, str, str, str], dict[str, str]]:
+    """
+    Baut einen Lookup für Runnerzeiten.
+
+    Primärer Schlüssel:
+    - Season + Slot ID + Player ID
+
+    Fallback:
+    - Season + Slot ID + Player Name
+    """
+    index: dict[tuple[str, str, str, str], dict[str, str]] = {}
+
+    for row in load_seed_comparison_rows():
+        season = normalize_text(row.get("Season"))
+        slot_id = normalize_text(row.get("Slot ID"))
+        player_id = normalize_text(row.get("Player ID"))
+        player_name = normalize_text(row.get("Player Name"))
+        time_value = normalize_text(row.get("Time"))
+        status = normalize_text(row.get("Status"))
+        winner_time = normalize_text(row.get("Winner Time"))
+        gap_to_winner = normalize_text(row.get("Gap To Winner"))
+
+        if not season or not slot_id:
+            continue
+
+        if not player_id and not player_name:
+            continue
+
+        value = {
+            "time": time_value,
+            "status": status,
+            "winner_time": winner_time,
+            "gap_to_winner": gap_to_winner,
+        }
+
+        if player_id:
+            index[_make_time_index_key(season, slot_id, player_id, "", "id")] = value
+
+        if player_name:
+            index[_make_time_index_key(season, slot_id, "", player_name, "name")] = value
+
+    return index
+
+
+def _lookup_player_time(
+    time_index: dict[tuple[str, str, str, str], dict[str, str]],
+    row: dict[str, Any],
+) -> dict[str, str]:
+    season = normalize_text(row.get("Season"))
+    slot_id = normalize_text(row.get("Slot ID"))
+    player_id = normalize_text(row.get("Player ID"))
+    player_name = normalize_text(row.get("Player Name"))
+
+    if player_id:
+        by_id = time_index.get(
+            _make_time_index_key(season, slot_id, player_id, "", "id")
+        )
+
+        if by_id:
+            return by_id
+
+    if player_name:
+        by_name = time_index.get(
+            _make_time_index_key(season, slot_id, "", player_name, "name")
+        )
+
+        if by_name:
+            return by_name
+
+    return {
+        "time": normalize_text(time_data.get("time")),
+        "race_time": normalize_text(time_data.get("time")),
+        "status": normalize_text(time_data.get("status")),
+        "winner_time": normalize_text(time_data.get("winner_time")),
+        "gap_to_winner": normalize_text(time_data.get("gap_to_winner")),
+        "status": "",
+        "winner_time": "",
+        "gap_to_winner": "",
+    }
+
+def _history_row_to_result_player(
+    row: dict[str, Any],
+    time_index: dict[tuple[str, str, str, str], dict[str, str]],
+) -> dict[str, Any]:
     result_type = normalize_text(row.get("Result Type"))
     normalized_result = result_type.lower()
+    time_data = _lookup_player_time(time_index, row)
 
     if normalized_result == "sieg":
         result = "win"
@@ -303,6 +433,7 @@ def build_tfnl_results_payload() -> list[dict[str, Any]]:
       Rating Event ID.
     """
     history_rows = load_history_rows()
+    time_index = build_seed_time_index()
     grouped: dict[str, dict[str, Any]] = {}
 
     for row in history_rows:
@@ -337,7 +468,7 @@ def build_tfnl_results_payload() -> list[dict[str, Any]]:
             "_seen_players": set(),
         })
 
-        player = _history_row_to_result_player(row)
+        player = _history_row_to_result_player(row, time_index)
         player_key = player["player_id"] or player["player_name"]
 
         if player_key and player_key not in item["_seen_players"]:
