@@ -358,11 +358,8 @@ def _lookup_player_time(
             return by_name
 
     return {
-        "time": normalize_text(time_data.get("time")),
-        "race_time": normalize_text(time_data.get("time")),
-        "status": normalize_text(time_data.get("status")),
-        "winner_time": normalize_text(time_data.get("winner_time")),
-        "gap_to_winner": normalize_text(time_data.get("gap_to_winner")),
+        "time": "",
+        "race_time": "",
         "status": "",
         "winner_time": "",
         "gap_to_winner": "",
@@ -391,7 +388,11 @@ def _history_row_to_result_player(
         "score": float_value(row.get("Score"), 0.0),
         "result_type": result_type,
         "result": result,
-        "time": "",
+        "time": normalize_text(time_data.get("time")),
+        "race_time": normalize_text(time_data.get("time")),
+        "status": normalize_text(time_data.get("status")),
+        "winner_time": normalize_text(time_data.get("winner_time")),
+        "gap_to_winner": normalize_text(time_data.get("gap_to_winner")),
         "elo_before": float_value(row.get("Elo Before"), 1000.0),
         "elo_after": float_value(row.get("Elo After"), 1000.0),
         "elo_change": float_value(row.get("Elo Change"), 0.0),
@@ -434,6 +435,7 @@ def build_tfnl_results_payload() -> list[dict[str, Any]]:
     """
     history_rows = load_history_rows()
     time_index = build_seed_time_index()
+    print(f"[TFNL_RESULTS] Time-Index geladen: {len(time_index)} Schlüssel")
     grouped: dict[str, dict[str, Any]] = {}
 
     for row in history_rows:
