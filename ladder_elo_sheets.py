@@ -662,12 +662,33 @@ def build_pairing_players(
             SCOPE_ALLTIME_MODE,
             START_ELO,
         )
+        season_overall_elo = get_rating_value(
+            player_id,
+            season,
+            "",
+            SCOPE_SEASON_OVERALL,
+            START_ELO,
+        )
+        alltime_overall_elo = get_rating_value(
+            player_id,
+            "ALL_TIME",
+            "",
+            SCOPE_ALLTIME_OVERALL,
+            START_ELO,
+        )
+
+        pairing_elo = (
+            0.35 * season_mode_elo
+            + 0.15 * alltime_mode_elo
+            + 0.35 * season_overall_elo
+            + 0.15 * alltime_overall_elo
+        )
 
         players.append(
             PairingPlayer(
                 player_id=player_id,
                 name=name,
-                pairing_elo=calculate_pairing_elo(season_mode_elo, alltime_mode_elo),
+                pairing_elo=pairing_elo,
             )
         )
 
