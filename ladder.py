@@ -102,7 +102,7 @@ TFNL_RESULTS_CHANNEL_INFO_MESSAGE = os.getenv(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v41-avianart-seed-integration"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v42-seed-test-choice-fix"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -7482,12 +7482,6 @@ class LadderCog(commands.Cog):
             app_commands.Choice(name="MC Boss", value="MC Boss"),
             app_commands.Choice(name="Influkeys", value="Influkeys"),
             app_commands.Choice(name="Crosskeys", value="Crosskeys"),
-            app_commands.Choice(name="Enemizer", value="Enemizer"),
-            app_commands.Choice(name="Bosshunt", value="Bosshunt"),
-            app_commands.Choice(name="Logischer Enemizer", value="Logischer Enemizer"),
-            app_commands.Choice(name="Swapkeys", value="Swapkeys"),
-            app_commands.Choice(name="Crosskeys 2024", value="Crosskeys 2024"),
-            app_commands.Choice(name="Cabookey", value="Cabookey"),
         ]
     )
     async def ladder_mode_standings(
@@ -7555,6 +7549,12 @@ class LadderCog(commands.Cog):
             app_commands.Choice(name="MC Boss", value="MC Boss"),
             app_commands.Choice(name="Influkeys", value="Influkeys"),
             app_commands.Choice(name="Crosskeys", value="Crosskeys"),
+            app_commands.Choice(name="Enemizer", value="Enemizer"),
+            app_commands.Choice(name="Bosshunt", value="Bosshunt"),
+            app_commands.Choice(name="Logischer Enemizer", value="Logischer Enemizer"),
+            app_commands.Choice(name="Swapkeys", value="Swapkeys"),
+            app_commands.Choice(name="Crosskeys 2024", value="Crosskeys 2024"),
+            app_commands.Choice(name="Cabookey", value="Cabookey"),
         ]
     )
     async def ladder_seed_test(
