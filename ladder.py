@@ -101,7 +101,7 @@ TFNL_RESULTS_CHANNEL_INFO_MESSAGE = os.getenv(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v36-nightly-results-channel-cleanup"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v39-enemizer-seed-mapping"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -327,6 +327,7 @@ TFNL_MODE_PRESETS = {
     "mc boss": "phoenix-aut/mcboss",
     "influkeys": "alttprleague/influkeys",
     "crosskeys": "crosskeys",
+    "enemizer": "enemizer",
 }
 
 TFNL_MODE_ALIASES = {
@@ -357,6 +358,11 @@ TFNL_MODE_ALIASES = {
 
     "xkeys": "crosskeys",
     "cross keys": "crosskeys",
+
+    "enemy": "enemizer",
+    "enemy shuffle": "enemizer",
+    "enemyshuffle": "enemizer",
+    "enemizer": "enemizer",
 
     "mcboss": "mc boss",
     "phoenix-aut/mcboss": "mc boss",
@@ -809,8 +815,8 @@ def append_matches(match_rows: list[list]):
         ],
     )
 
-def find_schedule_row(slot_id: str):
-    for row_index, row in load_schedule_rows_with_index():
+def find_schedule_row(slot_id: str, force_refresh: bool = False):
+    for row_index, row in load_schedule_rows_with_index(force_refresh=force_refresh):
         if normalize_text(row.get("Slot ID")) == slot_id:
             return row_index, row
 
@@ -2423,9 +2429,9 @@ def matches_already_created(slot_id: str) -> bool:
     return any(normalize_text(row.get("Slot ID")) == slot_id for row in rows)
 
 
-def get_matches_for_slot(slot_id: str) -> list[dict]:
+def get_matches_for_slot(slot_id: str, force_refresh: bool = False) -> list[dict]:
     return [
-        row for row in load_matches_rows()
+        row for row in load_matches_rows(force_refresh=force_refresh)
         if normalize_text(row.get("Slot ID")) == slot_id
     ]
 
@@ -5420,6 +5426,12 @@ class LadderCog(commands.Cog):
     async def send_seed_dms(self, schedule_row: dict):
         slot_id = normalize_text(schedule_row.get("Slot ID"))
 
+        # Der manuelle Seed-Step wird oft direkt nach Pairing/Seed-Eintrag ausgeführt.
+        # Deshalb hier bewusst frische Sheet-Daten erzwingen und nicht den 300s-Cache nutzen.
+        _, refreshed_schedule_row = find_schedule_row(slot_id, force_refresh=True)
+        if refreshed_schedule_row:
+            schedule_row = refreshed_schedule_row
+
         seed_url = await self.ensure_seed_url_for_slot(schedule_row)
 
         if not seed_url:
@@ -5428,15 +5440,15 @@ class LadderCog(commands.Cog):
             )
             return False
 
-        # Nach Seed-Erzeugung Schedule-Zeile frisch laden, damit der ggf.
-        # neu gespeicherte Seed Hash direkt in der DM erscheint.
-        _, refreshed_schedule_row = find_schedule_row(slot_id)
+        # Nach ggf. automatischer Seed-Erzeugung erneut frisch laden, damit Seed URL/Hash
+        # aus dem Sheet sicher in der DM landen.
+        _, refreshed_schedule_row = find_schedule_row(slot_id, force_refresh=True)
         if refreshed_schedule_row:
             schedule_row = refreshed_schedule_row
 
         seed_hash = get_seed_hash(schedule_row)
 
-        matches = get_matches_for_slot(slot_id)
+        matches = get_matches_for_slot(slot_id, force_refresh=True)
         sent_to = set()
 
         if not matches:
