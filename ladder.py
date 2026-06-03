@@ -102,7 +102,7 @@ TFNL_RESULTS_CHANNEL_INFO_MESSAGE = os.getenv(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v43-countdown-timing-logs"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v44-dmtest-countdown-fix"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -7033,8 +7033,116 @@ class LadderCog(commands.Cog):
         if seedpause_seconds > 0:
             await asyncio.sleep(seedpause_seconds)
 
-        countdown_message = await user.send(
-            build_countdown_dm_content(start_unix)
+        try:
+            countdown_spike_log_seconds = float(
+                os.getenv("TFNL_COUNTDOWN_DISCORD_SPIKE_SECONDS", "0.75").strip()
+            )
+        except Exception:
+            countdown_spike_log_seconds = 0.75
+
+        try:
+            countdown_debug_delay_seconds = float(
+                os.getenv("TFNL_COUNTDOWN_DEBUG_DELAY_SECONDS", "0").strip()
+            )
+        except Exception:
+            countdown_debug_delay_seconds = 0.0
+
+        countdown_verbose_discord_log = normalize_text(
+            os.getenv("TFNL_COUNTDOWN_VERBOSE_DISCORD_LOG", "")
+        ).lower() in ("1", "true", "ja", "yes", "on")
+
+        dmtest_player_id = normalize_text(getattr(user, "id", "dmtest"))
+        dmtest_match_id = "DM-TEST"
+
+        async def log_dmtest_countdown_request(
+            *,
+            action: str,
+            value_label: str,
+            duration: float,
+            failed: bool = False,
+            error: Exception | None = None,
+        ):
+            message = (
+                f"DM-Test-Countdown-Discord-{action}: Spieler `{dmtest_player_id}`, "
+                f"Match `{dmtest_match_id}`, Wert `{value_label}`, Dauer `{duration:.3f}s`"
+            )
+
+            if failed and error is not None:
+                message += f", Fehler `{repr(error)}`"
+
+            print(f"[TFNL] {message}")
+
+            if failed or countdown_verbose_discord_log or duration >= countdown_spike_log_seconds:
+                await self.log_tfnl(message)
+
+        async def run_dmtest_discord_request(
+            *,
+            action: str,
+            value_label: str,
+            request_coro_factory,
+        ):
+            request_started = time.monotonic()
+
+            if countdown_debug_delay_seconds > 0:
+                await asyncio.sleep(countdown_debug_delay_seconds)
+
+            try:
+                result = await request_coro_factory()
+                duration = time.monotonic() - request_started
+                await log_dmtest_countdown_request(
+                    action=action,
+                    value_label=value_label,
+                    duration=duration,
+                )
+                return result
+            except Exception as e:
+                duration = time.monotonic() - request_started
+                await log_dmtest_countdown_request(
+                    action=action,
+                    value_label=value_label,
+                    duration=duration,
+                    failed=True,
+                    error=e,
+                )
+                raise
+
+        async def send_or_edit_dmtest_countdown(
+            message,
+            content: str,
+            *,
+            value_label: str,
+        ):
+            if message is None:
+                return await run_dmtest_discord_request(
+                    action="send",
+                    value_label=value_label,
+                    request_coro_factory=lambda: user.send(content),
+                )
+
+            try:
+                await run_dmtest_discord_request(
+                    action="edit",
+                    value_label=value_label,
+                    request_coro_factory=lambda: message.edit(content=content),
+                )
+                return message
+            except Exception:
+                return await run_dmtest_discord_request(
+                    action="fallback_send",
+                    value_label=value_label,
+                    request_coro_factory=lambda: user.send(content),
+                )
+
+        def ceil_positive_seconds(value: float) -> int:
+            if value <= 0:
+                return 0
+
+            return int(value + 0.999)
+
+        countdown_message = await send_or_edit_dmtest_countdown(
+            None,
+            build_countdown_dm_content(start_unix),
+            value_label="prepared",
         )
 
         if preppause_seconds > 0:
@@ -7050,33 +7158,32 @@ class LadderCog(commands.Cog):
                 await asyncio.sleep(min(remaining, 0.25))
 
         start_deadline = time.monotonic() + countdown_seconds
+        last_value = None
 
-        for value in range(countdown_seconds, 0, -1):
-            target = start_deadline - value
-            await sleep_until_monotonic(target)
+        while True:
+            remaining_seconds = ceil_positive_seconds(start_deadline - time.monotonic())
 
-            if time.monotonic() >= start_deadline - 0.10:
+            if remaining_seconds <= 0:
                 break
 
-            try:
-                await countdown_message.edit(
-                    content=build_countdown_dm_content(start_unix, value=value)
+            if remaining_seconds != last_value:
+                countdown_message = await send_or_edit_dmtest_countdown(
+                    countdown_message,
+                    build_countdown_dm_content(start_unix, value=remaining_seconds),
+                    value_label=str(remaining_seconds),
                 )
-            except Exception:
-                countdown_message = await user.send(
-                    build_countdown_dm_content(start_unix, value=value)
-                )
+                last_value = remaining_seconds
+
+            next_tick_target = start_deadline - max(0, remaining_seconds - 1)
+            await sleep_until_monotonic(next_tick_target)
 
         await sleep_until_monotonic(start_deadline)
 
-        try:
-            await countdown_message.edit(
-                content=build_countdown_dm_content(start_unix, started=True)
-            )
-        except Exception:
-            await user.send(
-                build_countdown_dm_content(start_unix, started=True)
-            )
+        await send_or_edit_dmtest_countdown(
+            countdown_message,
+            build_countdown_dm_content(start_unix, started=True),
+            value_label="started",
+        )
 
         await user.send(
             "🔴 **TFNL RACE-CONTROL** 🔴\n\n"
