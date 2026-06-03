@@ -102,7 +102,7 @@ TFNL_RESULTS_CHANNEL_INFO_MESSAGE = os.getenv(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v40-sahasrahbot-user-preset-downloads"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v41-avianart-seed-integration"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -159,6 +159,16 @@ SAHASRAHBOT_PRESET_BASE_URL = (
 SAHASRAHBOT_USER_PRESET_DOWNLOAD_BASE_URL = (
     "https://sahasrahbotapi.synack.live/presets/download"
 )
+
+AVIANART_API_BASE_URL = os.getenv(
+    "AVIANART_API_BASE_URL",
+    "https://avianart.games/api.php",
+).strip()
+
+AVIANART_PERM_BASE_URL = os.getenv(
+    "AVIANART_PERM_BASE_URL",
+    "https://avianart.games/perm",
+).strip().rstrip("/")
 
 SIGNUP_HEADERS = [
     "Slot ID",
@@ -333,6 +343,14 @@ TFNL_MODE_PRESETS = {
     "influkeys": "alttprleague/influkeys",
     "crosskeys": "crosskeys",
     "enemizer": "enemizer",
+
+    # AvianART / PedChicken-nahe Presets
+    # Format: avianart:<preset>
+    "bosshunt": "avianart:league_bosshunt",
+    "logischer enemizer": "avianart:randomorris/enemizer",
+    "swapkeys": "avianart:Swapkeys",
+    "crosskeys 2024": "avianart:Jem041/Crosskeys2024",
+    "cabookey": "avianart:kaesden/cabookey",
 }
 
 TFNL_MODE_ALIASES = {
@@ -368,6 +386,26 @@ TFNL_MODE_ALIASES = {
     "enemy shuffle": "enemizer",
     "enemyshuffle": "enemizer",
     "enemizer": "enemizer",
+
+    "boss hunt": "bosshunt",
+    "bosshunt": "bosshunt",
+    "league bosshunt": "bosshunt",
+    "league_bosshunt": "bosshunt",
+
+    "logical enemizer": "logischer enemizer",
+    "logischer enemy": "logischer enemizer",
+    "logischer enemizer": "logischer enemizer",
+    "randomorris/enemizer": "logischer enemizer",
+
+    "swap keys": "swapkeys",
+    "swapkeys": "swapkeys",
+
+    "crosskeys2024": "crosskeys 2024",
+    "crosskeys 2024": "crosskeys 2024",
+    "jem041/crosskeys2024": "crosskeys 2024",
+
+    "cabookey": "cabookey",
+    "kaesden/cabookey": "cabookey",
 
     "mcboss": "mc boss",
     "phoenix-aut/mcboss": "mc boss",
@@ -1271,6 +1309,11 @@ def build_sahasrahbot_preset_url(preset_key: str) -> str:
     if preset_key.startswith("http://") or preset_key.startswith("https://"):
         return preset_key
 
+    # AvianART-Presets haben keine SahasrahBot-YAML.
+    if preset_key.startswith("avianart:"):
+        avianart_preset = preset_key.split(":", 1)[1]
+        return build_avianart_generate_url(avianart_preset)
+
     # Öffentliche SahasrahBot-Standardpresets liegen als YAML im GitHub-Repo.
     # User-Presets wie `mormacil/harder_standard`, `phoenix-aut/mcboss`
     # oder `alttprleague/influkeys` liegen NICHT im GitHub-Repo unter
@@ -1283,6 +1326,29 @@ def build_sahasrahbot_preset_url(preset_key: str) -> str:
         return f"{SAHASRAHBOT_USER_PRESET_DOWNLOAD_BASE_URL}/{owner}/alttpr/{preset_name}"
 
     return f"{SAHASRAHBOT_PRESET_BASE_URL}/{preset_key}.yaml"
+
+
+def is_avianart_preset_key(preset_key: str) -> bool:
+    return normalize_text(preset_key).startswith("avianart:")
+
+
+def get_avianart_preset_name(preset_key: str) -> str:
+    preset_key = normalize_text(preset_key)
+
+    if not preset_key.startswith("avianart:"):
+        return ""
+
+    return preset_key.split(":", 1)[1].strip()
+
+
+def build_avianart_generate_url(avianart_preset: str) -> str:
+    avianart_preset = normalize_text(avianart_preset)
+    return f"{AVIANART_API_BASE_URL}?action=generate&preset={quote(avianart_preset, safe='/')}"
+
+
+def build_avianart_perm_url(permalink_hash: str) -> str:
+    permalink_hash = normalize_text(permalink_hash)
+    return f"{AVIANART_PERM_BASE_URL}/{permalink_hash}"
 
 
 async def fetch_yaml_url(url: str) -> dict:
@@ -1530,12 +1596,136 @@ def build_seed_diagnostics(
     }
 
 
+def unwrap_avianart_response(data):
+    if isinstance(data, dict) and "response" in data and isinstance(data.get("response"), dict):
+        return data.get("response")
+
+    return data
+
+
+def extract_avianart_permalink_hash(data: dict) -> str:
+    data = unwrap_avianart_response(data)
+
+    if not isinstance(data, dict):
+        return ""
+
+    for key in ("hash", "permalink", "permalink_hash", "permalinkHash", "seed_hash", "seedHash"):
+        value = normalize_text(data.get(key))
+        if value:
+            if "/perm/" in value:
+                return value.rstrip("/").split("/perm/", 1)[1].split("?", 1)[0].strip("/")
+            return value
+
+    return ""
+
+
+def extract_avianart_seed_hash(data: dict) -> str:
+    data = unwrap_avianart_response(data)
+
+    if not isinstance(data, dict):
+        return ""
+
+    spoiler = data.get("spoiler")
+    if isinstance(spoiler, dict):
+        meta = spoiler.get("meta")
+        if isinstance(meta, dict):
+            seed_hash = normalize_seed_hash_value(meta.get("hash"))
+            if seed_hash:
+                return seed_hash
+
+    meta = data.get("meta")
+    if isinstance(meta, dict):
+        seed_hash = normalize_seed_hash_value(meta.get("hash"))
+        if seed_hash:
+            return seed_hash
+
+    for key in ("seed_hash", "seedHash", "hash_code", "hashCode", "code"):
+        seed_hash = normalize_seed_hash_value(data.get(key))
+        if seed_hash:
+            return seed_hash
+
+    return ""
+
+
+async def generate_avianart_seed_for_mode(mode_name: str, preset_key: str) -> tuple[str, dict]:
+    canonical_mode = get_canonical_mode_name(mode_name)
+    avianart_preset = get_avianart_preset_name(preset_key)
+
+    if not avianart_preset:
+        raise RuntimeError(f"Ungültiges AvianART-Preset für Modus `{mode_name}`: `{preset_key}`")
+
+    generate_url = build_avianart_generate_url(avianart_preset)
+    payload = [{"args": {"race": True}}]
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            generate_url,
+            json=payload,
+            timeout=90,
+            headers={"Content-Type": "application/json"},
+        ) as response:
+            response_text = await response.text()
+
+            if response.status != 200:
+                raise RuntimeError(
+                    f"AvianART Seed-Erzeugung fehlgeschlagen: HTTP {response.status} | {response_text[:800]}"
+                )
+
+            try:
+                data = await response.json(content_type=None)
+            except Exception as e:
+                raise RuntimeError(
+                    f"AvianART lieferte keine gültige JSON-Antwort: {repr(e)} | {response_text[:800]}"
+                )
+
+    response_data = unwrap_avianart_response(data)
+
+    if isinstance(data, dict):
+        api_status = data.get("status")
+        if api_status not in (None, 200, "200", True, "ok", "OK"):
+            raise RuntimeError(f"AvianART meldet Status `{api_status}`: {str(data)[:800]}")
+
+    permalink_hash = extract_avianart_permalink_hash(response_data)
+    seed_hash = extract_avianart_seed_hash(response_data)
+
+    if not permalink_hash:
+        raise RuntimeError(f"AvianART hat keinen Permalink-Hash geliefert: {str(data)[:800]}")
+
+    seed_url = build_avianart_perm_url(permalink_hash)
+
+    diagnostics = {
+        "mode": mode_name,
+        "canonical_mode": canonical_mode,
+        "preset_key": preset_key,
+        "preset_url": generate_url,
+        "customizer": False,
+        "mode_setting": "avianart",
+        "entrances": "",
+        "dungeon_items": "",
+        "accessibility": "",
+        "eq": [],
+        "has_pegasus_boots": False,
+        "quickswap_flags_set": False,
+        "allow_quickswap": "",
+        "endpoint": "AvianART api.php?action=generate",
+        "pyz3r_api": "AvianART.generate",
+        "seed_hash": seed_hash,
+        "avianart_preset": avianart_preset,
+        "avianart_permalink_hash": permalink_hash,
+    }
+
+    return seed_url, diagnostics
+
+
 async def generate_alttpr_seed_for_mode(mode_name: str) -> tuple[str, dict]:
     canonical_mode = get_canonical_mode_name(mode_name)
     preset_key = get_preset_key_for_mode(canonical_mode)
 
     if not preset_key:
         raise RuntimeError(f"Kein Seed-Mapping für Modus `{mode_name}` gefunden.")
+
+    if is_avianart_preset_key(preset_key):
+        return await generate_avianart_seed_for_mode(mode_name, preset_key)
 
     preset_url = build_sahasrahbot_preset_url(preset_key)
     preset_data = await fetch_yaml_url(preset_url)
@@ -5407,8 +5597,8 @@ class LadderCog(commands.Cog):
 
         try:
             await self.log_tfnl(
-                f"Erzeuge ALTTPR-Seed für Slot `{slot_id}` / Modus `{mode_name}` / "
-                f"Preset `{preset_key}` / YAML `{build_sahasrahbot_preset_url(preset_key)}` ..."
+                f"Erzeuge TFNL-Seed für Slot `{slot_id}` / Modus `{mode_name}` / "
+                f"Preset `{preset_key}` / Quelle `{build_sahasrahbot_preset_url(preset_key)}` ..."
             )
 
             seed_url, diagnostics = await generate_alttpr_seed_for_mode(mode_name)
@@ -5416,8 +5606,8 @@ class LadderCog(commands.Cog):
             await self.log_tfnl(
                 f"Seed-Validierung OK für Slot `{slot_id}` / Modus `{mode_name}` / "
                 f"Preset `{diagnostics['preset_key']}` / "
-                f"Customizer `{diagnostics['customizer']}` / "
-                f"PegasusBoots `{diagnostics['has_pegasus_boots']}`"
+                f"API `{diagnostics.get('pyz3r_api')}` / "
+                f"Quelle `{diagnostics.get('preset_url')}`"
             )
 
         except Exception as e:
@@ -7292,6 +7482,12 @@ class LadderCog(commands.Cog):
             app_commands.Choice(name="MC Boss", value="MC Boss"),
             app_commands.Choice(name="Influkeys", value="Influkeys"),
             app_commands.Choice(name="Crosskeys", value="Crosskeys"),
+            app_commands.Choice(name="Enemizer", value="Enemizer"),
+            app_commands.Choice(name="Bosshunt", value="Bosshunt"),
+            app_commands.Choice(name="Logischer Enemizer", value="Logischer Enemizer"),
+            app_commands.Choice(name="Swapkeys", value="Swapkeys"),
+            app_commands.Choice(name="Crosskeys 2024", value="Crosskeys 2024"),
+            app_commands.Choice(name="Cabookey", value="Cabookey"),
         ]
     )
     async def ladder_mode_standings(
@@ -7385,7 +7581,7 @@ class LadderCog(commands.Cog):
                 "**Seed-Test fehlgeschlagen.**\n\n"
                 f"Modus: `{mode_name}`\n"
                 f"Preset: `{preset_key}`\n"
-                f"YAML: `{build_sahasrahbot_preset_url(preset_key)}`\n\n"
+                f"Quelle: `{build_sahasrahbot_preset_url(preset_key)}`\n\n"
                 f"Fehler:\n```{repr(e)}```",
                 ephemeral=True,
             )
@@ -7410,6 +7606,8 @@ class LadderCog(commands.Cog):
             f"Quick-Swap-Flags: `gesetzt`\n"
             f"API: `{diagnostics.get('pyz3r_api')}`\n"
             f"Endpoint: `{diagnostics.get('endpoint')}`\n"
+            f"AvianART-Preset: `{diagnostics.get('avianart_preset', '-')}`\n"
+            f"Seed-Hash: `{normalize_seed_hash_value(diagnostics.get('seed_hash')) or '-'}`\n"
             f"Seed: {seed_url}\n\n"
             "Es wurde nichts ins Sheet geschrieben und keine DM verschickt.",
             ephemeral=True,
