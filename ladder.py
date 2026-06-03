@@ -102,7 +102,7 @@ TFNL_RESULTS_CHANNEL_INFO_MESSAGE = os.getenv(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v42-seed-test-choice-fix"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v43-countdown-timing-logs"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -5726,6 +5726,7 @@ class LadderCog(commands.Cog):
 
         matches = get_matches_for_slot(slot_id)
         sent_to = set()
+        prepared_count = 0
 
         if not matches:
             await self.log_tfnl(f"Countdown nicht möglich: Keine Matches für Slot `{slot_id}` gefunden.")
@@ -5734,12 +5735,36 @@ class LadderCog(commands.Cog):
         countdown_start_dt = start_dt - timedelta(seconds=10)
         start_unix = int(start_dt.timestamp())
 
+        try:
+            countdown_spike_log_seconds = float(
+                os.getenv("TFNL_COUNTDOWN_DISCORD_SPIKE_SECONDS", "0.75").strip()
+            )
+        except Exception:
+            countdown_spike_log_seconds = 0.75
+
+        try:
+            countdown_debug_delay_seconds = float(
+                os.getenv("TFNL_COUNTDOWN_DEBUG_DELAY_SECONDS", "0").strip()
+            )
+        except Exception:
+            countdown_debug_delay_seconds = 0.0
+
+        countdown_verbose_discord_log = normalize_text(
+            os.getenv("TFNL_COUNTDOWN_VERBOSE_DISCORD_LOG", "")
+        ).lower() in ("1", "true", "ja", "yes", "on")
+
         def build_monotonic_deadlines():
             now_wall = datetime.now(BERLIN_TZ)
             now_mono = time.monotonic()
             start_delay = max(0.0, (start_dt - now_wall).total_seconds())
             countdown_delay = max(0.0, (countdown_start_dt - now_wall).total_seconds())
             return now_mono + countdown_delay, now_mono + start_delay
+
+        def ceil_positive_seconds(value: float) -> int:
+            if value <= 0:
+                return 0
+
+            return int(value + 0.999)
 
         async def sleep_until_monotonic(target_mono: float):
             while True:
@@ -5750,47 +5775,147 @@ class LadderCog(commands.Cog):
 
                 await asyncio.sleep(min(remaining, 0.25))
 
+        async def log_countdown_request(
+            *,
+            action: str,
+            player_id: str,
+            match_id: str,
+            value_label: str,
+            duration: float,
+            failed: bool = False,
+            error: Exception | None = None,
+        ):
+            message = (
+                f"Countdown-Discord-{action}: Slot `{slot_id}`, Spieler `{player_id}`, "
+                f"Match `{match_id}`, Wert `{value_label}`, Dauer `{duration:.3f}s`"
+            )
+
+            if failed and error is not None:
+                message += f", Fehler `{repr(error)}`"
+
+            print(f"[TFNL] {message}")
+
+            if failed or countdown_verbose_discord_log or duration >= countdown_spike_log_seconds:
+                await self.log_tfnl(message)
+
+        async def run_discord_countdown_request(
+            *,
+            action: str,
+            player_id: str,
+            match_id: str,
+            value_label: str,
+            request_coro_factory,
+        ):
+            request_started = time.monotonic()
+
+            if countdown_debug_delay_seconds > 0:
+                await asyncio.sleep(countdown_debug_delay_seconds)
+
+            try:
+                result = await request_coro_factory()
+                duration = time.monotonic() - request_started
+                await log_countdown_request(
+                    action=action,
+                    player_id=player_id,
+                    match_id=match_id,
+                    value_label=value_label,
+                    duration=duration,
+                )
+                return result
+            except Exception as e:
+                duration = time.monotonic() - request_started
+                await log_countdown_request(
+                    action=action,
+                    player_id=player_id,
+                    match_id=match_id,
+                    value_label=value_label,
+                    duration=duration,
+                    failed=True,
+                    error=e,
+                )
+                raise
+
         async def send_or_edit_countdown(
             user: discord.User,
             message,
             content: str,
+            *,
+            player_id: str,
+            match_id: str,
+            value_label: str,
         ):
             if message is None:
-                return await user.send(content)
+                return await run_discord_countdown_request(
+                    action="send",
+                    player_id=player_id,
+                    match_id=match_id,
+                    value_label=value_label,
+                    request_coro_factory=lambda: user.send(content),
+                )
 
             try:
-                await message.edit(content=content)
+                await run_discord_countdown_request(
+                    action="edit",
+                    player_id=player_id,
+                    match_id=match_id,
+                    value_label=value_label,
+                    request_coro_factory=lambda: message.edit(content=content),
+                )
                 return message
             except Exception:
-                return await user.send(content)
+                return await run_discord_countdown_request(
+                    action="fallback_send",
+                    player_id=player_id,
+                    match_id=match_id,
+                    value_label=value_label,
+                    request_coro_factory=lambda: user.send(content),
+                )
 
         async def countdown(user: discord.User, player_id: str, match_id: str, player_no: int):
             try:
                 countdown_deadline, start_deadline = build_monotonic_deadlines()
 
-                # Reihenfolge v21:
-                # Seed-DM -> Countdown-DM -> Race gestartet -> danach Race-Control-DM.
+                # Reihenfolge:
+                # Seed-DM -> Countdown-DM -> Race gestartet -> danach Race-Control-DM via send_start_dms().
+                # v43:
+                # Countdown-Wert wird nicht mehr blind als 10..1-Sequenz abgespult,
+                # sondern vor jedem Edit aus der echten Restzeit bis zur Start-Deadline berechnet.
                 message = await send_or_edit_countdown(
                     user,
                     None,
                     build_countdown_dm_content(start_unix),
+                    player_id=player_id,
+                    match_id=match_id,
+                    value_label="prepared",
                 )
 
                 await sleep_until_monotonic(countdown_deadline)
 
-                for value in range(10, 0, -1):
-                    target = start_deadline - value
-                    await sleep_until_monotonic(target)
+                last_value = None
 
-                    # Countdown-Mechanik bleibt stabil: monotonic + absolute Zielzeit.
-                    if time.monotonic() >= start_deadline - 0.10:
+                while True:
+                    remaining_seconds = ceil_positive_seconds(start_deadline - time.monotonic())
+
+                    if remaining_seconds <= 0:
                         break
 
-                    message = await send_or_edit_countdown(
-                        user,
-                        message,
-                        build_countdown_dm_content(start_unix, value=value),
-                    )
+                    if remaining_seconds > 10:
+                        await sleep_until_monotonic(start_deadline - 10)
+                        continue
+
+                    if remaining_seconds != last_value:
+                        message = await send_or_edit_countdown(
+                            user,
+                            message,
+                            build_countdown_dm_content(start_unix, value=remaining_seconds),
+                            player_id=player_id,
+                            match_id=match_id,
+                            value_label=str(remaining_seconds),
+                        )
+                        last_value = remaining_seconds
+
+                    next_tick_target = start_deadline - max(0, remaining_seconds - 1)
+                    await sleep_until_monotonic(next_tick_target)
 
                 await sleep_until_monotonic(start_deadline)
 
@@ -5798,6 +5923,9 @@ class LadderCog(commands.Cog):
                     user,
                     message,
                     build_countdown_dm_content(start_unix, started=True),
+                    player_id=player_id,
+                    match_id=match_id,
+                    value_label="started",
                 )
 
             except Exception as e:
@@ -5815,7 +5943,21 @@ class LadderCog(commands.Cog):
                 sent_to.add(player_id)
 
                 try:
+                    user_fetch_started = time.monotonic()
                     user = await self.bot.fetch_user(int(player_id))
+                    user_fetch_duration = time.monotonic() - user_fetch_started
+
+                    print(
+                        f"[TFNL] Countdown-User-Fetch: Slot `{slot_id}`, Spieler `{player_id}`, "
+                        f"Dauer `{user_fetch_duration:.3f}s`"
+                    )
+
+                    if countdown_verbose_discord_log or user_fetch_duration >= countdown_spike_log_seconds:
+                        await self.log_tfnl(
+                            f"Countdown-User-Fetch: Slot `{slot_id}`, Spieler `{player_id}`, "
+                            f"Dauer `{user_fetch_duration:.3f}s`"
+                        )
+
                     self.bot.loop.create_task(
                         countdown(
                             user,
@@ -5824,10 +5966,21 @@ class LadderCog(commands.Cog):
                             int(player["no"]),
                         )
                     )
+                    prepared_count += 1
                 except Exception as e:
                     await self.log_tfnl(
                         f"Countdown-DM konnte nicht vorbereitet werden: Spieler `{player_id}` — {repr(e)}"
                     )
+
+        if prepared_count <= 0:
+            await self.log_tfnl(f"Countdown nicht gestartet: Keine Runner-DM vorbereitet für Slot `{slot_id}`.")
+            return False
+
+        await self.log_tfnl(
+            f"Countdown vorbereitet: Slot `{slot_id}`, Runner `{prepared_count}`, "
+            f"Spike-Log ab `{countdown_spike_log_seconds:.2f}s`, "
+            f"Debug-Delay `{countdown_debug_delay_seconds:.2f}s`"
+        )
 
         update_schedule_status(slot_id, "countdown_sent")
         await self.publish_schedule_to_channel()
