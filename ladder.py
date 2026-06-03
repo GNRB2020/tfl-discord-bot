@@ -6,6 +6,7 @@ import time
 from copy import deepcopy
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from urllib.parse import quote
 
 import aiohttp
 import discord
@@ -101,7 +102,7 @@ TFNL_RESULTS_CHANNEL_INFO_MESSAGE = os.getenv(
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v39-enemizer-seed-mapping"
+LADDER_PERFORMANCE_PATCH_VERSION = "ladder-output-v40-sahasrahbot-user-preset-downloads"
 print(f"[TFNL LADDER] geladen: {LADDER_PERFORMANCE_PATCH_VERSION}")
 
 TFNL_LOOP_INTERVAL_SECONDS = int(
@@ -153,6 +154,10 @@ SCHEDULE_SEED_HASH_COL = "Seed Hash"
 
 SAHASRAHBOT_PRESET_BASE_URL = (
     "https://raw.githubusercontent.com/tcprescott/sahasrahbot/master/presets/alttpr"
+)
+
+SAHASRAHBOT_USER_PRESET_DOWNLOAD_BASE_URL = (
+    "https://sahasrahbotapi.synack.live/presets/download"
 )
 
 SIGNUP_HEADERS = [
@@ -1258,6 +1263,25 @@ def get_preset_key_for_mode(mode_name: str) -> str | None:
 
 
 def build_sahasrahbot_preset_url(preset_key: str) -> str:
+    preset_key = normalize_text(preset_key)
+
+    if not preset_key:
+        return ""
+
+    if preset_key.startswith("http://") or preset_key.startswith("https://"):
+        return preset_key
+
+    # Öffentliche SahasrahBot-Standardpresets liegen als YAML im GitHub-Repo.
+    # User-Presets wie `mormacil/harder_standard`, `phoenix-aut/mcboss`
+    # oder `alttprleague/influkeys` liegen NICHT im GitHub-Repo unter
+    # presets/alttpr/<user>/<preset>.yaml. Dafür muss der SahasrahBot-API-
+    # Download-Endpunkt verwendet werden.
+    if "/" in preset_key:
+        owner, preset_name = preset_key.split("/", 1)
+        owner = quote(owner.strip(), safe="")
+        preset_name = quote(preset_name.strip(), safe="")
+        return f"{SAHASRAHBOT_USER_PRESET_DOWNLOAD_BASE_URL}/{owner}/alttpr/{preset_name}"
+
     return f"{SAHASRAHBOT_PRESET_BASE_URL}/{preset_key}.yaml"
 
 
