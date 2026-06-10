@@ -12,6 +12,7 @@ from itertools import combinations
 import random
 from typing import Iterable
 
+
 START_ELO = 1000.0
 DEFAULT_K_FACTOR = 32.0
 
@@ -27,7 +28,7 @@ ELO_SCOPES = (
     SCOPE_ALLTIME_MODE,
 )
 
-PAIRING_ELO_WINDOWS = (50, 75, 100, 150, 200, None)
+PAIRING_ELO_WINDOWS = (20, 35, 50, 75, 100, 150, None)
 LAST_OPPONENT_LIMIT = 5
 
 
@@ -98,8 +99,18 @@ def calculate_1on1_results(
 ) -> list[EloResult]:
     score_b = 1.0 - score_a
 
-    new_a, change_a = calculate_new_elo(player_a.elo, player_b.elo, score_a, k_factor)
-    new_b, change_b = calculate_new_elo(player_b.elo, player_a.elo, score_b, k_factor)
+    new_a, change_a = calculate_new_elo(
+        player_a.elo,
+        player_b.elo,
+        score_a,
+        k_factor,
+    )
+    new_b, change_b = calculate_new_elo(
+        player_b.elo,
+        player_a.elo,
+        score_b,
+        k_factor,
+    )
 
     if score_a > score_b:
         placement_a, placement_b = 1, 2
@@ -150,10 +161,19 @@ def calculate_3way_results(
     results: list[EloResult] = []
 
     for placement, player in enumerate(placed_players, start=1):
-        opponents = [other for other in placed_players if other.player_id != player.player_id]
+        opponents = [
+            other for other in placed_players
+            if other.player_id != player.player_id
+        ]
         opponent_average = sum(other.elo for other in opponents) / len(opponents)
         score = placement_scores[placement]
-        new_elo, change = calculate_new_elo(player.elo, opponent_average, score, k_factor)
+
+        new_elo, change = calculate_new_elo(
+            player.elo,
+            opponent_average,
+            score,
+            k_factor,
+        )
 
         results.append(
             EloResult(
@@ -179,18 +199,25 @@ def calculate_pairing_elo(
 ) -> float:
     season_value = safe_float(season_mode_elo, default)
     alltime_value = safe_float(alltime_mode_elo, default)
+
     return 0.7 * season_value + 0.3 * alltime_value
 
 
 def get_weight_for_elo_distance(distance: float) -> int:
     distance = abs(float(distance))
 
+    if distance <= 15:
+        return 10
+
+    if distance <= 30:
+        return 7
+
     if distance <= 50:
-        return 5
-    if distance <= 100:
-        return 3
-    if distance <= 150:
+        return 4
+
+    if distance <= 75:
         return 2
+
     return 1
 
 
@@ -202,9 +229,12 @@ def weighted_choice_by_elo_distance(
         raise ValueError("Keine Kandidaten vorhanden.")
 
     weights = [
-        get_weight_for_elo_distance(base_player.pairing_elo - candidate.pairing_elo)
+        get_weight_for_elo_distance(
+            base_player.pairing_elo - candidate.pairing_elo
+        )
         for candidate in candidates
     ]
+
     return random.choices(candidates, weights=weights, k=1)[0]
 
 
@@ -217,6 +247,7 @@ def has_recent_opponent_conflict(
     for player_a, player_b in combinations(group_list, 2):
         if player_b.player_id in recent_opponents.get(player_a.player_id, set()):
             return True
+
         if player_a.player_id in recent_opponents.get(player_b.player_id, set()):
             return True
 
@@ -231,21 +262,30 @@ def choose_3way_group(
         raise ValueError("Für ein 3way werden mindestens drei Spieler benötigt.")
 
     recent_opponents = recent_opponents or {}
+
     all_groups = list(combinations(players, 3))
 
     conflict_free = [
-        list(group) for group in all_groups
+        list(group)
+        for group in all_groups
         if not has_recent_opponent_conflict(group, recent_opponents)
     ]
 
-    candidate_groups = conflict_free if conflict_free else [list(group) for group in all_groups]
+    candidate_groups = conflict_free if conflict_free else [
+        list(group) for group in all_groups
+    ]
 
     def span(group: list[PairingPlayer]) -> float:
         ratings = [player.pairing_elo for player in group]
         return max(ratings) - min(ratings)
 
     best_span = min(span(group) for group in candidate_groups)
-    best_groups = [group for group in candidate_groups if span(group) == best_span]
+
+    best_groups = [
+        group for group in candidate_groups
+        if span(group) == best_span
+    ]
+
     return list(random.choice(best_groups))
 
 
@@ -292,6 +332,7 @@ def create_elo_pairings(
         return []
 
     recent_opponents = recent_opponents or {}
+
     open_players = players[:]
     random.shuffle(open_players)
 
@@ -300,13 +341,27 @@ def create_elo_pairings(
     if len(open_players) % 2 == 1:
         three_way = choose_3way_group(open_players, recent_opponents)
         three_way_ids = {player.player_id for player in three_way}
-        open_players = [player for player in open_players if player.player_id not in three_way_ids]
+
+        open_players = [
+            player for player in open_players
+            if player.player_id not in three_way_ids
+        ]
+
         pairings.append(three_way)
 
     while open_players:
         base_player = open_players.pop(0)
-        opponent = choose_1on1_opponent(base_player, open_players, recent_opponents)
-        open_players = [player for player in open_players if player.player_id != opponent.player_id]
+        opponent = choose_1on1_opponent(
+            base_player,
+            open_players,
+            recent_opponents,
+        )
+
+        open_players = [
+            player for player in open_players
+            if player.player_id != opponent.player_id
+        ]
+
         pairings.append([base_player, opponent])
 
     return pairings
