@@ -109,7 +109,7 @@ class TFLBot(commands.Bot):
         extensions = [
             "signup",
             "schedule",
-            "ladder",
+            #"ladder",    #deaktiviert
             "matchcenter",
             "asnyc",
             "player",
