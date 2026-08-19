@@ -24,7 +24,7 @@ from schedule import load_open_matches as load_open_cup_matches
 
 
 ADMIN_LOG_CHANNEL_ID = 1494265084208222208
-
+ADMIN_ROLE_NAME = "admin"
 ASYNC_SPREADSHEET_ID = "1TnKRQM8x2mLHfiaNC_dtlnjazJ5Ph5hz2edixM0Jhw8"
 ASYNC_WORKSHEET_GID = 539808866
 
@@ -34,9 +34,8 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-ASYNCPLAN_PERFORMANCE_VERSION = "asyncplan-performance-v1"
+ASYNCPLAN_PERFORMANCE_VERSION = "asyncplan-admin-request-v2"
 print(f"[ASYNCPLAN] geladen: {ASYNCPLAN_PERFORMANCE_VERSION}")
-
 ASYNCPLAN_SHEET_CACHE_TTL_SECONDS = int(os.getenv("ASYNCPLAN_SHEET_CACHE_TTL_SECONDS", "90"))
 ASYNCPLAN_ASYNC_COL_CACHE_TTL_SECONDS = int(os.getenv("ASYNCPLAN_ASYNC_COL_CACHE_TTL_SECONDS", "30"))
 
@@ -86,7 +85,6 @@ def get_async_worksheet():
         return _ASYNC_WORKSHEET_CACHE
 
     spreadsheet = get_async_spreadsheet()
-
     for ws in spreadsheet.worksheets():
         if int(ws.id) == int(ASYNC_WORKSHEET_GID):
             _ASYNC_WORKSHEET_CACHE = ws
@@ -143,7 +141,6 @@ def append_async_row(
     M = Mode
     """
     ws = get_async_worksheet()
-
     col_a = col_values_cached(
         lambda: ws,
         sheet_name=sheet_cache_name(ws, "Async"),
@@ -157,7 +154,6 @@ def append_async_row(
         row_index += 1
 
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
-
     reqs = [
         {"range": f"A{row_index}:A{row_index}", "values": [[timestamp]]},
         {"range": f"B{row_index}:B{row_index}", "values": [[home_player]]},
@@ -190,8 +186,26 @@ def normalize_name(value: str) -> str:
     )
 
 
-def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[dict]:
-    targets = {normalize_name(x) for x in name_candidates if x}
+def is_admin_member(member: discord.Member) -> bool:
+    return any(role.name.casefold() == ADMIN_ROLE_NAME.casefold() for role in member.roles)
+
+
+def get_admin_role(guild: discord.Guild) -> discord.Role | None:
+    return discord.utils.find(
+        lambda role: role.name.casefold() == ADMIN_ROLE_NAME.casefold(),
+        guild.roles,
+    )
+
+
+def collect_requestable_matches(name_candidates: list[str] | None = None) -> list[dict]:
+    """
+    Ohne name_candidates: alle offenen League-/Cup-Spiele (Admin).
+    Mit name_candidates: nur Spiele des jeweiligen Spielers.
+    """
+    targets = None
+    if name_candidates is not None:
+        targets = {normalize_name(x) for x in name_candidates if x}
+
     out: list[dict] = []
 
     # League
@@ -211,8 +225,9 @@ def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[d
                 continue
             if marker.lower() != "vs":
                 continue
-            if normalize_name(p1) not in targets and normalize_name(p2) not in targets:
-                continue
+            if targets is not None:
+                if normalize_name(p1) not in targets and normalize_name(p2) not in targets:
+                    continue
 
             out.append(
                 {
@@ -231,8 +246,9 @@ def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[d
         p1 = match["player1"]
         p2 = match["player2"]
 
-        if normalize_name(p1) not in targets and normalize_name(p2) not in targets:
-            continue
+        if targets is not None:
+            if normalize_name(p1) not in targets and normalize_name(p2) not in targets:
+                continue
 
         out.append(
             {
@@ -245,7 +261,15 @@ def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[d
             }
         )
 
-    return out[:25]
+    return out
+
+
+def collect_requestable_matches_for_member(name_candidates: list[str]) -> list[dict]:
+    return collect_requestable_matches(name_candidates)
+
+
+def collect_all_requestable_matches() -> list[dict]:
+    return collect_requestable_matches(None)
 
 
 def find_member_by_sheet_name(guild: discord.Guild, player_name: str) -> discord.Member | None:
@@ -264,22 +288,73 @@ def find_member_by_sheet_name(guild: discord.Guild, player_name: str) -> discord
     return None
 
 
-def get_requester_vs_opponent(match_data: dict, requester_member: discord.Member) -> tuple[str, str]:
-    requester_names = {
-        normalize_name(requester_member.display_name),
-        normalize_name(getattr(requester_member, "global_name", None)),
-        normalize_name(requester_member.name),
-    }
+def member_matches_sheet_name(member: discord.Member, player_name: str) -> bool:
+    target = normalize_name(player_name)
+    candidates = [
+        member.display_name,
+        getattr(member, "global_name", None),
+        member.name,
+    ]
+    return any(normalize_name(cand) == target for cand in candidates if cand)
 
-    p1 = match_data["player1"]
-    p2 = match_data["player2"]
 
-    if normalize_name(p1) in requester_names:
-        return p1, p2
-    if normalize_name(p2) in requester_names:
-        return p2, p1
+async def fetch_users(client: discord.Client, user_ids: list[int]) -> list[discord.User]:
+    users: list[discord.User] = []
+    seen: set[int] = set()
 
-    return p1, p2
+    for user_id in user_ids:
+        if user_id in seen:
+            continue
+        seen.add(user_id)
+        try:
+            users.append(await client.fetch_user(user_id))
+        except Exception:
+            pass
+
+    return users
+
+
+async def send_admin_decision_request(client: discord.Client, request_data: dict) -> bool:
+    if request_data.get("admin_log_sent"):
+        return True
+
+    channel = client.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if channel is None or not isinstance(channel, discord.TextChannel):
+        return False
+
+    # Vor dem await setzen, damit zwei fast zeitgleiche Zustimmungen
+    # nicht zwei Admin-Meldungen erzeugen.
+    request_data["admin_log_sent"] = True
+
+    admin_role = get_admin_role(channel.guild)
+    mention = admin_role.mention if admin_role is not None else "@admin"
+
+    approved_ids = list(dict.fromkeys(request_data.get("approved_consent_ids", [])))
+    approved_mentions = ", ".join(f"<@{user_id}>" for user_id in approved_ids) or "-"
+
+    requester_line = f"<@{request_data['requester_id']}>"
+    if request_data.get("initiated_by_admin"):
+        requester_line += " (Admin)"
+
+    content = (
+        f"Für das Spiel **{request_data['player1']} vs. {request_data['player2']}**\n"
+        f"wird ein Async mit dem Spielmodus **{request_data['selected_mode']}** beantragt.\n\n"
+        f"Beantragt von: {requester_line}\n"
+        f"Zugestimmt von: {approved_mentions}"
+    )
+
+    try:
+        await channel.send(
+            content=mention,
+            embed=menu_embed("⚡ Async beantragt", content),
+            view=AdminDecisionView(request_data),
+            allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+        )
+    except Exception:
+        request_data["admin_log_sent"] = False
+        raise
+
+    return True
 
 
 # =========================================================
@@ -306,13 +381,19 @@ class AsyncBaseView(discord.ui.View):
 # =========================================================
 
 class AsyncRequestMatchSelect(discord.ui.Select):
-    def __init__(self, matches: list[dict], requester_member: discord.Member):
+    def __init__(
+        self,
+        matches: list[dict],
+        requester_member: discord.Member,
+        initiated_by_admin: bool,
+    ):
         self.matches = {str(i): m for i, m in enumerate(matches)}
         self.requester_member = requester_member
+        self.initiated_by_admin = initiated_by_admin
 
         options = [
             discord.SelectOption(label=m["label"][:100], value=str(i))
-            for i, m in enumerate(matches[:25])
+            for i, m in enumerate(matches)
         ]
 
         super().__init__(
@@ -320,13 +401,13 @@ class AsyncRequestMatchSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             options=options,
+            row=0,
         )
 
     async def callback(self, interaction: discord.Interaction):
         match_data = self.matches[self.values[0]]
 
         await interaction.response.defer()
-
         try:
             modes = await asyncio.to_thread(get_runner_modes)
         except Exception:
@@ -337,6 +418,7 @@ class AsyncRequestMatchSelect(discord.ui.Select):
             requester_member=self.requester_member,
             match_data=match_data,
             modes=modes,
+            initiated_by_admin=self.initiated_by_admin,
         )
 
         await interaction.edit_original_response(
@@ -347,14 +429,77 @@ class AsyncRequestMatchSelect(discord.ui.Select):
 
 
 class AsyncRequestMatchListView(AsyncBaseView):
-    def __init__(self, owner_id: int, matches: list[dict], requester_member: discord.Member):
-        super().__init__(owner_id)
-        self.add_item(AsyncRequestMatchSelect(matches, requester_member))
+    PAGE_SIZE = 25
 
-    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
+    def __init__(
+        self,
+        owner_id: int,
+        matches: list[dict],
+        requester_member: discord.Member,
+        initiated_by_admin: bool = False,
+        page: int = 0,
+    ):
+        super().__init__(owner_id)
+        self.matches = matches
+        self.requester_member = requester_member
+        self.initiated_by_admin = initiated_by_admin
+        self.max_page = max(0, (len(matches) - 1) // self.PAGE_SIZE)
+        self.page = max(0, min(page, self.max_page))
+
+        start = self.page * self.PAGE_SIZE
+        page_matches = matches[start:start + self.PAGE_SIZE]
+
+        self.add_item(
+            AsyncRequestMatchSelect(
+                page_matches,
+                requester_member,
+                initiated_by_admin,
+            )
+        )
+
+        self.previous_page.disabled = self.page <= 0
+        self.next_page.disabled = self.page >= self.max_page
+
+    def render_embed(self) -> discord.Embed:
+        admin_text = "Admin-Modus: alle offenen Spiele." if self.initiated_by_admin else "Wähle eines deiner offenen Spiele."
+        return menu_embed(
+            "⚡ Async → Beantragen",
+            f"{admin_text}\nSeite **{self.page + 1}/{self.max_page + 1}**",
+        )
+
+    @discord.ui.button(label="◀ Seite", style=discord.ButtonStyle.secondary, row=1)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = AsyncRequestMatchListView(
+            owner_id=self.owner_id,
+            matches=self.matches,
+            requester_member=self.requester_member,
+            initiated_by_admin=self.initiated_by_admin,
+            page=self.page - 1,
+        )
+        await interaction.response.edit_message(
+            embed=view.render_embed(),
+            view=view,
+            content=None,
+        )
+
+    @discord.ui.button(label="Seite ▶", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = AsyncRequestMatchListView(
+            owner_id=self.owner_id,
+            matches=self.matches,
+            requester_member=self.requester_member,
+            initiated_by_admin=self.initiated_by_admin,
+            page=self.page + 1,
+        )
+        await interaction.response.edit_message(
+            embed=view.render_embed(),
+            view=view,
+            content=None,
+        )
+
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=2)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         from player import AsyncMenuView
-
         await interaction.response.edit_message(
             embed=menu_embed("⚡ Async", "Wähle einen Bereich."),
             view=AsyncMenuView(owner_id=interaction.user.id),
@@ -392,16 +537,26 @@ class AsyncModeSelect(discord.ui.Select):
 
 
 class AsyncRequestModeView(AsyncBaseView):
-    def __init__(self, owner_id: int, requester_member: discord.Member, match_data: dict, modes: list[str]):
+    def __init__(
+        self,
+        owner_id: int,
+        requester_member: discord.Member,
+        match_data: dict,
+        modes: list[str],
+        initiated_by_admin: bool = False,
+    ):
         super().__init__(owner_id, timeout=3600)
         self.requester_member = requester_member
         self.match_data = match_data
+        self.initiated_by_admin = initiated_by_admin
         self.selected_mode: str | None = None
         self.add_item(AsyncModeSelect(modes))
 
     def render_embed(self) -> discord.Embed:
         lines = [f"**Spiel:** {self.match_data['label']}"]
         lines.append(f"**Spielmodus:** {self.selected_mode or '-'}")
+        if self.initiated_by_admin:
+            lines.append("**Admin-Antrag:** Beide Spieler müssen zustimmen.")
         return menu_embed("⚡ Async → Beantragen", "\n".join(lines))
 
     @discord.ui.button(label="Beantragen", style=discord.ButtonStyle.success, row=1)
@@ -420,17 +575,50 @@ class AsyncRequestModeView(AsyncBaseView):
             )
             return
 
-        requester_name, opponent_name = get_requester_vs_opponent(self.match_data, self.requester_member)
-        opponent_member = find_member_by_sheet_name(interaction.guild, opponent_name)
+        player1_name = self.match_data["player1"]
+        player2_name = self.match_data["player2"]
+        player1_member = find_member_by_sheet_name(interaction.guild, player1_name)
+        player2_member = find_member_by_sheet_name(interaction.guild, player2_name)
 
-        if opponent_member is None:
+        missing = []
+        if player1_member is None:
+            missing.append(player1_name)
+        if player2_member is None:
+            missing.append(player2_name)
+
+        if missing:
             await interaction.response.send_message(
-                f"Gegner `{opponent_name}` konnte auf dem Server nicht gefunden werden.",
+                "Folgende Spieler konnten auf dem Server nicht gefunden werden: " + ", ".join(f"`{name}`" for name in missing),
                 ephemeral=True,
             )
             return
 
         await interaction.response.defer()
+
+        participant_ids = [player1_member.id, player2_member.id]
+
+        if self.initiated_by_admin:
+            required_consent_ids = participant_ids.copy()
+            approved_consent_ids: list[int] = []
+        else:
+            # Beim normalen Spielerantrag gilt der Antrag des Spielers selbst
+            # bereits als eigene Zustimmung. Nur der Gegner muss bestätigen.
+            if self.requester_member.id not in participant_ids:
+                await interaction.edit_original_response(
+                    embed=menu_embed(
+                        "⚡ Async → Beantragen",
+                        "Du bist keinem der beiden Spieler dieses Matches zugeordnet.",
+                    ),
+                    view=self,
+                    content=None,
+                )
+                return
+
+            required_consent_ids = [
+                user_id for user_id in participant_ids
+                if user_id != self.requester_member.id
+            ]
+            approved_consent_ids = [self.requester_member.id]
 
         request_data = {
             "match_kind": self.match_data["kind"],
@@ -438,35 +626,60 @@ class AsyncRequestModeView(AsyncBaseView):
             "division": self.match_data.get("division"),
             "round": self.match_data.get("round"),
             "source_row_index": self.match_data["row_index"],
-            "player1": self.match_data["player1"],
-            "player2": self.match_data["player2"],
+            "player1": player1_name,
+            "player2": player2_name,
+            "player1_id": player1_member.id,
+            "player2_id": player2_member.id,
             "requester_id": self.requester_member.id,
-            "requester_name": requester_name,
-            "opponent_id": opponent_member.id,
-            "opponent_name": opponent_name,
             "selected_mode": self.selected_mode,
+            "initiated_by_admin": self.initiated_by_admin,
+            "required_consent_ids": required_consent_ids,
+            "approved_consent_ids": approved_consent_ids,
+            "admin_log_sent": False,
         }
 
-        dm_text = (
-            f"**Async-Anfrage**\n"
-            f"Spiel: {request_data['player1']} vs. {request_data['player2']}\n"
-            f"Bereich: {request_data['match_kind'].capitalize()}\n"
-            f"Spielmodus: {request_data['selected_mode']}\n\n"
-            f"{requester_name} beantragt ein Async für dieses Spiel."
-        )
+        target_members = [
+            member
+            for member in (player1_member, player2_member)
+            if member.id in required_consent_ids
+        ]
 
-        try:
-            await opponent_member.send(
-                embed=menu_embed("⚡ Async-Anfrage", dm_text),
-                view=OpponentConsentView(request_data),
+        sent_to: list[str] = []
+        failed_to: list[str] = []
+
+        for target_member in target_members:
+            dm_text = (
+                f"**Async-Anfrage**\n"
+                f"Spiel: {player1_name} vs. {player2_name}\n"
+                f"Bereich: {request_data['match_kind'].capitalize()}\n"
+                f"Spielmodus: {request_data['selected_mode']}\n\n"
             )
-        except Exception as e:
+
+            if self.initiated_by_admin:
+                dm_text += f"<@{self.requester_member.id}> hat als Admin einen Async für dieses Spiel beantragt."
+            else:
+                dm_text += f"<@{self.requester_member.id}> beantragt ein Async für dieses Spiel."
+
+            try:
+                await target_member.send(
+                    embed=menu_embed("⚡ Async-Anfrage", dm_text),
+                    view=PlayerConsentView(request_data, target_member.id),
+                )
+                sent_to.append(target_member.display_name)
+            except Exception:
+                failed_to.append(target_member.display_name)
+
+        if failed_to:
             await interaction.edit_original_response(
                 embed=menu_embed(
                     "⚡ Async → Beantragen",
-                    f"DM an den Gegner konnte nicht gesendet werden: {e}",
+                    (
+                        "Die Anfrage konnte nicht an alle benötigten Spieler gesendet werden.\n\n"
+                        f"Gesendet an: {', '.join(sent_to) or '-'}\n"
+                        f"Fehlgeschlagen: {', '.join(failed_to)}"
+                    ),
                 ),
-                view=self,
+                view=AsyncRequestDoneView(owner_id=interaction.user.id),
                 content=None,
             )
             return
@@ -475,8 +688,10 @@ class AsyncRequestModeView(AsyncBaseView):
             embed=menu_embed(
                 "⚡ Async → Beantragen",
                 (
-                    f"Anfrage wurde an **{opponent_name}** per DM geschickt.\n"
-                    f"**Spielmodus:** {self.selected_mode}"
+                    f"Async-Anfrage verschickt.\n"
+                    f"**Spiel:** {player1_name} vs. {player2_name}\n"
+                    f"**Spielmodus:** {self.selected_mode}\n"
+                    f"**Zustimmung erforderlich von:** {', '.join(sent_to)}"
                 ),
             ),
             view=AsyncRequestDoneView(owner_id=interaction.user.id),
@@ -501,7 +716,6 @@ class AsyncRequestDoneView(AsyncBaseView):
     @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         from player import AsyncMenuView
-
         await interaction.response.edit_message(
             embed=menu_embed("⚡ Async", "Wähle einen Bereich."),
             view=AsyncMenuView(owner_id=interaction.user.id),
@@ -510,51 +724,84 @@ class AsyncRequestDoneView(AsyncBaseView):
 
 
 # =========================================================
-# GEGNER STIMMT ZU
+# SPIELER STIMMEN ZU
 # =========================================================
 
-class OpponentConsentView(discord.ui.View):
-    def __init__(self, request_data: dict):
-        super().__init__(timeout=86400)
+class PlayerConsentView(discord.ui.View):
+    def __init__(self, request_data: dict, target_player_id: int):
+        # Kein 24h-Timeout mehr. Die View bleibt aktiv, solange der Botprozess läuft.
+        super().__init__(timeout=None)
         self.request_data = request_data
+        self.target_player_id = target_player_id
 
     @discord.ui.button(label="Zustimmen", style=discord.ButtonStyle.success)
     async def agree_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.request_data["opponent_id"]:
-            await interaction.response.send_message("Diese Anfrage ist nicht für dich.", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
-        channel = interaction.client.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if channel is None or not isinstance(channel, discord.TextChannel):
-            await interaction.edit_original_response(
-                embed=menu_embed("⚡ Async-Anfrage", "Admin-Log-Channel wurde nicht gefunden."),
-                view=None,
-                content=None,
+        if interaction.user.id != self.target_player_id:
+            await interaction.response.send_message(
+                "Diese Anfrage ist nicht für dich.",
+                ephemeral=True,
             )
             return
 
-        content = (
-            f"Für das Spiel **{self.request_data['player1']} vs. {self.request_data['player2']}**\n"
-            f"wird ein Async mit dem Spielmodus **{self.request_data['selected_mode']}** beantragt.\n\n"
-            f"Beantragt von: <@{self.request_data['requester_id']}>\n"
-            f"Zugestimmt von: <@{self.request_data['opponent_id']}>"
-        )
+        approved_ids = self.request_data.setdefault("approved_consent_ids", [])
+        if interaction.user.id in approved_ids:
+            await interaction.response.send_message(
+                "Du hast dieser Async-Anfrage bereits zugestimmt.",
+                ephemeral=True,
+            )
+            return
 
-        await channel.send(
-            embed=menu_embed("⚡ Async beantragt", content),
-            view=AdminDecisionView(self.request_data),
-        )
+        await interaction.response.defer()
+        approved_ids.append(interaction.user.id)
+
+        required_ids = set(self.request_data.get("required_consent_ids", []))
+        current_approved_ids = set(self.request_data.get("approved_consent_ids", []))
+        all_confirmed = required_ids.issubset(current_approved_ids)
+
+        if all_confirmed:
+            try:
+                sent = await send_admin_decision_request(interaction.client, self.request_data)
+            except Exception as exc:
+                self.request_data["admin_log_sent"] = False
+                await interaction.edit_original_response(
+                    embed=menu_embed(
+                        "⚡ Async-Anfrage",
+                        f"Zustimmung gespeichert, aber die Admin-Meldung konnte nicht gesendet werden: {exc}",
+                    ),
+                    view=None,
+                    content=None,
+                )
+                return
+
+            if not sent:
+                await interaction.edit_original_response(
+                    embed=menu_embed(
+                        "⚡ Async-Anfrage",
+                        "Du hast zugestimmt, aber der Admin-Log-Channel wurde nicht gefunden.",
+                    ),
+                    view=None,
+                    content=None,
+                )
+                return
+
+            text = "Du hast dem Async zugestimmt. Alle benötigten Spieler haben bestätigt. Die Admins wurden informiert."
+        else:
+            remaining_ids = required_ids - current_approved_ids
+            remaining_mentions = ", ".join(f"<@{user_id}>" for user_id in remaining_ids)
+            text = (
+                "Du hast dem Async zugestimmt.\n"
+                f"Es fehlt noch die Zustimmung von: {remaining_mentions}"
+            )
 
         await interaction.edit_original_response(
-            embed=menu_embed(
-                "⚡ Async-Anfrage",
-                "Du hast dem Async zugestimmt. Die Admins wurden informiert.",
-            ),
+            embed=menu_embed("⚡ Async-Anfrage", text),
             view=None,
             content=None,
         )
+
+
+# Alias für mögliche ältere Imports innerhalb des Projekts.
+OpponentConsentView = PlayerConsentView
 
 
 # =========================================================
@@ -576,9 +823,6 @@ class DenyReasonModal(discord.ui.Modal, title="Async ablehnen"):
 
     async def on_submit(self, interaction: discord.Interaction):
         data = self.parent_view.request_data
-        requester = await interaction.client.fetch_user(data["requester_id"])
-        opponent = await interaction.client.fetch_user(data["opponent_id"])
-
         reason = str(self.reason).strip()
 
         dm_text = (
@@ -588,13 +832,16 @@ class DenyReasonModal(discord.ui.Modal, title="Async ablehnen"):
             f"Ablehnungsgrund: {reason}"
         )
 
-        for user in [requester, opponent]:
+        player_ids = [data["player1_id"], data["player2_id"]]
+        users = await fetch_users(interaction.client, player_ids)
+        for user in users:
             try:
                 await user.send(embed=menu_embed("⚡ Async abgelehnt", dm_text))
             except Exception:
                 pass
 
         await interaction.response.edit_message(
+            content=None,
             embed=menu_embed(
                 "⚡ Async beantragt",
                 (
@@ -604,7 +851,6 @@ class DenyReasonModal(discord.ui.Modal, title="Async ablehnen"):
                 ),
             ),
             view=None,
-            content=None,
         )
 
 
@@ -626,7 +872,6 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
         seed = str(self.seed_link).strip()
 
         await interaction.response.defer()
-
         try:
             row_index = await asyncio.to_thread(
                 append_async_row,
@@ -649,9 +894,6 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
             )
             return
 
-        requester = await interaction.client.fetch_user(data["requester_id"])
-        opponent = await interaction.client.fetch_user(data["opponent_id"])
-
         dm_text = (
             f"Dem Async wurde zugestimmt.\n"
             f"Spiel: {data['player1']} vs. {data['player2']}\n"
@@ -659,13 +901,16 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
             f"Seed: hinterlegt"
         )
 
-        for user in [requester, opponent]:
+        player_ids = [data["player1_id"], data["player2_id"]]
+        users = await fetch_users(interaction.client, player_ids)
+        for user in users:
             try:
                 await user.send(embed=menu_embed("⚡ Async bestätigt", dm_text))
             except Exception:
                 pass
 
         await interaction.edit_original_response(
+            content=None,
             embed=menu_embed(
                 "⚡ Async beantragt",
                 (
@@ -676,14 +921,24 @@ class SeedLinkModal(discord.ui.Modal, title="Seed setzen"):
                 ),
             ),
             view=None,
-            content=None,
         )
 
 
 class AdminDecisionView(discord.ui.View):
     def __init__(self, request_data: dict):
-        super().__init__(timeout=86400)
+        # Kein 24h-Timeout mehr.
+        super().__init__(timeout=None)
         self.request_data = request_data
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not is_admin_member(member):
+            await interaction.response.send_message(
+                "Nur Mitglieder mit der Rolle @admin können diesen Antrag bearbeiten.",
+                ephemeral=True,
+            )
+            return False
+        return True
 
     @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger)
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -705,20 +960,22 @@ async def open_async_request_from_player(interaction: discord.Interaction):
         await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
         return
 
+    initiated_by_admin = is_admin_member(member)
+
     await interaction.response.defer()
-
     try:
-        name_candidates = [
-            member.display_name,
-            getattr(member, "global_name", None),
-            member.name,
-        ]
-
-        matches = await asyncio.to_thread(
-            collect_requestable_matches_for_member,
-            name_candidates,
-        )
-
+        if initiated_by_admin:
+            matches = await asyncio.to_thread(collect_all_requestable_matches)
+        else:
+            name_candidates = [
+                member.display_name,
+                getattr(member, "global_name", None),
+                member.name,
+            ]
+            matches = await asyncio.to_thread(
+                collect_requestable_matches_for_member,
+                name_candidates,
+            )
     except Exception as e:
         await interaction.edit_original_response(
             embed=menu_embed("⚡ Async → Beantragen", f"Fehler beim Laden der Spiele: {e}"),
@@ -728,22 +985,27 @@ async def open_async_request_from_player(interaction: discord.Interaction):
         return
 
     if not matches:
+        text = (
+            "Es wurden keine offenen League- oder Cup-Spiele gefunden."
+            if initiated_by_admin
+            else "Für dich wurden keine offenen League- oder Cup-Spiele gefunden."
+        )
         await interaction.edit_original_response(
-            embed=menu_embed(
-                "⚡ Async → Beantragen",
-                "Für dich wurden keine offenen League- oder Cup-Spiele gefunden.",
-            ),
+            embed=menu_embed("⚡ Async → Beantragen", text),
             view=AsyncRequestDoneView(owner_id=interaction.user.id),
             content=None,
         )
         return
 
+    view = AsyncRequestMatchListView(
+        owner_id=interaction.user.id,
+        matches=matches,
+        requester_member=member,
+        initiated_by_admin=initiated_by_admin,
+    )
+
     await interaction.edit_original_response(
-        embed=menu_embed("⚡ Async → Beantragen", "Wähle ein Spiel."),
-        view=AsyncRequestMatchListView(
-            owner_id=interaction.user.id,
-            matches=matches,
-            requester_member=member,
-        ),
+        embed=view.render_embed(),
+        view=view,
         content=None,
     )
