@@ -64,7 +64,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v1"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v2-administration"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -96,6 +96,45 @@ def normalize_name(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = value.lower().strip()
     return re.sub(r"[^a-z0-9äöüß]", "", value)
+
+
+ADMIN_ROLE_NAME = "Admin"
+
+
+def has_admin_role(member) -> bool:
+    return (
+        isinstance(member, discord.Member)
+        and any(role.name == ADMIN_ROLE_NAME for role in member.roles)
+    )
+
+
+def get_main_bot_module():
+    """
+    bot.py läuft auf Render als __main__. Ein normales import bot würde den
+    Bot ein zweites Mal initialisieren. Daher verwenden wir das bereits
+    geladene Hauptmodul.
+    """
+    for module_name in ("__main__", "bot"):
+        module = sys.modules.get(module_name)
+
+        if module is not None and hasattr(module, "client"):
+            return module
+
+    return None
+
+
+def get_main_helper(name: str):
+    module = get_main_bot_module()
+
+    if module is None:
+        raise RuntimeError("Hauptmodul des Bots wurde nicht gefunden.")
+
+    helper = getattr(module, name, None)
+
+    if helper is None:
+        raise RuntimeError(f"Bot-Helfer '{name}' ist nicht verfügbar.")
+
+    return helper
 
 
 # =========================================================
@@ -1120,7 +1159,511 @@ class PlayerExitConfirmView(PlayerBaseView):
     ):
         await interaction.response.edit_message(
             embed=menu_embed("Spielermenü", "Der Liga-Austritt wurde abgebrochen."),
-            view=PlayerMenuView(owner_id=interaction.user.id),
+            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
+            content=None,
+        )
+
+
+# =========================================================
+# ADMINISTRATION
+# =========================================================
+
+class AdminOnlyView(PlayerBaseView):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await super().interaction_check(interaction):
+            return False
+
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "⛔ Diese Funktion ist nur für Admins verfügbar.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+
+class AdminSignupResetConfirmView(AdminOnlyView):
+    @discord.ui.button(
+        label="Ja, Anmeldungen zurücksetzen",
+        style=discord.ButtonStyle.danger,
+        row=0,
+    )
+    async def confirm_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.defer()
+
+        try:
+            ws = await asyncio.to_thread(signup.get_worksheet)
+            count = await asyncio.to_thread(signup.reset_signup_data, ws)
+
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Anmeldung zurücksetzen",
+                    f"**{count} Einträge wurden zurückgesetzt.**",
+                ),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Anmeldung zurücksetzen",
+                    f"Fehler beim Zurücksetzen: {e}",
+                ),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+
+    @discord.ui.button(
+        label="Abbrechen",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."),
+            view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+class AdminQualiResetSelect(discord.ui.Select):
+    def __init__(self, active_runs: dict):
+        options = []
+
+        for user_id, state in active_runs.items():
+            runner_name = getattr(state, "runner_name", str(user_id))
+            quali_number = getattr(state, "quali_number", "?")
+
+            options.append(
+                discord.SelectOption(
+                    label=f"{runner_name} – Quali {quali_number}"[:100],
+                    value=str(user_id),
+                )
+            )
+
+        super().__init__(
+            placeholder="Laufende Qualifikation auswählen …",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "⛔ Keine Berechtigung.",
+                ephemeral=True,
+            )
+            return
+
+        cog = interaction.client.get_cog("QualiCog")
+
+        if cog is None:
+            await interaction.response.send_message(
+                "Qualifikation ist aktuell nicht verfügbar.",
+                ephemeral=True,
+            )
+            return
+
+        target_user_id = int(self.values[0])
+        active = cog.active_runs.pop(target_user_id, None)
+
+        if active is None:
+            await interaction.response.send_message(
+                "Diese Qualifikation läuft nicht mehr.",
+                ephemeral=True,
+            )
+            return
+
+        active.cancelled = True
+        cog.stop_state_tasks(active)
+
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "🟨 Administration → Qualifikation zurücksetzen",
+                f"Die laufende Qualifikation von **{active.runner_name}** wurde zurückgesetzt.",
+            ),
+            view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+class AdminQualiResetView(AdminOnlyView):
+    def __init__(self, owner_id: int, active_runs: dict):
+        super().__init__(owner_id)
+
+        if active_runs:
+            self.add_item(AdminQualiResetSelect(active_runs))
+
+    @discord.ui.button(
+        label="◀ Zurück",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def back_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."),
+            view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+class AdminSpielplanDivisionSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Division wählen …",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=f"Division {i}", value=str(i))
+                for i in range(1, 7)
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "⛔ Keine Berechtigung.",
+                ephemeral=True,
+            )
+            return
+
+        div_number = self.values[0]
+        await interaction.response.defer()
+
+        try:
+            spielplan_read_players = get_main_helper("spielplan_read_players")
+            spielplan_build_matches = get_main_helper("spielplan_build_matches")
+            spielplan_write = get_main_helper("spielplan_write")
+            get_div_ws = get_main_helper("get_div_ws")
+
+            players = await asyncio.to_thread(
+                spielplan_read_players,
+                div_number,
+            )
+            rounds = spielplan_build_matches(players)
+            ws = get_div_ws(div_number)
+
+            written = await asyncio.to_thread(
+                spielplan_write,
+                ws,
+                rounds,
+            )
+
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Spielplan erstellen",
+                    (
+                        f"**Division {div_number}**\n"
+                        f"Spieler: **{len(players)}**\n"
+                        f"Geschriebene Spiele: **{written}**"
+                    ),
+                ),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Spielplan erstellen",
+                    f"Fehler beim Erstellen: {e}",
+                ),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+
+
+class AdminSpielplanView(AdminOnlyView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(AdminSpielplanDivisionSelect())
+
+    @discord.ui.button(
+        label="◀ Zurück",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def back_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."),
+            view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+class AdminTwitchModal(discord.ui.Modal, title="Twitchmapping setzen"):
+    player_name = discord.ui.TextInput(
+        label="Spielername",
+        placeholder="Name wie im Runner-Sheet",
+        required=True,
+        max_length=100,
+    )
+
+    twitch = discord.ui.TextInput(
+        label="Twitchkanal",
+        placeholder="Username oder https://twitch.tv/...",
+        required=True,
+        max_length=200,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "⛔ Keine Berechtigung.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            set_runner_twitch = get_main_helper("set_runner_twitch")
+            result = await asyncio.to_thread(
+                set_runner_twitch,
+                str(self.player_name.value),
+                str(self.twitch.value),
+            )
+
+            action_text = (
+                "aktualisiert"
+                if result["action"] == "updated"
+                else "neu angelegt"
+            )
+
+            await interaction.edit_original_response(
+                content=(
+                    f"✅ Twitchmapping {action_text}.\n"
+                    f"**Spieler:** {result['player_name']}\n"
+                    f"**Twitch:** {result['twitch']}\n"
+                    f"**Runner-Zeile:** {result['row']}"
+                )
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                content=f"❌ Fehler beim Twitchmapping: {e}"
+            )
+
+
+class PlayerTwitchModal(discord.ui.Modal, title="Twitchkanal setzen"):
+    twitch = discord.ui.TextInput(
+        label="Twitchkanal",
+        placeholder="Username oder https://twitch.tv/...",
+        required=True,
+        max_length=200,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        member = interaction.user
+
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "Nur auf dem Server verfügbar.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            set_runner_twitch = get_main_helper("set_runner_twitch")
+            result = await asyncio.to_thread(
+                set_runner_twitch,
+                member.display_name.strip(),
+                str(self.twitch.value),
+            )
+
+            await interaction.edit_original_response(
+                content=(
+                    "✅ Twitchkanal gespeichert.\n"
+                    f"**Spieler:** {result['player_name']}\n"
+                    f"**Twitch:** {result['twitch']}\n\n"
+                    "Multistreamlinks verwenden ab jetzt diesen Eintrag aus **Runner!B**."
+                )
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                content=f"❌ Twitchkanal konnte nicht gespeichert werden: {e}"
+            )
+
+
+class AdminMenuView(AdminOnlyView):
+    @discord.ui.button(
+        label="Anmeldung zurücksetzen",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def signup_reset_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="⚠️ Anmeldungen zurücksetzen?",
+                description=(
+                    "Damit wird die bestehende **/resetsign**-Funktion ausgeführt.\n\n"
+                    "Alle Saisonmeldungen werden zurückgesetzt. Fortfahren?"
+                ),
+                color=discord.Color.orange(),
+            ),
+            view=AdminSignupResetConfirmView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+    @discord.ui.button(
+        label="Qualifikation zurücksetzen",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def quali_reset_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        cog = interaction.client.get_cog("QualiCog")
+        active_runs = getattr(cog, "active_runs", {}) if cog else {}
+
+        if not active_runs:
+            await interaction.response.edit_message(
+                embed=menu_embed(
+                    "🟨 Administration → Qualifikation zurücksetzen",
+                    "Aktuell läuft keine Qualifikation.",
+                ),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "🟨 Administration → Qualifikation zurücksetzen",
+                "Wähle die laufende Qualifikation aus.",
+            ),
+            view=AdminQualiResetView(
+                owner_id=interaction.user.id,
+                active_runs=dict(active_runs),
+            ),
+            content=None,
+        )
+
+    @discord.ui.button(
+        label="Spieler Austritt",
+        style=discord.ButtonStyle.danger,
+        row=1,
+    )
+    async def player_exit_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        try:
+            player_exit_view = get_main_helper("PlayerExitDivisionSelectView")
+
+            await interaction.response.edit_message(
+                content="📤 Spieler-Exit starten:\nBitte Division auswählen.",
+                embed=None,
+                view=player_exit_view(requester=interaction.user),
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Spieler-Austritt konnte nicht geöffnet werden: {e}",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        label="Spielplan erstellen",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def spielplan_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "🟨 Administration → Spielplan erstellen",
+                "Wähle eine Division.",
+            ),
+            view=AdminSpielplanView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+    @discord.ui.button(
+        label="Twitchmapping",
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
+    async def twitch_mapping_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.send_modal(AdminTwitchModal())
+
+    @discord.ui.button(
+        label="◀ Zurück",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def back_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
+            view=PlayerMenuView(
+                owner_id=interaction.user.id,
+                show_admin=True,
+            ),
+            content=None,
+        )
+
+
+class AdminMenuButton(discord.ui.Button):
+    def __init__(self):
+        # Discord bietet keine frei wählbare gelbe Buttonfarbe.
+        # Deshalb gelbes Symbol + neutraler Button.
+        super().__init__(
+            label="🟨 Administration",
+            style=discord.ButtonStyle.secondary,
+            row=3,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "⛔ Diese Funktion ist nur für Admins verfügbar.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "🟨 Administration",
+                "Wähle eine Adminfunktion.",
+            ),
+            view=AdminMenuView(owner_id=interaction.user.id),
             content=None,
         )
 
@@ -1130,8 +1673,11 @@ class PlayerExitConfirmView(PlayerBaseView):
 # =========================================================
 
 class PlayerMenuView(PlayerBaseView):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, show_admin: bool = False):
         super().__init__(owner_id)
+
+        if show_admin:
+            self.add_item(AdminMenuButton())
 
     @discord.ui.button(label="ℹ️ Info", style=discord.ButtonStyle.secondary, row=0)
     async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1257,7 +1803,7 @@ class AsyncMenuView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id),
+            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
             content=None,
         )
 
@@ -1296,7 +1842,7 @@ class ResultMenuView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id),
+            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
             content=None,
         )
 
@@ -1353,7 +1899,7 @@ class InfoMenuView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id),
+            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
             content=None,
         )
 
@@ -1877,14 +2423,7 @@ class SettingsMenuView(PlayerBaseView):
 
     @discord.ui.button(label="Twitch setzen", style=discord.ButtonStyle.primary, row=0)
     async def twitch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if hasattr(signup, "open_signup_from_player"):
-            await signup.open_signup_from_player(interaction)
-            return
-
-        await interaction.response.send_message(
-            "Twitch setzen ist aktuell nicht verfügbar.",
-            ephemeral=True,
-        )
+        await interaction.response.send_modal(PlayerTwitchModal())
 
     @discord.ui.button(label="Restream/Commentary/Tracker", style=discord.ButtonStyle.primary, row=0)
     async def restream_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1963,7 +2502,7 @@ class SettingsMenuView(PlayerBaseView):
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id),
+            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
             content=None,
         )
 
@@ -1979,7 +2518,7 @@ class PlayerCog(commands.Cog):
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
-        view = PlayerMenuView(owner_id=interaction.user.id)
+        view = PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user))
 
         await interaction.response.send_message(
             embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
