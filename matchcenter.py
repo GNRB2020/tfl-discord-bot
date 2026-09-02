@@ -38,7 +38,7 @@ BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 print("DEBUG matchcenter CREDS_FILE =", CREDS_FILE)
 
-MATCHCENTER_PERFORMANCE_VERSION = "matchcenter-performance-v1"
+MATCHCENTER_PERFORMANCE_VERSION = "matchcenter-performance-v2-runner-twitch"
 print(f"[MATCHCENTER] geladen: {MATCHCENTER_PERFORMANCE_VERSION}")
 
 MATCHCENTER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("MATCHCENTER_SHEET_CACHE_TTL_SECONDS", "90"))
@@ -81,70 +81,6 @@ CUP_COL_RESULT = 3    # C
 CUP_COL_P2 = 4        # D
 CUP_COL_RACETIME = 5  # E
 CUP_COL_META = 6      # F
-
-# =========================================================
-# TWITCH MAP
-# =========================================================
-
-TWITCH_MAP = {
-    "gnrb": "gnrb87",
-    "steinchen89": "Steinchen89",
-    "dirtbubble": "DirtBubblE",
-    "speeka": "Speeka89",
-    "link-q": "linkq87",
-    "derdasch": "derdasch",
-    "bumble": "bumblebee86x",
-    "leisureking": "Leisureking",
-    "tyrant242": "Tyrant242",
-    "loadpille": "LoaDPille",
-    "offiziell_alex2k6": "offiziell_alex2k6",
-    "dafritza": "dafritza84",
-    "teku361": "TeKu361",
-    "holysmoke": "holysmoke",
-    "wabnik": "Wabnik",
-    "sydraves": "Sydraves",
-    "roteralarm": "roteralarm",
-    "kromb": "kromb4787",
-    "ntapple": "NTapple",
-    "kico_89": "Kico_89",
-    "oeptown": "oeptown",
-    "mr__navigator": "mr__navigator",
-    "basdingo": "Basdingo",
-    "phoenix": "phoenix_tyrol",
-    "wolle": "wolle_91",
-    "mc_thomas3": "mc_thomas3",
-    "esto": "estaryo90",
-    "dafatbrainbug": "dafatbrainbug",
-    "funtreecake": "FunTreeCake",
-    "darpex": "darpex3",
-    "schieva96": "Schieva96",
-    "crackerito": "crackerito88",
-    "blackirave": "blackirave",
-    "nezil": "Nezil7",
-    "officermiaumiau": "officermiaumiautwitch",
-    "papaschland": "Papaschland",
-    "hideonbush": "hideonbush1909",
-    "mahony": "mahony19888",
-    "iconic": "iconic22",
-    "krawalltofu": "krawalltofu",
-    "osora": "osora90",
-    "randonorris": "Rando_Norris",
-    "neo-sanji": "neo_sanji",
-    "cfate91": "CFate91",
-    "kalamarino": "Kalamarino",
-    "dekar112": "dekar_112",
-    "drdiabetus": "dr_diabetus",
-    "darknesslink81": "Darknesslink81",
-    "littlevaia": "LittleVaia",
-    "boothisman": "boothisman",
-    "cptnsabo": "CptnSabo",
-    "aleximwunderland": "alex_im_wunderland",
-    "dominik0688": "Dominik0688",
-    "quaschynock": "quaschynock",
-    "marcii": "marciii86",
-    "rennyur": "rennyur",
-    "yasi89": "yasi89",
-}
 
 # =========================================================
 # GOOGLE SHEETS
@@ -366,51 +302,60 @@ def get_runner_modes() -> list[str]:
 
 
 def normalize_twitch_lookup_key(value: str) -> str:
-    """
-    Normalisiert Spielernamen für das Twitch-Mapping.
-
-    Sheet-/Discord-Namen enthalten teilweise Leerzeichen, Punkte,
-    Unterstriche oder unterschiedliche Groß-/Kleinschreibung.
-    Beispiel:
-    "Officer Miau Miau" -> "officermiaumiau"
-    """
     value = clean_text(value or "").lower()
     return re.sub(r"[^a-z0-9äöüß]", "", value)
 
 
-def get_shared_twitch_map() -> dict:
-    """
-    Holt bevorzugt das zentrale TWITCH_MAP aus bot.py.
+def normalize_twitch_channel(value: str) -> str:
+    value = clean_text(value or "").rstrip("/")
 
-    Kein normales `import bot`, weil matchcenter.py als Extension von bot.py
-    geladen wird und ein Import den Bot doppelt initialisieren könnte.
+    if not value:
+        return ""
+
+    match = re.search(
+        r"(?:https?://)?(?:www\.)?twitch\.tv/([^/?#]+)",
+        value,
+        re.IGNORECASE,
+    )
+    if match:
+        value = match.group(1)
+
+    return value.strip().lstrip("@")
+
+
+def get_runner_twitch_map() -> dict[str, str]:
     """
-    for module_name in ("__main__", "bot"):
-        module = sys.modules.get(module_name)
-        if module is None:
+    Liest Multistream-Zuordnungen ausschließlich aus Runner:
+    Spalte A = Spielername
+    Spalte B = Twitchkanal
+    """
+    ws = get_cached_worksheet_by_name(RUNNER_SHEET)
+    rows = get_matchcenter_values(
+        ws,
+        ttl_seconds=MATCHCENTER_MODE_CACHE_TTL_SECONDS,
+    )
+
+    mapping: dict[str, str] = {}
+
+    for row in rows:
+        player_name = _cell(row, 0)   # A
+        twitch_value = _cell(row, 1)  # B
+
+        if not player_name or not twitch_value:
             continue
 
-        shared_map = getattr(module, "TWITCH_MAP", None)
-        if isinstance(shared_map, dict) and shared_map:
-            return shared_map
+        key = normalize_twitch_lookup_key(player_name)
+        channel = normalize_twitch_channel(twitch_value)
 
-    return TWITCH_MAP
+        if key and channel:
+            mapping[key] = channel
+
+    return mapping
 
 
 def get_twitch_handle_for_player(player_name: str) -> str | None:
-    twitch_map = get_shared_twitch_map()
-
-    direct_key = (player_name or "").strip().lower()
-    if direct_key in twitch_map:
-        return twitch_map[direct_key]
-
-    normalized_target = normalize_twitch_lookup_key(player_name)
-
-    for key, handle in twitch_map.items():
-        if normalize_twitch_lookup_key(key) == normalized_target:
-            return handle
-
-    return None
+    twitch_map = get_runner_twitch_map()
+    return twitch_map.get(normalize_twitch_lookup_key(player_name))
 
 
 def build_multistream_url(player1: str, player2: str) -> str:
@@ -419,13 +364,15 @@ def build_multistream_url(player1: str, player2: str) -> str:
 
     if p1 and p2:
         return f"https://multistre.am/{p1}/{p2}/layout4"
+
     if p1:
         return f"https://www.twitch.tv/{p1}"
+
     if p2:
         return f"https://www.twitch.tv/{p2}"
 
-    print(f"⚠️ Kein Streamlink im Mapping gefunden: {player1} / {player2}")
-    return "Kein Streamlink im Mapping gefunden"
+    print(f"⚠️ Kein Twitchkanal in Runner!B gefunden: {player1} / {player2}")
+    return "Kein Streamlink im Runner-Sheet gefunden"
 
 
 def result_league_from_value(value: str) -> str:
