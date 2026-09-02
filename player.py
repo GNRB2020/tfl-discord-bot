@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import re
 import unicodedata
@@ -819,6 +820,312 @@ class StreichmodusSettingView(PlayerBaseView):
 
 
 # =========================================================
+# LIGA-AUSTRITT
+# =========================================================
+
+LEAGUE_ROLE_NORMALIZED = "tryforceleague"
+CUP_ROLE_NORMALIZED = "tryforcecup"
+
+
+def clear_shared_results_db_cache():
+    """
+    Leert den Results-DB-Cache aus bot.py ohne einen normalen Import von bot.py.
+    Ein normales `import bot` würde beim Extension-Setup zu einer doppelten
+    Bot-Initialisierung führen können.
+    """
+    for module_name in ("__main__", "bot"):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+
+        clear_func = getattr(module, "clear_results_db_cache", None)
+        if callable(clear_func):
+            try:
+                clear_func()
+            except Exception as e:
+                print(f"[PLAYER EXIT] Results-DB-Cache konnte nicht geleert werden: {e}")
+            return
+
+
+def division_role_matches(role_name: str, div_number: int) -> bool:
+    """
+    Unterstützt u. a.:
+    - 1. Division
+    - Division 1
+    - 1 DIV
+    - DIV 1
+    """
+    normalized = normalize_name(role_name)
+    number = str(int(div_number))
+    return normalized in {
+        f"{number}division",
+        f"division{number}",
+        f"{number}div",
+        f"div{number}",
+    }
+
+
+def get_exit_roles(member: discord.Member, div_number: int) -> list[discord.Role]:
+    roles = []
+
+    for role in member.roles:
+        normalized = normalize_name(role.name)
+
+        if normalized in {LEAGUE_ROLE_NORMALIZED, CUP_ROLE_NORMALIZED}:
+            roles.append(role)
+            continue
+
+        if division_role_matches(role.name, div_number):
+            roles.append(role)
+
+    # Doppelte Rollen sicher ausschließen
+    unique = []
+    seen = set()
+    for role in roles:
+        if role.id in seen:
+            continue
+        seen.add(role.id)
+        unique.append(role)
+
+    return unique
+
+
+def apply_player_exit_for_name_candidates(name_candidates: list[str]) -> dict:
+    """
+    Findet die Division über Spalte L und wertet ALLE Ligaspiele des Spielers
+    als Niederlage gegen ihn.
+
+    Heimspieler steigt aus  -> 0:2
+    Gastspieler steigt aus  -> 2:0
+
+    Der ursprüngliche Modus in Spalte C bleibt bewusst erhalten.
+    Spalte G wird auf FF gesetzt und Spalte H mit dem Austritt markiert.
+    """
+    ws, roster_row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
+
+    if ws is None or roster_row_index is None or div_number is None:
+        raise RuntimeError("Du wurdest in keiner Division gefunden.")
+
+    roster_row = row_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws),
+        row=roster_row_index,
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
+
+    canonical_name = roster_row[11].strip() if len(roster_row) > 11 else ""
+    if not canonical_name:
+        canonical_name = next((x.strip() for x in name_candidates if x and x.strip()), "")
+
+    if not canonical_name:
+        raise RuntimeError("Spielername konnte nicht eindeutig bestimmt werden.")
+
+    target = normalize_name(canonical_name)
+    rows = ws.get_all_values()
+    requests = []
+    affected_rows = []
+
+    for row_index, row in enumerate(rows[1:], start=2):
+        home = row[3].strip() if len(row) > 3 else ""  # D
+        away = row[5].strip() if len(row) > 5 else ""  # F
+
+        home_match = bool(home) and normalize_name(home) == target
+        away_match = bool(away) and normalize_name(away) == target
+
+        if not home_match and not away_match:
+            continue
+
+        result_value = "0:2" if home_match else "2:0"
+
+        requests.extend(
+            [
+                {"range": f"E{row_index}:E{row_index}", "values": [[result_value]]},
+                {"range": f"G{row_index}:G{row_index}", "values": [["FF"]]},
+                {
+                    "range": f"H{row_index}:H{row_index}",
+                    "values": [[f"Austritt: {canonical_name}"]],
+                },
+            ]
+        )
+        affected_rows.append(row_index)
+
+    if not affected_rows:
+        raise RuntimeError(
+            f"Für {canonical_name} wurden in Division {div_number} keine Ligaspiele gefunden."
+        )
+
+    sheet_write_call(
+        lambda: ws.batch_update(requests),
+        invalidate_prefixes=player_invalidate_prefixes(ws),
+    )
+
+    # Der Joomla/API-Results-Cache sitzt in bot.py und muss nach dem Batch-Write
+    # ebenfalls verworfen werden.
+    clear_shared_results_db_cache()
+
+    return {
+        "player_name": canonical_name,
+        "division": int(div_number),
+        "affected_games": len(affected_rows),
+        "affected_rows": affected_rows,
+    }
+
+
+class PlayerExitConfirmView(PlayerBaseView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id=owner_id, timeout=300)
+        self.processing = False
+
+    @discord.ui.button(
+        label="Ja, Liga verlassen",
+        style=discord.ButtonStyle.danger,
+        row=0,
+    )
+    async def confirm_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        if self.processing:
+            await interaction.response.send_message(
+                "Der Austritt wird bereits verarbeitet.",
+                ephemeral=True,
+            )
+            return
+
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
+                ephemeral=True,
+            )
+            return
+
+        self.processing = True
+
+        # Discord sofort bestätigen, bevor Google Sheets und Rollen bearbeitet werden.
+        await interaction.response.defer()
+
+        try:
+            result = await asyncio.to_thread(
+                apply_player_exit_for_name_candidates,
+                get_name_candidates(member),
+            )
+
+            player_name = result["player_name"]
+            div_number = result["division"]
+            affected_games = result["affected_games"]
+
+            # Divisionschat informieren.
+            channel_error = None
+            channel_id = DIVISION_CHANNELS.get(div_number)
+            channel = interaction.guild.get_channel(channel_id) if interaction.guild and channel_id else None
+
+            if channel is None and channel_id:
+                try:
+                    channel = await interaction.client.fetch_channel(channel_id)
+                except Exception as e:
+                    channel_error = str(e)
+                    channel = None
+
+            if channel is not None:
+                try:
+                    await channel.send(
+                        "🚨 **LIGA-AUSTRITT** 🚨\n\n"
+                        f"**{player_name} ist ausgestiegen. "
+                        "Alle seine Spiele werden mit 0:2 gegen ihn gewertet.**"
+                    )
+                except Exception as e:
+                    channel_error = str(e)
+            elif channel_error is None:
+                channel_error = "Divisionschat konnte nicht gefunden werden."
+
+            # TFL-, Cup- und Divisionsrolle entfernen.
+            role_error = None
+            roles_to_remove = get_exit_roles(member, div_number)
+            removed_role_names = [role.name for role in roles_to_remove]
+
+            if roles_to_remove:
+                try:
+                    await member.remove_roles(
+                        *roles_to_remove,
+                        reason=f"TFL Liga-Austritt von {player_name}",
+                    )
+                except Exception as e:
+                    role_error = str(e)
+
+            warning_lines = []
+            if channel_error:
+                warning_lines.append(
+                    f"⚠️ Divisionsnachricht konnte nicht gesendet werden: {channel_error}"
+                )
+            if role_error:
+                warning_lines.append(
+                    f"⚠️ Rollen konnten nicht vollständig entfernt werden: {role_error}"
+                )
+            elif not roles_to_remove:
+                warning_lines.append(
+                    "⚠️ Es wurden keine passenden TFL-/Cup-/Divisionsrollen gefunden."
+                )
+
+            details = (
+                f"**Division:** {div_number}\n"
+                f"**Gewertete Spiele:** {affected_games}\n"
+            )
+
+            if removed_role_names and not role_error:
+                details += f"**Entfernte Rollen:** {', '.join(removed_role_names)}\n"
+
+            if warning_lines:
+                details += "\n" + "\n".join(warning_lines)
+
+            await interaction.edit_original_response(
+                embed=discord.Embed(
+                    title="Liga-Austritt bestätigt",
+                    description=(
+                        f"**{player_name}**, dein Austritt aus der Try Force League ist endgültig.\n\n"
+                        f"{details}"
+                    ),
+                    color=discord.Color.red(),
+                ),
+                view=None,
+                content=None,
+            )
+
+        except Exception as e:
+            self.processing = False
+            await interaction.edit_original_response(
+                embed=discord.Embed(
+                    title="Liga-Austritt fehlgeschlagen",
+                    description=(
+                        "Der Austritt wurde nicht vollständig durchgeführt. "
+                        "Bitte wende dich an einen Admin.\n\n"
+                        f"**Fehler:** {e}"
+                    ),
+                    color=discord.Color.red(),
+                ),
+                view=self,
+                content=None,
+            )
+
+    @discord.ui.button(
+        label="Abbrechen",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def cancel_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed("Spielermenü", "Der Liga-Austritt wurde abgebrochen."),
+            view=PlayerMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+# =========================================================
 # HAUPTMENÜ
 # =========================================================
 
@@ -885,6 +1192,31 @@ class PlayerMenuView(PlayerBaseView):
         await interaction.response.edit_message(
             embed=menu_embed("⚙️ Einstellungen", "Wähle einen Bereich."),
             view=SettingsMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+    @discord.ui.button(label="Austritt", style=discord.ButtonStyle.danger, row=2)
+    async def exit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="⚠️ Liga verlassen?",
+                description=(
+                    "Bist du dir absolut sicher, dass du die Liga verlassen möchtest? "
+                    "Wenn du nun bestätigst, ist die Entscheidung final. "
+                    "Zudem ist eine Teilnahme an der kommenden Saison damit ausgeschlossen."
+                ),
+                color=discord.Color.red(),
+            ),
+            view=PlayerExitConfirmView(owner_id=interaction.user.id),
             content=None,
         )
 
