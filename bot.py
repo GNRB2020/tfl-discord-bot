@@ -3,6 +3,7 @@ print("BOT FILE PATH:", os.path.abspath(__file__))
 
 import asyncio
 import datetime
+import re
 import sys
 import traceback
 from datetime import datetime as dt, timedelta
@@ -26,7 +27,7 @@ from tfnl_ranking_api_sync import publish_tfnl_rankings_to_api
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
-BOT_PERFORMANCE_VERSION = "bot-performance-v5-matchcenter-shared-sheets"
+BOT_PERFORMANCE_VERSION = "bot-performance-v6-admin-runner-twitch"
 print(f"[BOT] geladen: {BOT_PERFORMANCE_VERSION}")
 
 
@@ -215,77 +216,140 @@ DIV_COL_LEFT = 4      # D
 DIV_COL_MARKER = 5    # E
 DIV_COL_RIGHT = 6     # F
 
+RUNNER_SHEET = "Runner"
+RUNNER_NAME_COL = 1      # A
+RUNNER_TWITCH_COL = 2    # B
+
 
 # =========================================================
 # Twitch-Namen Mapping
 # =========================================================
-TWITCH_MAP = {
-    "gnrb": "gnrb87",
-    "steinchen89": "Steinchen89",
-    "dirtbubble": "DirtBubblE",
-    "speeka": "Speeka89",
-    "link-q": "linkq87",
-    "derdasch": "derdasch",
-    "bumble": "bumblebee86x",
-    "leisureking": "Leisureking",
-    "tyrant242": "Tyrant242",
-    "loadpille": "LoaDPille",
-    "offiziell_alex2k6": "offiziell_alex2k6",
-    "dafritza": "dafritza84",
-    "teku361": "TeKu361",
-    "holysmoke": "holysmoke",
-    "wabnik": "Wabnik",
-    "sydraves": "Sydraves",
-    "roteralarm": "roteralarm",
-    "kromb": "kromb4787",
-    "ntapple": "NTapple",
-    "kico_89": "Kico_89",
-    "oeptown": "oeptown",
-    "mr__navigator": "mr__navigator",
-    "basdingo": "Basdingo",
-    "phoenix": "phoenix_tyrol",
-    "wolle": "wolle_91",
-    "mc_thomas3": "mc_thomas3",
-    "esto": "estaryo90",
-    "dafatbrainbug": "dafatbrainbug",
-    "funtreecake": "FunTreeCake",
-    "darpex": "darpex3",
-    "schieva96": "Schieva96",
-    "crackerito": "crackerito88",
-    "blackirave": "blackirave",
-    "nezil": "Nezil7",
-    "officermiaumiau": "officermiaumiautwitch",
-    "papaschland": "Papaschland",
-    "hideonbush": "hideonbush1909",
-    "mahony": "mahony19888",
-    "iconic": "iconic22",
-    "krawalltofu": "krawalltofu",
-    "osora": "osora90",
-    "randonorris": "Rando_Norris",
-    "neo-sanji": "neo_sanji",
-    "cfate91": "CFate91",
-    "kalamarino": "Kalamarino",
-    "dekar112": "dekar_112",
-    "drdiabetus": "dr_diabetus",
-    "darknesslink81": "Darknesslink81",
-    "littlevaia": "LittleVaia",
-    "boothisman": "boothisman",
-    "cptnsabo": "CptnSabo",
-    "aleximwunderland": "alex_im_wunderland",
-    "dominik0688": "Dominik0688",
-    "quaschynock": "quaschynock",
-    "marcii": "marciii86",
-    "rennyur": "rennyur",
-    "yasi89": "yasi89",
-    "malxantholos": "malxantholos",
-    "robg": "robg92",
-    "mrslexy": "mrslexy",
-    "der_kai01": "der_Kai01",
-    "satono92": "satono92",
-    "dergoatbuster": "dergoatbuster",
-    "snack": "snack",
-    "hardy": "try_hardyy",
-}
+def normalize_runner_lookup_name(value: str) -> str:
+    value = (value or "").strip().lower()
+    return re.sub(r"[^a-z0-9äöüß]", "", value)
+
+
+def normalize_twitch_value(value: str) -> str:
+    """
+    Akzeptiert Username, @Username oder eine vollständige Twitch-URL.
+    In Runner!B wird nur der Kanalname gespeichert.
+    """
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+
+    match = re.search(
+        r"(?:https?://)?(?:www\.)?twitch\.tv/([^/?#]+)",
+        value,
+        re.IGNORECASE,
+    )
+    if match:
+        value = match.group(1)
+
+    return value.strip().lstrip("@")
+
+
+def get_runner_ws():
+    sheets_required()
+
+    if RUNNER_SHEET in _WORKSHEET_CACHE_BY_NAME:
+        return _WORKSHEET_CACHE_BY_NAME[RUNNER_SHEET]
+
+    ws = WB.worksheet(RUNNER_SHEET)
+    _WORKSHEET_CACHE_BY_NAME[RUNNER_SHEET] = ws
+    return ws
+
+
+def get_runner_twitch_mapping(force_refresh: bool = False) -> dict[str, str]:
+    """
+    Persistentes Twitchmapping:
+    Runner!A = Spielername
+    Runner!B = Twitchkanal
+    """
+    ws = get_runner_ws()
+    rows = get_all_values_cached(
+        lambda: ws,
+        sheet_name=RUNNER_SHEET,
+        ttl_seconds=BOT_PLAYER_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+    )
+
+    mapping: dict[str, str] = {}
+
+    for row in rows:
+        name = _cell(row, RUNNER_NAME_COL - 1)
+        twitch = _cell(row, RUNNER_TWITCH_COL - 1)
+
+        if not name or not twitch:
+            continue
+
+        key = normalize_runner_lookup_name(name)
+        channel = normalize_twitch_value(twitch)
+
+        if key and channel:
+            mapping[key] = channel
+
+    return mapping
+
+
+def set_runner_twitch(player_name: str, twitch: str) -> dict:
+    """
+    Aktualisiert Runner!B für einen vorhandenen Spieler.
+    Falls der Name in Runner!A noch nicht existiert, wird er am Tabellenende
+    mit Twitchkanal neu angelegt.
+    """
+    player_name = (player_name or "").strip()
+    twitch = normalize_twitch_value(twitch)
+
+    if not player_name:
+        raise ValueError("Spielername fehlt.")
+
+    if not twitch:
+        raise ValueError("Twitchkanal fehlt.")
+
+    ws = get_runner_ws()
+    rows = get_all_values_cached(
+        lambda: ws,
+        sheet_name=RUNNER_SHEET,
+        ttl_seconds=BOT_PLAYER_CACHE_TTL_SECONDS,
+        force_refresh=True,
+    )
+
+    target = normalize_runner_lookup_name(player_name)
+    found_row = None
+    canonical_name = player_name
+
+    for row_index, row in enumerate(rows, start=1):
+        existing_name = _cell(row, RUNNER_NAME_COL - 1)
+
+        if existing_name and normalize_runner_lookup_name(existing_name) == target:
+            found_row = row_index
+            canonical_name = existing_name
+            break
+
+    invalidation = invalidate_prefixes_for_ws(ws, RUNNER_SHEET)
+
+    if found_row is not None:
+        sheet_write_call(
+            lambda: ws.update(f"B{found_row}", [[twitch]]),
+            invalidate_prefixes=invalidation,
+        )
+        action = "updated"
+        row_number = found_row
+    else:
+        row_number = max(len(rows) + 1, 2)
+        sheet_write_call(
+            lambda: ws.update(f"A{row_number}:B{row_number}", [[player_name, twitch]]),
+            invalidate_prefixes=invalidation,
+        )
+        action = "created"
+
+    return {
+        "player_name": canonical_name,
+        "twitch": twitch,
+        "row": row_number,
+        "action": action,
+    }
 
 
 # =========================================================
@@ -991,13 +1055,37 @@ async def push_updates_to_api():
 # =========================================================
 # Slash Commands
 # =========================================================
-@tree.command(name="add", description="Fügt einen neuen Spieler zur Liste hinzu")
-@app_commands.describe(name="Name", twitch="Twitch-Username")
+@tree.command(name="add", description="(Admin) Twitchmapping eines Spielers persistent setzen")
+@app_commands.describe(
+    name="Spielername wie im Runner-Sheet",
+    twitch="Twitch-Username oder Twitch-URL",
+)
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def add(interaction: discord.Interaction, name: str, twitch: str):
-    key = name.strip().lower()
-    TWITCH_MAP[key] = twitch.strip()
-    await interaction.response.send_message(f"✅ `{key}` wurde mit Twitch `{twitch.strip()}` hinzugefügt.", ephemeral=True)
+    member = interaction.user
+
+    if not isinstance(member, discord.Member) or not has_admin_role(member):
+        await interaction.response.send_message("⛔ Keine Berechtigung.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        result = await asyncio.to_thread(set_runner_twitch, name, twitch)
+        action_text = "aktualisiert" if result["action"] == "updated" else "neu angelegt"
+
+        await interaction.edit_original_response(
+            content=(
+                f"✅ Twitchmapping {action_text}.\n"
+                f"**Spieler:** {result['player_name']}\n"
+                f"**Twitch:** {result['twitch']}\n"
+                f"**Runner-Zeile:** {result['row']}"
+            )
+        )
+    except Exception as e:
+        await interaction.edit_original_response(
+            content=f"❌ Fehler beim Twitchmapping: {e}"
+        )
 
 
 @tree.command(name="playerexit", description="Spieler aus Division austragen und alle Spiele als FF gegen ihn werten (nur Admin)")
@@ -1024,7 +1112,7 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(name="/playerexit", value="Admin: Spieler austragen (alle Spiele FF gegen ihn, Name durchgestrichen).", inline=False)
     embed.add_field(name="/spielplan", value="Admin: Hin- & Rückrunde erzeugen und ins DIV-Sheet schreiben.", inline=False)
     embed.add_field(name="/restreams", value="Zeigt alle zukünftigen Restream-Events.", inline=False)
-    embed.add_field(name="/add", value="Spieler → TWITCH_MAP hinzufügen (nicht persistent).", inline=False)
+    embed.add_field(name="/add", value="Admin: Twitchmapping persistent in Runner Spalte B setzen.", inline=False)
     embed.add_field(name="/sync", value="Admin: Slash-Commands synchronisieren.", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
