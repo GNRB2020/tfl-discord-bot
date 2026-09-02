@@ -26,7 +26,7 @@ from tfnl_ranking_api_sync import publish_tfnl_rankings_to_api
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
-BOT_PERFORMANCE_VERSION = "bot-performance-v4-ranking-results-counts"
+BOT_PERFORMANCE_VERSION = "bot-performance-v5-matchcenter-shared-sheets"
 print(f"[BOT] geladen: {BOT_PERFORMANCE_VERSION}")
 
 
