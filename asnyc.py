@@ -78,6 +78,7 @@ print(f"[ASNYC] geladen: {ASNYC_PERFORMANCE_VERSION}")
 ASNYC_SHEET_CACHE_TTL_SECONDS = int(os.getenv("ASNYC_SHEET_CACHE_TTL_SECONDS", "60"))
 ASNYC_SEED_CACHE_TTL_SECONDS = int(os.getenv("ASNYC_SEED_CACHE_TTL_SECONDS", "30"))
 ASNYC_SIGNUP_CACHE_TTL_SECONDS = int(os.getenv("ASNYC_SIGNUP_CACHE_TTL_SECONDS", "120"))
+ASNYC_IO_TIMEOUT_SECONDS = int(os.getenv("ASNYC_IO_TIMEOUT_SECONDS", "20"))
 
 _GSPREAD_CLIENT_CACHE = None
 _SPREADSHEET_CACHE: dict[str, gspread.Spreadsheet] = {}
@@ -169,6 +170,25 @@ async def try_send_dm(member: discord.Member | discord.User | None, text: str):
         await member.send(text)
     except Exception:
         pass
+
+
+async def run_blocking_with_timeout(func, *args, timeout: int | None = None):
+    """
+    Führt blockierende Google-/gspread-Aufrufe außerhalb des Discord-Event-Loops aus.
+
+    Wichtig für Component-Interactions:
+    Selbst wenn Google Sheets kurz hängt, bleibt der Discord-Bot reaktionsfähig.
+    """
+    effective_timeout = timeout or ASNYC_IO_TIMEOUT_SECONDS
+    return await asyncio.wait_for(
+        asyncio.to_thread(func, *args),
+        timeout=effective_timeout,
+    )
+
+
+def is_http_url(value: str) -> bool:
+    value = (value or "").strip().lower()
+    return value.startswith("http://") or value.startswith("https://")
 
 
 # =========================================================
@@ -968,20 +988,47 @@ class AsyncEntrySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        # Sofort bestätigen. open_async_entry arbeitet danach nur noch mit
+        # edit_original_response(). So kann Discord bei kurzen Hängern nicht
+        # mit "Bot hat nicht rechtzeitig reagiert" abbrechen.
+        await interaction.response.defer()
+
         sheet_row = int(self.values[0])
         entry = next((e for e in self.entries if e["sheet_row"] == sheet_row), None)
 
         if entry is None:
-            await interaction.response.send_message("Async nicht gefunden.", ephemeral=True)
+            await interaction.edit_original_response(
+                content="Async nicht gefunden.",
+                view=None,
+            )
             return
 
-        await self.cog.open_async_entry(interaction, entry)
+        await self.cog.open_async_entry(
+            interaction,
+            entry,
+            already_deferred=True,
+        )
 
 
 class AsyncSelectView(discord.ui.View):
     def __init__(self, cog, entries: list[dict]):
         super().__init__(timeout=300)
         self.add_item(AsyncEntrySelect(cog, entries))
+
+
+class AsyncSeedLinkButton(discord.ui.Button):
+    """
+    Reiner Discord-Linkbutton. Er benötigt keine Bot-Interaction und kann daher
+    selbst dann geöffnet werden, wenn Google Sheets oder der Bot gerade langsam ist.
+    """
+
+    def __init__(self, seed_url: str, row: int = 0):
+        super().__init__(
+            label="Seed-Link",
+            style=discord.ButtonStyle.link,
+            url=seed_url,
+            row=row,
+        )
 
 
 class AsyncSeedView(discord.ui.View):
@@ -992,11 +1039,21 @@ class AsyncSeedView(discord.ui.View):
 
     @discord.ui.button(label="Seed öffnen", style=discord.ButtonStyle.primary)
     async def reveal_seed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.reveal_async_seed(interaction, self.state)
+        await interaction.response.defer()
+        await self.cog.reveal_async_seed(
+            interaction,
+            self.state,
+            already_deferred=True,
+        )
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.cancel_async(interaction, self.state)
+        await interaction.response.defer()
+        await self.cog.cancel_async(
+            interaction,
+            self.state,
+            already_deferred=True,
+        )
 
 
 class AsyncStartView(discord.ui.View):
@@ -1005,23 +1062,44 @@ class AsyncStartView(discord.ui.View):
         self.cog = cog
         self.state = state
 
-    @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
-    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.start_async_race(interaction, self.state)
+        seed_url = (state.entry.get("seed") or "").strip()
+        if is_http_url(seed_url):
+            self.add_item(AsyncSeedLinkButton(seed_url, row=1))
 
-    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success, row=0)
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.cog.start_async_race(
+            interaction,
+            self.state,
+            already_deferred=True,
+        )
+
+    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary, row=0)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.cancel_async(interaction, self.state)
+        await interaction.response.defer()
+        await self.cog.cancel_async(
+            interaction,
+            self.state,
+            already_deferred=True,
+        )
 
 
 class AsyncRunningView(discord.ui.View):
     def __init__(self, cog, state: AsyncRaceState):
+        # Laufende Asyncs sollen nicht wegen eines View-Timeouts unbedienbar werden.
         super().__init__(timeout=None)
         self.cog = cog
         self.state = state
 
-    @discord.ui.button(label="Finish", style=discord.ButtonStyle.success)
+        seed_url = (state.entry.get("seed") or "").strip()
+        if is_http_url(seed_url):
+            self.add_item(AsyncSeedLinkButton(seed_url, row=1))
+
+    @discord.ui.button(label="Finish", style=discord.ButtonStyle.success, row=0)
     async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Hier absichtlich KEIN defer(): Ein Modal muss die direkte Antwort auf
+        # die Component-Interaction sein.
         await self.cog.finish_async(interaction, self.state)
 
 
@@ -1065,12 +1143,30 @@ async def open_quali_from_player(interaction: discord.Interaction):
     await cog.start_quali_flow(interaction, edit_existing=True)
 
 
-async def open_async_play_from_player(interaction: discord.Interaction):
+async def open_async_play_from_player(
+    interaction: discord.Interaction,
+    already_deferred: bool = False,
+):
     cog = interaction.client.get_cog("QualiCog")
     if cog is None or not isinstance(cog, QualiCog):
-        await interaction.response.send_message("Async spielen ist aktuell nicht verfügbar.", ephemeral=True)
+        if already_deferred or interaction.response.is_done():
+            await interaction.edit_original_response(
+                content="Async spielen ist aktuell nicht verfügbar.",
+                embed=None,
+                view=None,
+            )
+        else:
+            await interaction.response.send_message(
+                "Async spielen ist aktuell nicht verfügbar.",
+                ephemeral=True,
+            )
         return
-    await cog.start_async_flow(interaction, edit_existing=True)
+
+    await cog.start_async_flow(
+        interaction,
+        edit_existing=True,
+        already_deferred=already_deferred,
+    )
 
 
 # =========================================================
@@ -1308,31 +1404,97 @@ class QualiCog(commands.Cog):
             else:
                 await interaction.response.send_message(f"Fehler: {e}", ephemeral=True)
 
-    async def start_async_flow(self, interaction: discord.Interaction, edit_existing: bool = False):
-        if not edit_existing:
-            await interaction.response.defer(ephemeral=True)
-        else:
-            await interaction.response.defer()
+    async def start_async_flow(
+        self,
+        interaction: discord.Interaction,
+        edit_existing: bool = False,
+        already_deferred: bool = False,
+    ):
+        # Slash-Command und /player nutzen denselben Flow.
+        # Wurde die Interaction in player.py bereits bestätigt, darf hier kein
+        # zweites defer() erfolgen.
+        if not already_deferred and not interaction.response.is_done():
+            if not edit_existing:
+                await interaction.response.defer(ephemeral=True)
+            else:
+                await interaction.response.defer()
 
         try:
             runner_name = get_runner_name(interaction)
 
+            # Recovery: Ein bereits im Speicher vorhandenes Async wird nicht
+            # mehr nur mit "läuft bereits" quittiert. Stattdessen wird die
+            # passende Oberfläche erneut aufgebaut. So kommt der Spieler nach
+            # einem Discord-Timeout wieder an Seed/Start/Finish.
             active = self.active_asyncs.get(interaction.user.id)
-            if active and not active.finished:
-                text = "Du hast bereits ein laufendes Async."
-                if edit_existing:
-                    await interaction.edit_original_response(content=text, view=None)
+            if active and not active.finished and not active.cancelled:
+                if active.started_at is not None:
+                    text = (
+                        f"**Async läuft**\n\n"
+                        f"Spiel: **{active.entry['player1']} vs. {active.entry['player2']}**\n"
+                        f"Seed-Link: {active.entry['seed']}\n"
+                        f"Gestartet um: <t:{int(active.started_at.timestamp())}:T>\n\n"
+                        f"Drücke am Ende **Finish**.\n"
+                        f"Es gibt keinen Live-Timer im Discord."
+                    )
+                    view = AsyncRunningView(self, active)
+                elif active.seed_shown_at is not None:
+                    text = (
+                        f"**Async Seed geöffnet**\n\n"
+                        f"Spiel: **{active.entry['player1']} vs. {active.entry['player2']}**\n"
+                        f"Seed-Link: {active.entry['seed']}\n\n"
+                        f"Drücke **Start**, wenn du wirklich bereit bist.\n"
+                        f"Während des Runs gibt es keinen Live-Timer im Discord."
+                    )
+                    view = AsyncStartView(self, active)
                 else:
-                    await interaction.followup.send(text, ephemeral=True)
+                    text = (
+                        f"**Async Race**\n\n"
+                        f"Spiel: **{active.entry['player1']} vs. {active.entry['player2']}**\n"
+                        f"Art: **{active.entry['art']}**\n"
+                        f"Division: **{active.entry['division']}**\n"
+                        f"Modus: **{active.entry['mode']}**\n\n"
+                        f"Mit Klick auf **Seed öffnen** erhältst du den Async-Seed.\n"
+                        f"Danach startet deine Zeit erst mit **Start**."
+                    )
+                    view = AsyncSeedView(self, active)
+
+                if edit_existing:
+                    await interaction.edit_original_response(
+                        content=text,
+                        embed=None,
+                        view=view,
+                    )
+                    try:
+                        active.message = await interaction.original_response()
+                    except Exception:
+                        pass
+                else:
+                    await interaction.followup.send(
+                        text,
+                        view=view,
+                        ephemeral=True,
+                    )
                 return
 
-            ws = await asyncio.to_thread(get_async_worksheet)
-            entries = await asyncio.to_thread(get_async_open_entries_for_runner, ws, runner_name)
+            if active and (active.finished or active.cancelled):
+                self.active_asyncs.pop(interaction.user.id, None)
+
+            ws = await run_blocking_with_timeout(get_async_worksheet)
+            entries = await run_blocking_with_timeout(
+                get_async_open_entries_for_runner,
+                ws,
+                runner_name,
+            )
 
             if not entries:
                 text = "Keine offenen Asyncs für dich gefunden."
                 if edit_existing:
-                    await interaction.edit_original_response(content=text, view=None)
+                    await interaction.edit_original_response(
+                        content=text,
+                        embed=None,
+                        view=None,
+                    )
                 else:
                     await interaction.followup.send(text, ephemeral=True)
                 return
@@ -1345,17 +1507,50 @@ class QualiCog(commands.Cog):
             view = AsyncSelectView(self, entries)
 
             if edit_existing:
-                await interaction.edit_original_response(content=text, view=view)
+                await interaction.edit_original_response(
+                    content=text,
+                    embed=None,
+                    view=view,
+                )
             else:
-                await interaction.followup.send(text, view=view, ephemeral=True)
+                await interaction.followup.send(
+                    text,
+                    view=view,
+                    ephemeral=True,
+                )
 
+        except asyncio.TimeoutError:
+            text = (
+                "Google Sheets antwortet gerade zu langsam. "
+                "Bitte **Spielen** erneut anklicken. Dein Async/Seed geht dadurch nicht verloren."
+            )
+            if edit_existing:
+                await interaction.edit_original_response(
+                    content=text,
+                    embed=None,
+                    view=None,
+                )
+            else:
+                await interaction.followup.send(text, ephemeral=True)
         except Exception as e:
             if edit_existing:
-                await interaction.edit_original_response(content=f"Fehler: {e}", view=None)
+                await interaction.edit_original_response(
+                    content=f"Fehler: {e}",
+                    embed=None,
+                    view=None,
+                )
             else:
                 await interaction.followup.send(f"Fehler: {e}", ephemeral=True)
 
-    async def open_async_entry(self, interaction: discord.Interaction, entry: dict):
+    async def open_async_entry(
+        self,
+        interaction: discord.Interaction,
+        entry: dict,
+        already_deferred: bool = False,
+    ):
+        if not already_deferred and not interaction.response.is_done():
+            await interaction.response.defer()
+
         runner_name = get_runner_name(interaction)
         state = AsyncRaceState(interaction.user.id, runner_name, entry)
         self.active_asyncs[interaction.user.id] = state
@@ -1370,12 +1565,32 @@ class QualiCog(commands.Cog):
             f"Danach startet deine Zeit erst mit **Start**."
         )
         view = AsyncSeedView(self, state)
-        await interaction.response.edit_message(content=text, view=view)
-        state.message = await interaction.original_response()
 
-    async def reveal_async_seed(self, interaction: discord.Interaction, state: AsyncRaceState):
+        await interaction.edit_original_response(
+            content=text,
+            embed=None,
+            view=view,
+        )
+
+        try:
+            state.message = await interaction.original_response()
+        except Exception:
+            state.message = None
+
+    async def reveal_async_seed(
+        self,
+        interaction: discord.Interaction,
+        state: AsyncRaceState,
+        already_deferred: bool = False,
+    ):
+        if not already_deferred and not interaction.response.is_done():
+            await interaction.response.defer()
+
         if interaction.user.id != state.user_id:
-            await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send("Das ist nicht dein Async.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
             return
 
         state.seed_shown_at = dt.utcnow()
@@ -1384,32 +1599,75 @@ class QualiCog(commands.Cog):
             f"Spiel: **{state.entry['player1']} vs. {state.entry['player2']}**\n"
             f"Seed-Link: {state.entry['seed']}\n\n"
             f"Drücke **Start**, wenn du wirklich bereit bist.\n"
-            f"Während des Runs gibt es keinen Live-Timer im Discord."
+            f"Während des Runs gibt es keinen Live-Timer im Discord.\n\n"
+            f"Der Seed bleibt ab jetzt auch nach erneutem Öffnen von "
+            f"**/player → Async → Spielen** verfügbar."
         )
         view = AsyncStartView(self, state)
-        await interaction.response.edit_message(content=content, view=view)
-        state.message = await interaction.original_response()
 
-    async def start_async_race(self, interaction: discord.Interaction, state: AsyncRaceState):
+        await interaction.edit_original_response(
+            content=content,
+            embed=None,
+            view=view,
+        )
+
+        try:
+            state.message = await interaction.original_response()
+        except Exception:
+            state.message = None
+
+    async def start_async_race(
+        self,
+        interaction: discord.Interaction,
+        state: AsyncRaceState,
+        already_deferred: bool = False,
+    ):
+        if not already_deferred and not interaction.response.is_done():
+            await interaction.response.defer()
+
         if interaction.user.id != state.user_id:
-            await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send("Das ist nicht dein Async.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
             return
 
         if state.started_at is not None:
-            await interaction.response.send_message("Dieses Async läuft bereits.", ephemeral=True)
+            content = (
+                f"**Async läuft bereits**\n\n"
+                f"Spiel: **{state.entry['player1']} vs. {state.entry['player2']}**\n"
+                f"Seed-Link: {state.entry['seed']}\n"
+                f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n\n"
+                f"Drücke am Ende **Finish**."
+            )
+            await interaction.edit_original_response(
+                content=content,
+                embed=None,
+                view=AsyncRunningView(self, state),
+            )
             return
 
         state.started_at = dt.utcnow()
         content = (
             f"**Async läuft**\n\n"
             f"Spiel: **{state.entry['player1']} vs. {state.entry['player2']}**\n"
+            f"Seed-Link: {state.entry['seed']}\n"
             f"Gestartet um: <t:{int(state.started_at.timestamp())}:T>\n\n"
             f"Drücke am Ende **Finish**.\n"
             f"Es gibt keinen Live-Timer im Discord."
         )
         view = AsyncRunningView(self, state)
-        await interaction.response.edit_message(content=content, view=view)
-        state.message = await interaction.original_response()
+
+        await interaction.edit_original_response(
+            content=content,
+            embed=None,
+            view=view,
+        )
+
+        try:
+            state.message = await interaction.original_response()
+        except Exception:
+            state.message = None
 
     async def finish_async(self, interaction: discord.Interaction, state: AsyncRaceState):
         if interaction.user.id != state.user_id:
@@ -1420,18 +1678,36 @@ class QualiCog(commands.Cog):
             await interaction.response.send_message("Dieses Async wurde noch nicht gestartet.", ephemeral=True)
             return
 
+        # Modal muss direkt als Interaction-Response gesendet werden.
+        # Deshalb wird in AsyncRunningView vor diesem Aufruf nicht defer() genutzt.
         state.finished_at = dt.utcnow()
         state.locked_final_time = state.measured_time()
         await interaction.response.send_modal(AsyncSubmitModal(self, state))
 
-    async def cancel_async(self, interaction: discord.Interaction, state: AsyncRaceState):
+    async def cancel_async(
+        self,
+        interaction: discord.Interaction,
+        state: AsyncRaceState,
+        already_deferred: bool = False,
+    ):
+        if not already_deferred and not interaction.response.is_done():
+            await interaction.response.defer()
+
         if interaction.user.id != state.user_id:
-            await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send("Das ist nicht dein Async.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Das ist nicht dein Async.", ephemeral=True)
             return
 
         state.cancelled = True
         self.active_asyncs.pop(state.user_id, None)
-        await interaction.response.edit_message(content="Async abgebrochen.", view=None)
+
+        await interaction.edit_original_response(
+            content="Async abgebrochen.",
+            embed=None,
+            view=None,
+        )
 
     async def notify_async_review_ready(
         self,
