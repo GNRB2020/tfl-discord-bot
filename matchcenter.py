@@ -161,20 +161,74 @@ WB = None
 _WORKSHEET_NAME_CACHE = {}
 _WORKSHEET_GID_CACHE = {}
 
-try:
-    CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    GC = gspread.authorize(CREDS)
-    WB = GC.open(SPREADSHEET_TITLE)
-    print("✅ matchcenter Google Sheets verbunden")
-except Exception as e:
-    SHEETS_ENABLED = False
-    WB = None
-    print(f"⚠️ matchcenter Google Sheets deaktiviert: {e}")
+
+def _get_shared_bot_workbook():
+    """Übernimmt bevorzugt die bereits in bot.py aufgebaute Sheets-Verbindung."""
+    for module_name in ("__main__", "bot"):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+
+        shared_wb = getattr(module, "WB", None)
+        shared_enabled = getattr(module, "SHEETS_ENABLED", False)
+
+        if shared_enabled and shared_wb is not None:
+            return shared_wb
+
+    return None
+
+
+def initialize_matchcenter_sheets(force_retry: bool = False) -> bool:
+    """
+    Robuste MatchCenter-Sheets-Initialisierung.
+
+    1. Vorhandene Verbindung weiterverwenden.
+    2. Workbook aus bot.py übernehmen.
+    3. Nur als Fallback selbst verbinden.
+    """
+    global SHEETS_ENABLED, GC, WB
+
+    if WB is not None and SHEETS_ENABLED and not force_retry:
+        return True
+
+    shared_wb = _get_shared_bot_workbook()
+    if shared_wb is not None:
+        WB = shared_wb
+        SHEETS_ENABLED = True
+        print("✅ [MATCHCENTER] Google Sheets aus bot.py übernommen")
+        return True
+
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+        gc = gspread.authorize(creds)
+        wb = gc.open(SPREADSHEET_TITLE)
+
+        GC = gc
+        WB = wb
+        SHEETS_ENABLED = True
+        print("✅ [MATCHCENTER] Google Sheets direkt verbunden")
+        return True
+    except Exception as e:
+        SHEETS_ENABLED = False
+        WB = None
+        print(f"⚠️ [MATCHCENTER] Google-Sheets-Initialisierung fehlgeschlagen: {e}")
+        return False
+
+
+# Erster Versuch beim Import. Falls Google dabei kurz hakt, erfolgt später ein Retry.
+initialize_matchcenter_sheets()
 
 
 def sheets_required():
-    if not SHEETS_ENABLED or WB is None:
-        raise RuntimeError("Google Sheets nicht verbunden.")
+    if SHEETS_ENABLED and WB is not None:
+        return
+
+    # Selbstheilender Retry: nach einem temporären Startfehler erneut verbinden
+    # bzw. die inzwischen aktive Verbindung aus bot.py übernehmen.
+    if initialize_matchcenter_sheets(force_retry=True):
+        return
+
+    raise RuntimeError("Google Sheets nicht verbunden.")
 
 
 def get_cached_worksheet_by_name(sheet_name: str):
@@ -1642,4 +1696,5 @@ class MatchCenterCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    initialize_matchcenter_sheets(force_retry=True)
     await bot.add_cog(MatchCenterCog(bot))
