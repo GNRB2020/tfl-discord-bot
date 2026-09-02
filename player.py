@@ -903,13 +903,22 @@ class AsyncMenuView(PlayerBaseView):
 
     @discord.ui.button(label="Spielen", style=discord.ButtonStyle.success, row=0)
     async def spielen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Discord erwartet innerhalb weniger Sekunden eine Bestätigung der
+        # Component-Interaction. Deshalb wird der Klick hier sofort bestätigt,
+        # bevor im Async-Modul Google-Sheets-Daten geladen werden.
+        await interaction.response.defer()
+
         if hasattr(asnyc, "open_async_play_from_player"):
-            await asnyc.open_async_play_from_player(interaction)
+            await asnyc.open_async_play_from_player(
+                interaction,
+                already_deferred=True,
+            )
             return
 
-        await interaction.response.send_message(
-            "Async spielen ist aktuell nicht verfügbar.",
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content="Async spielen ist aktuell nicht verfügbar.",
+            embed=None,
+            view=None,
         )
 
     @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
