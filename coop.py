@@ -7,7 +7,7 @@ from datetime import datetime as dt
 import discord
 import gspread
 import pytz
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
@@ -125,27 +125,29 @@ def get_shared_workbook():
     Liefert eine funktionierende Workbook-Verbindung.
 
     Reihenfolge:
-    1. aktive Verbindung aus bot.py
-    2. selbstheilende Verbindung aus matchcenter.py
-    3. eigene direkte Google-Anmeldung als Fallback
+    1. restinfo.WB – wird von player.py bereits erfolgreich für die DIV-Sheets genutzt
+    2. matchcenter.WB – inklusive dessen Retry-Mechanismus
+    3. bot.py-WB – sofern tatsächlich aktiv
+    4. eigene direkte Google-Anmeldung mit google.oauth2 als Fallback
 
-    Damit hängt die Coop League nicht an einem beim Botstart einmalig
-    gesetzten SHEETS_ENABLED=False.
+    Wichtig:
+    Ein einmaliges SHEETS_ENABLED=False in bot.py blockiert die Coop-Funktion
+    damit nicht mehr.
     """
     global _COOP_GC, _COOP_WB
 
-    # 1) bot.py nur verwenden, wenn die Verbindung tatsächlich aktiv ist
-    module = get_main_bot_module()
-    if module is not None:
-        wb = getattr(module, "WB", None)
-        enabled = getattr(module, "SHEETS_ENABLED", False)
-        if enabled and wb is not None:
+    # 1) restinfo.py: player.py benutzt diese Verbindung bereits produktiv.
+    restinfo = sys.modules.get("restinfo")
+    if restinfo is not None:
+        wb = getattr(restinfo, "WB", None)
+        if wb is not None:
             return wb
 
-    # 2) MatchCenter besitzt bereits eine Retry-/Recovery-Initialisierung
+    # 2) matchcenter.py besitzt bereits eine Retry-/Recovery-Initialisierung.
     matchcenter = sys.modules.get("matchcenter")
     if matchcenter is not None:
         initializer = getattr(matchcenter, "initialize_matchcenter_sheets", None)
+
         if callable(initializer):
             try:
                 initializer(force_retry=True)
@@ -153,25 +155,50 @@ def get_shared_workbook():
                 print(f"[COOP] MatchCenter-Sheets-Retry fehlgeschlagen: {e}")
 
         wb = getattr(matchcenter, "WB", None)
-        enabled = getattr(matchcenter, "SHEETS_ENABLED", False)
-        if enabled and wb is not None:
+        if wb is not None:
             return wb
 
-    # 3) Eigene Verbindung als letzter Fallback
+    # 3) bot.py direkt verwenden, sobald ein Workbook-Objekt vorhanden ist.
+    # SHEETS_ENABLED wird hier bewusst NICHT zusätzlich geprüft:
+    # entscheidend ist, ob WB wirklich existiert.
+    module = get_main_bot_module()
+    if module is not None:
+        wb = getattr(module, "WB", None)
+        if wb is not None:
+            return wb
+
+    # 4) Eigene Verbindung als letzter Fallback.
     if _COOP_WB is not None:
         return _COOP_WB
 
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+        creds = Credentials.from_service_account_file(
+            CREDS_FILE,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
         gc = gspread.authorize(creds)
+
+        # open() über den Titel ist kompatibel mit der bestehenden Konfiguration.
         wb = gc.open(SPREADSHEET_TITLE)
 
         _COOP_GC = gc
         _COOP_WB = wb
-        print("✅ [COOP] Google Sheets direkt verbunden")
+
+        print(f"✅ [COOP] Google Sheets direkt verbunden: {SPREADSHEET_TITLE}")
         return wb
+
     except Exception as e:
-        raise RuntimeError(f"Google Sheets nicht verbunden: {e}") from e
+        print(
+            "[COOP] Direkte Google-Verbindung fehlgeschlagen: "
+            f"{type(e).__name__}: {e!r}"
+        )
+        raise RuntimeError(
+            "Google Sheets nicht verbunden. "
+            f"{type(e).__name__}: {e}"
+        ) from e
 
 
 def get_cached_ws(sheet_name: str):
@@ -179,7 +206,19 @@ def get_cached_ws(sheet_name: str):
         return _COOP_WS_CACHE[sheet_name]
 
     wb = get_shared_workbook()
-    ws = wb.worksheet(sheet_name)
+
+    try:
+        ws = wb.worksheet(sheet_name)
+    except Exception as e:
+        print(
+            f"[COOP] Worksheet '{sheet_name}' konnte nicht geöffnet werden: "
+            f"{type(e).__name__}: {e!r}"
+        )
+        raise RuntimeError(
+            f"Tabellenblatt '{sheet_name}' konnte nicht geöffnet werden. "
+            f"{type(e).__name__}: {e}"
+        ) from e
+
     _COOP_WS_CACHE[sheet_name] = ws
     return ws
 
