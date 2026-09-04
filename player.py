@@ -17,6 +17,7 @@ from sheet_guard import (
 import signup
 import asnyc
 import restinfo
+import coop
 
 from plan import PlanMenuView
 from asyncplan import open_async_request_from_player
@@ -64,7 +65,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v2-administration"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v3-coop-signup"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -1621,9 +1622,21 @@ class AdminMenuView(AdminOnlyView):
         await interaction.response.send_modal(AdminTwitchModal())
 
     @discord.ui.button(
+        label="Coop League",
+        style=discord.ButtonStyle.success,
+        row=2,
+    )
+    async def coop_admin_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await coop.open_coop_admin_from_player(interaction)
+
+    @discord.ui.button(
         label="◀ Zurück",
         style=discord.ButtonStyle.secondary,
-        row=3,
+        row=4,
     )
     async def back_button(
         self,
@@ -1664,6 +1677,41 @@ class AdminMenuButton(discord.ui.Button):
                 "Wähle eine Adminfunktion.",
             ),
             view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+# =========================================================
+# SAISONMELDUNG
+# =========================================================
+
+class SeasonSignupMenuView(PlayerBaseView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+
+    @discord.ui.button(label="TFL Saison", style=discord.ButtonStyle.primary, row=0)
+    async def tfl_signup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if hasattr(signup, "open_signup_from_player"):
+            await signup.open_signup_from_player(interaction)
+            return
+
+        await interaction.response.send_message(
+            "Saisonmeldung ist aktuell nicht verfügbar.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Coop League", style=discord.ButtonStyle.success, row=0)
+    async def coop_signup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop.open_coop_menu_from_player(interaction)
+
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
+            view=PlayerMenuView(
+                owner_id=interaction.user.id,
+                show_admin=has_admin_role(interaction.user),
+            ),
             content=None,
         )
 
@@ -1724,13 +1772,10 @@ class PlayerMenuView(PlayerBaseView):
 
     @discord.ui.button(label=" Saisonmeldung", style=discord.ButtonStyle.primary, row=1)
     async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if hasattr(signup, "open_signup_from_player"):
-            await signup.open_signup_from_player(interaction)
-            return
-
-        await interaction.response.send_message(
-            "Saisonmeldung ist aktuell nicht verfügbar.",
-            ephemeral=True,
+        await interaction.response.edit_message(
+            embed=menu_embed("Saisonmeldung", "Wähle einen Bereich."),
+            view=SeasonSignupMenuView(owner_id=interaction.user.id),
+            content=None,
         )
 
     @discord.ui.button(label="⚙️ Einstellungen", style=discord.ButtonStyle.secondary, row=2)
