@@ -17,6 +17,7 @@ RUNNER_SHEET = "Runner"
 
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
+SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
@@ -181,13 +182,14 @@ def get_shared_workbook():
         )
         gc = gspread.authorize(creds)
 
-        # open() über den Titel ist kompatibel mit der bestehenden Konfiguration.
-        wb = gc.open(SPREADSHEET_TITLE)
+        # Coop liegt im selben Spreadsheet wie die Saisonmeldung.
+        # Deshalb bewusst per stabiler Spreadsheet-ID statt über einen Titel öffnen.
+        wb = gc.open_by_key(SPREADSHEET_ID)
 
         _COOP_GC = gc
         _COOP_WB = wb
 
-        print(f"✅ [COOP] Google Sheets direkt verbunden: {SPREADSHEET_TITLE}")
+        print(f"✅ [COOP] Google Sheets direkt verbunden: {SPREADSHEET_ID}")
         return wb
 
     except Exception as e:
