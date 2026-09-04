@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
-COOP_SHEET = "coop"
+COOP_SHEET = "Coop"
 RUNNER_SHEET = "Runner"
 
 CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
