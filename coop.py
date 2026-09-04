@@ -1,15 +1,30 @@
 import asyncio
+import os
 import re
 import sys
 from datetime import datetime as dt
 
 import discord
+import gspread
 import pytz
+from oauth2client.service_account import ServiceAccountCredentials
 
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
 COOP_SHEET = "coop"
+RUNNER_SHEET = "Runner"
+
+CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
+SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+
+_COOP_GC = None
+_COOP_WB = None
+_COOP_WS_CACHE = {}
 
 # Tabellenaufbau:
 # A Teamname
@@ -105,29 +120,76 @@ def _cell(row, idx0: int) -> str:
     return row[idx0].strip() if 0 <= idx0 < len(row) else ""
 
 
-def get_coop_ws():
+def get_shared_workbook():
+    """
+    Liefert eine funktionierende Workbook-Verbindung.
+
+    Reihenfolge:
+    1. aktive Verbindung aus bot.py
+    2. selbstheilende Verbindung aus matchcenter.py
+    3. eigene direkte Google-Anmeldung als Fallback
+
+    Damit hängt die Coop League nicht an einem beim Botstart einmalig
+    gesetzten SHEETS_ENABLED=False.
+    """
+    global _COOP_GC, _COOP_WB
+
+    # 1) bot.py nur verwenden, wenn die Verbindung tatsächlich aktiv ist
     module = get_main_bot_module()
-    if module is None:
-        raise RuntimeError("Google-Sheets-Verbindung des Bots ist nicht verfügbar.")
+    if module is not None:
+        wb = getattr(module, "WB", None)
+        enabled = getattr(module, "SHEETS_ENABLED", False)
+        if enabled and wb is not None:
+            return wb
 
-    sheets_required = getattr(module, "sheets_required", None)
-    if callable(sheets_required):
-        sheets_required()
+    # 2) MatchCenter besitzt bereits eine Retry-/Recovery-Initialisierung
+    matchcenter = sys.modules.get("matchcenter")
+    if matchcenter is not None:
+        initializer = getattr(matchcenter, "initialize_matchcenter_sheets", None)
+        if callable(initializer):
+            try:
+                initializer(force_retry=True)
+            except Exception as e:
+                print(f"[COOP] MatchCenter-Sheets-Retry fehlgeschlagen: {e}")
 
-    cache = getattr(module, "_WORKSHEET_CACHE_BY_NAME", None)
-    if isinstance(cache, dict) and COOP_SHEET in cache:
-        return cache[COOP_SHEET]
+        wb = getattr(matchcenter, "WB", None)
+        enabled = getattr(matchcenter, "SHEETS_ENABLED", False)
+        if enabled and wb is not None:
+            return wb
 
-    wb = getattr(module, "WB", None)
-    if wb is None:
-        raise RuntimeError("Google Sheets nicht verbunden.")
+    # 3) Eigene Verbindung als letzter Fallback
+    if _COOP_WB is not None:
+        return _COOP_WB
 
-    ws = wb.worksheet(COOP_SHEET)
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+        gc = gspread.authorize(creds)
+        wb = gc.open(SPREADSHEET_TITLE)
 
-    if isinstance(cache, dict):
-        cache[COOP_SHEET] = ws
+        _COOP_GC = gc
+        _COOP_WB = wb
+        print("✅ [COOP] Google Sheets direkt verbunden")
+        return wb
+    except Exception as e:
+        raise RuntimeError(f"Google Sheets nicht verbunden: {e}") from e
 
+
+def get_cached_ws(sheet_name: str):
+    if sheet_name in _COOP_WS_CACHE:
+        return _COOP_WS_CACHE[sheet_name]
+
+    wb = get_shared_workbook()
+    ws = wb.worksheet(sheet_name)
+    _COOP_WS_CACHE[sheet_name] = ws
     return ws
+
+
+def get_coop_ws():
+    return get_cached_ws(COOP_SHEET)
+
+
+def get_runner_ws_local():
+    return get_cached_ws(RUNNER_SHEET)
 
 
 def ensure_coop_sheet_structure():
@@ -282,10 +344,30 @@ def find_pending_invite_for_member(member_id: int, names: list[str] | None = Non
 
 
 def get_runner_mapping() -> dict[str, str]:
+    """
+    Liest Runner!A:B direkt über dieselbe robuste Workbook-Verbindung.
+    """
     try:
-        getter = get_main_helper("get_runner_twitch_mapping")
-        return getter(force_refresh=False)
-    except Exception:
+        ws = get_runner_ws_local()
+        rows = ws.get_all_values()
+
+        mapping = {}
+        for row in rows:
+            player_name = _cell(row, 0)
+            twitch_value = _cell(row, 1)
+
+            if not player_name or not twitch_value:
+                continue
+
+            key = normalize_name(player_name)
+            twitch = normalize_twitch(twitch_value)
+
+            if key and twitch:
+                mapping[key] = twitch
+
+        return mapping
+    except Exception as e:
+        print(f"[COOP] Runner-Twitchmapping konnte nicht geladen werden: {e}")
         return {}
 
 
@@ -307,8 +389,7 @@ def ensure_runner_entry_if_missing(player_name: str, twitch: str):
     if not player_name or not twitch:
         return
 
-    get_runner_ws = get_main_helper("get_runner_ws")
-    ws = get_runner_ws()
+    ws = get_runner_ws_local()
     rows = ws.get_all_values()
 
     target = normalize_name(player_name)
