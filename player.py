@@ -68,7 +68,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v4-exit-request"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v5-admin-spielplan-sheets-fix"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -2182,6 +2182,149 @@ class AdminQualiResetView(AdminOnlyView):
         )
 
 
+
+def admin_spielplan_get_div_ws(div_number: str):
+    """
+    Nutzt dieselbe Workbook-Verbindung wie die bereits funktionierenden
+    Player-/Streichmodus-Funktionen: restinfo.WB.
+
+    Dadurch hängt die Admin-Spielplanfunktion nicht mehr von
+    bot.py -> SHEETS_ENABLED ab.
+    """
+    if restinfo.WB is None:
+        raise RuntimeError("Google Sheets über restinfo.py nicht verbunden.")
+
+    return restinfo.WB.worksheet(f"{div_number}.DIV")
+
+
+def admin_spielplan_read_players(div_number: str) -> list[str]:
+    ws = admin_spielplan_get_div_ws(div_number)
+
+    values = col_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws, f"{div_number}.DIV"),
+        col=12,  # L
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
+
+    players = []
+    seen = set()
+
+    # Regulärer Kaderbereich L2:L10
+    for raw in values[1:10]:
+        name = (raw or "").strip()
+        if not name:
+            continue
+
+        key = normalize_name(name)
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        players.append(name)
+
+    if len(players) not in (8, 9):
+        raise RuntimeError(
+            f"Für Division {div_number} müssen genau 8 oder 9 Spieler "
+            f"in Spalte L stehen. Gefunden: {len(players)}."
+        )
+
+    return players
+
+
+def admin_spielplan_build_rounds(players: list[str]) -> list[list[tuple[str, str]]]:
+    work = list(players)
+
+    if len(work) % 2 == 1:
+        work.append("BYE")
+
+    n = len(work)
+    half = n // 2
+    rotation = work[:]
+    rounds = []
+
+    for _ in range(n - 1):
+        left_half = rotation[:half]
+        right_half = rotation[half:]
+        right_rev = right_half[::-1]
+        day_pairs = []
+
+        for i in range(half):
+            p1 = left_half[i]
+            p2 = right_rev[i]
+
+            if p1 == "BYE" or p2 == "BYE":
+                continue
+
+            day_pairs.append((p1, p2))
+
+        rounds.append(day_pairs)
+
+        fixed = rotation[0]
+        tail = rotation[1:]
+        tail = [tail[-1]] + tail[:-1]
+        rotation = [fixed] + tail
+
+    return rounds
+
+
+def admin_spielplan_build_matches(players: list[str]) -> list[list[tuple[str, str]]]:
+    hinrunde = admin_spielplan_build_rounds(players)
+    rueckrunde = [
+        [(away, home) for home, away in day]
+        for day in hinrunde
+    ]
+    return hinrunde + rueckrunde
+
+
+def admin_spielplan_find_next_free_row(ws) -> int:
+    values = col_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws),
+        col=4,  # D
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
+
+    for row_index, value in enumerate(values, start=1):
+        if row_index == 1:
+            continue
+
+        if not (value or "").strip():
+            return row_index
+
+    return len(values) + 1
+
+
+def admin_spielplan_write(ws, rounds: list[list[tuple[str, str]]]) -> int:
+    start_row = admin_spielplan_find_next_free_row(ws)
+    rows_to_write = []
+    running_number = 1
+
+    for matches_in_round in rounds:
+        for home, away in matches_in_round:
+            row_data = [""] * 9
+            row_data[0] = str(running_number)
+            row_data[3] = home
+            row_data[4] = "vs"
+            row_data[5] = away
+
+            rows_to_write.append(row_data)
+            running_number += 1
+
+    if not rows_to_write:
+        return 0
+
+    end_row = start_row + len(rows_to_write) - 1
+    cell_range = f"A{start_row}:I{end_row}"
+
+    sheet_write_call(
+        lambda: ws.update(cell_range, rows_to_write),
+        invalidate_prefixes=player_invalidate_prefixes(ws),
+    )
+
+    return len(rows_to_write)
+
+
 class AdminSpielplanDivisionSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
@@ -2207,20 +2350,19 @@ class AdminSpielplanDivisionSelect(discord.ui.Select):
         await interaction.response.defer()
 
         try:
-            spielplan_read_players = get_main_helper("spielplan_read_players")
-            spielplan_build_matches = get_main_helper("spielplan_build_matches")
-            spielplan_write = get_main_helper("spielplan_write")
-            get_div_ws = get_main_helper("get_div_ws")
-
             players = await asyncio.to_thread(
-                spielplan_read_players,
+                admin_spielplan_read_players,
                 div_number,
             )
-            rounds = spielplan_build_matches(players)
-            ws = get_div_ws(div_number)
+
+            rounds = admin_spielplan_build_matches(players)
+            ws = await asyncio.to_thread(
+                admin_spielplan_get_div_ws,
+                div_number,
+            )
 
             written = await asyncio.to_thread(
-                spielplan_write,
+                admin_spielplan_write,
                 ws,
                 rounds,
             )
