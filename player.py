@@ -7,9 +7,11 @@ import uuid
 from datetime import datetime as dt, timedelta
 
 import discord
+import gspread
 import pytz
 from discord import app_commands
 from discord.ext import commands
+from google.oauth2.service_account import Credentials
 
 from sheet_guard import (
     col_values_cached,
@@ -68,7 +70,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v5-admin-spielplan-sheets-fix"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v6-admin-spielplan-direct-sheets"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -79,6 +81,11 @@ EXIT_REQUEST_ADMIN_CHANNEL_ID = 1277927528706736162
 EXIT_REQUEST_SHEET = "AustrittAnfragen"
 EXIT_REQUEST_TIMEOUT_DAYS = 5
 EXIT_REQUEST_CHECK_INTERVAL_SECONDS = 3600
+
+PLAYER_DIRECT_SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
+PLAYER_DIRECT_CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+_PLAYER_DIRECT_GC = None
+_PLAYER_DIRECT_WB = None
 
 _PLAYER_WORKSHEET_CACHE_BY_NAME = {}
 _PLAYER_WORKSHEET_CACHE_BY_GID = {}
@@ -2183,18 +2190,61 @@ class AdminQualiResetView(AdminOnlyView):
 
 
 
+def get_player_direct_workbook():
+    """
+    Eigene robuste Google-Sheets-Verbindung für player.py.
+
+    Diese Verbindung ist unabhängig von:
+    - bot.py / SHEETS_ENABLED
+    - restinfo.WB
+    - matchcenter.WB
+
+    Verwendet dieselbe Spreadsheet-ID wie signup.py und coop.py.
+    """
+    global _PLAYER_DIRECT_GC, _PLAYER_DIRECT_WB
+
+    if _PLAYER_DIRECT_WB is not None:
+        return _PLAYER_DIRECT_WB
+
+    try:
+        creds = Credentials.from_service_account_file(
+            PLAYER_DIRECT_CREDS_FILE,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
+
+        gc = gspread.authorize(creds)
+        wb = gc.open_by_key(PLAYER_DIRECT_SPREADSHEET_ID)
+
+        _PLAYER_DIRECT_GC = gc
+        _PLAYER_DIRECT_WB = wb
+
+        print("✅ [PLAYER] Direkte Google-Sheets-Verbindung hergestellt")
+        return wb
+
+    except Exception as e:
+        print(
+            "[PLAYER] Direkte Google-Sheets-Verbindung fehlgeschlagen: "
+            f"{type(e).__name__}: {e!r}"
+        )
+        raise RuntimeError(
+            "Google Sheets konnte nicht direkt verbunden werden. "
+            f"{type(e).__name__}: {e}"
+        ) from e
+
+
 def admin_spielplan_get_div_ws(div_number: str):
-    """
-    Nutzt dieselbe Workbook-Verbindung wie die bereits funktionierenden
-    Player-/Streichmodus-Funktionen: restinfo.WB.
+    wb = get_player_direct_workbook()
 
-    Dadurch hängt die Admin-Spielplanfunktion nicht mehr von
-    bot.py -> SHEETS_ENABLED ab.
-    """
-    if restinfo.WB is None:
-        raise RuntimeError("Google Sheets über restinfo.py nicht verbunden.")
-
-    return restinfo.WB.worksheet(f"{div_number}.DIV")
+    try:
+        return wb.worksheet(f"{div_number}.DIV")
+    except Exception as e:
+        raise RuntimeError(
+            f"Tabellenblatt '{div_number}.DIV' konnte nicht geöffnet werden. "
+            f"{type(e).__name__}: {e}"
+        ) from e
 
 
 def admin_spielplan_read_players(div_number: str) -> list[str]:
