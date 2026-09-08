@@ -1625,6 +1625,21 @@ class ExitRequestDMView(discord.ui.View):
         self.add_item(leave_button)
 
 
+class ExitRequestAdminView(PlayerBaseView):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await super().interaction_check(interaction):
+            return False
+
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message(
+                "⛔ Diese Funktion ist nur für Admins verfügbar.",
+                ephemeral=True,
+            )
+            return False
+
+        return True
+
+
 class ExitRequestPlayerSelect(discord.ui.Select):
     def __init__(self, division: int, players: list[str]):
         self.division = division
@@ -1666,7 +1681,7 @@ class ExitRequestPlayerSelect(discord.ui.Select):
         )
 
 
-class ExitRequestPlayerSelectView(AdminOnlyView):
+class ExitRequestPlayerSelectView(ExitRequestAdminView):
     def __init__(self, owner_id: int, division: int, players: list[str]):
         super().__init__(owner_id)
         self.add_item(ExitRequestPlayerSelect(division, players))
@@ -1737,7 +1752,7 @@ class ExitRequestDivisionSelect(discord.ui.Select):
             )
 
 
-class ExitRequestDivisionSelectView(AdminOnlyView):
+class ExitRequestDivisionSelectView(ExitRequestAdminView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id)
         self.add_item(ExitRequestDivisionSelect())
@@ -1751,7 +1766,7 @@ class ExitRequestDivisionSelectView(AdminOnlyView):
         )
 
 
-class ExitRequestSendConfirmView(AdminOnlyView):
+class ExitRequestSendConfirmView(ExitRequestAdminView):
     def __init__(self, owner_id: int, division: int, player_name: str):
         super().__init__(owner_id)
         self.division = division
