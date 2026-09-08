@@ -70,7 +70,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v6-admin-spielplan-direct-sheets"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v7-exit-request-direct-sheets"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -1403,13 +1403,21 @@ def get_pending_exit_requests() -> list[dict]:
 
 
 def list_league_players_by_division(div_number: int) -> list[str]:
-    ws = get_player_division_worksheet(div_number)
+    """
+    Liest die Teilnehmerliste für Austrittsanfragen direkt aus Spalte L
+    des korrekten Division-Sheets.
+
+    Wichtig: Nicht mehr über restinfo.WB, sondern über dieselbe direkte
+    Spreadsheet-ID-Verbindung wie die funktionierende Admin-Spielplanfunktion.
+    """
+    ws = admin_spielplan_get_div_ws(str(div_number))
 
     values = col_values_cached(
         lambda: ws,
         sheet_name=player_sheet_name(ws, f"{div_number}.DIV"),
-        col=12,
+        col=12,  # L
         ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+        force_refresh=True,
     )
 
     names = []
@@ -1420,12 +1428,21 @@ def list_league_players_by_division(div_number: int) -> list[str]:
         if not name:
             continue
 
+        # mögliche Überschrift ignorieren
+        if normalize_name(name) in {"racer", "spieler", "teilnehmer"}:
+            continue
+
         key = normalize_name(name)
         if not key or key in seen:
             continue
 
         seen.add(key)
         names.append(name)
+
+    print(
+        f"[EXIT REQUEST] Division {div_number}: "
+        f"{len(names)} Spieler aus {ws.title}!L geladen: {names}"
+    )
 
     return names[:25]
 
