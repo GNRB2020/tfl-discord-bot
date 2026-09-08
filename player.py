@@ -12,6 +12,7 @@ import pytz
 from discord import app_commands
 from discord.ext import commands
 from google.oauth2.service_account import Credentials
+from sheets_connection import get_season_spreadsheet, get_season_worksheet
 
 from sheet_guard import (
     col_values_cached,
@@ -70,7 +71,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v7-exit-request-direct-sheets"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v8-central-sheets"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -192,7 +193,7 @@ def get_player_division_worksheet(div_number: int):
     if sheet_name in _PLAYER_WORKSHEET_CACHE_BY_NAME:
         return _PLAYER_WORKSHEET_CACHE_BY_NAME[sheet_name]
 
-    ws = restinfo.WB.worksheet(sheet_name)
+    ws = get_season_worksheet(sheet_name)
     _PLAYER_WORKSHEET_CACHE_BY_NAME[sheet_name] = ws
     return ws
 
@@ -1249,13 +1250,12 @@ EXIT_REQUEST_HEADERS = [
 
 
 def get_exit_request_ws():
-    if restinfo.WB is None:
-        raise RuntimeError("Google Sheets nicht verbunden.")
+    wb = get_season_spreadsheet()
 
     try:
-        ws = restinfo.WB.worksheet(EXIT_REQUEST_SHEET)
+        ws = wb.worksheet(EXIT_REQUEST_SHEET)
     except Exception:
-        ws = restinfo.WB.add_worksheet(
+        ws = wb.add_worksheet(
             title=EXIT_REQUEST_SHEET,
             rows=500,
             cols=12,
@@ -1416,8 +1416,7 @@ def list_league_players_by_division(div_number: int) -> list[str]:
         lambda: ws,
         sheet_name=player_sheet_name(ws, f"{div_number}.DIV"),
         col=12,  # L
-        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
-        force_refresh=True,
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS
     )
 
     names = []
@@ -2208,48 +2207,8 @@ class AdminQualiResetView(AdminOnlyView):
 
 
 def get_player_direct_workbook():
-    """
-    Eigene robuste Google-Sheets-Verbindung für player.py.
-
-    Diese Verbindung ist unabhängig von:
-    - bot.py / SHEETS_ENABLED
-    - restinfo.WB
-    - matchcenter.WB
-
-    Verwendet dieselbe Spreadsheet-ID wie signup.py und coop.py.
-    """
-    global _PLAYER_DIRECT_GC, _PLAYER_DIRECT_WB
-
-    if _PLAYER_DIRECT_WB is not None:
-        return _PLAYER_DIRECT_WB
-
-    try:
-        creds = Credentials.from_service_account_file(
-            PLAYER_DIRECT_CREDS_FILE,
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ],
-        )
-
-        gc = gspread.authorize(creds)
-        wb = gc.open_by_key(PLAYER_DIRECT_SPREADSHEET_ID)
-
-        _PLAYER_DIRECT_GC = gc
-        _PLAYER_DIRECT_WB = wb
-
-        print("✅ [PLAYER] Direkte Google-Sheets-Verbindung hergestellt")
-        return wb
-
-    except Exception as e:
-        print(
-            "[PLAYER] Direkte Google-Sheets-Verbindung fehlgeschlagen: "
-            f"{type(e).__name__}: {e!r}"
-        )
-        raise RuntimeError(
-            "Google Sheets konnte nicht direkt verbunden werden. "
-            f"{type(e).__name__}: {e}"
-        ) from e
+    """Kompatibilitätswrapper: zentrale Season-Verbindung."""
+    return get_season_spreadsheet()
 
 
 def admin_spielplan_get_div_ws(div_number: str):
