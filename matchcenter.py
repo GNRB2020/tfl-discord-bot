@@ -12,6 +12,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from sheets_connection import get_season_spreadsheet
 
 from sheet_guard import (
     acell_cached,
@@ -98,69 +99,34 @@ _WORKSHEET_NAME_CACHE = {}
 _WORKSHEET_GID_CACHE = {}
 
 
-def _get_shared_bot_workbook():
-    """Übernimmt bevorzugt die bereits in bot.py aufgebaute Sheets-Verbindung."""
-    for module_name in ("__main__", "bot"):
-        module = sys.modules.get(module_name)
-        if module is None:
-            continue
-
-        shared_wb = getattr(module, "WB", None)
-        shared_enabled = getattr(module, "SHEETS_ENABLED", False)
-
-        if shared_enabled and shared_wb is not None:
-            return shared_wb
-
-    return None
-
-
 def initialize_matchcenter_sheets(force_retry: bool = False) -> bool:
-    """
-    Robuste MatchCenter-Sheets-Initialisierung.
-
-    1. Vorhandene Verbindung weiterverwenden.
-    2. Workbook aus bot.py übernehmen.
-    3. Nur als Fallback selbst verbinden.
-    """
     global SHEETS_ENABLED, GC, WB
 
     if WB is not None and SHEETS_ENABLED and not force_retry:
         return True
 
-    shared_wb = _get_shared_bot_workbook()
-    if shared_wb is not None:
-        WB = shared_wb
-        SHEETS_ENABLED = True
-        print("✅ [MATCHCENTER] Google Sheets aus bot.py übernommen")
-        return True
-
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-        gc = gspread.authorize(creds)
-        wb = gc.open(SPREADSHEET_TITLE)
-
-        GC = gc
-        WB = wb
+        WB = get_season_spreadsheet()
         SHEETS_ENABLED = True
-        print("✅ [MATCHCENTER] Google Sheets direkt verbunden")
+        print("✅ [MATCHCENTER] zentrales Season-Spreadsheet verbunden")
         return True
     except Exception as e:
         SHEETS_ENABLED = False
         WB = None
-        print(f"⚠️ [MATCHCENTER] Google-Sheets-Initialisierung fehlgeschlagen: {e}")
+        print(
+            f"⚠️ [MATCHCENTER] Google-Sheets-Verbindung fehlgeschlagen: "
+            f"{type(e).__name__}: {e}"
+        )
         return False
 
 
-# Erster Versuch beim Import. Falls Google dabei kurz hakt, erfolgt später ein Retry.
 initialize_matchcenter_sheets()
 
 
 def sheets_required():
-    if SHEETS_ENABLED and WB is not None:
+    if WB is not None:
         return
 
-    # Selbstheilender Retry: nach einem temporären Startfehler erneut verbinden
-    # bzw. die inzwischen aktive Verbindung aus bot.py übernehmen.
     if initialize_matchcenter_sheets(force_retry=True):
         return
 
