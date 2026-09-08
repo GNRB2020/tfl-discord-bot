@@ -2,46 +2,45 @@ import os
 import re
 import unicodedata
 
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
 from sheet_guard import get_all_values_cached
+from sheets_connection import get_season_spreadsheet, get_season_worksheet
 
 
 DIV_COL_LEFT = 4
 DIV_COL_MARKER = 5
 DIV_COL_RIGHT = 6
 
-CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
-
-SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
-
-GC = None
-WB = None
-SHEETS_ENABLED = True
-
-RESTINFO_PERFORMANCE_VERSION = "restinfo-performance-v1"
+RESTINFO_PERFORMANCE_VERSION = "restinfo-performance-v2-central-sheets"
 print(f"[RESTINFO] geladen: {RESTINFO_PERFORMANCE_VERSION}")
 
-RESTINFO_SHEET_CACHE_TTL_SECONDS = int(os.getenv("RESTINFO_SHEET_CACHE_TTL_SECONDS", "120"))
+RESTINFO_SHEET_CACHE_TTL_SECONDS = int(
+    os.getenv("RESTINFO_SHEET_CACHE_TTL_SECONDS", "120")
+)
+
+SHEETS_ENABLED = True
+WB = None
 _WORKSHEET_CACHE = {}
 
-try:
-    CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    GC = gspread.authorize(CREDS)
-    WB = GC.open(SPREADSHEET_TITLE)
-except Exception:
-    SHEETS_ENABLED = False
-    WB = None
+
+def _ensure_workbook():
+    global WB, SHEETS_ENABLED
+
+    if WB is not None:
+        return WB
+
+    try:
+        WB = get_season_spreadsheet()
+        SHEETS_ENABLED = True
+        return WB
+    except Exception as e:
+        SHEETS_ENABLED = False
+        raise RuntimeError(
+            f"Google Sheets nicht verbunden: {type(e).__name__}: {e}"
+        ) from e
 
 
 def sheets_required():
-    if not SHEETS_ENABLED or WB is None:
-        raise RuntimeError("Google Sheets nicht verbunden (SHEETS_ENABLED=False).")
+    _ensure_workbook()
 
 
 def _cell(row, idx0):
@@ -55,19 +54,19 @@ def normalize_name(value: str) -> str:
 
 
 def _division_worksheet(div_number: str):
-    sheets_required()
     sheet_name = f"{div_number}.DIV"
 
     if sheet_name in _WORKSHEET_CACHE:
         return _WORKSHEET_CACHE[sheet_name]
 
-    ws = WB.worksheet(sheet_name)
+    ws = get_season_worksheet(sheet_name)
     _WORKSHEET_CACHE[sheet_name] = ws
     return ws
 
 
 def _division_values(div_number: str):
     ws = _division_worksheet(div_number)
+
     return get_all_values_cached(
         lambda: ws,
         sheet_name=getattr(ws, "title", f"{div_number}.DIV"),
@@ -75,18 +74,12 @@ def _division_values(div_number: str):
     )
 
 
-def _unique_players_from_column_l(rows: list[list[str]]) -> list[str]:
-    """
-    Liest Spieler aus Spalte L ab Sheet-Zeile 2.
-
-    Bewusst ohne feste Grenze auf 8 oder 9 Spieler.
-    Dadurch funktionieren 7er-, 8er- und 9er-Staffeln sauber.
-    """
+def _unique_players_from_column_l(rows):
     players = []
     seen = set()
 
     for row in rows[1:]:
-        name = _cell(row, 11)  # L
+        name = _cell(row, 11)
 
         if not name:
             continue
@@ -101,18 +94,12 @@ def _unique_players_from_column_l(rows: list[list[str]]) -> list[str]:
     return players
 
 
-# =========================================================
-# RESTPROGRAMM
-# =========================================================
-
-def list_rest_players(div_number: str) -> list[str]:
-    rows = _division_values(div_number)
-    return _unique_players_from_column_l(rows)
+def list_rest_players(div_number: str):
+    return _unique_players_from_column_l(_division_values(div_number))
 
 
 def list_restprogramm(div_number: str, player_name: str):
     rows = _division_values(div_number)
-
     matches = []
     target = normalize_name(player_name)
 
@@ -136,7 +123,7 @@ def list_restprogramm(div_number: str, player_name: str):
     return matches
 
 
-def format_restprogramm_text(div_number: str, player: str) -> str:
+def format_restprogramm_text(div_number: str, player: str):
     matches = list_restprogramm(div_number, player)
 
     if not matches:
@@ -145,45 +132,37 @@ def format_restprogramm_text(div_number: str, player: str) -> str:
             "Es sind keine offenen Spiele mehr in der Tabelle (E != 'vs')."
         )
 
-    lines = [
-        f"Division {div_number} – Restprogramm für **{player}**:",
-        "",
-    ]
-
-    player_key = normalize_name(player)
+    lines = [f"Division {div_number} – Restprogramm für **{player}**:", ""]
+    target = normalize_name(player)
 
     for match in matches:
         heim = match["heim"]
         gast = match["gast"]
 
-        if normalize_name(heim) == player_key:
-            info = f"**{heim} (H)** vs {gast}"
-        elif normalize_name(gast) == player_key:
-            info = f"{heim} vs **{gast} (A)**"
+        if normalize_name(heim) == target:
+            lines.append(f"- **{heim} (H)** vs {gast}")
+        elif normalize_name(gast) == target:
+            lines.append(f"- {heim} vs **{gast} (A)**")
         else:
-            info = f"{heim} vs {gast}"
-
-        lines.append(f"- {info}")
+            lines.append(f"- {heim} vs {gast}")
 
     return "\n".join(lines)
 
 
-def find_divisions_with_open_matches(player_name: str) -> list[str]:
+def find_divisions_with_open_matches(player_name: str):
     found = []
 
     for div_number in ["1", "2", "3", "4", "5", "6"]:
         try:
-            matches = list_restprogramm(div_number, player_name)
+            if list_restprogramm(div_number, player_name):
+                found.append(div_number)
         except Exception:
             continue
-
-        if matches:
-            found.append(div_number)
 
     return found
 
 
-def find_divisions_with_player(player_name: str) -> list[str]:
+def find_divisions_with_player(player_name: str):
     target = normalize_name(player_name)
     found = []
 
@@ -193,15 +172,13 @@ def find_divisions_with_player(player_name: str) -> list[str]:
         except Exception:
             continue
 
-        for player in players:
-            if normalize_name(player) == target:
-                found.append(div_number)
-                break
+        if any(normalize_name(player) == target for player in players):
+            found.append(div_number)
 
     return found
 
 
-def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -> str:
+def get_open_restprogramm_text_for_name_candidates(name_candidates):
     clean_candidates = []
     seen = set()
 
@@ -210,173 +187,90 @@ def get_open_restprogramm_text_for_name_candidates(name_candidates: list[str]) -
             continue
 
         norm = normalize_name(name)
-        if not norm or norm in seen:
-            continue
-
-        seen.add(norm)
-        clean_candidates.append(name.strip())
+        if norm and norm not in seen:
+            seen.add(norm)
+            clean_candidates.append(name.strip())
 
     for candidate in clean_candidates:
-        open_divisions = find_divisions_with_open_matches(candidate)
+        divisions = find_divisions_with_open_matches(candidate)
 
-        if len(open_divisions) == 1:
-            return format_restprogramm_text(open_divisions[0], candidate)
+        if len(divisions) == 1:
+            return format_restprogramm_text(divisions[0], candidate)
 
-        if len(open_divisions) > 1:
-            lines = [
-                f"Für **{candidate}** wurden offene Spiele in mehreren Divisionen gefunden:",
-                "",
-            ]
+        if len(divisions) > 1:
+            parts = []
+            for div in divisions:
+                parts.append(format_restprogramm_text(div, candidate))
+            return "\n\n".join(parts)
 
-            for div in open_divisions:
-                lines.append(f"- Division {div}")
-
-            lines.append("")
-            lines.append("Nutze bitte **Andere** und wähle die Division manuell.")
-
-            return "\n".join(lines)
-
-    for candidate in clean_candidates:
-        player_divisions = find_divisions_with_player(candidate)
-
-        if len(player_divisions) == 1:
-            return (
-                f"Division {player_divisions[0]} – Restprogramm für **{candidate}**:\n"
-                "Es sind keine offenen Spiele mehr in der Tabelle (E != 'vs')."
-            )
-
-        if len(player_divisions) > 1:
-            lines = [
-                f"Für **{candidate}** wurden Einträge in mehreren Divisionen gefunden, aber aktuell keine offenen Spiele:",
-                "",
-            ]
-
-            for div in player_divisions:
-                lines.append(f"- Division {div}")
-
-            lines.append("")
-            lines.append("Nutze bitte **Andere** und wähle die Division manuell.")
-
-            return "\n".join(lines)
-
-    if clean_candidates:
-        tried = ", ".join(f"`{name}`" for name in clean_candidates)
-
-        return (
-            "Für dich wurde kein passendes Restprogramm gefunden.\n"
-            f"Verwendete Namensvarianten: {tried}\n\n"
-            "Nutze bitte **Andere** und wähle Division + Spieler manuell."
-        )
-
+    tried = ", ".join(f"`{n}`" for n in clean_candidates) or "-"
     return (
-        "Für dich wurde kein passendes Restprogramm gefunden.\n"
-        "Nutze bitte **Andere** und wähle Division + Spieler manuell."
+        "Für dich konnte kein offenes Restprogramm gefunden werden.\n"
+        f"Verwendete Namensvarianten: {tried}"
     )
 
 
-# =========================================================
-# STREICHMODUS
-# =========================================================
-
 def list_streichungen(div_number: str):
     rows = _division_values(div_number)
-
     entries = []
-    seen = set()
 
-    for idx, row in enumerate(rows[1:], start=2):
-        spieler = _cell(row, 11)  # L
+    for row in rows[1:10]:
+        player = _cell(row, 11)
+        mode_m = _cell(row, 12)
+        mode_n = _cell(row, 13)
 
-        if not spieler:
-            continue
-
-        key = normalize_name(spieler)
-        if not key or key in seen:
-            continue
-
-        seen.add(key)
-
-        entries.append(
-            {
-                "row_index": idx,
-                "spieler": spieler,
-                "modus_m": _cell(row, 12),  # M
-                "modus_n": _cell(row, 13),  # N
-            }
-        )
+        if player:
+            entries.append(
+                {
+                    "spieler": player,
+                    "modus_m": mode_m,
+                    "modus_n": mode_n,
+                }
+            )
 
     return entries
 
 
-def get_streich_text_for_division(div_number: str) -> str:
+def get_streich_text_for_division(div_number: str):
     entries = list_streichungen(div_number)
 
     if not entries:
-        return f"Keine Streichmodi in Division {div_number} hinterlegt."
+        return f"Keine Streichungen in Division {div_number} hinterlegt."
 
-    lines = [
-        f"Streichmodi in Division {div_number}:",
-        "",
-    ]
+    lines = [f"📝 Streichungen in Division {div_number}:", ""]
 
     for entry in entries:
-        spieler = entry["spieler"]
-        parts = []
-
-        if entry["modus_m"]:
-            parts.append(entry["modus_m"])
-
-        if entry["modus_n"]:
-            parts.append(entry["modus_n"])
-
-        if parts:
-            lines.append(f"- **{spieler}**: " + " | ".join(parts))
-        else:
-            lines.append(f"- **{spieler}**")
+        modes = [x for x in (entry["modus_m"], entry["modus_n"]) if x]
+        suffix = " | ".join(modes)
+        lines.append(
+            f"- **{entry['spieler']}**" + (f": {suffix}" if suffix else "")
+        )
 
     return "\n".join(lines)
 
 
-def find_own_division_for_name_candidates(name_candidates: list[str]) -> str | None:
-    clean_candidates = []
-    seen = set()
+def get_own_division_streich_text(name_candidates):
+    found = []
 
-    for name in name_candidates:
-        if not name:
+    for candidate in name_candidates:
+        if not candidate:
             continue
 
-        norm = normalize_name(name)
-        if not norm or norm in seen:
-            continue
+        for div in find_divisions_with_player(candidate):
+            if div not in found:
+                found.append(div)
 
-        seen.add(norm)
-        clean_candidates.append(name.strip())
+    if len(found) == 1:
+        return get_streich_text_for_division(found[0])
 
-    for candidate in clean_candidates:
-        divisions = find_divisions_with_player(candidate)
-
-        if len(divisions) == 1:
-            return divisions[0]
-
-    return None
-
-
-def get_own_division_streich_text(name_candidates: list[str]) -> str:
-    div_number = find_own_division_for_name_candidates(name_candidates)
-
-    if not div_number:
-        tried = [x for x in name_candidates if x]
-
-        if tried:
-            return (
-                "Für dich konnte keine eindeutige Division gefunden werden.\n"
-                f"Verwendete Namensvarianten: {', '.join(f'`{x}`' for x in tried)}\n\n"
-                "Nutze bitte **Andere Divisionen**."
-            )
-
+    if len(found) > 1:
         return (
-            "Für dich konnte keine eindeutige Division gefunden werden.\n"
-            "Nutze bitte **Andere Divisionen**."
+            "Du wurdest in mehreren Divisionen gefunden:\n"
+            + "\n".join(f"- Division {div}" for div in found)
         )
 
-    return get_streich_text_for_division(div_number)
+    tried = ", ".join(f"`{n}`" for n in name_candidates if n) or "-"
+    return (
+        "Für dich konnte keine Division ermittelt werden.\n"
+        f"Verwendete Namensvarianten: {tried}"
+    )
