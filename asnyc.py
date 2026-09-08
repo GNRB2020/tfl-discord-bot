@@ -8,6 +8,7 @@ import gspread
 from discord import app_commands
 from discord.ext import commands
 from oauth2client.service_account import ServiceAccountCredentials
+from sheets_connection import get_spreadsheet as get_central_spreadsheet
 
 from sheet_guard import (
     acell_cached,
@@ -215,8 +216,7 @@ def get_spreadsheet(spreadsheet_id: str):
     if spreadsheet_id in _SPREADSHEET_CACHE:
         return _SPREADSHEET_CACHE[spreadsheet_id]
 
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(spreadsheet_id)
+    spreadsheet = get_central_spreadsheet(spreadsheet_id)
     _SPREADSHEET_CACHE[spreadsheet_id] = spreadsheet
     return spreadsheet
 
