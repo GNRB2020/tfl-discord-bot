@@ -6,6 +6,7 @@ import gspread
 from discord import app_commands
 from discord.ext import commands
 from google.oauth2.service_account import Credentials
+from sheets_connection import get_season_worksheet_by_gid
 
 from sheet_guard import (
     acell_cached,
@@ -47,20 +48,9 @@ _NAME_ROW_CACHE: dict[str, int] = {}
 def get_worksheet():
     global _WORKSHEET_CACHE
 
-    if _WORKSHEET_CACHE is not None:
-        return _WORKSHEET_CACHE
+    if _WORKSHEET_CACHE is None:
+        _WORKSHEET_CACHE = get_season_worksheet_by_gid(WORKSHEET_GID)
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_file(
-        GOOGLE_CREDENTIALS_FILE,
-        scopes=scopes,
-    )
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(SPREADSHEET_ID)
-    _WORKSHEET_CACHE = sheet.get_worksheet_by_id(WORKSHEET_GID)
     return _WORKSHEET_CACHE
 
 
