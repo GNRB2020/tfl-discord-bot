@@ -3,8 +3,11 @@ import sys
 import asyncio
 import re
 import unicodedata
+import uuid
+from datetime import datetime as dt, timedelta
 
 import discord
+import pytz
 from discord import app_commands
 from discord.ext import commands
 
@@ -65,11 +68,17 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v3-coop-signup"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v4-exit-request"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
 PLAYER_MODE_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_MODE_CACHE_TTL_SECONDS", "300"))
+
+BERLIN_TZ = pytz.timezone("Europe/Berlin")
+EXIT_REQUEST_ADMIN_CHANNEL_ID = 1277927528706736162
+EXIT_REQUEST_SHEET = "AustrittAnfragen"
+EXIT_REQUEST_TIMEOUT_DAYS = 5
+EXIT_REQUEST_CHECK_INTERVAL_SECONDS = 3600
 
 _PLAYER_WORKSHEET_CACHE_BY_NAME = {}
 _PLAYER_WORKSHEET_CACHE_BY_GID = {}
@@ -1011,6 +1020,102 @@ def apply_player_exit_for_name_candidates(name_candidates: list[str]) -> dict:
     }
 
 
+async def send_exit_admin_message(client: discord.Client, text: str):
+    channel = client.get_channel(EXIT_REQUEST_ADMIN_CHANNEL_ID)
+
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(EXIT_REQUEST_ADMIN_CHANNEL_ID)
+        except Exception as e:
+            print(f"[EXIT REQUEST] Adminchannel konnte nicht geladen werden: {e}")
+            return False
+
+    try:
+        await channel.send(text)
+        return True
+    except Exception as e:
+        print(f"[EXIT REQUEST] Adminnachricht fehlgeschlagen: {e}")
+        return False
+
+
+async def execute_full_player_exit(
+    client: discord.Client,
+    guild: discord.Guild | None,
+    member: discord.Member | None = None,
+    fallback_name: str | None = None,
+) -> dict:
+    """
+    Gemeinsame Austrittslogik für:
+    - normalen Austrittsbutton des Spielers
+    - Antwort "Austreten" auf eine Admin-Anfrage
+    - automatischen Austritt nach 5 Tagen ohne Reaktion
+    """
+    if member is not None:
+        name_candidates = get_name_candidates(member)
+    elif fallback_name:
+        name_candidates = [fallback_name]
+    else:
+        raise RuntimeError("Spieler konnte nicht bestimmt werden.")
+
+    result = await asyncio.to_thread(
+        apply_player_exit_for_name_candidates,
+        name_candidates,
+    )
+
+    player_name = result["player_name"]
+    div_number = result["division"]
+    warnings = []
+
+    # Divisionschat informieren
+    channel_id = DIVISION_CHANNELS.get(div_number)
+    division_channel = guild.get_channel(channel_id) if guild and channel_id else None
+
+    if division_channel is None and channel_id:
+        try:
+            division_channel = await client.fetch_channel(channel_id)
+        except Exception as e:
+            warnings.append(f"Divisionschat konnte nicht geladen werden: {e}")
+            division_channel = None
+
+    if division_channel is not None:
+        try:
+            await division_channel.send(
+                "🚨 **LIGA-AUSTRITT** 🚨\n\n"
+                f"**{player_name} ist ausgestiegen. "
+                "Alle seine Spiele werden mit 0:2 gegen ihn gewertet.**"
+            )
+        except Exception as e:
+            warnings.append(f"Divisionsnachricht konnte nicht gesendet werden: {e}")
+
+    # Rollen entfernen
+    removed_role_names = []
+
+    if member is not None:
+        roles_to_remove = get_exit_roles(member, div_number)
+        removed_role_names = [role.name for role in roles_to_remove]
+
+        if roles_to_remove:
+            try:
+                await member.remove_roles(
+                    *roles_to_remove,
+                    reason=f"TFL Liga-Austritt von {player_name}",
+                )
+            except Exception as e:
+                warnings.append(f"Rollen konnten nicht vollständig entfernt werden: {e}")
+        else:
+            warnings.append("Keine passenden TFL-/Cup-/Divisionsrollen gefunden.")
+    else:
+        warnings.append("Discord-Mitglied nicht gefunden; Rollen konnten nicht entfernt werden.")
+
+    return {
+        **result,
+        "removed_role_names": removed_role_names,
+        "warnings": warnings,
+    }
+
+
+
+
 class PlayerExitConfirmView(PlayerBaseView):
     def __init__(self, owner_id: int):
         super().__init__(owner_id=owner_id, timeout=300)
@@ -1047,73 +1152,24 @@ class PlayerExitConfirmView(PlayerBaseView):
         await interaction.response.defer()
 
         try:
-            result = await asyncio.to_thread(
-                apply_player_exit_for_name_candidates,
-                get_name_candidates(member),
+            result = await execute_full_player_exit(
+                client=interaction.client,
+                guild=interaction.guild,
+                member=member,
             )
 
             player_name = result["player_name"]
             div_number = result["division"]
             affected_games = result["affected_games"]
-
-            # Divisionschat informieren.
-            channel_error = None
-            channel_id = DIVISION_CHANNELS.get(div_number)
-            channel = interaction.guild.get_channel(channel_id) if interaction.guild and channel_id else None
-
-            if channel is None and channel_id:
-                try:
-                    channel = await interaction.client.fetch_channel(channel_id)
-                except Exception as e:
-                    channel_error = str(e)
-                    channel = None
-
-            if channel is not None:
-                try:
-                    await channel.send(
-                        "🚨 **LIGA-AUSTRITT** 🚨\n\n"
-                        f"**{player_name} ist ausgestiegen. "
-                        "Alle seine Spiele werden mit 0:2 gegen ihn gewertet.**"
-                    )
-                except Exception as e:
-                    channel_error = str(e)
-            elif channel_error is None:
-                channel_error = "Divisionschat konnte nicht gefunden werden."
-
-            # TFL-, Cup- und Divisionsrolle entfernen.
-            role_error = None
-            roles_to_remove = get_exit_roles(member, div_number)
-            removed_role_names = [role.name for role in roles_to_remove]
-
-            if roles_to_remove:
-                try:
-                    await member.remove_roles(
-                        *roles_to_remove,
-                        reason=f"TFL Liga-Austritt von {player_name}",
-                    )
-                except Exception as e:
-                    role_error = str(e)
-
-            warning_lines = []
-            if channel_error:
-                warning_lines.append(
-                    f"⚠️ Divisionsnachricht konnte nicht gesendet werden: {channel_error}"
-                )
-            if role_error:
-                warning_lines.append(
-                    f"⚠️ Rollen konnten nicht vollständig entfernt werden: {role_error}"
-                )
-            elif not roles_to_remove:
-                warning_lines.append(
-                    "⚠️ Es wurden keine passenden TFL-/Cup-/Divisionsrollen gefunden."
-                )
+            removed_role_names = result["removed_role_names"]
+            warning_lines = [f"⚠️ {line}" for line in result["warnings"]]
 
             details = (
                 f"**Division:** {div_number}\n"
                 f"**Gewertete Spiele:** {affected_games}\n"
             )
 
-            if removed_role_names and not role_error:
+            if removed_role_names:
                 details += f"**Entfernte Rollen:** {', '.join(removed_role_names)}\n"
 
             if warning_lines:
@@ -1163,6 +1219,794 @@ class PlayerExitConfirmView(PlayerBaseView):
             view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
             content=None,
         )
+
+
+# =========================================================
+# ADMIN-AUSTRITTSANFRAGEN
+# =========================================================
+
+EXIT_REQUEST_HEADERS = [
+    "Request ID",
+    "Spieler",
+    "Discord ID",
+    "Division",
+    "Gesendet am",
+    "Frist",
+    "Status",
+    "Erledigt am",
+    "DM Channel ID",
+    "DM Message ID",
+    "Angefordert von",
+    "Fehler",
+]
+
+
+def get_exit_request_ws():
+    if restinfo.WB is None:
+        raise RuntimeError("Google Sheets nicht verbunden.")
+
+    try:
+        ws = restinfo.WB.worksheet(EXIT_REQUEST_SHEET)
+    except Exception:
+        ws = restinfo.WB.add_worksheet(
+            title=EXIT_REQUEST_SHEET,
+            rows=500,
+            cols=12,
+        )
+        ws.update("A1:L1", [EXIT_REQUEST_HEADERS])
+
+    try:
+        first_row = ws.row_values(1)
+        if not any((value or "").strip() for value in first_row[:12]):
+            ws.update("A1:L1", [EXIT_REQUEST_HEADERS])
+    except Exception:
+        pass
+
+    return ws
+
+
+def parse_request_datetime(value: str):
+    value = (value or "").strip()
+    if not value:
+        return None
+
+    try:
+        parsed = dt.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return BERLIN_TZ.localize(parsed)
+        return parsed.astimezone(BERLIN_TZ)
+    except Exception:
+        return None
+
+
+def get_exit_request_rows():
+    ws = get_exit_request_ws()
+    return ws, ws.get_all_values()
+
+
+def find_exit_request_row(request_id: str):
+    ws, rows = get_exit_request_rows()
+
+    for row_index, row in enumerate(rows[1:], start=2):
+        current_id = row[0].strip() if len(row) > 0 else ""
+        if current_id == request_id:
+            return ws, row_index, row
+
+    return ws, None, None
+
+
+def find_pending_exit_request_for_player(discord_id: int):
+    ws, rows = get_exit_request_rows()
+    target = str(discord_id)
+
+    for row_index, row in enumerate(rows[1:], start=2):
+        player_id = row[2].strip() if len(row) > 2 else ""
+        status = row[6].strip().lower() if len(row) > 6 else ""
+
+        if player_id == target and status == "offen":
+            return ws, row_index, row
+
+    return ws, None, None
+
+
+def write_exit_request(
+    request_id: str,
+    player_name: str,
+    discord_id: int,
+    division: int,
+    sent_at,
+    deadline,
+    dm_channel_id: int,
+    dm_message_id: int,
+    requested_by: str,
+):
+    ws = get_exit_request_ws()
+
+    ws.append_row(
+        [
+            request_id,
+            player_name,
+            str(discord_id),
+            str(division),
+            sent_at.isoformat(),
+            deadline.isoformat(),
+            "offen",
+            "",
+            str(dm_channel_id),
+            str(dm_message_id),
+            requested_by,
+            "",
+        ],
+        value_input_option="USER_ENTERED",
+    )
+
+
+def update_exit_request_status(
+    request_id: str,
+    status: str,
+    error_text: str = "",
+):
+    ws, row_index, row = find_exit_request_row(request_id)
+
+    if row_index is None:
+        raise RuntimeError("Austrittsanfrage wurde nicht gefunden.")
+
+    ws.batch_update(
+        [
+            {"range": f"G{row_index}", "values": [[status]]},
+            {"range": f"H{row_index}", "values": [[dt.now(BERLIN_TZ).isoformat()]]},
+            {"range": f"L{row_index}", "values": [[error_text]]},
+        ]
+    )
+
+    return row_index, row
+
+
+def get_pending_exit_requests() -> list[dict]:
+    _, rows = get_exit_request_rows()
+    out = []
+
+    for row_index, row in enumerate(rows[1:], start=2):
+        status = row[6].strip().lower() if len(row) > 6 else ""
+        if status != "offen":
+            continue
+
+        player_id = row[2].strip() if len(row) > 2 else ""
+        division = row[3].strip() if len(row) > 3 else ""
+        dm_channel_id = row[8].strip() if len(row) > 8 else ""
+        dm_message_id = row[9].strip() if len(row) > 9 else ""
+
+        if not player_id.isdigit():
+            continue
+
+        out.append(
+            {
+                "row": row_index,
+                "request_id": row[0].strip() if len(row) > 0 else "",
+                "player_name": row[1].strip() if len(row) > 1 else "",
+                "discord_id": int(player_id),
+                "division": int(division) if division.isdigit() else None,
+                "deadline": parse_request_datetime(row[5] if len(row) > 5 else ""),
+                "dm_channel_id": int(dm_channel_id) if dm_channel_id.isdigit() else None,
+                "dm_message_id": int(dm_message_id) if dm_message_id.isdigit() else None,
+            }
+        )
+
+    return out
+
+
+def list_league_players_by_division(div_number: int) -> list[str]:
+    ws = get_player_division_worksheet(div_number)
+
+    values = col_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws, f"{div_number}.DIV"),
+        col=12,
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
+
+    names = []
+    seen = set()
+
+    for raw in values[1:]:
+        name = (raw or "").strip()
+        if not name:
+            continue
+
+        key = normalize_name(name)
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        names.append(name)
+
+    return names[:25]
+
+
+async def find_discord_member_for_league_player(
+    guild: discord.Guild,
+    player_name: str,
+) -> discord.Member | None:
+    target = normalize_name(player_name)
+
+    for member in guild.members:
+        if any(
+            normalize_name(candidate or "") == target
+            for candidate in get_name_candidates(member)
+        ):
+            return member
+
+    return None
+
+
+async def resolve_exit_request_continue(
+    interaction: discord.Interaction,
+    request_id: str,
+    expected_player_id: int,
+):
+    if interaction.user.id != expected_player_id:
+        await interaction.response.send_message(
+            "Diese Anfrage ist nicht für dich bestimmt.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+
+    try:
+        _, row_index, row = await asyncio.to_thread(
+            find_exit_request_row,
+            request_id,
+        )
+
+        if row_index is None:
+            raise RuntimeError("Anfrage wurde nicht gefunden.")
+
+        status = row[6].strip().lower() if len(row) > 6 else ""
+        if status != "offen":
+            await interaction.edit_original_response(
+                content="Diese Anfrage wurde bereits bearbeitet.",
+                view=None,
+            )
+            return
+
+        player_name = row[1].strip() if len(row) > 1 else str(interaction.user)
+
+        await asyncio.to_thread(
+            update_exit_request_status,
+            request_id,
+            "weiterspielen",
+            "",
+        )
+
+        await send_exit_admin_message(
+            interaction.client,
+            f"{player_name} hat reagiert und wird weiter am Spielbetrieb teilnehmen",
+        )
+
+        await interaction.edit_original_response(
+            content=(
+                "✅ Danke für deine Rückmeldung.\n\n"
+                "Du hast bestätigt, dass du **weiter am Spielbetrieb teilnimmst**."
+            ),
+            view=None,
+        )
+
+    except Exception as e:
+        await interaction.edit_original_response(
+            content=f"❌ Deine Rückmeldung konnte nicht verarbeitet werden: {e}",
+            view=None,
+        )
+
+
+async def resolve_exit_request_leave(
+    interaction: discord.Interaction,
+    request_id: str,
+    expected_player_id: int,
+):
+    if interaction.user.id != expected_player_id:
+        await interaction.response.send_message(
+            "Diese Anfrage ist nicht für dich bestimmt.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+
+    try:
+        _, row_index, row = await asyncio.to_thread(
+            find_exit_request_row,
+            request_id,
+        )
+
+        if row_index is None:
+            raise RuntimeError("Anfrage wurde nicht gefunden.")
+
+        status = row[6].strip().lower() if len(row) > 6 else ""
+        if status != "offen":
+            await interaction.edit_original_response(
+                content="Diese Anfrage wurde bereits bearbeitet.",
+                view=None,
+            )
+            return
+
+        player_name = row[1].strip() if len(row) > 1 else str(interaction.user)
+
+        guild = interaction.client.get_guild(GUILD_ID)
+        member = guild.get_member(expected_player_id) if guild else None
+
+        if member is None and guild is not None:
+            try:
+                member = await guild.fetch_member(expected_player_id)
+            except Exception:
+                member = None
+
+        result = await execute_full_player_exit(
+            client=interaction.client,
+            guild=guild,
+            member=member,
+            fallback_name=player_name,
+        )
+
+        await asyncio.to_thread(
+            update_exit_request_status,
+            request_id,
+            "ausgetreten",
+            "\n".join(result["warnings"]),
+        )
+
+        await send_exit_admin_message(
+            interaction.client,
+            f"{result['player_name']} hat reagiert und wird aus dem Spielbetrieb austreten.",
+        )
+
+        await interaction.edit_original_response(
+            content=(
+                "✅ Deine Rückmeldung wurde verarbeitet.\n\n"
+                "Du trittst aus dem Spielbetrieb aus. "
+                "Deine Ligaspiele wurden entsprechend gewertet."
+            ),
+            view=None,
+        )
+
+    except Exception as e:
+        try:
+            await asyncio.to_thread(
+                update_exit_request_status,
+                request_id,
+                "fehler",
+                str(e),
+            )
+        except Exception:
+            pass
+
+        await interaction.edit_original_response(
+            content=f"❌ Der Austritt konnte nicht vollständig verarbeitet werden: {e}",
+            view=None,
+        )
+
+
+class ExitRequestDMView(discord.ui.View):
+    def __init__(self, request_id: str, player_id: int):
+        super().__init__(timeout=None)
+
+        self.request_id = request_id
+        self.player_id = player_id
+
+        continue_button = discord.ui.Button(
+            label="Weiterspielen",
+            style=discord.ButtonStyle.success,
+            custom_id=f"exitreq:continue:{request_id}",
+        )
+        leave_button = discord.ui.Button(
+            label="Austreten",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"exitreq:leave:{request_id}",
+        )
+
+        async def continue_callback(interaction: discord.Interaction):
+            await resolve_exit_request_continue(
+                interaction,
+                self.request_id,
+                self.player_id,
+            )
+
+        async def leave_callback(interaction: discord.Interaction):
+            await resolve_exit_request_leave(
+                interaction,
+                self.request_id,
+                self.player_id,
+            )
+
+        continue_button.callback = continue_callback
+        leave_button.callback = leave_callback
+
+        self.add_item(continue_button)
+        self.add_item(leave_button)
+
+
+class ExitRequestPlayerSelect(discord.ui.Select):
+    def __init__(self, division: int, players: list[str]):
+        self.division = division
+
+        super().__init__(
+            placeholder="Spieler auswählen …",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=name[:100], value=name[:100])
+                for name in players[:25]
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message("⛔ Keine Berechtigung.", ephemeral=True)
+            return
+
+        player_name = self.values[0]
+
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="📨 Austrittsanfrage senden",
+                description=(
+                    f"**Spieler:** {player_name}\n"
+                    f"**Division:** {self.division}\n\n"
+                    "Soll die 5-Tage-Anfrage jetzt per DM versendet werden?"
+                ),
+                color=discord.Color.orange(),
+            ),
+            view=ExitRequestSendConfirmView(
+                owner_id=interaction.user.id,
+                division=self.division,
+                player_name=player_name,
+            ),
+            content=None,
+        )
+
+
+class ExitRequestPlayerSelectView(AdminOnlyView):
+    def __init__(self, owner_id: int, division: int, players: list[str]):
+        super().__init__(owner_id)
+        self.add_item(ExitRequestPlayerSelect(division, players))
+
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "🟨 Administration → Austrittsanfrage",
+                "Wähle eine Division.",
+            ),
+            view=ExitRequestDivisionSelectView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+class ExitRequestDivisionSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Division auswählen …",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=f"Division {i}", value=str(i))
+                for i in range(1, 7)
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message("⛔ Keine Berechtigung.", ephemeral=True)
+            return
+
+        division = int(self.values[0])
+        await interaction.response.defer()
+
+        try:
+            players = await asyncio.to_thread(
+                list_league_players_by_division,
+                division,
+            )
+
+            if not players:
+                raise RuntimeError(f"In Division {division} wurden keine Spieler gefunden.")
+
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Austrittsanfrage",
+                    f"Division {division}: Wähle den Spieler aus.",
+                ),
+                view=ExitRequestPlayerSelectView(
+                    owner_id=interaction.user.id,
+                    division=division,
+                    players=players,
+                ),
+                content=None,
+            )
+
+        except Exception as e:
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Austrittsanfrage",
+                    f"Fehler beim Laden der Spieler: {e}",
+                ),
+                view=ExitRequestDivisionSelectView(owner_id=interaction.user.id),
+                content=None,
+            )
+
+
+class ExitRequestDivisionSelectView(AdminOnlyView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(ExitRequestDivisionSelect())
+
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."),
+            view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+class ExitRequestSendConfirmView(AdminOnlyView):
+    def __init__(self, owner_id: int, division: int, player_name: str):
+        super().__init__(owner_id)
+        self.division = division
+        self.player_name = player_name
+        self.processing = False
+
+    @discord.ui.button(label="Anfrage senden", style=discord.ButtonStyle.success, row=0)
+    async def send_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.processing:
+            await interaction.response.send_message(
+                "Die Anfrage wird bereits versendet.",
+                ephemeral=True,
+            )
+            return
+
+        self.processing = True
+        await interaction.response.defer()
+
+        try:
+            if interaction.guild is None:
+                raise RuntimeError("Server konnte nicht bestimmt werden.")
+
+            member = await find_discord_member_for_league_player(
+                interaction.guild,
+                self.player_name,
+            )
+
+            if member is None:
+                raise RuntimeError(
+                    f"Discord-Mitglied für '{self.player_name}' wurde nicht gefunden."
+                )
+
+            _, existing_row, _ = await asyncio.to_thread(
+                find_pending_exit_request_for_player,
+                member.id,
+            )
+
+            if existing_row is not None:
+                raise RuntimeError(
+                    "Für diesen Spieler existiert bereits eine offene Austrittsanfrage."
+                )
+
+            request_id = uuid.uuid4().hex
+            sent_at = dt.now(BERLIN_TZ)
+            deadline = sent_at + timedelta(days=EXIT_REQUEST_TIMEOUT_DAYS)
+
+            dm_channel = member.dm_channel or await member.create_dm()
+            message = await dm_channel.send(
+                (
+                    "Bitte teile uns mit, ob du weiterhin am Spielbetrieb teilnimmst. "
+                    "Mit Erhalt dieser Nachricht hast du **5 Tage Zeit**.\n\n"
+                    "Bitte wähle eine der beiden Optionen:"
+                ),
+                view=ExitRequestDMView(
+                    request_id=request_id,
+                    player_id=member.id,
+                ),
+            )
+
+            await asyncio.to_thread(
+                write_exit_request,
+                request_id,
+                self.player_name,
+                member.id,
+                self.division,
+                sent_at,
+                deadline,
+                dm_channel.id,
+                message.id,
+                interaction.user.display_name,
+            )
+
+            interaction.client.add_view(
+                ExitRequestDMView(
+                    request_id=request_id,
+                    player_id=member.id,
+                ),
+                message_id=message.id,
+            )
+
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Austrittsanfrage",
+                    (
+                        f"✅ Anfrage an **{self.player_name}** wurde versendet.\n\n"
+                        f"**Frist:** {deadline.strftime('%d.%m.%Y %H:%M')}\n"
+                        "Ohne Reaktion wird der Austritt nach 5 Tagen automatisch durchgeführt."
+                    ),
+                ),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+
+        except Exception as e:
+            self.processing = False
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "🟨 Administration → Austrittsanfrage",
+                    f"❌ Anfrage konnte nicht versendet werden: {e}",
+                ),
+                view=self,
+                content=None,
+            )
+
+    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."),
+            view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+async def disable_exit_request_dm(bot: commands.Bot, request: dict, content: str):
+    channel_id = request.get("dm_channel_id")
+    message_id = request.get("dm_message_id")
+
+    if not channel_id or not message_id:
+        return
+
+    try:
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            channel = await bot.fetch_channel(channel_id)
+
+        message = await channel.fetch_message(message_id)
+        await message.edit(content=content, view=None)
+    except Exception as e:
+        print(f"[EXIT REQUEST] DM nach Fristablauf nicht aktualisiert: {e}")
+
+
+async def process_expired_exit_request(bot: commands.Bot, request: dict):
+    request_id = request["request_id"]
+    player_name = request["player_name"]
+    player_id = request["discord_id"]
+
+    _, row_index, row = await asyncio.to_thread(
+        find_exit_request_row,
+        request_id,
+    )
+
+    if row_index is None:
+        return
+
+    status = row[6].strip().lower() if len(row) > 6 else ""
+    if status != "offen":
+        return
+
+    guild = bot.get_guild(GUILD_ID)
+    member = guild.get_member(player_id) if guild else None
+
+    if member is None and guild is not None:
+        try:
+            member = await guild.fetch_member(player_id)
+        except Exception:
+            member = None
+
+    try:
+        result = await execute_full_player_exit(
+            client=bot,
+            guild=guild,
+            member=member,
+            fallback_name=player_name,
+        )
+
+        await asyncio.to_thread(
+            update_exit_request_status,
+            request_id,
+            "frist_abgelaufen_austritt",
+            "\n".join(result["warnings"]),
+        )
+
+        await send_exit_admin_message(
+            bot,
+            (
+                f"{result['player_name']} hat innerhalb von 5 Tagen nicht reagiert "
+                "und wird aus dem Spielbetrieb austreten."
+            ),
+        )
+
+        await disable_exit_request_dm(
+            bot,
+            request,
+            (
+                "Die 5-Tage-Frist ist abgelaufen.\n\n"
+                "Da keine Rückmeldung eingegangen ist, wurde dein Austritt "
+                "aus dem Spielbetrieb automatisch durchgeführt."
+            ),
+        )
+
+    except Exception as e:
+        try:
+            await asyncio.to_thread(
+                update_exit_request_status,
+                request_id,
+                "fehler",
+                str(e),
+            )
+        except Exception:
+            pass
+
+        await send_exit_admin_message(
+            bot,
+            (
+                f"⚠️ Automatischer Austritt für {player_name} nach Ablauf "
+                f"der 5-Tage-Frist ist fehlgeschlagen: {e}"
+            ),
+        )
+
+
+async def exit_request_monitor_loop(bot: commands.Bot):
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            pending = await asyncio.to_thread(get_pending_exit_requests)
+            now = dt.now(BERLIN_TZ)
+
+            for request in pending:
+                deadline = request.get("deadline")
+                if deadline is not None and deadline <= now:
+                    await process_expired_exit_request(bot, request)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[EXIT REQUEST] Monitorfehler: {e}")
+
+        await asyncio.sleep(EXIT_REQUEST_CHECK_INTERVAL_SECONDS)
+
+
+async def restore_exit_request_views(bot: commands.Bot):
+    try:
+        pending = await asyncio.to_thread(get_pending_exit_requests)
+        restored = 0
+
+        for request in pending:
+            if not request["request_id"] or not request["dm_message_id"]:
+                continue
+
+            bot.add_view(
+                ExitRequestDMView(
+                    request_id=request["request_id"],
+                    player_id=request["discord_id"],
+                ),
+                message_id=request["dm_message_id"],
+            )
+            restored += 1
+
+        print(f"[EXIT REQUEST] {restored} offene DM-Views wiederhergestellt.")
+
+    except Exception as e:
+        print(f"[EXIT REQUEST] Wiederherstellung fehlgeschlagen: {e}")
+
+
 
 
 # =========================================================
@@ -1632,6 +2476,25 @@ class AdminMenuView(AdminOnlyView):
         button: discord.ui.Button,
     ):
         await coop.open_coop_admin_from_player(interaction)
+
+    @discord.ui.button(
+        label="Austritt Anfrage senden",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def exit_request_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "🟨 Administration → Austrittsanfrage",
+                "Wähle zuerst die Division des Spielers.",
+            ),
+            view=ExitRequestDivisionSelectView(owner_id=interaction.user.id),
+            content=None,
+        )
 
     @discord.ui.button(
         label="◀ Zurück",
@@ -2574,3 +3437,12 @@ class PlayerCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PlayerCog(bot))
+
+    # Persistente Buttons offener Anfragen nach Neustart wieder registrieren.
+    await restore_exit_request_views(bot)
+
+    # Fristen liegen im Google Sheet und überstehen dadurch Bot-Neustarts.
+    if not hasattr(bot, "_exit_request_monitor_task"):
+        bot._exit_request_monitor_task = asyncio.create_task(
+            exit_request_monitor_loop(bot)
+        )
