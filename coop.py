@@ -8,6 +8,7 @@ import discord
 import gspread
 import pytz
 from google.oauth2.service_account import Credentials
+from sheets_connection import get_season_spreadsheet
 
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
@@ -122,85 +123,8 @@ def _cell(row, idx0: int) -> str:
 
 
 def get_shared_workbook():
-    """
-    Liefert eine funktionierende Workbook-Verbindung.
-
-    Reihenfolge:
-    1. restinfo.WB – wird von player.py bereits erfolgreich für die DIV-Sheets genutzt
-    2. matchcenter.WB – inklusive dessen Retry-Mechanismus
-    3. bot.py-WB – sofern tatsächlich aktiv
-    4. eigene direkte Google-Anmeldung mit google.oauth2 als Fallback
-
-    Wichtig:
-    Ein einmaliges SHEETS_ENABLED=False in bot.py blockiert die Coop-Funktion
-    damit nicht mehr.
-    """
-    global _COOP_GC, _COOP_WB
-
-    # 1) restinfo.py: player.py benutzt diese Verbindung bereits produktiv.
-    restinfo = sys.modules.get("restinfo")
-    if restinfo is not None:
-        wb = getattr(restinfo, "WB", None)
-        if wb is not None:
-            return wb
-
-    # 2) matchcenter.py besitzt bereits eine Retry-/Recovery-Initialisierung.
-    matchcenter = sys.modules.get("matchcenter")
-    if matchcenter is not None:
-        initializer = getattr(matchcenter, "initialize_matchcenter_sheets", None)
-
-        if callable(initializer):
-            try:
-                initializer(force_retry=True)
-            except Exception as e:
-                print(f"[COOP] MatchCenter-Sheets-Retry fehlgeschlagen: {e}")
-
-        wb = getattr(matchcenter, "WB", None)
-        if wb is not None:
-            return wb
-
-    # 3) bot.py direkt verwenden, sobald ein Workbook-Objekt vorhanden ist.
-    # SHEETS_ENABLED wird hier bewusst NICHT zusätzlich geprüft:
-    # entscheidend ist, ob WB wirklich existiert.
-    module = get_main_bot_module()
-    if module is not None:
-        wb = getattr(module, "WB", None)
-        if wb is not None:
-            return wb
-
-    # 4) Eigene Verbindung als letzter Fallback.
-    if _COOP_WB is not None:
-        return _COOP_WB
-
-    try:
-        creds = Credentials.from_service_account_file(
-            CREDS_FILE,
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ],
-        )
-        gc = gspread.authorize(creds)
-
-        # Coop liegt im selben Spreadsheet wie die Saisonmeldung.
-        # Deshalb bewusst per stabiler Spreadsheet-ID statt über einen Titel öffnen.
-        wb = gc.open_by_key(SPREADSHEET_ID)
-
-        _COOP_GC = gc
-        _COOP_WB = wb
-
-        print(f"✅ [COOP] Google Sheets direkt verbunden: {SPREADSHEET_ID}")
-        return wb
-
-    except Exception as e:
-        print(
-            "[COOP] Direkte Google-Verbindung fehlgeschlagen: "
-            f"{type(e).__name__}: {e!r}"
-        )
-        raise RuntimeError(
-            "Google Sheets nicht verbunden. "
-            f"{type(e).__name__}: {e}"
-        ) from e
+    """Coop nutzt ausschließlich die zentrale Season-Spreadsheet-Verbindung."""
+    return get_season_spreadsheet()
 
 
 def get_cached_ws(sheet_name: str):
