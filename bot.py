@@ -24,6 +24,7 @@ from sheet_guard import (
     sheet_write_call,
 )
 from tfnl_ranking_api_sync import publish_tfnl_rankings_to_api
+from sheets_connection import get_season_spreadsheet, get_season_worksheet
 
 print("🔍 DEBUG: bot.py wurde geladen")
 
@@ -156,19 +157,30 @@ WB = None
 _WORKSHEET_CACHE_BY_NAME: dict[str, gspread.Worksheet] = {}
 
 try:
-    CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
-    GC = gspread.authorize(CREDS)
-    WB = GC.open(SPREADSHEET_TITLE)
-    print("✅ Google Sheets verbunden (ohne Master-Tab)")
+    WB = get_season_spreadsheet()
+    print("✅ [BOT] Season-Spreadsheet zentral verbunden")
 except Exception as e:
     SHEETS_ENABLED = False
     WB = None
-    print(f"⚠️ Google Sheets deaktiviert: {e}")
+    print(f"⚠️ [BOT] Season-Spreadsheet nicht verbunden: {type(e).__name__}: {e}")
+
 
 
 def sheets_required():
-    if not SHEETS_ENABLED or WB is None:
-        raise RuntimeError("Google Sheets nicht verbunden (SHEETS_ENABLED=False).")
+    global SHEETS_ENABLED, WB
+
+    if WB is not None:
+        return
+
+    try:
+        WB = get_season_spreadsheet()
+        SHEETS_ENABLED = True
+        return
+    except Exception as e:
+        SHEETS_ENABLED = False
+        raise RuntimeError(
+            f"Google Sheets nicht verbunden: {type(e).__name__}: {e}"
+        ) from e
 
 
 def get_div_ws(div_number: str):
