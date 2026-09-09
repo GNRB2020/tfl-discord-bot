@@ -188,6 +188,7 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
         normalize_name(name): {
             "name": name,
             "wins": 0,
+            "draws": 0,
             "losses": 0,
             "played": 0,
             "score_for": 0,
@@ -218,6 +219,7 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
             stats[home_key] = {
                 "name": home,
                 "wins": 0,
+                "draws": 0,
                 "losses": 0,
                 "played": 0,
                 "score_for": 0,
@@ -228,6 +230,7 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
             stats[away_key] = {
                 "name": away,
                 "wins": 0,
+                "draws": 0,
                 "losses": 0,
                 "played": 0,
                 "score_for": 0,
@@ -248,6 +251,9 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
         elif away_score > home_score:
             stats[away_key]["wins"] += 1
             stats[home_key]["losses"] += 1
+        else:
+            stats[home_key]["draws"] += 1
+            stats[away_key]["draws"] += 1
 
     for item in stats.values():
         item["diff"] = item["score_for"] - item["score_against"]
@@ -256,6 +262,7 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
         stats.values(),
         key=lambda item: (
             -item["wins"],
+            -item["draws"],
             item["losses"],
             -item["diff"],
             -item["score_for"],
@@ -426,16 +433,23 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
 
         next_matches = data.get("next_matches") or []
         if next_matches:
-            for idx, match in enumerate(next_matches[:2]):
+            # Eigener Block erzwingt einen Zeilenumbruch nach Saisonstatus/Streichmodi.
+            # Die beiden folgenden Inline-Felder stehen dadurch nebeneinander.
+            embed.add_field(
+                name="📅 Nächste Termine",
+                value="\u200b",
+                inline=False,
+            )
+
+            for match in next_matches[:2]:
                 when = match["datetime"].strftime("%d.%m.%Y · %H:%M")
                 mode = match.get("mode") or "Modus noch offen"
                 home = match.get("home") or "?"
                 away = match.get("away") or "?"
 
                 embed.add_field(
-                    name="📅 Nächste Termine" if idx == 0 else "​",
+                    name=f"{when} Uhr",
                     value=(
-                        f"**{when} Uhr**\n"
                         f"{home} vs. {away}\n"
                         f"🎮 {mode}"
                     ),
@@ -459,12 +473,12 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
                     name = f"\u001b[1;33m{name}\u001b[0m"
 
                 lines.append(
-                    f"{item['rank']}. {name} — {item['wins']}-{item['losses']} ({item['played']})"
+                    f"{item['rank']}. {name} — {item['wins']}-{item['draws']}-{item['losses']} ({item['played']})"
                 )
 
             table_text = "```ansi\n" + "\n".join(lines) + "\n```"
             embed.add_field(
-                name=f"🏆 Aktuelle Tabelle Division {division}",
+                name=f"🏆 Aktuelle Tabelle Division {division} · S-U-N",
                 value=table_text[:1024],
                 inline=False,
             )
