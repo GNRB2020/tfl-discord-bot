@@ -257,15 +257,15 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
 
     for item in stats.values():
         item["diff"] = item["score_for"] - item["score_against"]
+        item["points"] = (item["wins"] * 2) + item["draws"]
 
     ranked = sorted(
         stats.values(),
         key=lambda item: (
-            -item["wins"],
-            -item["draws"],
-            item["losses"],
+            -item["points"],
             -item["diff"],
             -item["score_for"],
+            -item["wins"],
             normalize_name(item["name"]),
         ),
     )
@@ -464,21 +464,42 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
 
         division_table = data.get("division_table") or []
         if division_table:
-            lines = []
+            # Feste Spaltenbreiten sorgen in Discord für eine echte Tabellenansicht.
+            # ANSI färbt nur den bereits aufgefüllten Namensbereich und zerstört
+            # dadurch die Ausrichtung der nachfolgenden Zahlen nicht.
+            name_width = max(12, min(18, max(len(item["name"]) for item in division_table[:9])))
+
+            header = (
+                f"{'Pl':>2}  "
+                f"{'Spieler':<{name_width}}  "
+                f"{'Sp':>2}  {'S':>2}  {'U':>2}  {'N':>2}  {'Pkt':>3}"
+            )
+            separator = (
+                f"{'--':>2}  "
+                f"{'-' * name_width}  "
+                f"{'--':>2}  {'--':>2}  {'--':>2}  {'--':>2}  {'---':>3}"
+            )
+
+            lines = [header, separator]
+
             for item in division_table[:9]:
-                name = item["name"]
+                padded_name = f"{item['name']:<{name_width}}"
                 if item.get("is_self"):
-                    # Discord-Embeds unterstützen keine Textfarbe per Markdown.
-                    # ANSI erlaubt hier gezielt gelb + fett für den eigenen Namen.
-                    name = f"\u001b[1;33m{name}\u001b[0m"
+                    padded_name = f"\u001b[1;33m{padded_name}\u001b[0m"
 
                 lines.append(
-                    f"{item['rank']}. {name} — {item['wins']}-{item['draws']}-{item['losses']} ({item['played']})"
+                    f"{item['rank']:>2}. "
+                    f"{padded_name}  "
+                    f"{item['played']:>2}  "
+                    f"{item['wins']:>2}  "
+                    f"{item['draws']:>2}  "
+                    f"{item['losses']:>2}  "
+                    f"{item['points']:>3}"
                 )
 
             table_text = "```ansi\n" + "\n".join(lines) + "\n```"
             embed.add_field(
-                name=f"🏆 Aktuelle Tabelle Division {division} · S-U-N",
+                name=f"🏆 Aktuelle Tabelle Division {division}",
                 value=table_text[:1024],
                 inline=False,
             )
