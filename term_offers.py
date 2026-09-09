@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import uuid
+from threading import RLock
 from dataclasses import dataclass
 from datetime import datetime as dt, timedelta
 
@@ -11,7 +13,11 @@ import pytz
 
 import matchcenter
 from sheet_guard import col_values_cached, row_values_cached, sheet_write_call
-from sheets_connection import get_season_worksheet, get_season_worksheet_by_gid
+from sheets_connection import (
+    get_season_spreadsheet,
+    get_season_worksheet,
+    get_season_worksheet_by_gid,
+)
 
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
@@ -39,11 +45,30 @@ PROFILE_CACHE_TTL = 60
 MODE_CACHE_TTL = 300
 RESERVATION_SECONDS = 10 * 60
 
-# Laufzeit-Registry. Die Nachrichten bleiben solange interaktiv, wie der Bot läuft.
-# Ein späterer Ausbau kann diese Offers in einem Sheet persistieren und beim Start
-# wieder registrieren, ohne den eigentlichen Terminworkflow zu ändern.
+# Offene Terminangebote werden zusätzlich im Season-Spreadsheet persistiert.
+# Dadurch können Views und Buttons nach einem Bot-Neustart wieder registriert werden.
+OFFER_STORE_SHEET = "Terminangebote"
+OFFER_STORE_HEADERS = [
+    "offer_id",
+    "creator_id",
+    "creator_name",
+    "division",
+    "channel_id",
+    "message_id",
+    "slot_index",
+    "timestamp",
+    "status",
+    "updated_at",
+]
+OFFER_STATUS_OPEN = "OPEN"
+OFFER_STATUS_BOOKED = "BOOKED"
+OFFER_STATUS_REMOVED = "REMOVED"
+LEGACY_OFFER_SCAN_LIMIT = 500
+
 _OFFER_VIEWS: dict[tuple[int, int], "TermOfferView"] = {}
 _RESERVATIONS: dict[str, tuple[int, float]] = {}
+_OFFER_STORE_WS = None
+_OFFER_STORE_LOCK = RLock()
 
 
 def normalize_name(value: str | None) -> str:
@@ -72,6 +97,191 @@ def _invalidate_prefixes(ws, fallback: str) -> list[str]:
         f"col:{title}:",
         f"cell:{title}:",
     ]
+
+
+def _ensure_offer_store_ws():
+    global _OFFER_STORE_WS
+
+    with _OFFER_STORE_LOCK:
+        if _OFFER_STORE_WS is not None:
+            return _OFFER_STORE_WS
+
+        try:
+            ws = get_season_worksheet(OFFER_STORE_SHEET)
+        except Exception:
+            spreadsheet = get_season_spreadsheet()
+            try:
+                ws = spreadsheet.worksheet(OFFER_STORE_SHEET)
+            except Exception:
+                ws = spreadsheet.add_worksheet(
+                    title=OFFER_STORE_SHEET,
+                    rows=1000,
+                    cols=len(OFFER_STORE_HEADERS),
+                )
+                ws.update(
+                    f"A1:J1",
+                    [OFFER_STORE_HEADERS],
+                )
+                print(f"✅ [TERMINBÖRSE] Sheet '{OFFER_STORE_SHEET}' angelegt")
+
+        try:
+            header = ws.row_values(1)
+        except Exception:
+            header = []
+
+        if header[: len(OFFER_STORE_HEADERS)] != OFFER_STORE_HEADERS:
+            ws.update(
+                "A1:J1",
+                [OFFER_STORE_HEADERS],
+            )
+
+        _OFFER_STORE_WS = ws
+        return ws
+
+
+def _offer_store_all_values() -> list[list[str]]:
+    ws = _ensure_offer_store_ws()
+    with _OFFER_STORE_LOCK:
+        return ws.get_all_values()
+
+
+def _offer_status_for_view(view, slot_index: int) -> str:
+    if slot_index in view.booked_slots:
+        return OFFER_STATUS_BOOKED
+    if slot_index in view.removed_slots:
+        return OFFER_STATUS_REMOVED
+    return OFFER_STATUS_OPEN
+
+
+def _persist_offer_rows(view) -> None:
+    """Legt/aktualisiert alle Slots eines Terminangebots im Persistenz-Sheet."""
+    if view.channel_id is None or view.message_id is None:
+        raise RuntimeError("Terminangebot hat noch keine Discord-Nachricht.")
+
+    ws = _ensure_offer_store_ws()
+    now_text = dt.now(BERLIN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    with _OFFER_STORE_LOCK:
+        values = ws.get_all_values()
+        existing: dict[int, int] = {}
+        for row_index, row in enumerate(values[1:], start=2):
+            if _cell(row, 0) != view.offer_id:
+                continue
+            try:
+                slot_index = int(_cell(row, 6))
+            except ValueError:
+                continue
+            existing[slot_index] = row_index
+
+        append_rows = []
+        for slot in view.slots:
+            status = _offer_status_for_view(view, slot.index)
+            row_values = [
+                view.offer_id,
+                str(view.creator_id),
+                view.creator_name,
+                str(view.division),
+                str(view.channel_id),
+                str(view.message_id),
+                str(slot.index),
+                slot.timestamp,
+                status,
+                now_text,
+            ]
+            row_index = existing.get(slot.index)
+            if row_index is None:
+                append_rows.append(row_values)
+            else:
+                ws.update(f"A{row_index}:J{row_index}", [row_values])
+                view.store_rows[slot.index] = row_index
+
+        if append_rows:
+            ws.append_rows(append_rows, value_input_option="RAW")
+
+            # Nach dem Append nochmals auflösen. Dadurch bleibt die Zuordnung auch
+            # korrekt, wenn mehrere Angebote kurz nacheinander gespeichert werden.
+            values = ws.get_all_values()
+            for row_index, row in enumerate(values[1:], start=2):
+                if _cell(row, 0) != view.offer_id:
+                    continue
+                try:
+                    slot_index = int(_cell(row, 6))
+                except ValueError:
+                    continue
+                view.store_rows[slot_index] = row_index
+
+
+def _persist_offer_slot_state(view, slot_index: int) -> None:
+    ws = _ensure_offer_store_ws()
+    status = _offer_status_for_view(view, slot_index)
+    now_text = dt.now(BERLIN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    with _OFFER_STORE_LOCK:
+        row_index = view.store_rows.get(slot_index)
+        if row_index is None:
+            _persist_offer_rows(view)
+            row_index = view.store_rows.get(slot_index)
+
+        if row_index is None:
+            raise RuntimeError("Persistenzzeile für Terminangebot nicht gefunden.")
+
+        ws.update(
+            f"I{row_index}:J{row_index}",
+            [[status, now_text]],
+        )
+
+
+def _load_persisted_offer_records() -> list[dict]:
+    values = _offer_store_all_values()
+    grouped: dict[str, dict] = {}
+
+    for row_index, row in enumerate(values[1:], start=2):
+        offer_id = _cell(row, 0)
+        if not offer_id:
+            continue
+
+        try:
+            creator_id = int(_cell(row, 1))
+            division = int(_cell(row, 3))
+            channel_id = int(_cell(row, 4))
+            message_id = int(_cell(row, 5))
+            slot_index = int(_cell(row, 6))
+            when = _parse_offer_datetime(_cell(row, 7))
+        except Exception:
+            continue
+
+        status = (_cell(row, 8) or OFFER_STATUS_OPEN).upper()
+        record = grouped.setdefault(
+            offer_id,
+            {
+                "offer_id": offer_id,
+                "creator_id": creator_id,
+                "creator_name": _cell(row, 2),
+                "division": division,
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "slots": [],
+                "booked_slots": set(),
+                "removed_slots": set(),
+                "store_rows": {},
+            },
+        )
+        record["slots"].append(OfferSlot(index=slot_index, when=when))
+        record["store_rows"][slot_index] = row_index
+        if status == OFFER_STATUS_BOOKED:
+            record["booked_slots"].add(slot_index)
+        elif status == OFFER_STATUS_REMOVED:
+            record["removed_slots"].add(slot_index)
+
+    out = []
+    for record in grouped.values():
+        record["slots"].sort(key=lambda slot: slot.index)
+        if any(
+            slot.index not in record["booked_slots"] and slot.index not in record["removed_slots"]
+            for slot in record["slots"]
+        ):
+            out.append(record)
+    return out
 
 
 @dataclass(frozen=True)
@@ -798,6 +1008,19 @@ class OfferConfirmView(discord.ui.View):
             )
             view.message_id = message.id
             view.channel_id = message.channel.id
+
+            try:
+                await asyncio.to_thread(_persist_offer_rows, view)
+            except Exception:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "Das Terminangebot konnte nicht dauerhaft gespeichert werden. "
+                    "Der öffentliche Post wurde deshalb wieder entfernt."
+                )
+
             _OFFER_VIEWS[(message.channel.id, message.id)] = view
 
             await interaction.edit_original_response(
@@ -823,11 +1046,12 @@ class OfferConfirmView(discord.ui.View):
 
 
 class TermSlotButton(discord.ui.Button):
-    def __init__(self, slot: OfferSlot):
+    def __init__(self, slot: OfferSlot, offer_id: str):
         super().__init__(
             label=slot.short_label,
             style=discord.ButtonStyle.primary,
             row=0,
+            custom_id=f"tfl_offer:{offer_id}:{slot.index}",
         )
         self.slot = slot
 
@@ -840,19 +1064,41 @@ class TermSlotButton(discord.ui.Button):
 
 
 class TermOfferView(discord.ui.View):
-    def __init__(self, creator_id: int, creator_name: str, division: int, slots: list[OfferSlot]):
+    def __init__(
+        self,
+        creator_id: int,
+        creator_name: str,
+        division: int,
+        slots: list[OfferSlot],
+        *,
+        offer_id: str | None = None,
+        booked_slots: set[int] | None = None,
+        removed_slots: set[int] | None = None,
+        store_rows: dict[int, int] | None = None,
+    ):
         super().__init__(timeout=None)
+        self.offer_id = offer_id or uuid.uuid4().hex[:20]
         self.creator_id = creator_id
         self.creator_name = creator_name
         self.division = division
         self.slots = slots
         self.message_id: int | None = None
         self.channel_id: int | None = None
-        self.booked_slots: set[int] = set()
-        self.removed_slots: set[int] = set()
+        self.booked_slots: set[int] = set(booked_slots or set())
+        self.removed_slots: set[int] = set(removed_slots or set())
+        self.store_rows: dict[int, int] = dict(store_rows or {})
 
         for slot in slots:
-            self.add_item(TermSlotButton(slot))
+            button = TermSlotButton(slot, self.offer_id)
+            if slot.index in self.booked_slots:
+                button.disabled = True
+                button.style = discord.ButtonStyle.secondary
+                button.label = f"✅ {slot.short_label}"
+            elif slot.index in self.removed_slots:
+                button.disabled = True
+                button.style = discord.ButtonStyle.secondary
+                button.label = f"❌ {slot.short_label}"
+            self.add_item(button)
 
     def reservation_key(self, slot_index: int) -> str:
         return f"{self.channel_id}:{self.message_id}:{slot_index}"
@@ -1012,6 +1258,10 @@ class TermOfferView(discord.ui.View):
 
     async def mark_booked(self, client: discord.Client, slot_index: int) -> None:
         self.booked_slots.add(slot_index)
+        try:
+            await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] BOOKED-Status konnte nicht persistiert werden: {exc}")
         for item in self.children:
             if isinstance(item, TermSlotButton) and item.slot.index == slot_index:
                 item.disabled = True
@@ -1026,6 +1276,13 @@ class TermOfferView(discord.ui.View):
 
         self.removed_slots.add(slot_index)
         release_slot(self.reservation_key(slot_index))
+        try:
+            await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
+        except Exception as exc:
+            self.removed_slots.discard(slot_index)
+            print(f"⚠️ [TERMINBÖRSE] REMOVED-Status konnte nicht persistiert werden: {exc}")
+            return False
+
         for item in self.children:
             if isinstance(item, TermSlotButton) and item.slot.index == slot_index:
                 item.disabled = True
@@ -1036,13 +1293,22 @@ class TermOfferView(discord.ui.View):
         return True
 
     async def withdraw_all(self, client: discord.Client) -> int:
-        removed = 0
+        removed_indices = []
         for slot in self.slots:
             if slot.index in self.booked_slots or slot.index in self.removed_slots:
                 continue
             self.removed_slots.add(slot.index)
             release_slot(self.reservation_key(slot.index))
-            removed += 1
+            removed_indices.append(slot.index)
+
+        try:
+            for slot_index in removed_indices:
+                await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
+        except Exception as exc:
+            for slot_index in removed_indices:
+                self.removed_slots.discard(slot_index)
+            print(f"⚠️ [TERMINBÖRSE] Angebot konnte nicht vollständig persistiert werden: {exc}")
+            return 0
 
         for item in self.children:
             if isinstance(item, TermSlotButton) and item.slot.index in self.removed_slots:
@@ -1051,7 +1317,212 @@ class TermOfferView(discord.ui.View):
                 item.label = f"❌ {item.slot.short_label}"
 
         await self._refresh_message(client)
-        return removed
+        return len(removed_indices)
+
+
+def _view_from_persisted_record(record: dict) -> TermOfferView:
+    view = TermOfferView(
+        creator_id=record["creator_id"],
+        creator_name=record["creator_name"],
+        division=record["division"],
+        slots=record["slots"],
+        offer_id=record["offer_id"],
+        booked_slots=record["booked_slots"],
+        removed_slots=record["removed_slots"],
+        store_rows=record["store_rows"],
+    )
+    view.channel_id = record["channel_id"]
+    view.message_id = record["message_id"]
+    return view
+
+
+def _parse_legacy_offer_message(content: str):
+    header = re.search(
+        r"📅\s*\*\*(.+?)\s+bietet folgende Termine für Races an:\*\*",
+        content or "",
+        flags=re.IGNORECASE,
+    )
+    if not header:
+        return None
+
+    creator_name = clean_text(header.group(1))
+    slots: list[OfferSlot] = []
+    booked: set[int] = set()
+    removed: set[int] = set()
+
+    for line in (content or "").splitlines():
+        match = re.match(r"^\s*•\s*\*\*(.+?)\*\*(.*)$", line.strip())
+        if not match:
+            continue
+
+        label = clean_text(match.group(1))
+        suffix = clean_text(match.group(2))
+        date_match = re.search(
+            r"(\d{2}\.\d{2}\.\d{4})\s*[–—-]\s*(\d{2}:\d{2})\s*Uhr",
+            label,
+            flags=re.IGNORECASE,
+        )
+        if not date_match:
+            continue
+
+        try:
+            when = _parse_offer_datetime(f"{date_match.group(1)} {date_match.group(2)}")
+        except Exception:
+            continue
+
+        slot_index = len(slots)
+        slots.append(OfferSlot(index=slot_index, when=when))
+        if "✅" in suffix or "vergeben" in suffix.lower():
+            booked.add(slot_index)
+        elif "❌" in suffix or "zurückgezogen" in suffix.lower():
+            removed.add(slot_index)
+
+    if not creator_name or not slots:
+        return None
+
+    return creator_name, slots, booked, removed
+
+
+async def _recover_legacy_offer_posts(client: discord.Client, known_keys: set[tuple[int, int]]) -> int:
+    """Migriert alte, vor der Persistenz erstellte Angebotsposts.
+
+    Alte Buttons hatten zufällige custom_ids und wären nach einem Restart tot.
+    Beim ersten Start mit dieser Version werden solche Posts erkannt, gespeichert
+    und einmal mit persistenten Buttons neu geschrieben.
+    """
+    guild = client.get_guild(matchcenter.GUILD_ID)
+    if guild is None:
+        try:
+            guild = await client.fetch_guild(matchcenter.GUILD_ID)
+        except Exception:
+            return 0
+
+    recovered = 0
+    bot_user_id = getattr(client.user, "id", None)
+
+    for division, channel_id in DIVISION_CHANNELS.items():
+        try:
+            channel = client.get_channel(channel_id)
+            if channel is None:
+                channel = await client.fetch_channel(channel_id)
+            if not hasattr(channel, "history"):
+                continue
+
+            async for message in channel.history(limit=LEGACY_OFFER_SCAN_LIMIT):
+                key = (message.channel.id, message.id)
+                if key in known_keys or key in _OFFER_VIEWS:
+                    continue
+                if bot_user_id is not None and message.author.id != bot_user_id:
+                    continue
+
+                parsed = _parse_legacy_offer_message(message.content)
+                if parsed is None:
+                    continue
+
+                creator_name, slots, booked, removed = parsed
+                active_indices = {
+                    slot.index for slot in slots
+                    if slot.index not in booked and slot.index not in removed
+                }
+                if not active_indices:
+                    continue
+
+                # Abgelaufene offene Slots werden bei der Migration geschlossen.
+                now = dt.now(BERLIN_TZ)
+                for slot in slots:
+                    if slot.index in active_indices and slot.when < now:
+                        removed.add(slot.index)
+
+                if not any(slot.index not in booked and slot.index not in removed for slot in slots):
+                    continue
+
+                member = await matchcenter.find_member_by_player_name(guild, creator_name)
+                if member is None:
+                    print(
+                        f"⚠️ [TERMINBÖRSE] Altes Angebot {message.id} nicht migriert: "
+                        f"Spieler '{creator_name}' nicht gefunden"
+                    )
+                    continue
+
+                view = TermOfferView(
+                    creator_id=member.id,
+                    creator_name=creator_name,
+                    division=division,
+                    slots=slots,
+                    offer_id=f"legacy{message.id}",
+                    booked_slots=booked,
+                    removed_slots=removed,
+                )
+                view.channel_id = message.channel.id
+                view.message_id = message.id
+
+                await asyncio.to_thread(_persist_offer_rows, view)
+                await message.edit(content=view.render_public_content(), view=view)
+                client.add_view(view, message_id=message.id)
+                _OFFER_VIEWS[key] = view
+                known_keys.add(key)
+                recovered += 1
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] Legacy-Scan {division}.DIV fehlgeschlagen: {exc}")
+
+    return recovered
+
+
+async def _recover_legacy_after_ready(
+    client: discord.Client,
+    known_keys: set[tuple[int, int]],
+) -> None:
+    try:
+        await client.wait_until_ready()
+        recovered = await _recover_legacy_offer_posts(client, known_keys)
+        print(f"✅ [TERMINBÖRSE] {recovered} alte Angebotspost(s) migriert")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ [TERMINBÖRSE] Legacy-Migration fehlgeschlagen: {exc}")
+
+
+async def restore_persistent_offer_views(client: discord.Client) -> dict:
+    """Lädt offene Terminangebote und registriert ihre persistenten Buttons neu.
+
+    Bereits persistierte Views werden direkt im setup_hook registriert. Alte Posts
+    aus Versionen ohne Persistenz werden nach on_ready einmalig aus den
+    Divisionschats migriert, damit auch diese wieder benutzbar werden.
+    """
+    restored = 0
+
+    try:
+        records = await asyncio.to_thread(_load_persisted_offer_records)
+    except Exception as exc:
+        print(f"⚠️ [TERMINBÖRSE] Persistenz konnte nicht geladen werden: {exc}")
+        return {"restored": 0, "recovery_scheduled": False, "error": str(exc)}
+
+    known_keys: set[tuple[int, int]] = set()
+
+    for record in records:
+        try:
+            view = _view_from_persisted_record(record)
+            if view.channel_id is None or view.message_id is None or not view.active_slots():
+                continue
+
+            key = (view.channel_id, view.message_id)
+            client.add_view(view, message_id=view.message_id)
+            _OFFER_VIEWS[key] = view
+            known_keys.add(key)
+            restored += 1
+        except Exception as exc:
+            print(
+                f"⚠️ [TERMINBÖRSE] Angebot {record.get('offer_id', '?')} "
+                f"konnte nicht registriert werden: {exc}"
+            )
+
+    if not hasattr(client, "_term_offer_legacy_migration_task"):
+        client._term_offer_legacy_migration_task = asyncio.create_task(
+            _recover_legacy_after_ready(client, known_keys)
+        )
+
+    print(f"✅ [TERMINBÖRSE] {restored} persistente Angebotspost(s) registriert")
+    return {"restored": restored, "recovery_scheduled": True, "error": None}
 
 
 class HomeAwayChoiceView(discord.ui.View):
