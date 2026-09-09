@@ -37,6 +37,11 @@ from matchcenter import (
 
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
+CURRENT_SEASON_LABEL = os.getenv("TFL_SEASON_LABEL", "Saison #6")
+TFL_COLOR = 0x1F6FEB
+TFL_SUCCESS_COLOR = 0x2ECC71
+TFL_DANGER_COLOR = 0xE74C3C
+
 # =========================================================
 # STREICHMODUS CONFIG
 # =========================================================
@@ -97,11 +102,294 @@ _PLAYER_WORKSHEET_CACHE_BY_GID = {}
 # UI HELFER
 # =========================================================
 
-def menu_embed(title: str, description: str) -> discord.Embed:
-    return discord.Embed(
+def menu_embed(
+    title: str,
+    description: str,
+    color: int = TFL_COLOR,
+) -> discord.Embed:
+    embed = discord.Embed(
         title=title,
         description=description,
-        color=0x00FFCC,
+        color=color,
+    )
+    embed.set_footer(text=f"Try Force League · {CURRENT_SEASON_LABEL}")
+    return embed
+
+
+def _clean_sheet_datetime_text(value: str) -> str:
+    value = (value or "").strip()
+    value = value.replace(" Uhr", "")
+    value = value.replace("–", "-").replace("—", "-")
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"(?<=\d)\s*-\s*(?=\d{1,2}:\d{2})", " ", value)
+    value = value.replace(",", " ")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def parse_sheet_datetime(value: str):
+    raw = _clean_sheet_datetime_text(value)
+    if not raw:
+        return None
+
+    formats = (
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%y %H:%M",
+        "%d.%m.%Y",
+        "%d.%m.%y",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    )
+
+    for fmt in formats:
+        try:
+            parsed = dt.strptime(raw, fmt)
+            if "%H" not in fmt:
+                parsed = parsed.replace(hour=12, minute=0)
+            return BERLIN_TZ.localize(parsed)
+        except ValueError:
+            continue
+
+    return None
+
+
+def load_player_dashboard_data(name_candidates: list[str]) -> dict:
+    ws, roster_row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
+
+    if ws is None or roster_row_index is None or div_number is None:
+        return {
+            "found": False,
+            "player_name": next((x for x in name_candidates if x), "Spieler"),
+            "division": None,
+            "mode_1": "",
+            "mode_2": "",
+            "played": 0,
+            "open": 0,
+            "scheduled_open": 0,
+            "total": 0,
+            "next_match": None,
+        }
+
+    roster_row = row_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws),
+        row=roster_row_index,
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
+
+    player_name = roster_row[11].strip() if len(roster_row) > 11 else ""
+    if not player_name:
+        player_name = next((x.strip() for x in name_candidates if x and x.strip()), "Spieler")
+
+    mode_1 = roster_row[12].strip() if len(roster_row) > 12 else ""
+    mode_2 = roster_row[13].strip() if len(roster_row) > 13 else ""
+
+    target = normalize_name(player_name)
+    rows = ws.get_all_values()
+    now = dt.now(BERLIN_TZ)
+
+    played = 0
+    open_games = 0
+    scheduled_open = 0
+    total = 0
+    upcoming = []
+
+    for row_index, row in enumerate(rows[1:], start=2):
+        home = row[3].strip() if len(row) > 3 else ""  # D
+        result = row[4].strip() if len(row) > 4 else ""  # E
+        away = row[5].strip() if len(row) > 5 else ""  # F
+
+        if not home or not away:
+            continue
+
+        home_match = normalize_name(home) == target
+        away_match = normalize_name(away) == target
+
+        if not home_match and not away_match:
+            continue
+
+        total += 1
+
+        if result:
+            played += 1
+            continue
+
+        open_games += 1
+
+        date_text = row[1].strip() if len(row) > 1 else ""  # B
+        mode = row[2].strip() if len(row) > 2 else ""  # C
+
+        if date_text:
+            scheduled_open += 1
+            parsed_date = parse_sheet_datetime(date_text)
+
+            if parsed_date is not None and parsed_date >= now - timedelta(minutes=5):
+                opponent = away if home_match else home
+                upcoming.append(
+                    {
+                        "datetime": parsed_date,
+                        "date_text": date_text,
+                        "mode": mode,
+                        "home": home,
+                        "away": away,
+                        "opponent": opponent,
+                        "row": row_index,
+                    }
+                )
+
+    upcoming.sort(key=lambda item: item["datetime"])
+
+    return {
+        "found": True,
+        "player_name": player_name,
+        "division": int(div_number),
+        "mode_1": mode_1,
+        "mode_2": mode_2,
+        "played": played,
+        "open": open_games,
+        "scheduled_open": scheduled_open,
+        "total": total,
+        "next_match": upcoming[0] if upcoming else None,
+    }
+
+
+def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord.Embed:
+    player_name = data.get("player_name") or "Spieler"
+    division = data.get("division")
+
+    if data.get("found"):
+        subtitle = f"**{player_name}** · **Division {division}**"
+    else:
+        subtitle = f"**{player_name}** · Division noch nicht erkannt"
+
+    description = (
+        f"{subtitle}\n"
+        f"**{CURRENT_SEASON_LABEL}**\n\n"
+        "Deine zentrale Anlaufstelle für Spiele, Termine und Saisoninformationen."
+    )
+
+    if note:
+        description += f"\n\n{note}"
+
+    embed = discord.Embed(
+        title="⚔️ TFL SPIELERBEREICH",
+        description=description,
+        color=TFL_COLOR,
+    )
+
+    if data.get("found"):
+        played = int(data.get("played") or 0)
+        total = int(data.get("total") or 0)
+        open_games = int(data.get("open") or 0)
+        scheduled_open = int(data.get("scheduled_open") or 0)
+
+        embed.add_field(
+            name="🎯 Saisonstatus",
+            value=(
+                f"**{played}/{total}** gespielt\n"
+                f"**{open_games}** offen\n"
+                f"**{scheduled_open}** davon terminiert"
+            ),
+            inline=True,
+        )
+
+        mode_1 = data.get("mode_1") or "–"
+        mode_2 = data.get("mode_2") or "–"
+        embed.add_field(
+            name="🚫 Streichmodi",
+            value=f"**{mode_1}**\n**{mode_2}**",
+            inline=True,
+        )
+
+        next_match = data.get("next_match")
+        if next_match:
+            when = next_match["datetime"].strftime("%d.%m.%Y · %H:%M")
+            mode = next_match.get("mode") or "Modus noch offen"
+            home = next_match.get("home") or "?"
+            away = next_match.get("away") or "?"
+            next_text = (
+                f"**{when} Uhr**\n"
+                f"{home} vs. {away}\n"
+                f"🎮 {mode}"
+            )
+        else:
+            next_text = "Aktuell ist kein zukünftiger Termin eingetragen."
+
+        embed.add_field(
+            name="📅 Nächster Termin",
+            value=next_text,
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="ℹ️ Saisonstatus",
+            value=(
+                "Deine Divisionsdaten konnten aktuell nicht aus dem Sheet geladen werden. "
+                "Die Menüfunktionen stehen trotzdem zur Verfügung."
+            ),
+            inline=False,
+        )
+
+    embed.add_field(
+        name="🎮 Spielen",
+        value="Spiel planen · Termine vorschlagen · Ergebnis melden",
+        inline=False,
+    )
+    embed.add_field(
+        name="📊 Meine Saison",
+        value="Info & Tabelle · Restprogramm · Qualifikation",
+        inline=False,
+    )
+    embed.set_footer(text=f"Try Force League · {CURRENT_SEASON_LABEL} · Together we race")
+    return embed
+
+
+async def get_player_dashboard_embed(member, note: str | None = None) -> discord.Embed:
+    if not isinstance(member, discord.Member):
+        return build_player_dashboard_embed(
+            {
+                "found": False,
+                "player_name": getattr(member, "display_name", "Spieler"),
+                "division": None,
+            },
+            note=note,
+        )
+
+    try:
+        data = await asyncio.to_thread(
+            load_player_dashboard_data,
+            get_name_candidates(member),
+        )
+        return build_player_dashboard_embed(data, note=note)
+    except Exception as e:
+        print(f"[PLAYER DASHBOARD] Laden fehlgeschlagen: {e}")
+        return build_player_dashboard_embed(
+            {
+                "found": False,
+                "player_name": member.display_name,
+                "division": None,
+            },
+            note=note,
+        )
+
+
+async def show_player_dashboard(
+    interaction: discord.Interaction,
+    note: str | None = None,
+    already_deferred: bool = False,
+):
+    if not already_deferred and not interaction.response.is_done():
+        await interaction.response.defer()
+
+    embed = await get_player_dashboard_embed(interaction.user, note=note)
+    view = PlayerMenuView(
+        owner_id=interaction.user.id,
+        show_admin=has_admin_role(interaction.user),
+    )
+
+    await interaction.edit_original_response(
+        embed=embed,
+        view=view,
+        content=None,
     )
 
 
@@ -1223,10 +1511,9 @@ class PlayerExitConfirmView(PlayerBaseView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        await interaction.response.edit_message(
-            embed=menu_embed("Spielermenü", "Der Liga-Austritt wurde abgebrochen."),
-            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
-            content=None,
+        await show_player_dashboard(
+            interaction,
+            note="Der Liga-Austritt wurde abgebrochen.",
         )
 
 
@@ -2690,14 +2977,7 @@ class AdminMenuView(AdminOnlyView):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        await interaction.response.edit_message(
-            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(
-                owner_id=interaction.user.id,
-                show_admin=True,
-            ),
-            content=None,
-        )
+        await show_player_dashboard(interaction)
 
 
 class AdminMenuButton(discord.ui.Button):
@@ -2707,7 +2987,7 @@ class AdminMenuButton(discord.ui.Button):
         super().__init__(
             label="🟨 Administration",
             style=discord.ButtonStyle.secondary,
-            row=3,
+            row=4,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -2753,14 +3033,7 @@ class SeasonSignupMenuView(PlayerBaseView):
 
     @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(
-                owner_id=interaction.user.id,
-                show_admin=has_admin_role(interaction.user),
-            ),
-            content=None,
-        )
+        await show_player_dashboard(interaction)
 
 
 # =========================================================
@@ -2774,39 +3047,51 @@ class PlayerMenuView(PlayerBaseView):
         if show_admin:
             self.add_item(AdminMenuButton())
 
-    @discord.ui.button(label="ℹ️ Info", style=discord.ButtonStyle.secondary, row=0)
-    async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=menu_embed("ℹ️ Info", "Wähle einen Bereich."),
-            view=InfoMenuView(owner_id=interaction.user.id),
-            content=None,
-        )
+    # -----------------------------------------------------
+    # Zeile 1: SPIELEN
+    # -----------------------------------------------------
 
-    @discord.ui.button(label=" Spiel planen", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🎮 Spiel planen", style=discord.ButtonStyle.primary, row=0)
     async def plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=menu_embed(" Spiel planen", "Wähle einen Bereich."),
+            embed=menu_embed("🎮 Spiel planen", "Wähle den Bereich für deine Spielplanung."),
             view=PlanMenuView(owner_id=interaction.user.id),
             content=None,
         )
 
-    @discord.ui.button(label=" Ergebnis melden", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="📅 Termine vorschlagen", style=discord.ButtonStyle.success, row=0)
+    async def term_offer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await term_offers.open_term_offer_modal(interaction)
+
+    @discord.ui.button(label="✅ Ergebnis melden", style=discord.ButtonStyle.success, row=0)
     async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=menu_embed(" Ergebnis melden", "Wähle einen Bereich."),
+            embed=menu_embed("✅ Ergebnis melden", "Wähle League oder Cup."),
             view=ResultMenuView(owner_id=interaction.user.id),
             content=None,
         )
 
-    @discord.ui.button(label="⚡ Async", style=discord.ButtonStyle.primary, row=1)
-    async def async_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    # -----------------------------------------------------
+    # Zeile 2: MEINE SAISON
+    # -----------------------------------------------------
+
+    @discord.ui.button(label="ℹ️ Info & Tabelle", style=discord.ButtonStyle.primary, row=1)
+    async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=menu_embed("⚡ Async", "Wähle einen Bereich."),
-            view=AsyncMenuView(owner_id=interaction.user.id),
+            embed=menu_embed("ℹ️ Info & Tabelle", "Saisoninfos, Meldestatus, Tabellen und weitere Übersichten."),
+            view=InfoMenuView(owner_id=interaction.user.id),
             content=None,
         )
 
-    @discord.ui.button(label=" Qualifikation", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="📋 Restprogramm", style=discord.ButtonStyle.primary, row=1)
+    async def restprogramm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("📋 Restprogramm", "Zeige dein eigenes Restprogramm oder das eines anderen Spielers."),
+            view=RestprogrammView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+    @discord.ui.button(label="🏆 Qualifikation", style=discord.ButtonStyle.primary, row=1)
     async def qualification_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if hasattr(asnyc, "open_quali_from_player"):
             await asnyc.open_quali_from_player(interaction)
@@ -2817,28 +3102,43 @@ class PlayerMenuView(PlayerBaseView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label=" Saisonmeldung", style=discord.ButtonStyle.primary, row=1)
+    # -----------------------------------------------------
+    # Zeile 3: SPIELERBEREICH
+    # -----------------------------------------------------
+
+    @discord.ui.button(label="📝 Saisonmeldung", style=discord.ButtonStyle.primary, row=2)
     async def season_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=menu_embed("Saisonmeldung", "Wähle einen Bereich."),
+            embed=menu_embed("📝 Saisonmeldung", "Wähle den Bereich für deine Saisonmeldung."),
             view=SeasonSignupMenuView(owner_id=interaction.user.id),
             content=None,
         )
 
-
-    @discord.ui.button(label="Termine vorschlagen", style=discord.ButtonStyle.success, row=2)
-    async def term_offer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await term_offers.open_term_offer_modal(interaction)
+    @discord.ui.button(label="⚡ Async", style=discord.ButtonStyle.primary, row=2)
+    async def async_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("⚡ Async", "Beantrage oder spiele ein Async-Match."),
+            view=AsyncMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
 
     @discord.ui.button(label="⚙️ Einstellungen", style=discord.ButtonStyle.secondary, row=2)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=menu_embed("⚙️ Einstellungen", "Wähle einen Bereich."),
+            embed=menu_embed("⚙️ Einstellungen", "Verwalte Twitch, Restream-Angaben und Streichmodi."),
             view=SettingsMenuView(owner_id=interaction.user.id),
             content=None,
         )
 
-    @discord.ui.button(label="Austritt", style=discord.ButtonStyle.danger, row=2)
+    # -----------------------------------------------------
+    # Zeile 4: DASHBOARD / KRITISCHE AKTION
+    # -----------------------------------------------------
+
+    @discord.ui.button(label="🔄 Dashboard aktualisieren", style=discord.ButtonStyle.secondary, row=3)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await show_player_dashboard(interaction)
+
+    @discord.ui.button(label="🚪 Austritt", style=discord.ButtonStyle.danger, row=3)
     async def exit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
 
@@ -2857,7 +3157,7 @@ class PlayerMenuView(PlayerBaseView):
                     "Wenn du nun bestätigst, ist die Entscheidung final. "
                     "Zudem ist eine Teilnahme an der kommenden Saison damit ausgeschlossen."
                 ),
-                color=discord.Color.red(),
+                color=TFL_DANGER_COLOR,
             ),
             view=PlayerExitConfirmView(owner_id=interaction.user.id),
             content=None,
@@ -2898,11 +3198,7 @@ class AsyncMenuView(PlayerBaseView):
 
     @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
-            content=None,
-        )
+        await show_player_dashboard(interaction)
 
 
 # =========================================================
@@ -2937,11 +3233,7 @@ class ResultMenuView(PlayerBaseView):
 
     @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
-            content=None,
-        )
+        await show_player_dashboard(interaction)
 
 
 # =========================================================
@@ -2994,11 +3286,7 @@ class InfoMenuView(PlayerBaseView):
 
     @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=3)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
-            content=None,
-        )
+        await show_player_dashboard(interaction)
 
 
 # =========================================================
@@ -3597,11 +3885,7 @@ class SettingsMenuView(PlayerBaseView):
 
     @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=2)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
-            content=None,
-        )
+        await show_player_dashboard(interaction)
 
 
 # =========================================================
@@ -3615,12 +3899,10 @@ class PlayerCog(commands.Cog):
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
-        view = PlayerMenuView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user))
-
-        await interaction.response.send_message(
-            embed=menu_embed("Spielermenü", "Wähle einen Bereich."),
-            view=view,
-            ephemeral=True,
+        await interaction.response.defer(ephemeral=True)
+        await show_player_dashboard(
+            interaction,
+            already_deferred=True,
         )
 
 
