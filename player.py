@@ -209,7 +209,12 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
 
         total += 1
 
-        if result:
+        # In Spalte E steht bei noch offenen Begegnungen standardmäßig "vs".
+        # Nur ein tatsächliches Ergebnis zählt als gespielt.
+        result_normalized = (result or "").strip().lower()
+        is_played = result_normalized not in {"", "vs", "v.s.", "-", "–", "—"}
+
+        if is_played:
             played += 1
             continue
 
