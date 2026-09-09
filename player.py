@@ -152,6 +152,125 @@ def parse_sheet_datetime(value: str):
     return None
 
 
+def _is_open_result_value(result: str) -> bool:
+    result_normalized = (result or "").strip().lower()
+    return result_normalized in {"", "vs", "v.s.", "-", "–", "—"}
+
+
+def _parse_match_score(result: str):
+    match = re.match(r"^\s*(\d+)\s*:\s*(\d+)\s*$", (result or "").strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
+    values = col_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws),
+        col=12,
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+    )
+
+    players = []
+    seen = set()
+    for raw in values[1:12]:
+        name = (raw or "").strip()
+        if not name:
+            continue
+        key = normalize_name(name)
+        if not key or key in seen or key in {"racer", "spieler", "teilnehmer"}:
+            continue
+        seen.add(key)
+        players.append(name)
+
+    stats = {
+        normalize_name(name): {
+            "name": name,
+            "wins": 0,
+            "losses": 0,
+            "played": 0,
+            "score_for": 0,
+            "score_against": 0,
+            "diff": 0,
+        }
+        for name in players
+    }
+
+    rows = ws.get_all_values()
+    for row in rows[1:]:
+        home = row[3].strip() if len(row) > 3 else ""
+        result = row[4].strip() if len(row) > 4 else ""
+        away = row[5].strip() if len(row) > 5 else ""
+
+        if not home or not away or _is_open_result_value(result):
+            continue
+
+        parsed = _parse_match_score(result)
+        if parsed is None:
+            continue
+
+        home_score, away_score = parsed
+        home_key = normalize_name(home)
+        away_key = normalize_name(away)
+
+        if home_key not in stats:
+            stats[home_key] = {
+                "name": home,
+                "wins": 0,
+                "losses": 0,
+                "played": 0,
+                "score_for": 0,
+                "score_against": 0,
+                "diff": 0,
+            }
+        if away_key not in stats:
+            stats[away_key] = {
+                "name": away,
+                "wins": 0,
+                "losses": 0,
+                "played": 0,
+                "score_for": 0,
+                "score_against": 0,
+                "diff": 0,
+            }
+
+        stats[home_key]["played"] += 1
+        stats[away_key]["played"] += 1
+        stats[home_key]["score_for"] += home_score
+        stats[home_key]["score_against"] += away_score
+        stats[away_key]["score_for"] += away_score
+        stats[away_key]["score_against"] += home_score
+
+        if home_score > away_score:
+            stats[home_key]["wins"] += 1
+            stats[away_key]["losses"] += 1
+        elif away_score > home_score:
+            stats[away_key]["wins"] += 1
+            stats[home_key]["losses"] += 1
+
+    for item in stats.values():
+        item["diff"] = item["score_for"] - item["score_against"]
+
+    ranked = sorted(
+        stats.values(),
+        key=lambda item: (
+            -item["wins"],
+            item["losses"],
+            -item["diff"],
+            -item["score_for"],
+            normalize_name(item["name"]),
+        ),
+    )
+
+    target = normalize_name(player_name)
+    for index, item in enumerate(ranked, start=1):
+        item["rank"] = index
+        item["is_self"] = normalize_name(item["name"]) == target
+
+    return ranked
+
+
 def load_player_dashboard_data(name_candidates: list[str]) -> dict:
     ws, roster_row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
 
@@ -166,7 +285,8 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
             "open": 0,
             "scheduled_open": 0,
             "total": 0,
-            "next_match": None,
+            "next_matches": [],
+            "division_table": [],
         }
 
     roster_row = row_values_cached(
@@ -209,10 +329,7 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
 
         total += 1
 
-        # In Spalte E steht bei noch offenen Begegnungen standardmäßig "vs".
-        # Nur ein tatsächliches Ergebnis zählt als gespielt.
-        result_normalized = (result or "").strip().lower()
-        is_played = result_normalized not in {"", "vs", "v.s.", "-", "–", "—"}
+        is_played = not _is_open_result_value(result)
 
         if is_played:
             played += 1
@@ -242,6 +359,7 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
                 )
 
     upcoming.sort(key=lambda item: item["datetime"])
+    division_table = _load_division_table_for_dashboard(ws, player_name)
 
     return {
         "found": True,
@@ -253,7 +371,8 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
         "open": open_games,
         "scheduled_open": scheduled_open,
         "total": total,
-        "next_match": upcoming[0] if upcoming else None,
+        "next_matches": upcoming[:3],
+        "division_table": division_table,
     }
 
 
@@ -305,25 +424,41 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
             inline=True,
         )
 
-        next_match = data.get("next_match")
-        if next_match:
-            when = next_match["datetime"].strftime("%d.%m.%Y · %H:%M")
-            mode = next_match.get("mode") or "Modus noch offen"
-            home = next_match.get("home") or "?"
-            away = next_match.get("away") or "?"
-            next_text = (
-                f"**{when} Uhr**\n"
-                f"{home} vs. {away}\n"
-                f"🎮 {mode}"
-            )
+        next_matches = data.get("next_matches") or []
+        if next_matches:
+            blocks = []
+            for idx, match in enumerate(next_matches[:3], start=1):
+                when = match["datetime"].strftime("%d.%m.%Y · %H:%M")
+                mode = match.get("mode") or "Modus noch offen"
+                home = match.get("home") or "?"
+                away = match.get("away") or "?"
+                blocks.append(
+                    f"**{idx}. {when} Uhr**\n{home} vs. {away}\n🎮 {mode}"
+                )
+            next_text = "\n\n".join(blocks)
         else:
-            next_text = "Aktuell ist kein zukünftiger Termin eingetragen."
+            next_text = "Aktuell sind keine zukünftigen Termine eingetragen."
 
         embed.add_field(
-            name="📅 Nächster Termin",
+            name="📅 Nächste Termine",
             value=next_text,
             inline=False,
         )
+
+        division_table = data.get("division_table") or []
+        if division_table:
+            lines = []
+            for item in division_table[:9]:
+                marker = "➡️ " if item.get("is_self") else ""
+                lines.append(
+                    f"{marker}**{item['rank']}.** {item['name']} — {item['wins']}-{item['losses']} ({item['played']})"
+                )
+            table_text = "\n".join(lines)
+            embed.add_field(
+                name=f"🏆 Aktuelle Tabelle Division {division}",
+                value=table_text[:1024],
+                inline=False,
+            )
     else:
         embed.add_field(
             name="ℹ️ Saisonstatus",
@@ -334,16 +469,6 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
             inline=False,
         )
 
-    embed.add_field(
-        name="🎮 Spielen",
-        value="Spiel planen · Termine vorschlagen · Ergebnis melden",
-        inline=False,
-    )
-    embed.add_field(
-        name="📊 Meine Saison",
-        value="Info & Tabelle · Restprogramm · Qualifikation",
-        inline=False,
-    )
     embed.set_footer(text=f"Try Force League · {CURRENT_SEASON_LABEL} · Together we race")
     return embed
 
