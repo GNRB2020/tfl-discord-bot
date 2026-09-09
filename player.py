@@ -38,6 +38,8 @@ from matchcenter import (
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
 CURRENT_SEASON_LABEL = os.getenv("TFL_SEASON_LABEL", "Saison #6")
+TFL_SEASON_START = os.getenv("TFL_SEASON_START", "").strip()
+TFL_SEASON_END = os.getenv("TFL_SEASON_END", "").strip()
 TFL_COLOR = 0x1F6FEB
 TFL_SUCCESS_COLOR = 0x2ECC71
 TFL_DANGER_COLOR = 0xE74C3C
@@ -383,6 +385,74 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
     }
 
 
+def _parse_season_date(value: str):
+    raw = (value or "").strip()
+    if not raw:
+        return None
+
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            parsed = dt.strptime(raw, fmt)
+            return BERLIN_TZ.localize(parsed.replace(hour=0, minute=0, second=0, microsecond=0))
+        except ValueError:
+            continue
+    return None
+
+
+def get_deadline_traffic_light(played: int, total: int) -> dict:
+    start = _parse_season_date(TFL_SEASON_START)
+    end = _parse_season_date(TFL_SEASON_END)
+
+    if start is None or end is None or end <= start or total <= 0:
+        return {
+            "emoji": "⚪",
+            "label": "Zeitplan nicht konfiguriert",
+            "detail": "Saisonstart/-ende fehlen",
+        }
+
+    now = dt.now(BERLIN_TZ)
+    if now < start:
+        return {
+            "emoji": "🟢",
+            "label": "im Soll",
+            "detail": f"Saisonstart: {start.strftime('%d.%m.%Y')}",
+        }
+
+    if now >= end:
+        if played >= total:
+            return {
+                "emoji": "🟢",
+                "label": "im Soll",
+                "detail": f"{played}/{total} gespielt",
+            }
+        return {
+            "emoji": "🔴",
+            "label": "hinter Saisonvorgabe",
+            "detail": f"Soll: {total}/{total} · Stand: {played}",
+        }
+
+    season_seconds = (end - start).total_seconds()
+    elapsed_seconds = max(0.0, (now - start).total_seconds())
+    progress = min(1.0, elapsed_seconds / season_seconds) if season_seconds > 0 else 0.0
+    expected = min(total, int(total * progress))
+
+    if played >= expected:
+        emoji = "🟢"
+        label = "im Soll"
+    elif played == expected - 1:
+        emoji = "🟡"
+        label = "bald Handlungsbedarf"
+    else:
+        emoji = "🔴"
+        label = "hinter Saisonvorgabe"
+
+    return {
+        "emoji": emoji,
+        "label": label,
+        "detail": f"Soll: {expected}/{total} · Stand: {played}",
+    }
+
+
 def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord.Embed:
     player_name = data.get("player_name") or "Spieler"
     division = data.get("division")
@@ -420,6 +490,13 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
                 f"**{open_games}** offen\n"
                 f"**{scheduled_open}** davon terminiert"
             ),
+            inline=True,
+        )
+
+        deadline = get_deadline_traffic_light(played, total)
+        embed.add_field(
+            name=f"{deadline['emoji']} Deadline-Ampel",
+            value=f"**{deadline['label']}**\n{deadline['detail']}",
             inline=True,
         )
 
@@ -3307,6 +3384,14 @@ class PlayerMenuView(PlayerBaseView):
     # -----------------------------------------------------
     # Zeile 4: DASHBOARD / KRITISCHE AKTION
     # -----------------------------------------------------
+
+    @discord.ui.button(label="🗓️ Termin ändern", style=discord.ButtonStyle.secondary, row=3)
+    async def manage_schedule_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await term_offers.open_schedule_manage_menu(interaction)
+
+    @discord.ui.button(label="📌 Meine Angebote", style=discord.ButtonStyle.secondary, row=3)
+    async def my_offers_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await term_offers.open_my_offers_menu(interaction)
 
     @discord.ui.button(label="🔄 Dashboard aktualisieren", style=discord.ButtonStyle.secondary, row=3)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
