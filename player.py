@@ -371,7 +371,7 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
         "open": open_games,
         "scheduled_open": scheduled_open,
         "total": total,
-        "next_matches": upcoming[:3],
+        "next_matches": upcoming[:2],
         "division_table": division_table,
     }
 
@@ -426,34 +426,43 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
 
         next_matches = data.get("next_matches") or []
         if next_matches:
-            blocks = []
-            for idx, match in enumerate(next_matches[:3], start=1):
+            for idx, match in enumerate(next_matches[:2]):
                 when = match["datetime"].strftime("%d.%m.%Y · %H:%M")
                 mode = match.get("mode") or "Modus noch offen"
                 home = match.get("home") or "?"
                 away = match.get("away") or "?"
-                blocks.append(
-                    f"**{idx}. {when} Uhr**\n{home} vs. {away}\n🎮 {mode}"
-                )
-            next_text = "\n\n".join(blocks)
-        else:
-            next_text = "Aktuell sind keine zukünftigen Termine eingetragen."
 
-        embed.add_field(
-            name="📅 Nächste Termine",
-            value=next_text,
-            inline=False,
-        )
+                embed.add_field(
+                    name="📅 Nächste Termine" if idx == 0 else "​",
+                    value=(
+                        f"**{when} Uhr**\n"
+                        f"{home} vs. {away}\n"
+                        f"🎮 {mode}"
+                    ),
+                    inline=True,
+                )
+        else:
+            embed.add_field(
+                name="📅 Nächste Termine",
+                value="Aktuell sind keine zukünftigen Termine eingetragen.",
+                inline=False,
+            )
 
         division_table = data.get("division_table") or []
         if division_table:
             lines = []
             for item in division_table[:9]:
-                marker = "➡️ " if item.get("is_self") else ""
+                name = item["name"]
+                if item.get("is_self"):
+                    # Discord-Embeds unterstützen keine Textfarbe per Markdown.
+                    # ANSI erlaubt hier gezielt gelb + fett für den eigenen Namen.
+                    name = f"\u001b[1;33m{name}\u001b[0m"
+
                 lines.append(
-                    f"{marker}**{item['rank']}.** {item['name']} — {item['wins']}-{item['losses']} ({item['played']})"
+                    f"{item['rank']}. {name} — {item['wins']}-{item['losses']} ({item['played']})"
                 )
-            table_text = "\n".join(lines)
+
+            table_text = "```ansi\n" + "\n".join(lines) + "\n```"
             embed.add_field(
                 name=f"🏆 Aktuelle Tabelle Division {division}",
                 value=table_text[:1024],
