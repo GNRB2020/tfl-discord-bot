@@ -24,6 +24,7 @@ import signup
 import asnyc
 import restinfo
 import coop
+import term_offers
 
 from plan import PlanMenuView
 from asyncplan import open_async_request_from_player
@@ -2823,6 +2824,11 @@ class PlayerMenuView(PlayerBaseView):
             view=SeasonSignupMenuView(owner_id=interaction.user.id),
             content=None,
         )
+
+
+    @discord.ui.button(label="Termine vorschlagen", style=discord.ButtonStyle.success, row=2)
+    async def term_offer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await term_offers.open_term_offer_modal(interaction)
 
     @discord.ui.button(label="⚙️ Einstellungen", style=discord.ButtonStyle.secondary, row=2)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
