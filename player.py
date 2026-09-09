@@ -4171,6 +4171,13 @@ async def setup(bot: commands.Bot):
     # Persistente Buttons offener Anfragen nach Neustart wieder registrieren.
     await restore_exit_request_views(bot)
 
+    # Offene Terminangebote ebenfalls persistent registrieren. Alte Posts aus
+    # Versionen ohne Persistenz werden nach on_ready automatisch migriert.
+    try:
+        await term_offers.restore_persistent_offer_views(bot)
+    except Exception as exc:
+        print(f"⚠️ [PLAYER] Terminangebote konnten nicht wiederhergestellt werden: {exc}")
+
     # Fristen liegen im Google Sheet und überstehen dadurch Bot-Neustarts.
     if not hasattr(bot, "_exit_request_monitor_task"):
         bot._exit_request_monitor_task = asyncio.create_task(
