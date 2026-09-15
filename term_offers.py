@@ -2604,7 +2604,10 @@ async def open_schedule_manage_menu(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Diese Funktion ist nur auf dem TFL-Server verfügbar.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
+    # Bei Aufruf aus dem Components-V2-Dashboard muss ein eigenes ephemeres
+    # Antwortfenster entstehen. thinking=True verhindert, dass das Dashboard
+    # selbst per deferred_message_update überschrieben wird.
+    await interaction.response.defer(ephemeral=True, thinking=True)
     try:
         profile = await asyncio.to_thread(find_member_profile, interaction.user)
         if profile is None:
