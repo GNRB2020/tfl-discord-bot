@@ -32,6 +32,7 @@ from matchcenter import (
     LeagueResultViewStep1,
     LeagueResultViewStep2,
     CupResultView,
+    MatchCenterState,
     get_runner_modes,
 )
 
@@ -43,6 +44,13 @@ TFL_SEASON_END = os.getenv("TFL_SEASON_END", "").strip()
 TFL_COLOR = 0x1F6FEB
 TFL_SUCCESS_COLOR = 0x2ECC71
 TFL_DANGER_COLOR = 0xE74C3C
+
+DASHBOARD_BANNER_FILENAME = "tfl_dashboard_banner.png"
+TFL_DASHBOARD_BANNER_URL = os.getenv("TFL_DASHBOARD_BANNER_URL", "").strip()
+TFL_DASHBOARD_BANNER_PATH = os.getenv(
+    "TFL_DASHBOARD_BANNER_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), DASHBOARD_BANNER_FILENAME),
+).strip()
 
 # =========================================================
 # STREICHMODUS CONFIG
@@ -472,8 +480,12 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
         description += f"\n\n{note}"
 
     embed = discord.Embed(
-        title="⚔️ TFL SPIELERBEREICH",
-        description=description,
+        title=(f"⚔️ {player_name} · Division {division}" if data.get("found") else "⚔️ TFL SPIELERBEREICH"),
+        description=(
+            f"**{CURRENT_SEASON_LABEL}**\n"
+            "Deine zentrale Anlaufstelle für Spiele, Termine und Saisoninformationen."
+            + (f"\n\n{note}" if note else "")
+        ) if data.get("found") else description,
         color=TFL_COLOR,
     )
 
@@ -594,33 +606,55 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
     return embed
 
 
-async def get_player_dashboard_embed(member, note: str | None = None) -> discord.Embed:
+async def get_player_dashboard_data(member) -> dict:
     if not isinstance(member, discord.Member):
-        return build_player_dashboard_embed(
-            {
-                "found": False,
-                "player_name": getattr(member, "display_name", "Spieler"),
-                "division": None,
-            },
-            note=note,
-        )
+        return {
+            "found": False,
+            "player_name": getattr(member, "display_name", "Spieler"),
+            "division": None,
+            "next_matches": [],
+        }
 
     try:
-        data = await asyncio.to_thread(
+        return await asyncio.to_thread(
             load_player_dashboard_data,
             get_name_candidates(member),
         )
-        return build_player_dashboard_embed(data, note=note)
     except Exception as e:
         print(f"[PLAYER DASHBOARD] Laden fehlgeschlagen: {e}")
-        return build_player_dashboard_embed(
-            {
-                "found": False,
-                "player_name": member.display_name,
-                "division": None,
-            },
-            note=note,
-        )
+        return {
+            "found": False,
+            "player_name": member.display_name,
+            "division": None,
+            "next_matches": [],
+        }
+
+
+async def get_player_dashboard_embed(member, note: str | None = None) -> discord.Embed:
+    data = await get_player_dashboard_data(member)
+    return build_player_dashboard_embed(data, note=note)
+
+
+def _dashboard_banner_embed() -> discord.Embed | None:
+    banner = discord.Embed(color=TFL_COLOR)
+
+    if TFL_DASHBOARD_BANNER_URL:
+        banner.set_image(url=TFL_DASHBOARD_BANNER_URL)
+        return banner
+
+    if TFL_DASHBOARD_BANNER_PATH and os.path.isfile(TFL_DASHBOARD_BANNER_PATH):
+        banner.set_image(url=f"attachment://{DASHBOARD_BANNER_FILENAME}")
+        return banner
+
+    return None
+
+
+def _dashboard_local_banner_file() -> discord.File | None:
+    if TFL_DASHBOARD_BANNER_URL:
+        return None
+    if not TFL_DASHBOARD_BANNER_PATH or not os.path.isfile(TFL_DASHBOARD_BANNER_PATH):
+        return None
+    return discord.File(TFL_DASHBOARD_BANNER_PATH, filename=DASHBOARD_BANNER_FILENAME)
 
 
 async def show_player_dashboard(
@@ -631,17 +665,36 @@ async def show_player_dashboard(
     if not already_deferred and not interaction.response.is_done():
         await interaction.response.defer()
 
-    embed = await get_player_dashboard_embed(interaction.user, note=note)
+    data = await get_player_dashboard_data(interaction.user)
+    embed = build_player_dashboard_embed(data, note=note)
+    next_matches = data.get("next_matches") or []
+
     view = PlayerMenuView(
         owner_id=interaction.user.id,
         show_admin=has_admin_role(interaction.user),
+        next_matches=next_matches,
+        division=data.get("division"),
     )
 
-    await interaction.edit_original_response(
-        embed=embed,
-        view=view,
-        content=None,
-    )
+    banner_embed = _dashboard_banner_embed()
+    banner_file = _dashboard_local_banner_file()
+
+    kwargs = {
+        "content": None,
+        "view": view,
+    }
+
+    if banner_embed is not None:
+        kwargs["embeds"] = [banner_embed, embed]
+        if banner_file is not None:
+            kwargs["attachments"] = [banner_file]
+        else:
+            kwargs["attachments"] = []
+    else:
+        kwargs["embed"] = embed
+        kwargs["attachments"] = []
+
+    await interaction.edit_original_response(**kwargs)
 
 
 def normalize_name(value: str) -> str:
@@ -1079,6 +1132,146 @@ class PlaceholderView(PlayerBaseView):
             embed=self.back_embed,
             view=self.back_view,
             content=None,
+        )
+
+
+# =========================================================
+# DASHBOARD: DIREKTE ERGEBNISEINGABE
+# =========================================================
+
+
+def _load_live_dashboard_result_match(
+    division: int,
+    row_index: int,
+    expected_home: str,
+    expected_away: str,
+    name_candidates: list[str],
+) -> dict:
+    ws = get_player_division_worksheet(int(division))
+    row = ws.row_values(int(row_index))
+
+    home = row[3].strip() if len(row) > 3 else ""
+    result = row[4].strip() if len(row) > 4 else ""
+    away = row[5].strip() if len(row) > 5 else ""
+    mode = row[2].strip() if len(row) > 2 else ""
+
+    if not home or not away:
+        raise ValueError("Die Begegnung wurde im Sheet nicht mehr gefunden.")
+
+    if normalize_name(home) != normalize_name(expected_home) or normalize_name(away) != normalize_name(expected_away):
+        raise ValueError("Die Begegnung hat sich im Sheet geändert. Bitte Dashboard aktualisieren.")
+
+    targets = {normalize_name(value) for value in name_candidates if value}
+    if normalize_name(home) not in targets and normalize_name(away) not in targets:
+        raise PermissionError("Du bist kein Teilnehmer dieser Begegnung.")
+
+    if not _is_open_result_value(result):
+        return {
+            "open": False,
+            "result": result,
+            "home": home,
+            "away": away,
+            "mode": mode,
+        }
+
+    if not mode:
+        raise ValueError("Für dieses Spiel ist noch kein Modus eingetragen.")
+
+    return {
+        "open": True,
+        "result": result,
+        "home": home,
+        "away": away,
+        "mode": mode,
+    }
+
+
+class BackToDashboardFromDirectResultButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="◀ Dashboard", style=discord.ButtonStyle.secondary, row=2)
+
+    async def callback(self, interaction: discord.Interaction):
+        await show_player_dashboard(interaction)
+
+
+class DashboardLeagueResultViewStep2(LeagueResultViewStep2):
+    def __init__(self, author_id: int, state):
+        super().__init__(cog=None, author_id=author_id, state=state)
+
+        for item in list(self.children):
+            if isinstance(item, discord.ui.Button) and item.label == "Zurück":
+                self.remove_item(item)
+                break
+
+        self.add_item(BackToDashboardFromDirectResultButton())
+
+
+class DashboardResultButton(discord.ui.Button):
+    def __init__(self, match: dict, division: int):
+        opponent = match.get("opponent") or "Gegner"
+        super().__init__(
+            label=f"✅ Ergebnis vs. {opponent}"[:80],
+            style=discord.ButtonStyle.success,
+            row=4,
+        )
+        self.division = int(division)
+        self.row_index = int(match.get("row") or 0)
+        self.expected_home = str(match.get("home") or "")
+        self.expected_away = str(match.get("away") or "")
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.followup.send(
+                "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            live = await asyncio.to_thread(
+                _load_live_dashboard_result_match,
+                self.division,
+                self.row_index,
+                self.expected_home,
+                self.expected_away,
+                get_name_candidates(interaction.user),
+            )
+        except PermissionError as exc:
+            await interaction.followup.send(f"⛔ {exc}", ephemeral=True)
+            return
+        except Exception as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+            return
+
+        if not live.get("open"):
+            await interaction.followup.send(
+                f"Dieses Spiel wurde bereits gewertet: **{live.get('result') or '-'}**",
+                ephemeral=True,
+            )
+            return
+
+        state = MatchCenterState()
+        state.kind = "Ergebnis League"
+        state.division = f"Div {self.division}"
+        state.home_player = live["home"]
+        state.match_label = f"{live['home']} vs. {live['away']}"
+        state.match_row_index = self.row_index
+        state.player1 = live["home"]
+        state.player2 = live["away"]
+        state.mode = live["mode"]
+
+        view = DashboardLeagueResultViewStep2(
+            author_id=interaction.user.id,
+            state=state,
+        )
+
+        await interaction.edit_original_response(
+            content=view.render_summary(),
+            embeds=[],
+            attachments=[],
+            view=view,
         )
 
 
@@ -3256,6 +3449,7 @@ class AdminMenuButton(discord.ui.Button):
             ),
             view=AdminMenuView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
 
@@ -3292,8 +3486,18 @@ class SeasonSignupMenuView(PlayerBaseView):
 # =========================================================
 
 class PlayerMenuView(PlayerBaseView):
-    def __init__(self, owner_id: int, show_admin: bool = False):
+    def __init__(
+        self,
+        owner_id: int,
+        show_admin: bool = False,
+        next_matches: list[dict] | None = None,
+        division: int | None = None,
+    ):
         super().__init__(owner_id)
+
+        if division is not None:
+            for match in (next_matches or [])[:2]:
+                self.add_item(DashboardResultButton(match, int(division)))
 
         if show_admin:
             self.add_item(AdminMenuButton())
@@ -3308,6 +3512,7 @@ class PlayerMenuView(PlayerBaseView):
             embed=menu_embed("🎮 Spiel planen", "Wähle den Bereich für deine Spielplanung."),
             view=PlanMenuView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
     @discord.ui.button(label="📅 Termine vorschlagen", style=discord.ButtonStyle.success, row=0)
@@ -3320,6 +3525,7 @@ class PlayerMenuView(PlayerBaseView):
             embed=menu_embed("✅ Ergebnis melden", "Wähle League oder Cup."),
             view=ResultMenuView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
     # -----------------------------------------------------
@@ -3332,6 +3538,7 @@ class PlayerMenuView(PlayerBaseView):
             embed=menu_embed("ℹ️ Info & Tabelle", "Saisoninfos, Meldestatus, Tabellen und weitere Übersichten."),
             view=InfoMenuView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
     @discord.ui.button(label="📋 Restprogramm", style=discord.ButtonStyle.primary, row=1)
@@ -3340,6 +3547,7 @@ class PlayerMenuView(PlayerBaseView):
             embed=menu_embed("📋 Restprogramm", "Zeige dein eigenes Restprogramm oder das eines anderen Spielers."),
             view=RestprogrammView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
     @discord.ui.button(label="🏆 Qualifikation", style=discord.ButtonStyle.primary, row=1)
@@ -3363,6 +3571,7 @@ class PlayerMenuView(PlayerBaseView):
             embed=menu_embed("📝 Saisonmeldung", "Wähle den Bereich für deine Saisonmeldung."),
             view=SeasonSignupMenuView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
     @discord.ui.button(label="⚡ Async", style=discord.ButtonStyle.primary, row=2)
@@ -3371,6 +3580,7 @@ class PlayerMenuView(PlayerBaseView):
             embed=menu_embed("⚡ Async", "Beantrage oder spiele ein Async-Match."),
             view=AsyncMenuView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
     @discord.ui.button(label="⚙️ Einstellungen", style=discord.ButtonStyle.secondary, row=2)
@@ -3379,6 +3589,7 @@ class PlayerMenuView(PlayerBaseView):
             embed=menu_embed("⚙️ Einstellungen", "Verwalte Twitch, Restream-Angaben und Streichmodi."),
             view=SettingsMenuView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
     # -----------------------------------------------------
@@ -3420,6 +3631,7 @@ class PlayerMenuView(PlayerBaseView):
             ),
             view=PlayerExitConfirmView(owner_id=interaction.user.id),
             content=None,
+            attachments=[],
         )
 
 
