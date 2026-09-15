@@ -815,25 +815,30 @@ async def show_player_dashboard(
     )
 
     if HAS_COMPONENTS_V2:
-        view = build_dashboard_layout_view(
-            data=data,
-            owner_id=interaction.user.id,
-            show_admin=has_admin_role(interaction.user),
-            note=note,
-        )
-        # Components-V2-Nachrichten dürfen keine klassischen Embeds/Inhalte
-        # enthalten. Das gesamte Dashboard lebt in der LayoutView.
-        # Components V2 kann keine klassischen Embeds/Inhalte mischen.
-        # Das Banner wird als Attachment hochgeladen und innerhalb der
-        # MediaGallery über attachment:// referenziert.
-        banner_file = getattr(view, "banner_file", None)
-        await interaction.edit_original_response(
-            content=None,
-            embed=None,
-            attachments=[banner_file] if banner_file is not None else [],
-            view=view,
-        )
-        return
+        try:
+            view = build_dashboard_layout_view(
+                data=data,
+                owner_id=interaction.user.id,
+                show_admin=has_admin_role(interaction.user),
+                note=note,
+            )
+            component_count = getattr(view, "total_children_count", None)
+            if component_count is not None:
+                print(f"[PLAYER DASHBOARD] Components V2: {component_count}/40 Children")
+            banner_file = getattr(view, "banner_file", None)
+            await interaction.edit_original_response(
+                content=None,
+                embed=None,
+                attachments=[banner_file] if banner_file is not None else [],
+                view=view,
+            )
+            return
+        except Exception as exc:
+            # Ein V2-Layoutfehler darf /player nie wieder scheinbar endlos
+            # laden lassen. Vor dem Senden der V2-Nachricht können wir sicher
+            # auf das klassische Dashboard zurückfallen.
+            print(f"⚠️ [PLAYER DASHBOARD] Components-V2-Fallback: {exc}")
+            traceback.print_exc()
 
     # Fallback für ältere discord.py-Versionen.
     embed = build_player_dashboard_embed(data, note=note)
@@ -1745,17 +1750,16 @@ if HAS_COMPONENTS_V2:
                 print(f"⚠️ [PLAYER DASHBOARD] V2-Banner konnte nicht geladen werden: {exc}")
 
         def _add_actions(self, *, show_admin: bool):
-            # Ein kompakter Aktionsblock. Die fünf Zeilen folgen bewusst immer
-            # derselben Reihenfolge: Spielen, Termine, Saison, Profil, System.
+            """Kompaktes Aktionsmenü mit bewusst geringer Components-V2-Anzahl."""
             actions = discord.ui.Container(accent_colour=0x5865F2)
             actions.add_item(
                 discord.ui.TextDisplay(
                     "## ⚙️ Aktionen\n"
-                    "**🎮 Spielen**  ·  **📅 Termine**  ·  **📊 Saison**  ·  "
-                    "**👤 Profil**  ·  **🔧 System**"
+                    "**Spielen & Termine** · **Saison** · **Profil & System**"
                 )
             )
 
+            # Zeile 1: Alles, was direkt mit einem Match oder Termin zu tun hat.
             actions.add_item(
                 discord.ui.ActionRow(
                     DashboardV2ActionButton(
@@ -1767,19 +1771,15 @@ if HAS_COMPONENTS_V2:
                     DashboardV2ActionButton(
                         owner_id=self.owner_id,
                         action="offer",
-                        label="📅 Termine vorschlagen",
+                        label="📅 Termine",
                         style=discord.ButtonStyle.success,
                     ),
                     DashboardV2ActionButton(
                         owner_id=self.owner_id,
                         action="result",
-                        label="✅ Ergebnis melden",
+                        label="✅ Ergebnis",
                         style=discord.ButtonStyle.success,
                     ),
-                )
-            )
-            actions.add_item(
-                discord.ui.ActionRow(
                     DashboardV2ActionButton(
                         owner_id=self.owner_id,
                         action="schedule_manage",
@@ -1788,10 +1788,12 @@ if HAS_COMPONENTS_V2:
                     DashboardV2ActionButton(
                         owner_id=self.owner_id,
                         action="my_offers",
-                        label="📌 Meine Angebote",
+                        label="📌 Angebote",
                     ),
                 )
             )
+
+            # Zeile 2: Saisonbezogene Funktionen.
             actions.add_item(
                 discord.ui.ActionRow(
                     DashboardV2ActionButton(
@@ -1809,13 +1811,9 @@ if HAS_COMPONENTS_V2:
                     DashboardV2ActionButton(
                         owner_id=self.owner_id,
                         action="quali",
-                        label="🏆 Qualifikation",
+                        label="🏆 Quali",
                         style=discord.ButtonStyle.primary,
                     ),
-                )
-            )
-            actions.add_item(
-                discord.ui.ActionRow(
                     DashboardV2ActionButton(
                         owner_id=self.owner_id,
                         action="season",
@@ -1828,15 +1826,16 @@ if HAS_COMPONENTS_V2:
                         label="⚡ Async",
                         style=discord.ButtonStyle.primary,
                     ),
-                    DashboardV2ActionButton(
-                        owner_id=self.owner_id,
-                        action="settings",
-                        label="⚙️ Einstellungen",
-                    ),
                 )
             )
 
+            # Zeile 3: Profil/System. Admin kommt nur bei Berechtigung dazu.
             system_buttons = [
+                DashboardV2ActionButton(
+                    owner_id=self.owner_id,
+                    action="settings",
+                    label="⚙️ Einstellungen",
+                ),
                 DashboardV2ActionButton(
                     owner_id=self.owner_id,
                     action="refresh",
@@ -1867,7 +1866,8 @@ if HAS_COMPONENTS_V2:
 
             self._add_banner()
 
-            # Kopfkarte
+            # Kopfzeile bewusst ohne zusätzlichen Container: spart V2-Children
+            # und hält das Dashboard unter Discord's hartem 40er-Limit.
             if found:
                 title = f"## ⚔️ {player_name} · Division {division}"
             else:
@@ -1875,18 +1875,12 @@ if HAS_COMPONENTS_V2:
 
             intro = (
                 f"{title}\n"
-                f"**{CURRENT_SEASON_LABEL}**  ·  **Together we race**\n"
+                f"**{CURRENT_SEASON_LABEL}** · **Together we race**\n"
                 "Deine Spielerzentrale für Matches, Termine und Saisoninformationen."
             )
             if note:
-                intro += f"\n\n> {note}"
-
-            self.add_item(
-                discord.ui.Container(
-                    discord.ui.TextDisplay(intro),
-                    accent_colour=TFL_COLOR,
-                )
-            )
+                intro += f"\n> {note}"
+            self.add_item(discord.ui.TextDisplay(intro))
 
             if found:
                 played = int(data.get("played") or 0)
@@ -1898,46 +1892,31 @@ if HAS_COMPONENTS_V2:
                 deadline = get_deadline_traffic_light(played, total)
                 percent = round((played / total) * 100) if total else 0
 
-                # Drei klar getrennte Statuskarten statt eines kompakten Textblocks.
-                self.add_item(
-                    discord.ui.Container(
-                        discord.ui.TextDisplay(
-                            "### 🎯 Saisonstatus\n"
-                            f"**{played}/{total} gespielt**  ·  **{open_games} offen**\n"
-                            f"**{scheduled_open}** davon terminiert  ·  **{percent}%** abgeschlossen"
-                        ),
-                        accent_colour=0x2ECC71,
-                    )
+                # Ein kompakter Überblicks-Container ersetzt drei einzelne
+                # Karten. Inhaltlich bleibt alles erhalten, Komponentenanzahl
+                # sinkt aber deutlich.
+                overview = (
+                    "## 🧭 Überblick\n"
+                    f"🎯 **Saison:** {played}/{total} gespielt · {open_games} offen · "
+                    f"{scheduled_open} terminiert · {percent}%\n"
+                    f"{deadline['emoji']} **Deadline:** {deadline['label']} — {deadline['detail']}\n"
+                    f"🚫 **Streichmodi:** {mode_1} · {mode_2}"
                 )
                 self.add_item(
                     discord.ui.Container(
-                        discord.ui.TextDisplay(
-                            f"### {deadline['emoji']} Deadline-Ampel\n"
-                            f"**{deadline['label']}**\n"
-                            f"{deadline['detail']}"
-                        ),
+                        discord.ui.TextDisplay(overview),
                         accent_colour=_deadline_accent(deadline),
                     )
                 )
-                self.add_item(
-                    discord.ui.Container(
-                        discord.ui.TextDisplay(
-                            "### 🚫 Streichmodi\n"
-                            f"**1.** {mode_1}\n"
-                            f"**2.** {mode_2}"
-                        ),
-                        accent_colour=0xE74C3C,
-                    )
-                )
 
-                # Termine sind ein eigener, blauer Bereich. Der Ergebnisbutton
-                # ist jeweils Zubehör genau DER Begegnung und sitzt damit direkt
-                # im Terminblock statt im allgemeinen Menü.
+                # Nächste Termine als eigener Bereich. Der Ergebnisbutton sitzt
+                # direkt am jeweiligen Match und gehört damit optisch/logisch
+                # zu genau diesem Termin.
                 terms = discord.ui.Container(accent_colour=0x3498DB)
                 terms.add_item(
                     discord.ui.TextDisplay(
                         "## 📅 Nächste Termine\n"
-                        "*Ist das Match gespielt, öffnet der grüne Button direkt die passende Ergebniseingabe.*"
+                        "-# Ergebnis direkt beim passenden Spiel eintragen"
                     )
                 )
 
@@ -1947,7 +1926,7 @@ if HAS_COMPONENTS_V2:
                         "Mon": "Mo", "Tue": "Di", "Wed": "Mi", "Thu": "Do",
                         "Fri": "Fr", "Sat": "Sa", "Sun": "So",
                     }
-                    for idx, match in enumerate(next_matches):
+                    for match in next_matches:
                         when_dt = match.get("datetime")
                         if when_dt:
                             when = when_dt.strftime("%d.%m.%Y · %H:%M")
@@ -1960,14 +1939,11 @@ if HAS_COMPONENTS_V2:
                         away = match.get("away") or "?"
                         mode = match.get("mode") or "Modus noch offen"
                         prefix = f"{weekday}, " if weekday else ""
-                        match_text = (
-                            f"### {prefix}{when} Uhr\n"
-                            f"**{home}**  vs.  **{away}**\n"
-                            f"🎮 **{mode}**"
-                        )
                         terms.add_item(
                             discord.ui.Section(
-                                match_text,
+                                f"### {prefix}{when} Uhr\n"
+                                f"**{home}** vs. **{away}**\n"
+                                f"🎮 **{mode}**",
                                 accessory=DashboardV2ResultButton(
                                     match,
                                     int(division),
@@ -1975,8 +1951,6 @@ if HAS_COMPONENTS_V2:
                                 ),
                             )
                         )
-                        if idx < len(next_matches) - 1:
-                            terms.add_item(discord.ui.Separator(visible=True))
                 else:
                     terms.add_item(
                         discord.ui.TextDisplay(
@@ -1986,12 +1960,11 @@ if HAS_COMPONENTS_V2:
 
                 self.add_item(terms)
 
-                # Tabelle bleibt bewusst als eigene Karte unter den Terminen.
                 table_text = _dashboard_table_markdown(data)
                 self.add_item(
                     discord.ui.Container(
                         discord.ui.TextDisplay(
-                            f"## 🏆 Aktuelle Tabelle · Division {division}\n"
+                            f"## 🏆 Tabelle · Division {division}\n"
                             f"{table_text}\n"
                             "-# S = Siege · U = Remis · N = Niederlagen · Sieg 2 Pkt · Remis 1 Pkt"
                         ),
@@ -2010,8 +1983,6 @@ if HAS_COMPONENTS_V2:
                     )
                 )
 
-            # Aktionen werden auch bei einem temporären Sheet-Fehler weiterhin
-            # angezeigt. So bleibt /player immer benutzbar.
             self._add_actions(show_admin=show_admin)
 
 
@@ -5129,10 +5100,32 @@ class PlayerCog(commands.Cog):
     @app_commands.guilds(discord.Object(id=GUILD_ID))
     async def player(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        await show_player_dashboard(
-            interaction,
-            already_deferred=True,
-        )
+        try:
+            await show_player_dashboard(
+                interaction,
+                already_deferred=True,
+            )
+        except Exception as exc:
+            print(f"❌ [PLAYER] /player konnte nicht aufgebaut werden: {exc}")
+            traceback.print_exc()
+            try:
+                await interaction.edit_original_response(
+                    content=(
+                        "❌ Das Spieler-Dashboard konnte gerade nicht aufgebaut werden. "
+                        "Bitte versuche /player erneut."
+                    ),
+                    embed=None,
+                    view=None,
+                    attachments=[],
+                )
+            except Exception:
+                try:
+                    await interaction.followup.send(
+                        "❌ Das Spieler-Dashboard konnte gerade nicht aufgebaut werden. Bitte versuche /player erneut.",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
 
 
 async def setup(bot: commands.Bot):
