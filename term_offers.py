@@ -2625,3 +2625,72 @@ async def open_schedule_manage_menu(interaction: discord.Interaction) -> None:
         )
     except Exception as exc:
         await interaction.edit_original_response(content=f"❌ Terminverwaltung konnte nicht geladen werden: {exc}")
+
+
+async def open_schedule_manage_match(
+    interaction: discord.Interaction,
+    *,
+    division: int,
+    row_index: int,
+    expected_home: str = "",
+    expected_away: str = "",
+) -> None:
+    """Öffnet die Terminverwaltung direkt für eine konkrete Begegnung.
+
+    Wird vom Matchday-Bereich des /player-Dashboards verwendet. Vor dem
+    Öffnen wird der Termin live aus dem Divisions-Sheet neu gelesen, damit
+    keine veraltete Dashboard-Information bearbeitet werden kann.
+    """
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        profile = await asyncio.to_thread(find_member_profile, interaction.user)
+        if profile is None:
+            await interaction.edit_original_response(
+                content="Dein Spielername wurde in keiner Division gefunden."
+            )
+            return
+
+        if int(profile.division) != int(division):
+            await interaction.edit_original_response(
+                content="❌ Diese Begegnung gehört nicht zu deiner aktuellen Division."
+            )
+            return
+
+        match = await asyncio.to_thread(
+            _get_live_scheduled_match,
+            int(division),
+            int(row_index),
+        )
+
+        if expected_home and normalize_name(match.home) != normalize_name(expected_home):
+            raise RuntimeError("Der Heimspieler der Begegnung hat sich inzwischen geändert.")
+        if expected_away and normalize_name(match.away) != normalize_name(expected_away):
+            raise RuntimeError("Der Gastspieler der Begegnung hat sich inzwischen geändert.")
+
+        target = normalize_name(profile.player_name)
+        if target not in {normalize_name(match.home), normalize_name(match.away)}:
+            raise RuntimeError("Du bist an dieser Begegnung nicht beteiligt.")
+
+        await interaction.edit_original_response(
+            content=(
+                "🗓️ **Termin verwalten**\n\n"
+                f"**{match.home} vs. {match.away}**\n"
+                f"📅 {match.timestamp} Uhr\n"
+                f"🎮 {match.mode or 'Modus offen'}\n\n"
+                "Eine Änderung wird erst ausgeführt, wenn der Gegner zustimmt."
+            ),
+            view=ScheduledMatchActionView(interaction.user.id, profile, match),
+        )
+    except Exception as exc:
+        await interaction.edit_original_response(
+            content=f"❌ Termin konnte nicht geöffnet werden: {exc}",
+            view=None,
+        )
