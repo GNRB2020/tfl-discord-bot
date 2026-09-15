@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import re
+import time
 import unicodedata
 import uuid
 from datetime import datetime as dt, timedelta
@@ -16,6 +17,7 @@ from sheets_connection import get_season_spreadsheet, get_season_worksheet
 
 from sheet_guard import (
     col_values_cached,
+    get_all_values_cached,
     row_values_cached,
     sheet_write_call,
 )
@@ -103,11 +105,12 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v9-components-v2-dashboard"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v10-fast-components-v2-dashboard"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
 PLAYER_MODE_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_MODE_CACHE_TTL_SECONDS", "300"))
+PLAYER_DASHBOARD_IO_TIMEOUT_SECONDS = int(os.getenv("PLAYER_DASHBOARD_IO_TIMEOUT_SECONDS", "15"))
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 EXIT_REQUEST_ADMIN_CHANNEL_ID = 1277927528706736162
@@ -190,25 +193,22 @@ def _parse_match_score(result: str):
     return int(match.group(1)), int(match.group(2))
 
 
-def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
-    values = col_values_cached(
-        lambda: ws,
-        sheet_name=player_sheet_name(ws),
-        col=12,
-        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
-    )
-
+def _load_division_table_for_dashboard(rows: list[list[str]], player_name: str) -> list[dict]:
+    """Baut die Divisionstabelle ausschließlich aus bereits geladenen Sheet-Daten."""
     players = []
     seen = set()
-    for raw in values[1:12]:
-        name = (raw or "").strip()
-        if not name:
+
+    # Die Roster-/Spielernamen stehen in Spalte L. Nicht auf feste Zeilenzahlen
+    # verlassen: so funktioniert es auch bei leicht verschobenen Tabellen.
+    for row in rows:
+        raw = row[11].strip() if len(row) > 11 else ""
+        if not raw:
             continue
-        key = normalize_name(name)
+        key = normalize_name(raw)
         if not key or key in seen or key in {"racer", "spieler", "teilnehmer"}:
             continue
         seen.add(key)
-        players.append(name)
+        players.append(raw)
 
     stats = {
         normalize_name(name): {
@@ -224,7 +224,6 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
         for name in players
     }
 
-    rows = ws.get_all_values()
     for row in rows[1:]:
         home = row[3].strip() if len(row) > 3 else ""
         result = row[4].strip() if len(row) > 4 else ""
@@ -303,11 +302,24 @@ def _load_division_table_for_dashboard(ws, player_name: str) -> list[dict]:
 
     return ranked
 
+def load_player_dashboard_data(
+    name_candidates: list[str],
+    preferred_division: int | None = None,
+    force_refresh: bool = False,
+) -> dict:
+    """
+    Schneller Dashboard-Loader.
 
-def load_player_dashboard_data(name_candidates: list[str]) -> dict:
-    ws, roster_row_index, div_number = get_division_worksheet_for_name_candidates(name_candidates)
+    Früher wurde erst Spalte L in bis zu sechs Divisionen gelesen und das
+    gefundene Divisionsblatt danach erneut mehrfach geladen. Jetzt wird bei
+    vorhandener Discord-Divisionsrolle direkt genau dieses Blatt einmal
+    komplett gelesen und für Status, Termine, Streichmodi und Tabelle gemeinsam
+    ausgewertet.
+    """
+    targets = {normalize_name(x) for x in name_candidates if x}
+    targets.discard("")
 
-    if ws is None or roster_row_index is None or div_number is None:
+    if not targets:
         return {
             "found": False,
             "player_name": next((x for x in name_candidates if x), "Spieler"),
@@ -322,13 +334,61 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
             "division_table": [],
         }
 
-    roster_row = row_values_cached(
-        lambda: ws,
-        sheet_name=player_sheet_name(ws),
-        row=roster_row_index,
-        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
-    )
+    division_order = []
+    if preferred_division in {1, 2, 3, 4, 5, 6}:
+        division_order.append(int(preferred_division))
+    division_order.extend(d for d in range(1, 7) if d not in division_order)
 
+    ws = None
+    rows = None
+    roster_row_index = None
+    div_number = None
+
+    for candidate_div in division_order:
+        candidate_ws = get_player_division_worksheet(candidate_div)
+        sheet_title = player_sheet_name(candidate_ws, f"{candidate_div}.DIV")
+        candidate_rows = get_all_values_cached(
+            lambda ws=candidate_ws: ws,
+            sheet_name=sheet_title,
+            ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+            force_refresh=force_refresh,
+        )
+
+        found_row = None
+        for idx, row in enumerate(candidate_rows, start=1):
+            roster_name = row[11].strip() if len(row) > 11 else ""
+            if roster_name and normalize_name(roster_name) in targets:
+                found_row = idx
+                break
+
+        if found_row is not None:
+            ws = candidate_ws
+            rows = candidate_rows
+            roster_row_index = found_row
+            div_number = candidate_div
+            break
+
+        # Wenn eine verlässliche Divisionsrolle vorhanden war, sollte ein
+        # fehlender Name meist nur ein Namens-Mapping-Problem sein. Trotzdem
+        # erlauben wir den Fallback auf die übrigen Divisionen, damit /player
+        # nicht unbrauchbar wird.
+
+    if ws is None or rows is None or roster_row_index is None or div_number is None:
+        return {
+            "found": False,
+            "player_name": next((x for x in name_candidates if x), "Spieler"),
+            "division": None,
+            "mode_1": "",
+            "mode_2": "",
+            "played": 0,
+            "open": 0,
+            "scheduled_open": 0,
+            "total": 0,
+            "next_matches": [],
+            "division_table": [],
+        }
+
+    roster_row = rows[roster_row_index - 1] if roster_row_index <= len(rows) else []
     player_name = roster_row[11].strip() if len(roster_row) > 11 else ""
     if not player_name:
         player_name = next((x.strip() for x in name_candidates if x and x.strip()), "Spieler")
@@ -337,7 +397,6 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
     mode_2 = roster_row[13].strip() if len(roster_row) > 13 else ""
 
     target = normalize_name(player_name)
-    rows = ws.get_all_values()
     now = dt.now(BERLIN_TZ)
 
     played = 0
@@ -347,38 +406,33 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
     upcoming = []
 
     for row_index, row in enumerate(rows[1:], start=2):
-        home = row[3].strip() if len(row) > 3 else ""  # D
-        result = row[4].strip() if len(row) > 4 else ""  # E
-        away = row[5].strip() if len(row) > 5 else ""  # F
+        home = row[3].strip() if len(row) > 3 else ""
+        result = row[4].strip() if len(row) > 4 else ""
+        away = row[5].strip() if len(row) > 5 else ""
 
         if not home or not away:
             continue
 
         home_match = normalize_name(home) == target
         away_match = normalize_name(away) == target
-
         if not home_match and not away_match:
             continue
 
         total += 1
 
-        is_played = not _is_open_result_value(result)
-
-        if is_played:
+        if not _is_open_result_value(result):
             played += 1
             continue
 
         open_games += 1
 
-        date_text = row[1].strip() if len(row) > 1 else ""  # B
-        mode = row[2].strip() if len(row) > 2 else ""  # C
+        date_text = row[1].strip() if len(row) > 1 else ""
+        mode = row[2].strip() if len(row) > 2 else ""
 
         if date_text:
             scheduled_open += 1
             parsed_date = parse_sheet_datetime(date_text)
-
             if parsed_date is not None and parsed_date >= now - timedelta(minutes=5):
-                opponent = away if home_match else home
                 upcoming.append(
                     {
                         "datetime": parsed_date,
@@ -386,13 +440,12 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
                         "mode": mode,
                         "home": home,
                         "away": away,
-                        "opponent": opponent,
+                        "opponent": away if home_match else home,
                         "row": row_index,
                     }
                 )
 
     upcoming.sort(key=lambda item: item["datetime"])
-    division_table = _load_division_table_for_dashboard(ws, player_name)
 
     return {
         "found": True,
@@ -405,9 +458,8 @@ def load_player_dashboard_data(name_candidates: list[str]) -> dict:
         "scheduled_open": scheduled_open,
         "total": total,
         "next_matches": upcoming[:2],
-        "division_table": division_table,
+        "division_table": _load_division_table_for_dashboard(rows, player_name),
     }
-
 
 def _parse_season_date(value: str):
     raw = (value or "").strip()
@@ -622,7 +674,19 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
     return embed
 
 
-async def get_player_dashboard_data(member) -> dict:
+def _dashboard_division_from_member(member: discord.Member) -> int | None:
+    """Ermittelt die Division ohne Sheet-Read direkt aus der Discord-Rolle."""
+    if not isinstance(member, discord.Member):
+        return None
+
+    for div_number in range(1, 7):
+        for role in member.roles:
+            if division_role_matches(role.name, div_number):
+                return div_number
+    return None
+
+
+async def get_player_dashboard_data(member, force_refresh: bool = False) -> dict:
     if not isinstance(member, discord.Member):
         return {
             "found": False,
@@ -631,23 +695,49 @@ async def get_player_dashboard_data(member) -> dict:
             "next_matches": [],
         }
 
+    preferred_division = _dashboard_division_from_member(member)
+
+    started = time.perf_counter()
     try:
-        return await asyncio.to_thread(
-            load_player_dashboard_data,
-            get_name_candidates(member),
+        data = await asyncio.wait_for(
+            asyncio.to_thread(
+                load_player_dashboard_data,
+                get_name_candidates(member),
+                preferred_division,
+                force_refresh,
+            ),
+            timeout=PLAYER_DASHBOARD_IO_TIMEOUT_SECONDS,
         )
+        elapsed = time.perf_counter() - started
+        if elapsed >= 2.0:
+            print(
+                f"[PLAYER DASHBOARD] Daten geladen in {elapsed:.2f}s "
+                f"(Division={data.get('division')}, force={force_refresh})"
+            )
+        return data
+    except asyncio.TimeoutError:
+        elapsed = time.perf_counter() - started
+        print(
+            f"⚠️ [PLAYER DASHBOARD] Sheet-Laden nach {elapsed:.2f}s abgebrochen. "
+            "Dashboard wird ohne Live-Daten geöffnet."
+        )
+        return {
+            "found": False,
+            "player_name": member.display_name,
+            "division": preferred_division,
+            "next_matches": [],
+        }
     except Exception as e:
         print(f"[PLAYER DASHBOARD] Laden fehlgeschlagen: {e}")
         return {
             "found": False,
             "player_name": member.display_name,
-            "division": None,
+            "division": preferred_division,
             "next_matches": [],
         }
 
-
-async def get_player_dashboard_embed(member, note: str | None = None) -> discord.Embed:
-    data = await get_player_dashboard_data(member)
+async def get_player_dashboard_embed(member, note: str | None = None, force_refresh: bool = False) -> discord.Embed:
+    data = await get_player_dashboard_data(member, force_refresh=force_refresh)
     return build_player_dashboard_embed(data, note=note)
 
 
@@ -703,6 +793,7 @@ async def show_player_dashboard(
     interaction: discord.Interaction,
     note: str | None = None,
     already_deferred: bool = False,
+    force_refresh: bool = False,
 ):
     # Hauptaktionen des V2-Dashboards öffnen eigene ephemere Panels. Ein
     # "Zurück" aus so einem Panel schließt deshalb nur dieses Panel.
@@ -718,7 +809,10 @@ async def show_player_dashboard(
     if not already_deferred and not interaction.response.is_done():
         await interaction.response.defer()
 
-    data = await get_player_dashboard_data(interaction.user)
+    data = await get_player_dashboard_data(
+        interaction.user,
+        force_refresh=force_refresh,
+    )
 
     if HAS_COMPONENTS_V2:
         view = build_dashboard_layout_view(
@@ -1561,7 +1655,7 @@ if HAS_COMPONENTS_V2:
                 return
 
             if action == "refresh":
-                await show_player_dashboard(interaction)
+                await show_player_dashboard(interaction, force_refresh=True)
                 return
 
             if action == "exit":
