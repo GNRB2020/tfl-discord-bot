@@ -707,7 +707,7 @@ def load_coop_dashboard_data(member_id: int, name_candidates: list[str], force_r
                 upcoming.append({"datetime": parsed, "date_text": date_text, "mode": _safe_row_cell(row, 2), "home": home, "away": away, "opponent": away if home_match else home, "row": row_index, "link": _safe_row_cell(row, 6)})
     upcoming.sort(key=lambda item: item["datetime"])
     today = [item for item in upcoming if item["datetime"].astimezone(BERLIN_TZ).date() == now.date()]
-    return {"found": True, "team_name": team_name, "partner": partner, "status": status, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:2], "today_matches": today[:1], "coop_table": _build_coop_table(rows, confirmed_teams, team_name)}
+    return {"found": True, "team_name": team_name, "partner": partner, "status": status, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:2], "today_matches": today[:3], "coop_table": _build_coop_table(rows, confirmed_teams, team_name)}
 
 
 def _load_live_coop_result_match(row_index: int, expected_home: str, expected_away: str, team_name: str) -> dict:
@@ -896,7 +896,7 @@ def load_player_dashboard_data(
     table = _load_division_table_for_dashboard(rows, player_name)
     today = [item for item in upcoming if item["datetime"].astimezone(BERLIN_TZ).date() == now.date()]
     achievements = _load_awarded_achievements_for_player(player_name)
-    return {"found": True, "player_name": player_name, "division": int(div_number), "mode_1": mode_1, "mode_2": mode_2, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:3], "today_matches": today[:1], "division_table": table, "achievements": achievements}
+    return {"found": True, "player_name": player_name, "division": int(div_number), "mode_1": mode_1, "mode_2": mode_2, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:3], "today_matches": today[:3], "division_table": table, "achievements": achievements}
 
 
 def _parse_season_date(value: str):
@@ -2164,12 +2164,17 @@ if HAS_COMPONENTS_V2:
             current = "**⚔️ League** · 👥 Coop" if self.dashboard_mode=="league" else "⚔️ League · **👥 Coop**"; body=f"## {title}\n{current}\n{subtitle}" + (f"\n> {note}" if note else "")
             self.add_item(discord.ui.Section(body, accessory=DashboardModeSwitchButton(owner_id=self.owner_id, target_mode="coop" if self.dashboard_mode=="league" else "league")))
         def _add_matchday(self,data,division):
-            matches=data.get("today_matches") or []
+            matches=(data.get("today_matches") or [])[:3]
             if not matches: return
-            m=matches[0]; w=m.get("datetime"); tm=w.strftime("%H:%M") if w else "?"; card=discord.ui.Container(accent_colour=0xE67E22)
-            card.add_item(discord.ui.TextDisplay(f"## 🔥 MATCHDAY\n### Heute {tm} Uhr · **{m.get('home') or '?'} vs. {m.get('away') or '?'}**\n🎮 **{m.get('mode') or 'Modus noch offen'}**"))
-            link=str(m.get("link") or "").strip(); multi=discord.ui.Button(label="📺 Multistream", style=discord.ButtonStyle.link, url=link) if link.lower().startswith(("http://","https://")) else discord.ui.Button(label="📺 Multistream fehlt", style=discord.ButtonStyle.secondary, disabled=True)
-            card.add_item(discord.ui.ActionRow(DashboardV2ResultButton(m,division,self.owner_id,compact=True), multi, DashboardV2ScheduleButton(m,division,self.owner_id))); self.add_item(card)
+            card=discord.ui.Container(accent_colour=0xE67E22)
+            card.add_item(discord.ui.TextDisplay("## 🔥 MATCHDAY\n-# Alle heutigen Ligaspiele auf einen Blick"))
+            for index, m in enumerate(matches):
+                w=m.get("datetime"); tm=w.strftime("%H:%M") if w else "?"
+                card.add_item(discord.ui.TextDisplay(f"### Heute {tm} Uhr · **{m.get('home') or '?'} vs. {m.get('away') or '?'}**\n🎮 **{m.get('mode') or 'Modus noch offen'}**"))
+                link=str(m.get("link") or "").strip()
+                multi=discord.ui.Button(label="📺 Multistream", style=discord.ButtonStyle.link, url=link) if link.lower().startswith(("http://","https://")) else discord.ui.Button(label="📺 Multistream fehlt", style=discord.ButtonStyle.secondary, disabled=True)
+                card.add_item(discord.ui.ActionRow(DashboardV2ResultButton(m,division,self.owner_id,compact=True), multi, DashboardV2ScheduleButton(m,division,self.owner_id)))
+            self.add_item(card)
         def _add_league_actions(self,show_admin):
             c=discord.ui.Container(accent_colour=0x5865F2); c.add_item(discord.ui.TextDisplay("## ⚙️ Aktionen\n-# Spielen · Termine · Saison · System"))
             c.add_item(discord.ui.ActionRow(DashboardV2ActionButton(owner_id=self.owner_id,action="plan",label="🎮 Spiel planen",style=discord.ButtonStyle.primary),DashboardV2ActionButton(owner_id=self.owner_id,action="offer",label="📅 Termine",style=discord.ButtonStyle.success),DashboardV2ActionButton(owner_id=self.owner_id,action="result",label="✅ Ergebnis",style=discord.ButtonStyle.success),DashboardV2ActionButton(owner_id=self.owner_id,action="schedule_manage",label="🗓️ Termin ändern"),DashboardV2ActionButton(owner_id=self.owner_id,action="my_offers",label="📌 Angebote")))
@@ -2182,12 +2187,15 @@ if HAS_COMPONENTS_V2:
             if found:
                 self._add_matchday(data,int(div)); played=int(data.get("played") or 0); total=int(data.get("total") or 0); op=int(data.get("open") or 0); sched=int(data.get("scheduled_open") or 0); deadline=get_deadline_traffic_light(played,total); pct=round((played/total)*100) if total else 0; ach=[a.get("label","") for a in data.get("achievements") or [] if a.get("label")]; ach_text=" · ".join(ach[:4]) if ach else "noch keine aktiven Achievements"
                 self.add_item(discord.ui.Container(discord.ui.TextDisplay(f"## 🧭 Überblick\n🎯 **Saison:** {played}/{total} gespielt · {op} offen · {sched} terminiert · {pct}%\n{deadline['emoji']} **Deadline:** {deadline['label']} — {deadline['detail']}\n🚫 **Streichmodi:** {data.get('mode_1') or '–'} · {data.get('mode_2') or '–'}\n🏅 **Achievements:** {ach_text}"),accent_colour=_deadline_accent(deadline)))
-                today_rows={int(x.get("row") or 0) for x in data.get("today_matches") or []}; visible_limit = 1 if today_rows else 2; nm=[x for x in data.get("next_matches") or [] if int(x.get("row") or 0) not in today_rows][:visible_limit]; terms=discord.ui.Container(accent_colour=0x3498DB); terms.add_item(discord.ui.TextDisplay("## 📅 Nächste Termine\n-# Ergebnis direkt beim passenden Spiel eintragen"))
-                if nm:
-                    for m in nm:
-                        w=m.get("datetime"); when=w.strftime("%d.%m.%Y · %H:%M") if w else str(m.get("date_text") or "Termin"); terms.add_item(discord.ui.Section(f"### {when} Uhr\n**{m.get('home') or '?'}** vs. **{m.get('away') or '?'}**\n🎮 **{m.get('mode') or 'Modus noch offen'}**",accessory=DashboardV2ResultButton(m,int(div),self.owner_id)))
-                else: terms.add_item(discord.ui.TextDisplay("Aktuell sind keine weiteren zukünftigen Spieltermine eingetragen."))
-                self.add_item(terms); self.add_item(discord.ui.Container(discord.ui.TextDisplay(f"## 🏆 Tabelle · Division {div}\n{_dashboard_table_markdown(data)}\n-# S = Siege · U = Remis · N = Niederlagen · Sieg 2 Pkt · Remis 1 Pkt"),accent_colour=0xF1C40F))
+                today_rows={int(x.get("row") or 0) for x in data.get("today_matches") or []}
+                if not today_rows:
+                    nm=[x for x in data.get("next_matches") or []][:2]; terms=discord.ui.Container(accent_colour=0x3498DB); terms.add_item(discord.ui.TextDisplay("## 📅 Nächste Termine\n-# Ergebnis direkt beim passenden Spiel eintragen"))
+                    if nm:
+                        for m in nm:
+                            w=m.get("datetime"); when=w.strftime("%d.%m.%Y · %H:%M") if w else str(m.get("date_text") or "Termin"); terms.add_item(discord.ui.Section(f"### {when} Uhr\n**{m.get('home') or '?'}** vs. **{m.get('away') or '?'}**\n🎮 **{m.get('mode') or 'Modus noch offen'}**",accessory=DashboardV2ResultButton(m,int(div),self.owner_id)))
+                    else: terms.add_item(discord.ui.TextDisplay("Aktuell sind keine weiteren zukünftigen Spieltermine eingetragen."))
+                    self.add_item(terms)
+                self.add_item(discord.ui.Container(discord.ui.TextDisplay(f"## 🏆 Tabelle · Division {div}\n{_dashboard_table_markdown(data)}\n-# S = Siege · U = Remis · N = Niederlagen · Sieg 2 Pkt · Remis 1 Pkt"),accent_colour=0xF1C40F))
             else: self.add_item(discord.ui.Container(discord.ui.TextDisplay("### ℹ️ Divisionsdaten nicht verfügbar\nDie Daten konnten gerade nicht aus dem Sheet geladen werden. Die Spielerfunktionen stehen weiterhin zur Verfügung."),accent_colour=0x95A5A6))
             self._add_league_actions(show_admin)
         def _build_coop(self,data,note):
