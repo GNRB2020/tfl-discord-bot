@@ -2211,6 +2211,134 @@ if HAS_COMPONENTS_V2:
             await show_player_dashboard(interaction, dashboard_mode=self.target_mode)
 
 
+    class DashboardNextMatchSelect(discord.ui.Select):
+        def __init__(self, *, matches: list[dict], owner_id: int, state: dict, division: int):
+            self.owner_id = int(owner_id)
+            self.state = state
+            self.matches = {
+                int(m.get("row") or 0): dict(m)
+                for m in matches
+                if int(m.get("row") or 0) > 0
+            }
+            selected_row = int(state.get("row") or 0)
+            options = []
+            for match in matches[:25]:
+                row = int(match.get("row") or 0)
+                when = match.get("datetime")
+                when_text = when.strftime("%d.%m. · %H:%M") if when else str(match.get("date_text") or "Termin")
+                opponent = str(match.get("opponent") or "Gegner")
+                mode = str(match.get("mode") or "Modus noch offen")
+                options.append(
+                    discord.SelectOption(
+                        label=f"{when_text} · {opponent}"[:100],
+                        value=str(row),
+                        description=mode[:100],
+                        default=row == selected_row,
+                    )
+                )
+            super().__init__(
+                placeholder="Nächstes Spiel auswählen …",
+                min_values=1,
+                max_values=1,
+                options=options,
+                custom_id=f"tfl:dashboard:nextmatch:select:{division}:{owner_id}"[:100],
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+            selected = int(self.values[0])
+            self.state["row"] = selected
+            for option in self.options:
+                option.default = option.value == str(selected)
+            await interaction.response.defer()
+
+
+    class DashboardNextGameActionButton(discord.ui.Button):
+        def __init__(
+            self,
+            *,
+            owner_id: int,
+            division: int,
+            matches: list[dict],
+            state: dict,
+            action: str,
+        ):
+            labels = {
+                "result": "✅ Ergebnis",
+                "reschedule": "🔄 Spiel verschieben",
+                "cancel": "❌ Spiel absagen",
+            }
+            styles = {
+                "result": discord.ButtonStyle.success,
+                "reschedule": discord.ButtonStyle.primary,
+                "cancel": discord.ButtonStyle.danger,
+            }
+            super().__init__(
+                label=labels[action],
+                style=styles[action],
+                custom_id=f"tfl:dashboard:nextmatch:{action}:{division}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.division = int(division)
+            self.matches = {
+                int(m.get("row") or 0): dict(m)
+                for m in matches
+                if int(m.get("row") or 0) > 0
+            }
+            self.state = state
+            self.action = action
+
+        def _selected_match(self) -> dict | None:
+            row = int(self.state.get("row") or 0)
+            if row in self.matches:
+                return self.matches[row]
+            return next(iter(self.matches.values()), None)
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+
+            match = self._selected_match()
+            if not match:
+                await interaction.response.send_message(
+                    "Das ausgewählte Spiel ist nicht mehr verfügbar.",
+                    ephemeral=True,
+                )
+                return
+
+            common = {
+                "division": self.division,
+                "row_index": int(match.get("row") or 0),
+                "expected_home": str(match.get("home") or ""),
+                "expected_away": str(match.get("away") or ""),
+            }
+
+            if self.action == "result":
+                await _open_direct_dashboard_result(
+                    interaction,
+                    owner_id=self.owner_id,
+                    **common,
+                )
+                return
+
+            if self.action == "reschedule":
+                await term_offers.open_schedule_reschedule_match(
+                    interaction,
+                    **common,
+                )
+                return
+
+            if self.action == "cancel":
+                await term_offers.request_schedule_cancel_match(
+                    interaction,
+                    **common,
+                )
+                return
+
+
     class DashboardMatchdaySelect(discord.ui.Select):
         def __init__(self, *, matches: list[dict], owner_id: int, state: dict, prefix: str):
             self.owner_id = int(owner_id)
@@ -2801,16 +2929,55 @@ if HAS_COMPONENTS_V2:
                     header += "\n-# Nach heute ist aktuell kein weiterer Termin eingetragen"
                 if without_date:
                     header += f"\n-# {without_date} offene Saisonspiel{'e' if without_date != 1 else ''} noch ohne Termin"
+                if visible_matches:
+                    game_lines = []
+                    for idx, match in enumerate(visible_matches, start=1):
+                        when = match.get("datetime")
+                        when_text = when.strftime("%d.%m.%Y · %H:%M") if when else str(match.get("date_text") or "Termin")
+                        game_lines.append(
+                            f"**{idx}. {when_text} Uhr** · "
+                            f"**{match.get('home') or '?'} vs. {match.get('away') or '?'}** "
+                            f"· 🎮 **{match.get('mode') or 'Modus noch offen'}**"
+                        )
+                    header += "\n\n" + "\n".join(game_lines)
+
                 terms.add_item(discord.ui.TextDisplay(header))
-                for match in visible_matches:
-                    when = match.get("datetime")
-                    when_text = when.strftime("%d.%m.%Y · %H:%M") if when else str(match.get("date_text") or "Termin")
+
+                if visible_matches:
+                    next_state = {"row": int(visible_matches[0].get("row") or 0)}
                     terms.add_item(
-                        discord.ui.Section(
-                            f"### {when_text} Uhr\n"
-                            f"**{match.get('home') or '?'}** vs. **{match.get('away') or '?'}**\n"
-                            f"🎮 **{match.get('mode') or 'Modus noch offen'}**",
-                            accessory=DashboardV2ResultButton(match, division, self.owner_id, compact=True),
+                        discord.ui.ActionRow(
+                            DashboardNextMatchSelect(
+                                matches=visible_matches,
+                                owner_id=self.owner_id,
+                                state=next_state,
+                                division=division,
+                            )
+                        )
+                    )
+                    terms.add_item(
+                        discord.ui.ActionRow(
+                            DashboardNextGameActionButton(
+                                owner_id=self.owner_id,
+                                division=division,
+                                matches=visible_matches,
+                                state=next_state,
+                                action="result",
+                            ),
+                            DashboardNextGameActionButton(
+                                owner_id=self.owner_id,
+                                division=division,
+                                matches=visible_matches,
+                                state=next_state,
+                                action="reschedule",
+                            ),
+                            DashboardNextGameActionButton(
+                                owner_id=self.owner_id,
+                                division=division,
+                                matches=visible_matches,
+                                state=next_state,
+                                action="cancel",
+                            ),
                         )
                     )
                 self.add_item(terms)
