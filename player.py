@@ -33,6 +33,7 @@ import term_offers
 
 from plan import PlanMenuView
 from asyncplan import open_async_request_from_player
+import matchcenter
 from matchcenter import (
     LeagueResultViewStep1,
     LeagueResultViewStep2,
@@ -5333,7 +5334,14 @@ class PlayerCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    _install_achievement_hooks()
+    # /player ist die Kernfunktion. Zusatzfunktionen wie Achievements dürfen
+    # das Laden des Cogs niemals verhindern.
+    try:
+        _install_achievement_hooks()
+    except Exception as exc:
+        print(f"⚠️ [PLAYER] Achievement-Hooks konnten nicht installiert werden: {exc}")
+        traceback.print_exc()
+
     await bot.add_cog(PlayerCog(bot))
 
     # Persistente Buttons offener Anfragen nach Neustart wieder registrieren.
