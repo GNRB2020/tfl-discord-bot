@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 import time
 import uuid
 from threading import RLock
@@ -21,6 +22,21 @@ from sheets_connection import (
 
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
+
+
+def _award_first_schedule_achievement_if_available(division: int, row_index: int, actor_name: str):
+    """
+    player.py importiert term_offers.py, deshalb bewusst kein statischer Rückimport.
+    Nach erfolgreicher Terminbörsen-Transaktion greifen wir auf das bereits
+    geladene player-Modul zu.
+    """
+    player_module = sys.modules.get("player")
+    if player_module is None:
+        return []
+    awarder = getattr(player_module, "_award_first_scheduled_match", None)
+    if not callable(awarder):
+        return []
+    return awarder(int(division), int(row_index), actor_name)
 
 DIVISION_CHANNELS = {
     1: 1344118033920168047,
@@ -725,6 +741,18 @@ async def finalize_match_schedule(
             "Das Discord-Event konnte nicht erstellt werden. Der Sheet-Eintrag wurde "
             "deshalb automatisch zurückgenommen."
         ) from exc
+
+    # Erst jetzt ist die Terminbörsen-Transaktion wirklich erfolgreich:
+    # Sheet steht und das Discord-Event wurde angelegt.
+    try:
+        await asyncio.to_thread(
+            _award_first_schedule_achievement_if_available,
+            division,
+            row_index,
+            actor.display_name,
+        )
+    except Exception as exc:
+        print(f"⚠️ [TERMINBÖRSE] First-Planner-Achievement konnte nicht geprüft werden: {exc}")
 
     event_url = getattr(event, "url", "") or ""
 
