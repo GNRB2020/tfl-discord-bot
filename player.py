@@ -52,6 +52,22 @@ TFL_DASHBOARD_BANNER_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), DASHBOARD_BANNER_FILENAME),
 ).strip()
 
+# Discord Components V2 (discord.py >= 2.6) ermöglicht Container, Trenner,
+# Textblöcke und Buttons direkt zwischen Dashboard-Abschnitten.
+HAS_COMPONENTS_V2 = all(
+    hasattr(discord.ui, name)
+    for name in (
+        "LayoutView",
+        "Container",
+        "TextDisplay",
+        "Separator",
+        "Section",
+        "ActionRow",
+        "MediaGallery",
+    )
+)
+COMPONENTS_V2_FLAG = 1 << 15
+
 # =========================================================
 # STREICHMODUS CONFIG
 # =========================================================
@@ -87,7 +103,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v8-central-sheets"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v9-components-v2-dashboard"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -657,18 +673,77 @@ def _dashboard_local_banner_file() -> discord.File | None:
     return discord.File(TFL_DASHBOARD_BANNER_PATH, filename=DASHBOARD_BANNER_FILENAME)
 
 
+def _message_uses_components_v2(message) -> bool:
+    try:
+        return bool(int(getattr(getattr(message, "flags", None), "value", 0)) & COMPONENTS_V2_FLAG)
+    except Exception:
+        return False
+
+
+async def close_player_panel(interaction: discord.Interaction):
+    """Schließt ein untergeordnetes /player-Fenster; das V2-Dashboard bleibt stehen."""
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
+    try:
+        await interaction.delete_original_response()
+    except Exception:
+        try:
+            await interaction.edit_original_response(
+                content="↩️ Das Spieler-Dashboard bleibt geöffnet.",
+                embed=None,
+                view=None,
+                attachments=[],
+            )
+        except Exception:
+            pass
+
+
 async def show_player_dashboard(
     interaction: discord.Interaction,
     note: str | None = None,
     already_deferred: bool = False,
 ):
+    # Hauptaktionen des V2-Dashboards öffnen eigene ephemere Panels. Ein
+    # "Zurück" aus so einem Panel schließt deshalb nur dieses Panel.
+    if (
+        HAS_COMPONENTS_V2
+        and interaction.message is not None
+        and not _message_uses_components_v2(interaction.message)
+        and not already_deferred
+    ):
+        await close_player_panel(interaction)
+        return
+
     if not already_deferred and not interaction.response.is_done():
         await interaction.response.defer()
 
     data = await get_player_dashboard_data(interaction.user)
+
+    if HAS_COMPONENTS_V2:
+        view = build_dashboard_layout_view(
+            data=data,
+            owner_id=interaction.user.id,
+            show_admin=has_admin_role(interaction.user),
+            note=note,
+        )
+        # Components-V2-Nachrichten dürfen keine klassischen Embeds/Inhalte
+        # enthalten. Das gesamte Dashboard lebt in der LayoutView.
+        # Components V2 kann keine klassischen Embeds/Inhalte mischen.
+        # Das Banner wird als Attachment hochgeladen und innerhalb der
+        # MediaGallery über attachment:// referenziert.
+        banner_file = getattr(view, "banner_file", None)
+        await interaction.edit_original_response(
+            content=None,
+            embed=None,
+            attachments=[banner_file] if banner_file is not None else [],
+            view=view,
+        )
+        return
+
+    # Fallback für ältere discord.py-Versionen.
     embed = build_player_dashboard_embed(data, note=note)
     next_matches = data.get("next_matches") or []
-
     view = PlayerMenuView(
         owner_id=interaction.user.id,
         show_admin=has_admin_role(interaction.user),
@@ -678,18 +753,11 @@ async def show_player_dashboard(
 
     banner_embed = _dashboard_banner_embed()
     banner_file = _dashboard_local_banner_file()
-
-    kwargs = {
-        "content": None,
-        "view": view,
-    }
+    kwargs = {"content": None, "view": view}
 
     if banner_embed is not None:
         kwargs["embeds"] = [banner_embed, embed]
-        if banner_file is not None:
-            kwargs["attachments"] = [banner_file]
-        else:
-            kwargs["attachments"] = []
+        kwargs["attachments"] = [banner_file] if banner_file is not None else []
     else:
         kwargs["embed"] = embed
         kwargs["attachments"] = []
@@ -1188,10 +1256,10 @@ def _load_live_dashboard_result_match(
 
 class BackToDashboardFromDirectResultButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="◀ Dashboard", style=discord.ButtonStyle.secondary, row=2)
+        super().__init__(label="Schließen", style=discord.ButtonStyle.secondary, row=2)
 
     async def callback(self, interaction: discord.Interaction):
-        await show_player_dashboard(interaction)
+        await close_player_panel(interaction)
 
 
 class DashboardLeagueResultViewStep2(LeagueResultViewStep2):
@@ -1206,7 +1274,86 @@ class DashboardLeagueResultViewStep2(LeagueResultViewStep2):
         self.add_item(BackToDashboardFromDirectResultButton())
 
 
+async def _open_direct_dashboard_result(
+    interaction: discord.Interaction,
+    *,
+    division: int,
+    row_index: int,
+    expected_home: str,
+    expected_away: str,
+    owner_id: int,
+):
+    if interaction.user.id != owner_id:
+        await interaction.response.send_message(
+            "Dieses Dashboard gehört nicht dir.",
+            ephemeral=True,
+        )
+        return
+
+    # Wir bestätigen nur den Klick am Dashboard. Die Ergebniseingabe erscheint
+    # anschließend als eigenes ephemeres Panel, damit das Dashboard stehen bleibt.
+    await interaction.response.defer()
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.followup.send(
+            "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        live = await asyncio.to_thread(
+            _load_live_dashboard_result_match,
+            division,
+            row_index,
+            expected_home,
+            expected_away,
+            get_name_candidates(interaction.user),
+        )
+    except PermissionError as exc:
+        await interaction.followup.send(f"⛔ {exc}", ephemeral=True)
+        return
+    except Exception as exc:
+        await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+        return
+
+    if not live.get("open"):
+        await interaction.followup.send(
+            f"Dieses Spiel wurde bereits gewertet: **{live.get('result') or '-'}**",
+            ephemeral=True,
+        )
+        return
+
+    state = MatchCenterState()
+    state.kind = "Ergebnis League"
+    state.division = f"Div {division}"
+    state.home_player = live["home"]
+    state.match_label = f"{live['home']} vs. {live['away']}"
+    state.match_row_index = row_index
+    state.player1 = live["home"]
+    state.player2 = live["away"]
+    state.mode = live["mode"]
+
+    view = DashboardLeagueResultViewStep2(
+        author_id=interaction.user.id,
+        state=state,
+    )
+
+    await interaction.followup.send(
+        content=(
+            "## ✅ Ergebnis eintragen\n"
+            f"**{live['home']} vs. {live['away']}**\n"
+            f"Modus: **{live['mode']}**\n\n"
+            "Wähle das Ergebnis und hinterlege anschließend den Racetime-Link."
+        ),
+        view=view,
+        ephemeral=True,
+    )
+
+
 class DashboardResultButton(discord.ui.Button):
+    """Legacy/Fallback-Button für das klassische View-Dashboard."""
+
     def __init__(self, match: dict, division: int):
         opponent = match.get("opponent") or "Gegner"
         super().__init__(
@@ -1220,59 +1367,576 @@ class DashboardResultButton(discord.ui.Button):
         self.expected_away = str(match.get("away") or "")
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-
-        if not isinstance(interaction.user, discord.Member):
-            await interaction.followup.send(
-                "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            live = await asyncio.to_thread(
-                _load_live_dashboard_result_match,
-                self.division,
-                self.row_index,
-                self.expected_home,
-                self.expected_away,
-                get_name_candidates(interaction.user),
-            )
-        except PermissionError as exc:
-            await interaction.followup.send(f"⛔ {exc}", ephemeral=True)
-            return
-        except Exception as exc:
-            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
-            return
-
-        if not live.get("open"):
-            await interaction.followup.send(
-                f"Dieses Spiel wurde bereits gewertet: **{live.get('result') or '-'}**",
-                ephemeral=True,
-            )
-            return
-
-        state = MatchCenterState()
-        state.kind = "Ergebnis League"
-        state.division = f"Div {self.division}"
-        state.home_player = live["home"]
-        state.match_label = f"{live['home']} vs. {live['away']}"
-        state.match_row_index = self.row_index
-        state.player1 = live["home"]
-        state.player2 = live["away"]
-        state.mode = live["mode"]
-
-        view = DashboardLeagueResultViewStep2(
-            author_id=interaction.user.id,
-            state=state,
+        await _open_direct_dashboard_result(
+            interaction,
+            division=self.division,
+            row_index=self.row_index,
+            expected_home=self.expected_home,
+            expected_away=self.expected_away,
+            owner_id=interaction.user.id,
         )
 
-        await interaction.edit_original_response(
-            content=view.render_summary(),
-            embeds=[],
-            attachments=[],
-            view=view,
+
+def _dashboard_table_markdown(data: dict) -> str:
+    division_table = data.get("division_table") or []
+    if not division_table:
+        return "Noch keine Tabellendaten verfügbar."
+
+    name_width = max(12, min(18, max(len(item["name"]) for item in division_table[:9])))
+    header = (
+        f"{'Pl':>2}  {'Spieler':<{name_width}}  "
+        f"{'Sp':>2}  {'S':>2}  {'U':>2}  {'N':>2}  {'Pkt':>3}"
+    )
+    separator = (
+        f"{'--':>2}  {'-' * name_width}  "
+        f"{'--':>2}  {'--':>2}  {'--':>2}  {'--':>2}  {'---':>3}"
+    )
+    lines = [header, separator]
+
+    for item in division_table[:9]:
+        padded_name = f"{item['name']:<{name_width}}"
+        if item.get("is_self"):
+            padded_name = f"\u001b[1;33m{padded_name}\u001b[0m"
+        lines.append(
+            f"{item['rank']:>2}. "
+            f"{padded_name}  "
+            f"{item['played']:>2}  "
+            f"{item['wins']:>2}  "
+            f"{item['draws']:>2}  "
+            f"{item['losses']:>2}  "
+            f"{item['points']:>3}"
         )
+
+    return "```ansi\n" + "\n".join(lines) + "\n```"
+
+
+def _deadline_accent(deadline: dict) -> int:
+    emoji = deadline.get("emoji")
+    if emoji == "🟢":
+        return 0x2ECC71
+    if emoji == "🟡":
+        return 0xF1C40F
+    if emoji == "🔴":
+        return 0xE74C3C
+    return 0x5865F2
+
+
+if HAS_COMPONENTS_V2:
+    class DashboardV2ResultButton(discord.ui.Button):
+        def __init__(self, match: dict, division: int, owner_id: int):
+            opponent = str(match.get("opponent") or "Gegner")
+            super().__init__(
+                label=f"✅ Ergebnis vs. {opponent}"[:80],
+                style=discord.ButtonStyle.success,
+                custom_id=f"tfl:dashboard:result:{division}:{int(match.get('row') or 0)}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.division = int(division)
+            self.row_index = int(match.get("row") or 0)
+            self.expected_home = str(match.get("home") or "")
+            self.expected_away = str(match.get("away") or "")
+
+        async def callback(self, interaction: discord.Interaction):
+            await _open_direct_dashboard_result(
+                interaction,
+                division=self.division,
+                row_index=self.row_index,
+                expected_home=self.expected_home,
+                expected_away=self.expected_away,
+                owner_id=self.owner_id,
+            )
+
+
+    class DashboardV2ActionButton(discord.ui.Button):
+        def __init__(
+            self,
+            *,
+            owner_id: int,
+            action: str,
+            label: str,
+            style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+        ):
+            super().__init__(
+                label=label[:80],
+                style=style,
+                custom_id=f"tfl:dashboard:{action}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.action = action
+
+        async def _send_panel(self, interaction: discord.Interaction, *, embed, view):
+            await interaction.response.send_message(
+                embed=embed,
+                view=view,
+                ephemeral=True,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "Dieses Dashboard gehört nicht dir.",
+                    ephemeral=True,
+                )
+                return
+
+            action = self.action
+
+            if action == "plan":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("🎮 Spiel planen", "Wähle den Bereich für deine Spielplanung."),
+                    view=PlanMenuView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "offer":
+                await term_offers.open_term_offer_modal(interaction)
+                return
+
+            if action == "result":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("✅ Ergebnis melden", "Wähle League oder Cup."),
+                    view=ResultMenuView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "schedule_manage":
+                await term_offers.open_schedule_manage_menu(interaction)
+                return
+
+            if action == "my_offers":
+                await term_offers.open_my_offers_menu(interaction)
+                return
+
+            if action == "info":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("ℹ️ Info & Tabelle", "Saisoninfos, Meldestatus, Tabellen und weitere Übersichten."),
+                    view=InfoMenuView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "rest":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("📋 Restprogramm", "Zeige dein eigenes Restprogramm oder das eines anderen Spielers."),
+                    view=RestprogrammView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "quali":
+                cog = interaction.client.get_cog("QualiCog")
+                if cog is None or not hasattr(cog, "start_quali_flow"):
+                    await interaction.response.send_message(
+                        "Qualifikation ist aktuell nicht verfügbar.",
+                        ephemeral=True,
+                    )
+                    return
+                await cog.start_quali_flow(interaction, edit_existing=False)
+                return
+
+            if action == "season":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("📝 Saisonmeldung", "Wähle den Bereich für deine Saisonmeldung."),
+                    view=SeasonSignupMenuView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "async":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("⚡ Async", "Beantrage oder spiele ein Async-Match."),
+                    view=AsyncMenuView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "settings":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("⚙️ Einstellungen", "Verwalte Twitch, Restream-Angaben und Streichmodi."),
+                    view=SettingsMenuView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "refresh":
+                await show_player_dashboard(interaction)
+                return
+
+            if action == "exit":
+                await self._send_panel(
+                    interaction,
+                    embed=discord.Embed(
+                        title="⚠️ Liga verlassen?",
+                        description=(
+                            "Bist du dir absolut sicher, dass du die Liga verlassen möchtest? "
+                            "Wenn du nun bestätigst, ist die Entscheidung final. "
+                            "Zudem ist eine Teilnahme an der kommenden Saison damit ausgeschlossen."
+                        ),
+                        color=TFL_DANGER_COLOR,
+                    ),
+                    view=PlayerExitConfirmView(owner_id=interaction.user.id),
+                )
+                return
+
+            if action == "admin":
+                if not has_admin_role(interaction.user):
+                    await interaction.response.send_message(
+                        "⛔ Diese Funktion ist nur für Admins verfügbar.",
+                        ephemeral=True,
+                    )
+                    return
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."),
+                    view=AdminMenuView(owner_id=interaction.user.id),
+                )
+                return
+
+            await interaction.response.send_message(
+                "Diese Dashboard-Aktion ist aktuell nicht verfügbar.",
+                ephemeral=True,
+            )
+
+
+    class DashboardLayoutView(discord.ui.LayoutView):
+        def __init__(
+            self,
+            *,
+            data: dict,
+            owner_id: int,
+            show_admin: bool,
+            note: str | None = None,
+        ):
+            super().__init__(timeout=900)
+            self.owner_id = int(owner_id)
+            self.banner_file: discord.File | None = None
+            self._build(data, show_admin=show_admin, note=note)
+
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "Dieses Dashboard gehört nicht dir.",
+                    ephemeral=True,
+                )
+                return False
+            return True
+
+        def _add_banner(self):
+            """Banner als echte Components-V2-MediaGallery einbinden."""
+            gallery = discord.ui.MediaGallery()
+
+            try:
+                if TFL_DASHBOARD_BANNER_URL:
+                    gallery.add_item(
+                        media=TFL_DASHBOARD_BANNER_URL,
+                        description="TFL Spielerbereich",
+                    )
+                    self.add_item(gallery)
+                    return
+
+                if TFL_DASHBOARD_BANNER_PATH and os.path.isfile(TFL_DASHBOARD_BANNER_PATH):
+                    self.banner_file = discord.File(
+                        TFL_DASHBOARD_BANNER_PATH,
+                        filename=DASHBOARD_BANNER_FILENAME,
+                    )
+                    gallery.add_item(
+                        media=f"attachment://{DASHBOARD_BANNER_FILENAME}",
+                        description="TFL Spielerbereich",
+                    )
+                    self.add_item(gallery)
+            except Exception as exc:
+                self.banner_file = None
+                print(f"⚠️ [PLAYER DASHBOARD] V2-Banner konnte nicht geladen werden: {exc}")
+
+        def _add_actions(self, *, show_admin: bool):
+            # Ein kompakter Aktionsblock. Die fünf Zeilen folgen bewusst immer
+            # derselben Reihenfolge: Spielen, Termine, Saison, Profil, System.
+            actions = discord.ui.Container(accent_colour=0x5865F2)
+            actions.add_item(
+                discord.ui.TextDisplay(
+                    "## ⚙️ Aktionen\n"
+                    "**🎮 Spielen**  ·  **📅 Termine**  ·  **📊 Saison**  ·  "
+                    "**👤 Profil**  ·  **🔧 System**"
+                )
+            )
+
+            actions.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="plan",
+                        label="🎮 Spiel planen",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="offer",
+                        label="📅 Termine vorschlagen",
+                        style=discord.ButtonStyle.success,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="result",
+                        label="✅ Ergebnis melden",
+                        style=discord.ButtonStyle.success,
+                    ),
+                )
+            )
+            actions.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="schedule_manage",
+                        label="🗓️ Termin ändern",
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="my_offers",
+                        label="📌 Meine Angebote",
+                    ),
+                )
+            )
+            actions.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="info",
+                        label="ℹ️ Info & Tabelle",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="rest",
+                        label="📋 Restprogramm",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="quali",
+                        label="🏆 Qualifikation",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                )
+            )
+            actions.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="season",
+                        label="📝 Saisonmeldung",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="async",
+                        label="⚡ Async",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="settings",
+                        label="⚙️ Einstellungen",
+                    ),
+                )
+            )
+
+            system_buttons = [
+                DashboardV2ActionButton(
+                    owner_id=self.owner_id,
+                    action="refresh",
+                    label="🔄 Aktualisieren",
+                ),
+                DashboardV2ActionButton(
+                    owner_id=self.owner_id,
+                    action="exit",
+                    label="🚪 Austritt",
+                    style=discord.ButtonStyle.danger,
+                ),
+            ]
+            if show_admin:
+                system_buttons.append(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="admin",
+                        label="🟨 Administration",
+                    )
+                )
+            actions.add_item(discord.ui.ActionRow(*system_buttons))
+            self.add_item(actions)
+
+        def _build(self, data: dict, *, show_admin: bool, note: str | None):
+            player_name = str(data.get("player_name") or "Spieler")
+            division = data.get("division")
+            found = bool(data.get("found"))
+
+            self._add_banner()
+
+            # Kopfkarte
+            if found:
+                title = f"## ⚔️ {player_name} · Division {division}"
+            else:
+                title = "## ⚔️ TFL SPIELERBEREICH"
+
+            intro = (
+                f"{title}\n"
+                f"**{CURRENT_SEASON_LABEL}**  ·  **Together we race**\n"
+                "Deine Spielerzentrale für Matches, Termine und Saisoninformationen."
+            )
+            if note:
+                intro += f"\n\n> {note}"
+
+            self.add_item(
+                discord.ui.Container(
+                    discord.ui.TextDisplay(intro),
+                    accent_colour=TFL_COLOR,
+                )
+            )
+
+            if found:
+                played = int(data.get("played") or 0)
+                total = int(data.get("total") or 0)
+                open_games = int(data.get("open") or 0)
+                scheduled_open = int(data.get("scheduled_open") or 0)
+                mode_1 = data.get("mode_1") or "–"
+                mode_2 = data.get("mode_2") or "–"
+                deadline = get_deadline_traffic_light(played, total)
+                percent = round((played / total) * 100) if total else 0
+
+                # Drei klar getrennte Statuskarten statt eines kompakten Textblocks.
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            "### 🎯 Saisonstatus\n"
+                            f"**{played}/{total} gespielt**  ·  **{open_games} offen**\n"
+                            f"**{scheduled_open}** davon terminiert  ·  **{percent}%** abgeschlossen"
+                        ),
+                        accent_colour=0x2ECC71,
+                    )
+                )
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            f"### {deadline['emoji']} Deadline-Ampel\n"
+                            f"**{deadline['label']}**\n"
+                            f"{deadline['detail']}"
+                        ),
+                        accent_colour=_deadline_accent(deadline),
+                    )
+                )
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            "### 🚫 Streichmodi\n"
+                            f"**1.** {mode_1}\n"
+                            f"**2.** {mode_2}"
+                        ),
+                        accent_colour=0xE74C3C,
+                    )
+                )
+
+                # Termine sind ein eigener, blauer Bereich. Der Ergebnisbutton
+                # ist jeweils Zubehör genau DER Begegnung und sitzt damit direkt
+                # im Terminblock statt im allgemeinen Menü.
+                terms = discord.ui.Container(accent_colour=0x3498DB)
+                terms.add_item(
+                    discord.ui.TextDisplay(
+                        "## 📅 Nächste Termine\n"
+                        "*Ist das Match gespielt, öffnet der grüne Button direkt die passende Ergebniseingabe.*"
+                    )
+                )
+
+                next_matches = (data.get("next_matches") or [])[:2]
+                if next_matches:
+                    weekday_map = {
+                        "Mon": "Mo", "Tue": "Di", "Wed": "Mi", "Thu": "Do",
+                        "Fri": "Fr", "Sat": "Sa", "Sun": "So",
+                    }
+                    for idx, match in enumerate(next_matches):
+                        when_dt = match.get("datetime")
+                        if when_dt:
+                            when = when_dt.strftime("%d.%m.%Y · %H:%M")
+                            weekday = weekday_map.get(when_dt.strftime("%a"), when_dt.strftime("%a"))
+                        else:
+                            when = str(match.get("date_text") or "Termin")
+                            weekday = ""
+
+                        home = match.get("home") or "?"
+                        away = match.get("away") or "?"
+                        mode = match.get("mode") or "Modus noch offen"
+                        prefix = f"{weekday}, " if weekday else ""
+                        match_text = (
+                            f"### {prefix}{when} Uhr\n"
+                            f"**{home}**  vs.  **{away}**\n"
+                            f"🎮 **{mode}**"
+                        )
+                        terms.add_item(
+                            discord.ui.Section(
+                                match_text,
+                                accessory=DashboardV2ResultButton(
+                                    match,
+                                    int(division),
+                                    self.owner_id,
+                                ),
+                            )
+                        )
+                        if idx < len(next_matches) - 1:
+                            terms.add_item(discord.ui.Separator(visible=True))
+                else:
+                    terms.add_item(
+                        discord.ui.TextDisplay(
+                            "Aktuell sind keine zukünftigen Spieltermine eingetragen."
+                        )
+                    )
+
+                self.add_item(terms)
+
+                # Tabelle bleibt bewusst als eigene Karte unter den Terminen.
+                table_text = _dashboard_table_markdown(data)
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            f"## 🏆 Aktuelle Tabelle · Division {division}\n"
+                            f"{table_text}\n"
+                            "-# S = Siege · U = Remis · N = Niederlagen · Sieg 2 Pkt · Remis 1 Pkt"
+                        ),
+                        accent_colour=0xF1C40F,
+                    )
+                )
+            else:
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            "### ℹ️ Divisionsdaten nicht verfügbar\n"
+                            "Die Daten konnten gerade nicht aus dem Sheet geladen werden. "
+                            "Die Spielerfunktionen stehen weiterhin zur Verfügung."
+                        ),
+                        accent_colour=0x95A5A6,
+                    )
+                )
+
+            # Aktionen werden auch bei einem temporären Sheet-Fehler weiterhin
+            # angezeigt. So bleibt /player immer benutzbar.
+            self._add_actions(show_admin=show_admin)
+
+
+    def build_dashboard_layout_view(
+        *,
+        data: dict,
+        owner_id: int,
+        show_admin: bool,
+        note: str | None = None,
+    ):
+        return DashboardLayoutView(
+            data=data,
+            owner_id=owner_id,
+            show_admin=show_admin,
+            note=note,
+        )
+else:
+    def build_dashboard_layout_view(*, data: dict, owner_id: int, show_admin: bool, note: str | None = None):
+        raise RuntimeError("Discord Components V2 sind mit dieser discord.py-Version nicht verfügbar.")
 
 
 # =========================================================
