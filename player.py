@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 import traceback
+import threading
 import unicodedata
 import uuid
 from datetime import datetime as dt, timedelta
@@ -115,7 +116,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v12-matchday-achievements-coop"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v13-season-unique-achievements"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -251,52 +252,13 @@ def _current_win_streak(rows: list[list[str]], player_name: str) -> int:
     return streak
 
 
-def _compute_player_achievements(
-    rows: list[list[str]],
-    player_name: str,
-    *,
-    total: int,
-    open_games: int,
-    scheduled_open: int,
-    division_table: list[dict],
-) -> list[dict]:
-    achievements: list[dict] = []
-    streak = _current_win_streak(rows, player_name)
-    if streak >= 3:
-        achievements.append({"key": "win_streak_3", "label": f"🔥 {streak} Siege in Folge"})
-
-    if total > 0 and open_games > 0 and scheduled_open == open_games:
-        achievements.append({"key": "early_planner", "label": "🗓️ Frühplaner – alle offenen Spiele terminiert"})
-
-    start = _parse_season_date(TFL_SEASON_START)
-    if start is not None:
-        deadline = start + timedelta(days=14)
-        early_completed = 0
-        target = normalize_name(player_name)
-        for row in rows[1:]:
-            home = _safe_row_cell(row, 3)
-            result = _safe_row_cell(row, 4)
-            away = _safe_row_cell(row, 5)
-            if target not in {normalize_name(home), normalize_name(away)} or _is_open_result_value(result):
-                continue
-            played_at = parse_sheet_datetime(_safe_row_cell(row, 1))
-            if played_at is not None and start <= played_at < deadline:
-                early_completed += 1
-        if early_completed >= 5:
-            achievements.append({"key": "quick_starter_5", "label": "⚡ Schnellstarter – 5 Spiele in den ersten 2 Wochen"})
-
-    own = next((item for item in division_table if normalize_name(item.get("name", "")) == normalize_name(player_name)), None)
-    if own is not None:
-        own_draws = int(own.get("draws") or 0)
-        max_draws = max((int(item.get("draws") or 0) for item in division_table), default=0)
-        if own_draws >= 2 and own_draws == max_draws:
-            achievements.append({"key": "draw_king", "label": f"🤝 Unentschieden-König – {own_draws} Remis"})
-    return achievements
-
-
 def _achievement_sheet_invalidation(ws) -> list[str]:
     name = player_sheet_name(ws, ACHIEVEMENT_SHEET)
     return [f"records:{name}", f"values:{name}", f"row:{name}:", f"col:{name}:", f"cell:{name}:"]
+
+
+_ACHIEVEMENT_LOCK = threading.Lock()
+_ACHIEVEMENT_STREAK_THRESHOLDS = (3, 5, 10)
 
 
 def _ensure_achievement_sheet():
@@ -312,72 +274,332 @@ def _ensure_achievement_sheet():
     return ws
 
 
-def _award_new_achievements_after_result(division: int, player_names: list[str]) -> list[str]:
+def _achievement_key_is_current(key: str) -> bool:
+    if key in {
+        "season_first_finisher",
+        "season_first_scheduled_match",
+        "season_opening_match",
+        "win_streak_3",
+        "win_streak_5",
+        "win_streak_10",
+    }:
+        return True
+    return bool(re.fullmatch(r"division_(?:first_finisher|opening_match)_d[1-6]", key or ""))
+
+
+def _read_current_season_achievement_rows(force_refresh: bool = False):
+    ws = _ensure_achievement_sheet()
+    rows = get_all_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws, ACHIEVEMENT_SHEET),
+        ttl_seconds=30,
+        force_refresh=force_refresh,
+    )
+    current = [
+        row for row in rows[1:]
+        if _safe_row_cell(row, 6) == CURRENT_SEASON_LABEL
+        and _achievement_key_is_current(_safe_row_cell(row, 2))
+    ]
+    return ws, current
+
+
+def _load_awarded_achievements_for_player(player_name: str) -> list[dict]:
     try:
-        div_ws = get_player_division_worksheet(int(division))
-        rows = get_all_values_cached(
-            lambda: div_ws,
-            sheet_name=player_sheet_name(div_ws, f"{division}.DIV"),
-            ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
-            force_refresh=True,
-        )
-        table = _load_division_table_for_dashboard(rows, "")
-        achievement_ws = _ensure_achievement_sheet()
-        existing = get_all_values_cached(
-            lambda: achievement_ws,
-            sheet_name=player_sheet_name(achievement_ws, ACHIEVEMENT_SHEET),
-            ttl_seconds=60,
-            force_refresh=True,
-        )
-        existing_keys = {
-            (
-                normalize_name(_safe_row_cell(row, 1)),
-                _safe_row_cell(row, 2),
-                _safe_row_cell(row, 6),
+        _, rows = _read_current_season_achievement_rows(force_refresh=False)
+        target = normalize_name(player_name)
+        achievements = []
+        seen = set()
+        for row in rows:
+            if normalize_name(_safe_row_cell(row, 1)) != target:
+                continue
+            key = _safe_row_cell(row, 2)
+            if key in seen:
+                continue
+            seen.add(key)
+            achievements.append({
+                "key": key,
+                "label": _safe_row_cell(row, 3),
+                "division": _safe_row_cell(row, 4),
+                "awarded_at": _safe_row_cell(row, 0),
+            })
+        return achievements
+    except Exception as exc:
+        print(f"⚠️ [ACHIEVEMENTS] Dashboard-Erfolge konnten nicht geladen werden: {exc}")
+        return []
+
+
+def _achievement_event_claimed(rows: list[list[str]], key: str) -> bool:
+    return any(_safe_row_cell(row, 2) == key for row in rows)
+
+
+def _player_achievement_claimed(rows: list[list[str]], player_name: str, key: str) -> bool:
+    target = normalize_name(player_name)
+    return any(
+        normalize_name(_safe_row_cell(row, 1)) == target
+        and _safe_row_cell(row, 2) == key
+        for row in rows
+    )
+
+
+def _append_achievement_rows(ws, rows_to_add: list[list[str]]) -> None:
+    if not rows_to_add:
+        return
+    sheet_write_call(
+        lambda: ws.append_rows(rows_to_add, value_input_option="USER_ENTERED"),
+        invalidate_prefixes=_achievement_sheet_invalidation(ws),
+    )
+
+
+def _player_schedule_progress(rows: list[list[str]], player_name: str) -> tuple[int, int]:
+    target = normalize_name(player_name)
+    total = 0
+    open_games = 0
+    for row in rows[1:]:
+        home = _safe_row_cell(row, 3)
+        away = _safe_row_cell(row, 5)
+        if target not in {normalize_name(home), normalize_name(away)}:
+            continue
+        total += 1
+        if _is_open_result_value(_safe_row_cell(row, 4)):
+            open_games += 1
+    return total, open_games
+
+
+def _award_first_scheduled_match(
+    division: int,
+    row_index: int,
+    entered_by: str,
+) -> list[str]:
+    """Vergibt genau einmal pro Saison den Preis für die erste Terminplanung."""
+    try:
+        with _ACHIEVEMENT_LOCK:
+            achievement_ws, existing = _read_current_season_achievement_rows(force_refresh=True)
+            key = "season_first_scheduled_match"
+            if _achievement_event_claimed(existing, key):
+                return []
+
+            div_ws = get_player_division_worksheet(int(division))
+            row = row_values_cached(
+                lambda: div_ws,
+                sheet_name=player_sheet_name(div_ws, f"{division}.DIV"),
+                row=int(row_index),
+                ttl_seconds=0,
             )
-            for row in existing[1:]
-            if _safe_row_cell(row, 1) and _safe_row_cell(row, 2)
-        }
-        new_rows = []
-        post_lines = []
-        now_text = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
-        for player_name in dict.fromkeys(player_names):
-            target = normalize_name(player_name)
-            total = open_games = scheduled_open = 0
-            for row in rows[1:]:
-                home = _safe_row_cell(row, 3)
-                result = _safe_row_cell(row, 4)
-                away = _safe_row_cell(row, 5)
-                if target not in {normalize_name(home), normalize_name(away)}:
-                    continue
-                total += 1
-                if _is_open_result_value(result):
-                    open_games += 1
-                    if _safe_row_cell(row, 1):
-                        scheduled_open += 1
-            candidates = _compute_player_achievements(
-                rows, player_name, total=total, open_games=open_games,
-                scheduled_open=scheduled_open, division_table=table,
+            home = _safe_row_cell(row, 3)
+            away = _safe_row_cell(row, 5)
+            if not home or not away:
+                return []
+
+            entered_norm = normalize_name(entered_by)
+            scheduler = next(
+                (p for p in (home, away) if normalize_name(p) and normalize_name(p) in entered_norm),
+                "",
             )
-            for achievement in candidates:
-                key = (target, achievement["key"], CURRENT_SEASON_LABEL)
-                if key in existing_keys:
-                    continue
-                existing_keys.add(key)
-                new_rows.append([
-                    now_text, player_name, achievement["key"], achievement["label"],
-                    str(division), "League-Ergebnis", CURRENT_SEASON_LABEL,
-                ])
-                post_lines.append(f"🏅 **{player_name}:** {achievement['label']}")
-        if new_rows:
-            sheet_write_call(
-                lambda: achievement_ws.append_rows(new_rows, value_input_option="USER_ENTERED"),
-                invalidate_prefixes=_achievement_sheet_invalidation(achievement_ws),
+            if not scheduler:
+                # Fallback für Formate wie "Terminbörse: Spielername".
+                tail = (entered_by or "").split(":")[-1].strip()
+                tail_norm = normalize_name(tail)
+                scheduler = next(
+                    (p for p in (home, away) if normalize_name(p) == tail_norm),
+                    "",
+                )
+            if not scheduler:
+                print(
+                    f"⚠️ [ACHIEVEMENTS] Erster Termin erkannt, Planer aus '{entered_by}' "
+                    f"für {home} vs. {away} aber nicht eindeutig bestimmbar."
+                )
+                return []
+
+            label = f"📅 First Planner – erstes Match in {CURRENT_SEASON_LABEL} geplant"
+            now_text = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+            _append_achievement_rows(achievement_ws, [[
+                now_text, scheduler, key, label, str(division), "Terminplanung", CURRENT_SEASON_LABEL,
+            ]])
+            return [f"🏅 **{scheduler}:** {label}"]
+    except Exception as exc:
+        print(f"⚠️ [ACHIEVEMENTS] First-Planner-Auswertung fehlgeschlagen: {exc}")
+        return []
+
+
+def _award_new_achievements_after_result(division: int, player_names: list[str]) -> list[str]:
+    """
+    Saison-eindeutige League-Achievements.
+
+    Event-Achievements (Opening Match) werden beiden Spielern desselben ersten
+    Matches gegeben. First-Finisher ist dagegen genau ein Spieler global bzw.
+    genau ein Spieler je Division. Winning Streaks sind individuell und werden
+    pro Schwelle genau einmal je Saison vergeben.
+    """
+    try:
+        division = int(division)
+        with _ACHIEVEMENT_LOCK:
+            div_ws = get_player_division_worksheet(division)
+            rows = get_all_values_cached(
+                lambda: div_ws,
+                sheet_name=player_sheet_name(div_ws, f"{division}.DIV"),
+                ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+                force_refresh=True,
             )
-        return post_lines
+            achievement_ws, existing = _read_current_season_achievement_rows(force_refresh=True)
+
+            players = [p for p in dict.fromkeys(player_names) if p]
+            if not players:
+                return []
+
+            now_text = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+            new_rows: list[list[str]] = []
+            post_lines: list[str] = []
+
+            def stage(player: str, key: str, label: str, source: str = "League-Ergebnis"):
+                nonlocal existing
+                if _player_achievement_claimed(existing + new_rows, player, key):
+                    return
+                row = [
+                    now_text, player, key, label, str(division), source, CURRENT_SEASON_LABEL,
+                ]
+                new_rows.append(row)
+                post_lines.append(f"🏅 **{player}:** {label}")
+
+            # 1) Erstes tatsächlich abgeschlossenes Match der gesamten Saison.
+            global_opening_key = "season_opening_match"
+            if not _achievement_event_claimed(existing, global_opening_key):
+                label = f"🚩 Opening Match – erstes Match in {CURRENT_SEASON_LABEL}"
+                for player in players:
+                    stage(player, global_opening_key, label)
+
+            # 2) Erstes abgeschlossenes Match der jeweiligen Division.
+            div_opening_key = f"division_opening_match_d{division}"
+            if not _achievement_event_claimed(existing, div_opening_key):
+                label = (
+                    f"🚩 Division {division} Opening – erstes Match der Division {division} "
+                    f"in {CURRENT_SEASON_LABEL}"
+                )
+                for player in players:
+                    stage(player, div_opening_key, label)
+
+            # 3) Individuelle Winning-Streak-Meilensteine.
+            for player in players:
+                streak = _current_win_streak(rows, player)
+                for threshold in _ACHIEVEMENT_STREAK_THRESHOLDS:
+                    if streak >= threshold:
+                        stage(
+                            player,
+                            f"win_streak_{threshold}",
+                            f"🔥 Winning Streak {threshold} – {threshold} Siege in Folge in {CURRENT_SEASON_LABEL}",
+                        )
+
+            # 4/5) First Finisher. Falls durch dasselbe Match beide Spieler gleichzeitig
+            # ihre Saison abschließen, teilen sie sich den "ersten" Platz statt dass
+            # Heim/Gast-Reihenfolge willkürlich entscheidet.
+            finishers = []
+            for player in players:
+                total, open_games = _player_schedule_progress(rows, player)
+                if total > 0 and open_games == 0:
+                    finishers.append(player)
+
+            div_finisher_key = f"division_first_finisher_d{division}"
+            if finishers and not _achievement_event_claimed(existing, div_finisher_key):
+                label = (
+                    f"🏁 Division {division} First Finisher – als Erster der Division {division} "
+                    f"alle Spiele in {CURRENT_SEASON_LABEL} bestritten"
+                )
+                for player in finishers:
+                    stage(player, div_finisher_key, label)
+
+            global_finisher_key = "season_first_finisher"
+            if finishers and not _achievement_event_claimed(existing, global_finisher_key):
+                label = (
+                    f"🏆 Season First Finisher – als Erster aller Divisionen "
+                    f"alle Spiele in {CURRENT_SEASON_LABEL} bestritten"
+                )
+                for player in finishers:
+                    stage(player, global_finisher_key, label)
+
+            _append_achievement_rows(achievement_ws, new_rows)
+            return post_lines
     except Exception as exc:
         print(f"⚠️ [ACHIEVEMENTS] Auswertung fehlgeschlagen: {exc}")
         return []
+
+
+def _parse_league_result_post(post_text: str):
+    division_match = re.search(r"\[Division\s+(\d+)\]", post_text or "", re.IGNORECASE)
+    players_match = re.search(r"^(.+?)\s+vs\s+(.+?)\s+→\s+\d+\s*:\s*\d+\s*$", post_text or "", re.MULTILINE)
+    if not division_match or not players_match:
+        return None
+    return int(division_match.group(1)), players_match.group(1).strip(), players_match.group(2).strip()
+
+
+def _install_achievement_hooks() -> None:
+    """
+    Hängt die Achievement-Auswertung an die zentralen Matchcenter-Funktionen.
+    Dadurch zählen auch klassische /termin- und Matchcenter-Wege, nicht nur
+    Klicks aus dem neuen /player-Dashboard.
+    """
+    original_write_schedule = getattr(
+        matchcenter,
+        "_tfl_original_write_league_schedule",
+        matchcenter.write_league_schedule,
+    )
+    original_send_result_post = getattr(
+        matchcenter,
+        "_tfl_original_send_result_post",
+        matchcenter.send_result_post,
+    )
+    matchcenter._tfl_original_write_league_schedule = original_write_schedule
+    matchcenter._tfl_original_send_result_post = original_send_result_post
+
+    def achievement_aware_write_league_schedule(
+        row_index: int,
+        mode: str,
+        event_url: str,
+        entered_by: str,
+        timestamp: str,
+        division_label: str,
+    ):
+        result = original_write_schedule(
+            row_index,
+            mode,
+            event_url,
+            entered_by,
+            timestamp,
+            division_label,
+        )
+        try:
+            # Die Terminbörse schreibt zuerst ins Sheet und erzeugt danach das
+            # Discord-Event. Dort vergeben wir das Achievement deshalb erst nach
+            # erfolgreicher Event-Erstellung, damit ein Rollback keinen falschen
+            # First-Planner erzeugt. Das klassische Matchcenter erzeugt das Event
+            # bereits vor dem Sheet-Write und kann hier direkt gewertet werden.
+            if "terminbörse" not in (entered_by or "").lower():
+                match = re.search(r"(\d+)", str(division_label))
+                if match:
+                    _award_first_scheduled_match(int(match.group(1)), int(row_index), entered_by)
+        except Exception as exc:
+            print(f"⚠️ [ACHIEVEMENTS] Termin-Hook fehlgeschlagen: {exc}")
+        return result
+
+    async def achievement_aware_send_result_post(guild, post_text: str):
+        augmented = post_text
+        try:
+            parsed = _parse_league_result_post(post_text)
+            if parsed:
+                division, player1, player2 = parsed
+                lines = await asyncio.to_thread(
+                    _award_new_achievements_after_result,
+                    division,
+                    [player1, player2],
+                )
+                if lines:
+                    augmented += "\n\n**🏅 Neue Achievements**\n" + "\n".join(lines)
+        except Exception as exc:
+            print(f"⚠️ [ACHIEVEMENTS] Ergebnis-Hook fehlgeschlagen: {exc}")
+        return await original_send_result_post(guild, augmented)
+
+    matchcenter.write_league_schedule = achievement_aware_write_league_schedule
+    matchcenter.send_result_post = achievement_aware_send_result_post
+    globals()["send_result_post"] = achievement_aware_send_result_post
+    matchcenter._tfl_season_achievement_hooks_installed = True
 
 
 def _get_or_create_coop_league_ws():
@@ -672,7 +894,7 @@ def load_player_dashboard_data(
     upcoming.sort(key=lambda item: item["datetime"])
     table = _load_division_table_for_dashboard(rows, player_name)
     today = [item for item in upcoming if item["datetime"].astimezone(BERLIN_TZ).date() == now.date()]
-    achievements = _compute_player_achievements(rows, player_name, total=total, open_games=open_games, scheduled_open=scheduled_open, division_table=table)
+    achievements = _load_awarded_achievements_for_player(player_name)
     return {"found": True, "player_name": player_name, "division": int(div_number), "mode_1": mode_1, "mode_2": mode_2, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:3], "today_matches": today[:1], "division_table": table, "achievements": achievements}
 
 
@@ -1619,10 +1841,6 @@ class EnhancedLeagueResultSubmitButton(discord.ui.Button):
             result = result_league_from_value(s.winner_value); timestamp = now_berlin_str()
             await asyncio.to_thread(write_league_result, s.match_row_index, s.mode, result, s.racetime_link, interaction.user.display_name, timestamp, s.division)
             post_text = league_result_post_text(s.division, timestamp, s.player1, s.player2, result, s.mode, s.racetime_link)
-            div_match = re.search(r"(\d+)", str(s.division)); achievement_lines = []
-            if div_match:
-                achievement_lines = await asyncio.to_thread(_award_new_achievements_after_result, int(div_match.group(1)), [s.player1, s.player2])
-            if achievement_lines: post_text += "\n\n**🏅 Neue Achievements**\n" + "\n".join(achievement_lines)
             if interaction.guild: await send_result_post(interaction.guild, post_text)
             await interaction.edit_original_response(content=f"✅ Ergebnis gespeichert:\n{post_text}", view=None)
         except Exception as exc:
@@ -5115,6 +5333,7 @@ class PlayerCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    _install_achievement_hooks()
     await bot.add_cog(PlayerCog(bot))
 
     # Persistente Buttons offener Anfragen nach Neustart wieder registrieren.
