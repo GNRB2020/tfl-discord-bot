@@ -2437,7 +2437,11 @@ async def _send_schedule_change_approval_request(
     action: str,
     new_when: dt | None,
 ) -> None:
-    await interaction.response.defer(ephemeral=True)
+    # Die Funktion wird sowohl aus klassischen Views/Modals als auch direkt
+    # aus dem /player-Dashboard aufgerufen. Dashboard-Aktionen können bereits
+    # deferred sein; eine zweite Interaction-Response würde dann fehlschlagen.
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
     if guild is None:
@@ -2625,6 +2629,173 @@ class ScheduleChangeApprovalView(discord.ui.View):
             f"❌ Deine Anfrage zur **{action_text}** für **{self.home} vs. {self.away}** wurde abgelehnt.",
         )
         self.stop()
+
+
+async def _resolve_direct_schedule_match(
+    interaction: discord.Interaction,
+    *,
+    division: int,
+    row_index: int,
+    expected_home: str = "",
+    expected_away: str = "",
+) -> tuple[PlayerProfile, MatchRow]:
+    """Lädt und validiert einen konkreten eingetragenen Ligatermin live."""
+    if not isinstance(interaction.user, discord.Member):
+        raise PermissionError("Diese Funktion ist nur auf dem TFL-Server verfügbar.")
+
+    profile = await asyncio.to_thread(find_member_profile, interaction.user)
+    if profile is None:
+        raise RuntimeError("Dein Spielername wurde in keiner Division gefunden.")
+
+    if int(profile.division) != int(division):
+        raise RuntimeError("Diese Begegnung gehört nicht zu deiner aktuellen Division.")
+
+    match = await asyncio.to_thread(
+        _get_live_scheduled_match,
+        int(division),
+        int(row_index),
+    )
+
+    if expected_home and normalize_name(match.home) != normalize_name(expected_home):
+        raise RuntimeError("Der Heimspieler der Begegnung hat sich inzwischen geändert.")
+    if expected_away and normalize_name(match.away) != normalize_name(expected_away):
+        raise RuntimeError("Der Gastspieler der Begegnung hat sich inzwischen geändert.")
+
+    target = normalize_name(profile.player_name)
+    if target not in {normalize_name(match.home), normalize_name(match.away)}:
+        raise RuntimeError("Du bist an dieser Begegnung nicht beteiligt.")
+
+    return profile, match
+
+
+class DirectRescheduleExistingMatchModal(discord.ui.Modal, title="Spiel verschieben"):
+    new_datetime = discord.ui.TextInput(
+        label="Neuer Termin",
+        placeholder="TT.MM.JJJJ HH:MM",
+        required=True,
+        max_length=30,
+    )
+
+    def __init__(
+        self,
+        *,
+        division: int,
+        row_index: int,
+        expected_home: str = "",
+        expected_away: str = "",
+    ):
+        super().__init__()
+        self.division = int(division)
+        self.row_index = int(row_index)
+        self.expected_home = str(expected_home or "")
+        self.expected_away = str(expected_away or "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.new_datetime.value or "").strip()
+        try:
+            new_when = _parse_offer_datetime(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                "Bitte das Format `TT.MM.JJJJ HH:MM` verwenden.",
+                ephemeral=True,
+            )
+            return
+
+        if new_when <= dt.now(BERLIN_TZ):
+            await interaction.response.send_message(
+                "Der neue Termin muss in der Zukunft liegen.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            profile, match = await _resolve_direct_schedule_match(
+                interaction,
+                division=self.division,
+                row_index=self.row_index,
+                expected_home=self.expected_home,
+                expected_away=self.expected_away,
+            )
+        except Exception as exc:
+            await interaction.edit_original_response(
+                content=f"❌ Termin konnte nicht geladen werden: {exc}"
+            )
+            return
+
+        await _send_schedule_change_approval_request(
+            interaction=interaction,
+            profile=profile,
+            match=match,
+            action="reschedule",
+            new_when=new_when,
+        )
+
+
+async def open_schedule_reschedule_match(
+    interaction: discord.Interaction,
+    *,
+    division: int,
+    row_index: int,
+    expected_home: str = "",
+    expected_away: str = "",
+) -> None:
+    """Öffnet vom /player-Dashboard direkt den Verschieben-Dialog."""
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_modal(
+        DirectRescheduleExistingMatchModal(
+            division=division,
+            row_index=row_index,
+            expected_home=expected_home,
+            expected_away=expected_away,
+        )
+    )
+
+
+async def request_schedule_cancel_match(
+    interaction: discord.Interaction,
+    *,
+    division: int,
+    row_index: int,
+    expected_home: str = "",
+    expected_away: str = "",
+) -> None:
+    """Startet vom /player-Dashboard direkt die Zustimmungsanfrage zur Absage."""
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        profile, match = await _resolve_direct_schedule_match(
+            interaction,
+            division=division,
+            row_index=row_index,
+            expected_home=expected_home,
+            expected_away=expected_away,
+        )
+    except Exception as exc:
+        await interaction.edit_original_response(
+            content=f"❌ Termin konnte nicht geladen werden: {exc}"
+        )
+        return
+
+    await _send_schedule_change_approval_request(
+        interaction=interaction,
+        profile=profile,
+        match=match,
+        action="cancel",
+        new_when=None,
+    )
 
 
 async def open_schedule_manage_menu(interaction: discord.Interaction) -> None:
