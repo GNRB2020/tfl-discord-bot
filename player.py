@@ -117,7 +117,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v13-season-unique-achievements"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v14-dashboard-ux"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -707,7 +707,7 @@ def load_coop_dashboard_data(member_id: int, name_candidates: list[str], force_r
                 upcoming.append({"datetime": parsed, "date_text": date_text, "mode": _safe_row_cell(row, 2), "home": home, "away": away, "opponent": away if home_match else home, "row": row_index, "link": _safe_row_cell(row, 6)})
     upcoming.sort(key=lambda item: item["datetime"])
     today = [item for item in upcoming if item["datetime"].astimezone(BERLIN_TZ).date() == now.date()]
-    return {"found": True, "team_name": team_name, "partner": partner, "status": status, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:2], "today_matches": today[:3], "coop_table": _build_coop_table(rows, confirmed_teams, team_name)}
+    return {"found": True, "team_name": team_name, "partner": partner, "status": status, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:25], "today_matches": today, "coop_table": _build_coop_table(rows, confirmed_teams, team_name)}
 
 
 def _load_live_coop_result_match(row_index: int, expected_home: str, expected_away: str, team_name: str) -> dict:
@@ -896,7 +896,7 @@ def load_player_dashboard_data(
     table = _load_division_table_for_dashboard(rows, player_name)
     today = [item for item in upcoming if item["datetime"].astimezone(BERLIN_TZ).date() == now.date()]
     achievements = _load_awarded_achievements_for_player(player_name)
-    return {"found": True, "player_name": player_name, "division": int(div_number), "mode_1": mode_1, "mode_2": mode_2, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:10], "today_matches": today[:3], "division_table": table, "achievements": achievements}
+    return {"found": True, "player_name": player_name, "division": int(div_number), "mode_1": mode_1, "mode_2": mode_2, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:25], "today_matches": today, "division_table": table, "achievements": achievements}
 
 
 def _parse_season_date(value: str):
@@ -1053,7 +1053,7 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
                 inline=False,
             )
 
-            for match in next_matches[:2]:
+            for match in next_matches[:3]:
                 when = match["datetime"].strftime("%d.%m.%Y · %H:%M")
                 mode = match.get("mode") or "Modus noch offen"
                 home = match.get("home") or "?"
@@ -1099,7 +1099,9 @@ def build_player_dashboard_embed(data: dict, note: str | None = None) -> discord
             lines = [header, separator]
 
             for item in division_table[:9]:
-                padded_name = f"{item['name']:<{name_width}}"
+                short_name = _truncate_dashboard_name(item.get("name") or "", name_width)
+                marker = "▶" if item.get("is_self") else " "
+                padded_name = f"{marker} {short_name:<{name_width}}"
                 if item.get("is_self"):
                     padded_name = f"\u001b[1;33m{padded_name}\u001b[0m"
 
@@ -2049,29 +2051,69 @@ class DashboardResultButton(discord.ui.Button):
         )
 
 
+def _truncate_dashboard_name(value: str, max_len: int) -> str:
+    value = str(value or "").strip()
+    if max_len <= 1:
+        return value[:max_len]
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1] + "…"
+
+
+def _dashboard_progress_bar(played: int, total: int, width: int = 12) -> str:
+    if total <= 0:
+        return "░" * width
+    ratio = max(0.0, min(1.0, played / total))
+    filled = int(round(ratio * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _dashboard_achievement_label(item: dict) -> str:
+    key = str(item.get("key") or "")
+    division = str(item.get("division") or "").strip()
+    if key == "season_first_finisher":
+        return "🏆 Season First Finisher"
+    if key.startswith("division_first_finisher_d"):
+        div = division or key.rsplit("d", 1)[-1]
+        return f"🏁 Division {div} First Finisher"
+    if key == "season_first_scheduled_match":
+        return "📅 First Planner"
+    if key == "season_opening_match":
+        return "🚩 Season Opening Match"
+    if key.startswith("division_opening_match_d"):
+        div = division or key.rsplit("d", 1)[-1]
+        return f"🚩 Division {div} Opening Match"
+    if key.startswith("win_streak_"):
+        return f"🔥 Winning Streak {key.rsplit('_', 1)[-1]}"
+    return str(item.get("label") or key or "Achievement")
+
+
 def _dashboard_table_markdown(data: dict) -> str:
     division_table = data.get("division_table") or []
     if not division_table:
         return "Noch keine Tabellendaten verfügbar."
 
-    name_width = max(12, min(18, max(len(item["name"]) for item in division_table[:9])))
+    raw_name_width = max(12, min(18, max(len(str(item.get("name") or "")) for item in division_table[:9])))
+    display_width = raw_name_width + 2  # Marker + Leerzeichen
     header = (
-        f"{'Pl':>2}  {'Spieler':<{name_width}}  "
+        f"{'Pl':>2}  {'Spieler':<{display_width}}  "
         f"{'Sp':>2}  {'S':>2}  {'U':>2}  {'N':>2}  {'Pkt':>3}"
     )
     separator = (
-        f"{'--':>2}  {'-' * name_width}  "
+        f"{'--':>2}  {'-' * display_width}  "
         f"{'--':>2}  {'--':>2}  {'--':>2}  {'--':>2}  {'---':>3}"
     )
     lines = [header, separator]
 
     for item in division_table[:9]:
-        padded_name = f"{item['name']:<{name_width}}"
+        short_name = _truncate_dashboard_name(item.get("name") or "", raw_name_width)
+        marker = "▶" if item.get("is_self") else " "
+        display_name = f"{marker} {short_name:<{raw_name_width}}"
         if item.get("is_self"):
-            padded_name = f"\u001b[1;33m{padded_name}\u001b[0m"
+            display_name = f"\u001b[1;33m{display_name}\u001b[0m"
         lines.append(
             f"{item['rank']:>2}. "
-            f"{padded_name}  "
+            f"{display_name}  "
             f"{item['played']:>2}  "
             f"{item['wins']:>2}  "
             f"{item['draws']:>2}  "
@@ -2096,82 +2138,425 @@ def _deadline_accent(deadline: dict) -> int:
 if HAS_COMPONENTS_V2:
     class DashboardV2ResultButton(discord.ui.Button):
         def __init__(self, match: dict, division: int, owner_id: int, *, compact: bool = False):
-            opponent = str(match.get("opponent") or "Gegner"); label = "✅ Ergebnis" if compact else f"✅ Ergebnis vs. {opponent}"
-            super().__init__(label=label[:80], style=discord.ButtonStyle.success, custom_id=f"tfl:dashboard:result:{division}:{int(match.get('row') or 0)}:{owner_id}"[:100])
-            self.owner_id = int(owner_id); self.division = int(division); self.row_index = int(match.get("row") or 0); self.expected_home = str(match.get("home") or ""); self.expected_away = str(match.get("away") or "")
-        async def callback(self, interaction: discord.Interaction): await _open_direct_dashboard_result(interaction, division=self.division, row_index=self.row_index, expected_home=self.expected_home, expected_away=self.expected_away, owner_id=self.owner_id)
+            opponent = str(match.get("opponent") or "Gegner")
+            label = "✅ Ergebnis" if compact else f"✅ Ergebnis vs. {opponent}"
+            super().__init__(
+                label=label[:80],
+                style=discord.ButtonStyle.success,
+                custom_id=f"tfl:dashboard:result:{division}:{int(match.get('row') or 0)}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.division = int(division)
+            self.row_index = int(match.get("row") or 0)
+            self.expected_home = str(match.get("home") or "")
+            self.expected_away = str(match.get("away") or "")
 
-
-    class DashboardV2ScheduleButton(discord.ui.Button):
-        def __init__(self, match: dict, division: int, owner_id: int):
-            super().__init__(label="🗓️ Termin ändern", style=discord.ButtonStyle.secondary, custom_id=f"tfl:dashboard:matchday:schedule:{division}:{int(match.get('row') or 0)}:{owner_id}"[:100])
-            self.owner_id = int(owner_id); self.division = int(division); self.row_index = int(match.get("row") or 0); self.expected_home = str(match.get("home") or ""); self.expected_away = str(match.get("away") or "")
         async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id: await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True); return
-            await term_offers.open_schedule_manage_match(interaction, division=self.division, row_index=self.row_index, expected_home=self.expected_home, expected_away=self.expected_away)
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+            await _open_direct_dashboard_result(
+                interaction,
+                division=self.division,
+                row_index=self.row_index,
+                expected_home=self.expected_home,
+                expected_away=self.expected_away,
+                owner_id=self.owner_id,
+            )
 
 
     class DashboardV2CoopResultButton(discord.ui.Button):
-        def __init__(self, *, match: dict, team_name: str, owner_id: int):
+        def __init__(self, *, match: dict, team_name: str, owner_id: int, compact: bool = False):
             opponent = str(match.get("opponent") or "Gegner")
-            super().__init__(label=f"✅ Ergebnis vs. {opponent}"[:80], style=discord.ButtonStyle.success, custom_id=f"tfl:dashboard:coopresult:{int(match.get('row') or 0)}:{owner_id}"[:100])
-            self.owner_id = int(owner_id); self.team_name = team_name; self.match = dict(match)
-        async def callback(self, interaction: discord.Interaction): await _open_direct_coop_result(interaction, owner_id=self.owner_id, team_name=self.team_name, match=self.match)
+            label = "✅ Ergebnis" if compact else f"✅ Ergebnis vs. {opponent}"
+            super().__init__(
+                label=label[:80],
+                style=discord.ButtonStyle.success,
+                custom_id=f"tfl:dashboard:coopresult:{int(match.get('row') or 0)}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.team_name = team_name
+            self.match = dict(match)
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+            await _open_direct_coop_result(
+                interaction,
+                owner_id=self.owner_id,
+                team_name=self.team_name,
+                match=self.match,
+            )
 
 
     class DashboardModeSwitchButton(discord.ui.Button):
-        def __init__(self, *, owner_id: int, target_mode: str):
+        def __init__(self, *, owner_id: int, target_mode: str, active: bool = False):
             target_mode = "coop" if target_mode == "coop" else "league"
-            super().__init__(label="👥 Coop" if target_mode == "coop" else "⚔️ League", style=discord.ButtonStyle.success if target_mode == "coop" else discord.ButtonStyle.primary, custom_id=f"tfl:dashboard:switch:{target_mode}:{owner_id}"[:100])
-            self.owner_id = int(owner_id); self.target_mode = target_mode
+            label = "👥 COOP" if target_mode == "coop" else "⚔️ LEAGUE"
+            style = discord.ButtonStyle.success if target_mode == "coop" else discord.ButtonStyle.primary
+            super().__init__(
+                label=label,
+                style=style,
+                disabled=bool(active),
+                custom_id=f"tfl:dashboard:switch:{target_mode}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.target_mode = target_mode
+
         async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id: await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True); return
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
             await show_player_dashboard(interaction, dashboard_mode=self.target_mode)
 
 
-    class DashboardV2ActionButton(discord.ui.Button):
-        def __init__(self, *, owner_id: int, action: str, label: str, style: discord.ButtonStyle = discord.ButtonStyle.secondary, dashboard_mode: str = "league"):
-            super().__init__(label=label[:80], style=style, custom_id=f"tfl:dashboard:{action}:{dashboard_mode}:{owner_id}"[:100]); self.owner_id = int(owner_id); self.action = action; self.dashboard_mode = dashboard_mode
-        async def _send_panel(self, interaction, *, embed, view): await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    class DashboardMatchdaySelect(discord.ui.Select):
+        def __init__(self, *, matches: list[dict], owner_id: int, state: dict, prefix: str):
+            self.owner_id = int(owner_id)
+            self.state = state
+            self.matches = {int(m.get("row") or 0): dict(m) for m in matches if int(m.get("row") or 0) > 0}
+            options = []
+            selected_row = int(state.get("row") or 0)
+            for match in matches[:25]:
+                row = int(match.get("row") or 0)
+                when = match.get("datetime")
+                time_text = when.strftime("%H:%M") if when else "?"
+                home = str(match.get("home") or "?")
+                away = str(match.get("away") or "?")
+                mode = str(match.get("mode") or "Modus noch offen")
+                options.append(
+                    discord.SelectOption(
+                        label=f"{time_text} · {home} vs. {away}"[:100],
+                        value=str(row),
+                        description=mode[:100],
+                        default=row == selected_row,
+                    )
+                )
+            super().__init__(
+                placeholder="Heutiges Match auswählen …",
+                min_values=1,
+                max_values=1,
+                options=options,
+                custom_id=f"tfl:dashboard:{prefix}:select:{owner_id}"[:100],
+            )
+
         async def callback(self, interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id: await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True); return
-            a=self.action
-            if a=="plan": await self._send_panel(interaction, embed=menu_embed("🎮 Spiel planen", "Wähle den Bereich für deine Spielplanung."), view=PlanMenuView(owner_id=interaction.user.id)); return
-            if a=="offer": await term_offers.open_term_offer_modal(interaction); return
-            if a=="result": await self._send_panel(interaction, embed=menu_embed("✅ Ergebnis melden", "Wähle League oder Cup."), view=ResultMenuView(owner_id=interaction.user.id)); return
-            if a=="schedule_manage": await term_offers.open_schedule_manage_menu(interaction); return
-            if a=="my_offers": await term_offers.open_my_offers_menu(interaction); return
-            if a=="info": await self._send_panel(interaction, embed=menu_embed("ℹ️ Info & Tabelle", "Saisoninfos, Meldestatus, Tabellen und weitere Übersichten."), view=InfoMenuView(owner_id=interaction.user.id)); return
-            if a=="rest": await self._send_panel(interaction, embed=menu_embed("📋 Restprogramm", "Zeige dein eigenes Restprogramm oder das eines anderen Spielers."), view=RestprogrammView(owner_id=interaction.user.id)); return
-            if a=="quali":
-                cog = interaction.client.get_cog("QualiCog")
-                if cog is None or not hasattr(cog, "start_quali_flow"): await interaction.response.send_message("Qualifikation ist aktuell nicht verfügbar.", ephemeral=True); return
-                await cog.start_quali_flow(interaction, edit_existing=False); return
-            if a=="season": await self._send_panel(interaction, embed=menu_embed("📝 Saisonmeldung", "Wähle den Bereich für deine Saisonmeldung."), view=SeasonSignupMenuView(owner_id=interaction.user.id)); return
-            if a=="async": await self._send_panel(interaction, embed=menu_embed("⚡ Async", "Beantrage oder spiele ein Async-Match."), view=AsyncMenuView(owner_id=interaction.user.id)); return
-            if a=="settings": await self._send_panel(interaction, embed=menu_embed("⚙️ Einstellungen", "Verwalte Twitch, Restream-Angaben und Streichmodi."), view=SettingsMenuView(owner_id=interaction.user.id)); return
-            if a=="more":
-                await self._send_panel(
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+            selected = int(self.values[0])
+            self.state["row"] = selected
+            for option in self.options:
+                option.default = option.value == str(selected)
+            await interaction.response.defer()
+
+
+    class DashboardMatchdayActionButton(discord.ui.Button):
+        def __init__(
+            self,
+            *,
+            owner_id: int,
+            division: int,
+            matches: list[dict],
+            state: dict,
+            action: str,
+        ):
+            labels = {
+                "result": "✅ Ergebnis",
+                "stream": "📺 Multistream",
+                "schedule": "🗓️ Termin",
+            }
+            styles = {
+                "result": discord.ButtonStyle.success,
+                "stream": discord.ButtonStyle.primary,
+                "schedule": discord.ButtonStyle.secondary,
+            }
+            super().__init__(
+                label=labels[action],
+                style=styles[action],
+                custom_id=f"tfl:dashboard:matchday:{action}:{division}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.division = int(division)
+            self.matches = {int(m.get("row") or 0): dict(m) for m in matches if int(m.get("row") or 0) > 0}
+            self.state = state
+            self.action = action
+
+        def _selected_match(self) -> dict | None:
+            row = int(self.state.get("row") or 0)
+            if row in self.matches:
+                return self.matches[row]
+            return next(iter(self.matches.values()), None)
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+            match = self._selected_match()
+            if not match:
+                await interaction.response.send_message("Das ausgewählte Match ist nicht mehr verfügbar.", ephemeral=True)
+                return
+
+            if self.action == "result":
+                await _open_direct_dashboard_result(
                     interaction,
-                    embed=menu_embed("➕ Weitere Funktionen", "Weitere Spieler- und Saisonfunktionen."),
-                    view=DashboardMoreActionsView(owner_id=interaction.user.id, show_admin=has_admin_role(interaction.user)),
+                    division=self.division,
+                    row_index=int(match.get("row") or 0),
+                    expected_home=str(match.get("home") or ""),
+                    expected_away=str(match.get("away") or ""),
+                    owner_id=self.owner_id,
                 )
                 return
-            if a=="refresh": await show_player_dashboard(interaction, force_refresh=True, dashboard_mode=self.dashboard_mode); return
-            if a=="coop_menu":
-                # Das Components-V2-Dashboard darf nicht mit einer klassischen
-                # View überschrieben werden. Das Coop-Menü öffnet deshalb als
-                # eigenes ephemeres Panel und das Dashboard bleibt stehen.
+
+            if self.action == "schedule":
+                await term_offers.open_schedule_manage_match(
+                    interaction,
+                    division=self.division,
+                    row_index=int(match.get("row") or 0),
+                    expected_home=str(match.get("home") or ""),
+                    expected_away=str(match.get("away") or ""),
+                )
+                return
+
+            if self.action == "stream":
+                await interaction.response.defer(ephemeral=True)
+                try:
+                    url = await asyncio.to_thread(
+                        matchcenter.build_multistream_url,
+                        str(match.get("home") or ""),
+                        str(match.get("away") or ""),
+                    )
+                    if str(url).lower().startswith(("http://", "https://")):
+                        await interaction.edit_original_response(
+                            content=(
+                                f"📺 **{match.get('home') or '?'} vs. {match.get('away') or '?'}**\n"
+                                f"<{url}>"
+                            )
+                        )
+                    else:
+                        await interaction.edit_original_response(
+                            content="Für diese Begegnung ist aktuell kein Twitch-/Multistream-Link hinterlegt."
+                        )
+                except Exception as exc:
+                    await interaction.edit_original_response(content=f"Streamlink konnte nicht geladen werden: {exc}")
+                return
+
+
+    class DashboardCoopMatchdayActionButton(discord.ui.Button):
+        def __init__(self, *, owner_id: int, team_name: str, matches: list[dict], state: dict, action: str):
+            labels = {"result": "✅ Ergebnis", "stream": "📺 Stream", "menu": "👥 Coop-Menü"}
+            styles = {"result": discord.ButtonStyle.success, "stream": discord.ButtonStyle.primary, "menu": discord.ButtonStyle.secondary}
+            super().__init__(
+                label=labels[action],
+                style=styles[action],
+                custom_id=f"tfl:dashboard:coopmatchday:{action}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.team_name = team_name
+            self.matches = {int(m.get("row") or 0): dict(m) for m in matches if int(m.get("row") or 0) > 0}
+            self.state = state
+            self.action = action
+
+        def _selected_match(self):
+            row = int(self.state.get("row") or 0)
+            return self.matches.get(row) or next(iter(self.matches.values()), None)
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+            match = self._selected_match()
+            if self.action == "menu":
                 await interaction.response.send_message(
                     embed=coop.menu_embed("🤝 Coop League", "Wähle einen Bereich."),
                     view=coop.CoopMenuView(owner_id=interaction.user.id),
                     ephemeral=True,
                 )
                 return
-            if a=="exit": await self._send_panel(interaction, embed=discord.Embed(title="⚠️ Liga verlassen?", description="Bist du dir absolut sicher, dass du die Liga verlassen möchtest? Wenn du nun bestätigst, ist die Entscheidung final. Zudem ist eine Teilnahme an der kommenden Saison damit ausgeschlossen.", color=TFL_DANGER_COLOR), view=PlayerExitConfirmView(owner_id=interaction.user.id)); return
-            if a=="admin":
-                if not has_admin_role(interaction.user): await interaction.response.send_message("⛔ Diese Funktion ist nur für Admins verfügbar.", ephemeral=True); return
-                await self._send_panel(interaction, embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."), view=AdminMenuView(owner_id=interaction.user.id)); return
+            if not match:
+                await interaction.response.send_message("Das ausgewählte Match ist nicht mehr verfügbar.", ephemeral=True)
+                return
+            if self.action == "result":
+                await _open_direct_coop_result(
+                    interaction,
+                    owner_id=self.owner_id,
+                    team_name=self.team_name,
+                    match=match,
+                )
+                return
+            link = str(match.get("link") or "").strip()
+            if link.lower().startswith(("http://", "https://")):
+                await interaction.response.send_message(
+                    f"📺 **{match.get('home') or '?'} vs. {match.get('away') or '?'}**\n<{link}>",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message("Für dieses Coop-Match ist aktuell kein Streamlink hinterlegt.", ephemeral=True)
+
+
+    class DashboardV2ActionButton(discord.ui.Button):
+        def __init__(
+            self,
+            *,
+            owner_id: int,
+            action: str,
+            label: str,
+            style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+            dashboard_mode: str = "league",
+        ):
+            super().__init__(
+                label=label[:80],
+                style=style,
+                custom_id=f"tfl:dashboard:{action}:{dashboard_mode}:{owner_id}"[:100],
+            )
+            self.owner_id = int(owner_id)
+            self.action = action
+            self.dashboard_mode = dashboard_mode
+
+        async def _send_panel(self, interaction, *, embed, view):
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        async def callback(self, interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return
+
+            a = self.action
+            if a == "plan":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("🎮 Spiel planen", "Wähle den Bereich für deine Spielplanung."),
+                    view=PlanMenuView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "offer":
+                await term_offers.open_term_offer_modal(interaction)
+                return
+            if a == "result":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("✅ Ergebnis melden", "Wähle League oder Cup."),
+                    view=ResultMenuView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "schedule_manage":
+                await term_offers.open_schedule_manage_menu(interaction)
+                return
+            if a == "my_offers":
+                await term_offers.open_my_offers_menu(interaction)
+                return
+            if a == "info":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("ℹ️ Info & Tabelle", "Saisoninfos, Meldestatus, Tabellen und weitere Übersichten."),
+                    view=InfoMenuView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "rest":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("📋 Restprogramm", "Zeige dein eigenes Restprogramm oder das eines anderen Spielers."),
+                    view=RestprogrammView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "quali":
+                cog = interaction.client.get_cog("QualiCog")
+                if cog is None or not hasattr(cog, "start_quali_flow"):
+                    await interaction.response.send_message("Qualifikation ist aktuell nicht verfügbar.", ephemeral=True)
+                    return
+                await cog.start_quali_flow(interaction, edit_existing=False)
+                return
+            if a == "season":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("📝 Saisonmeldung", "Wähle den Bereich für deine Saisonmeldung."),
+                    view=SeasonSignupMenuView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "async":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("⚡ Async", "Beantrage oder spiele ein Async-Match."),
+                    view=AsyncMenuView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "settings":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("⚙️ Einstellungen", "Verwalte Twitch, Restream-Angaben und Streichmodi."),
+                    view=SettingsMenuView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "achievements":
+                await interaction.response.defer(ephemeral=True)
+                data = await get_player_dashboard_data(interaction.user)
+                achievements = data.get("achievements") or []
+                if achievements:
+                    lines = []
+                    for item in achievements:
+                        label = _dashboard_achievement_label(item)
+                        awarded = str(item.get("awarded_at") or "").strip()
+                        lines.append(f"• **{label}**" + (f" · {awarded}" if awarded else ""))
+                    description = "\n".join(lines)
+                else:
+                    description = f"In {CURRENT_SEASON_LABEL} hast du noch kein Achievement erhalten."
+                embed = discord.Embed(
+                    title=f"🏅 Meine Achievements · {CURRENT_SEASON_LABEL}",
+                    description=description,
+                    color=0xF1C40F,
+                )
+                await interaction.edit_original_response(embed=embed, view=None, content=None)
+                return
+            if a == "more":
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("➕ Weitere Funktionen", "Seltener benötigte Spieler- und Saisonfunktionen."),
+                    view=DashboardMoreActionsView(
+                        owner_id=interaction.user.id,
+                        show_admin=has_admin_role(interaction.user),
+                    ),
+                )
+                return
+            if a == "refresh":
+                await show_player_dashboard(
+                    interaction,
+                    force_refresh=True,
+                    dashboard_mode=self.dashboard_mode,
+                )
+                return
+            if a == "coop_menu":
+                await interaction.response.send_message(
+                    embed=coop.menu_embed("🤝 Coop League", "Wähle einen Bereich."),
+                    view=coop.CoopMenuView(owner_id=interaction.user.id),
+                    ephemeral=True,
+                )
+                return
+            if a == "exit":
+                await self._send_panel(
+                    interaction,
+                    embed=discord.Embed(
+                        title="⚠️ Liga verlassen?",
+                        description=(
+                            "Bist du dir absolut sicher, dass du die Liga verlassen möchtest? "
+                            "Wenn du nun bestätigst, ist die Entscheidung final. Zudem ist eine "
+                            "Teilnahme an der kommenden Saison damit ausgeschlossen."
+                        ),
+                        color=TFL_DANGER_COLOR,
+                    ),
+                    view=PlayerExitConfirmView(owner_id=interaction.user.id),
+                )
+                return
+            if a == "admin":
+                if not has_admin_role(interaction.user):
+                    await interaction.response.send_message("⛔ Diese Funktion ist nur für Admins verfügbar.", ephemeral=True)
+                    return
+                await self._send_panel(
+                    interaction,
+                    embed=menu_embed("🟨 Administration", "Wähle eine Adminfunktion."),
+                    view=AdminMenuView(owner_id=interaction.user.id),
+                )
+                return
             await interaction.response.send_message("Diese Dashboard-Aktion ist aktuell nicht verfügbar.", ephemeral=True)
 
 
@@ -2179,12 +2564,15 @@ if HAS_COMPONENTS_V2:
         def __init__(self, *, owner_id: int, show_admin: bool):
             super().__init__(timeout=300)
             self.owner_id = int(owner_id)
-            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="result", label="✅ Ergebnis melden", style=discord.ButtonStyle.success))
-            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="schedule_manage", label="🗓️ Termin ändern"))
+            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="my_offers", label="📌 Meine Angebote"))
+            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="schedule_manage", label="🗓️ Termine verwalten"))
+            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="achievements", label="🏅 Meine Achievements", style=discord.ButtonStyle.primary))
+            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="info", label="ℹ️ Saisoninfos", style=discord.ButtonStyle.primary))
             self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="quali", label="🏆 Qualifikation", style=discord.ButtonStyle.primary))
+            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="season", label="📝 Saisonmeldung", style=discord.ButtonStyle.primary))
             self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="async", label="⚡ Async", style=discord.ButtonStyle.primary))
             self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="settings", label="⚙️ Einstellungen"))
-            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="exit", label="🚪 Austritt", style=discord.ButtonStyle.danger))
+            self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="exit", label="🚪 Liga verlassen", style=discord.ButtonStyle.danger))
             if show_admin:
                 self.add_item(DashboardV2ActionButton(owner_id=self.owner_id, action="admin", label="🟨 Administration"))
 
@@ -2196,111 +2584,475 @@ if HAS_COMPONENTS_V2:
 
 
     class DashboardLayoutView(discord.ui.LayoutView):
-        def __init__(self, *, data: dict, owner_id: int, show_admin: bool, note: str | None = None, dashboard_mode: str = "league"):
-            super().__init__(timeout=900); self.owner_id = int(owner_id); self.dashboard_mode = "coop" if dashboard_mode == "coop" else "league"; self.banner_file = None; self._build(data, show_admin=show_admin, note=note)
+        def __init__(
+            self,
+            *,
+            data: dict,
+            owner_id: int,
+            show_admin: bool,
+            note: str | None = None,
+            dashboard_mode: str = "league",
+        ):
+            super().__init__(timeout=900)
+            self.owner_id = int(owner_id)
+            self.dashboard_mode = "coop" if dashboard_mode == "coop" else "league"
+            self.banner_file = None
+            self._build(data, show_admin=show_admin, note=note)
+
         async def interaction_check(self, interaction):
-            if interaction.user.id != self.owner_id: await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True); return False
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True)
+                return False
             return True
+
         def _add_banner(self):
             gallery = discord.ui.MediaGallery()
             try:
-                if TFL_DASHBOARD_BANNER_URL: gallery.add_item(media=TFL_DASHBOARD_BANNER_URL, description="TFL Spielerbereich"); self.add_item(gallery); return
+                if TFL_DASHBOARD_BANNER_URL:
+                    gallery.add_item(media=TFL_DASHBOARD_BANNER_URL, description="TFL Spielerbereich")
+                    self.add_item(gallery)
+                    return
                 if TFL_DASHBOARD_BANNER_PATH and os.path.isfile(TFL_DASHBOARD_BANNER_PATH):
-                    self.banner_file = discord.File(TFL_DASHBOARD_BANNER_PATH, filename=DASHBOARD_BANNER_FILENAME); gallery.add_item(media=f"attachment://{DASHBOARD_BANNER_FILENAME}", description="TFL Spielerbereich"); self.add_item(gallery)
-            except Exception as exc: self.banner_file = None; print(f"⚠️ [PLAYER DASHBOARD] V2-Banner konnte nicht geladen werden: {exc}")
-        def _add_header(self,title,subtitle,note):
-            current = "**⚔️ League** · 👥 Coop" if self.dashboard_mode=="league" else "⚔️ League · **👥 Coop**"; body=f"## {title}\n{current}\n{subtitle}" + (f"\n> {note}" if note else "")
-            self.add_item(discord.ui.Section(body, accessory=DashboardModeSwitchButton(owner_id=self.owner_id, target_mode="coop" if self.dashboard_mode=="league" else "league")))
-        def _add_matchday(self,data,division):
-            matches=(data.get("today_matches") or [])[:3]
-            if not matches: return
-            card=discord.ui.Container(accent_colour=0xE67E22)
-            lines=["## 🔥 MATCHDAY", "-# Alle heutigen Ligaspiele auf einen Blick"]
-            for index, m in enumerate(matches, start=1):
-                w=m.get("datetime"); tm=w.strftime("%H:%M") if w else "?"
+                    self.banner_file = discord.File(TFL_DASHBOARD_BANNER_PATH, filename=DASHBOARD_BANNER_FILENAME)
+                    gallery.add_item(media=f"attachment://{DASHBOARD_BANNER_FILENAME}", description="TFL Spielerbereich")
+                    self.add_item(gallery)
+            except Exception as exc:
+                self.banner_file = None
+                print(f"⚠️ [PLAYER DASHBOARD] V2-Banner konnte nicht geladen werden: {exc}")
+
+        def _add_header(self, title: str, subtitle: str, note: str | None):
+            card = discord.ui.Container(accent_colour=0x5865F2 if self.dashboard_mode == "league" else 0x2ECC71)
+            body = f"## {title}\n{subtitle}"
+            if note:
+                body += f"\n> {note}"
+            card.add_item(discord.ui.TextDisplay(body))
+            card.add_item(
+                discord.ui.ActionRow(
+                    DashboardModeSwitchButton(
+                        owner_id=self.owner_id,
+                        target_mode="league",
+                        active=self.dashboard_mode == "league",
+                    ),
+                    DashboardModeSwitchButton(
+                        owner_id=self.owner_id,
+                        target_mode="coop",
+                        active=self.dashboard_mode == "coop",
+                    ),
+                )
+            )
+            self.add_item(card)
+
+        def _add_matchday(self, data: dict, division: int):
+            matches = (data.get("today_matches") or [])[:25]
+            if not matches:
+                return
+
+            state = {"row": int(matches[0].get("row") or 0)}
+            card = discord.ui.Container(accent_colour=0xE67E22)
+            lines = [
+                "## 🔥 MATCHDAY",
+                "-# Alle heutigen Ligaspiele · Match auswählen, dann Aktion starten",
+            ]
+            for match in matches:
+                when = match.get("datetime")
+                time_text = when.strftime("%H:%M") if when else "?"
                 lines.append(
-                    f"**{index}. {tm} Uhr** · **{m.get('home') or '?'} vs. {m.get('away') or '?'}** · 🎮 **{m.get('mode') or 'Modus noch offen'}**"
+                    f"**{time_text} Uhr** · **{match.get('home') or '?'} vs. {match.get('away') or '?'}** "
+                    f"· 🎮 **{match.get('mode') or 'Modus noch offen'}**"
                 )
             card.add_item(discord.ui.TextDisplay("\n".join(lines)))
-            for index, m in enumerate(matches, start=1):
-                w=m.get("datetime"); tm=w.strftime("%H:%M") if w else "?"
-                result_button=DashboardV2ResultButton(m,division,self.owner_id,compact=True)
-                result_button.label=f"{index} · ✅ Ergebnis"
-                schedule_button=DashboardV2ScheduleButton(m,division,self.owner_id)
-                schedule_button.label=f"{index} · 🗓️ Termin"
-                link=str(m.get("link") or "").strip()
-                multi=discord.ui.Button(label=f"{index} · 📺 Stream", style=discord.ButtonStyle.link, url=link) if link.lower().startswith(("http://","https://")) else discord.ui.Button(label=f"{index} · 📺 Stream", style=discord.ButtonStyle.secondary, disabled=True)
-                card.add_item(discord.ui.ActionRow(result_button, multi, schedule_button))
+            card.add_item(
+                discord.ui.ActionRow(
+                    DashboardMatchdaySelect(
+                        matches=matches,
+                        owner_id=self.owner_id,
+                        state=state,
+                        prefix=f"matchday:{division}",
+                    )
+                )
+            )
+            card.add_item(
+                discord.ui.ActionRow(
+                    DashboardMatchdayActionButton(
+                        owner_id=self.owner_id,
+                        division=division,
+                        matches=matches,
+                        state=state,
+                        action="result",
+                    ),
+                    DashboardMatchdayActionButton(
+                        owner_id=self.owner_id,
+                        division=division,
+                        matches=matches,
+                        state=state,
+                        action="stream",
+                    ),
+                    DashboardMatchdayActionButton(
+                        owner_id=self.owner_id,
+                        division=division,
+                        matches=matches,
+                        state=state,
+                        action="schedule",
+                    ),
+                )
+            )
             self.add_item(card)
-        def _add_league_actions(self,show_admin,compact=False):
-            c=discord.ui.Container(accent_colour=0x5865F2); c.add_item(discord.ui.TextDisplay("## ⚙️ Aktionen\n-# Spielen · Termine · Saison · System"))
-            if compact:
-                c.add_item(discord.ui.ActionRow(
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="plan",label="🎮 Spiel planen",style=discord.ButtonStyle.primary),
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="offer",label="📅 Termine",style=discord.ButtonStyle.success),
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="my_offers",label="📌 Angebote"),
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="info",label="ℹ️ Info",style=discord.ButtonStyle.primary),
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="rest",label="📋 Restprogramm",style=discord.ButtonStyle.primary),
-                ))
-                c.add_item(discord.ui.ActionRow(
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="season",label="📝 Saisonmeldung",style=discord.ButtonStyle.primary),
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="refresh",label="🔄 Aktualisieren"),
-                    DashboardV2ActionButton(owner_id=self.owner_id,action="more",label="➕ Mehr"),
-                ))
-            else:
-                c.add_item(discord.ui.ActionRow(DashboardV2ActionButton(owner_id=self.owner_id,action="plan",label="🎮 Spiel planen",style=discord.ButtonStyle.primary),DashboardV2ActionButton(owner_id=self.owner_id,action="offer",label="📅 Termine",style=discord.ButtonStyle.success),DashboardV2ActionButton(owner_id=self.owner_id,action="result",label="✅ Ergebnis",style=discord.ButtonStyle.success),DashboardV2ActionButton(owner_id=self.owner_id,action="schedule_manage",label="🗓️ Termin ändern"),DashboardV2ActionButton(owner_id=self.owner_id,action="my_offers",label="📌 Angebote")))
-                c.add_item(discord.ui.ActionRow(DashboardV2ActionButton(owner_id=self.owner_id,action="info",label="ℹ️ Info & Tabelle",style=discord.ButtonStyle.primary),DashboardV2ActionButton(owner_id=self.owner_id,action="rest",label="📋 Restprogramm",style=discord.ButtonStyle.primary),DashboardV2ActionButton(owner_id=self.owner_id,action="quali",label="🏆 Quali",style=discord.ButtonStyle.primary),DashboardV2ActionButton(owner_id=self.owner_id,action="season",label="📝 Saisonmeldung",style=discord.ButtonStyle.primary),DashboardV2ActionButton(owner_id=self.owner_id,action="async",label="⚡ Async",style=discord.ButtonStyle.primary)))
-                btn=[DashboardV2ActionButton(owner_id=self.owner_id,action="settings",label="⚙️ Einstellungen"),DashboardV2ActionButton(owner_id=self.owner_id,action="refresh",label="🔄 Aktualisieren"),DashboardV2ActionButton(owner_id=self.owner_id,action="exit",label="🚪 Austritt",style=discord.ButtonStyle.danger)]
-                if show_admin: btn.append(DashboardV2ActionButton(owner_id=self.owner_id,action="admin",label="🟨 Administration"))
-                c.add_item(discord.ui.ActionRow(*btn))
-            self.add_item(c)
-        def _build_league(self,data,show_admin,note):
-            found=bool(data.get("found")); name=str(data.get("player_name") or "Spieler"); div=data.get("division"); self._add_header(f"⚔️ {name} · Division {div}" if found else "⚔️ TFL SPIELERBEREICH",f"**{CURRENT_SEASON_LABEL}** · TFL Bot – macht das Racen leichter!",note)
-            if found:
-                self._add_matchday(data,int(div)); played=int(data.get("played") or 0); total=int(data.get("total") or 0); op=int(data.get("open") or 0); sched=int(data.get("scheduled_open") or 0); deadline=get_deadline_traffic_light(played,total); pct=round((played/total)*100) if total else 0; ach=[a.get("label","") for a in data.get("achievements") or [] if a.get("label")]; ach_text=" · ".join(ach[:4]) if ach else "noch keine aktiven Achievements"
-                self.add_item(discord.ui.Container(discord.ui.TextDisplay(f"## 🧭 Überblick\n🎯 **Saison:** {played}/{total} gespielt · {op} offen · {sched} terminiert · {pct}%\n{deadline['emoji']} **Deadline:** {deadline['label']} — {deadline['detail']}\n🚫 **Streichmodi:** {data.get('mode_1') or '–'} · {data.get('mode_2') or '–'}\n🏅 **Achievements:** {ach_text}"),accent_colour=_deadline_accent(deadline)))
-                today_rows={int(x.get("row") or 0) for x in data.get("today_matches") or []}
-                nm=[x for x in data.get("next_matches") or [] if int(x.get("row") or 0) not in today_rows][:2]
-                terms=discord.ui.Container(accent_colour=0x3498DB)
-                if today_rows:
-                    lines=["## 📅 Nächste Termine", "-# Die nächsten Spiele nach dem heutigen Matchday"]
-                    if nm:
-                        for m in nm:
-                            w=m.get("datetime"); when=w.strftime("%d.%m.%Y · %H:%M") if w else str(m.get("date_text") or "Termin")
-                            lines.append(f"**{when} Uhr** · **{m.get('home') or '?'} vs. {m.get('away') or '?'}** · 🎮 **{m.get('mode') or 'Modus noch offen'}**")
-                    else:
-                        lines.append("Aktuell sind nach heute keine weiteren zukünftigen Spieltermine eingetragen.")
-                    terms.add_item(discord.ui.TextDisplay("\n".join(lines)))
-                else:
-                    terms.add_item(discord.ui.TextDisplay("## 📅 Nächste Termine\n-# Ergebnis direkt beim passenden Spiel eintragen"))
-                    if nm:
-                        for m in nm:
-                            w=m.get("datetime"); when=w.strftime("%d.%m.%Y · %H:%M") if w else str(m.get("date_text") or "Termin"); terms.add_item(discord.ui.Section(f"### {when} Uhr\n**{m.get('home') or '?'}** vs. **{m.get('away') or '?'}**\n🎮 **{m.get('mode') or 'Modus noch offen'}**",accessory=DashboardV2ResultButton(m,int(div),self.owner_id)))
-                    else: terms.add_item(discord.ui.TextDisplay("Aktuell sind keine zukünftigen Spieltermine eingetragen."))
-                self.add_item(terms)
-                self.add_item(discord.ui.Container(discord.ui.TextDisplay(f"## 🏆 Tabelle · Division {div}\n{_dashboard_table_markdown(data)}\n-# S = Siege · U = Remis · N = Niederlagen · Sieg 2 Pkt · Remis 1 Pkt"),accent_colour=0xF1C40F))
-            else: self.add_item(discord.ui.Container(discord.ui.TextDisplay("### ℹ️ Divisionsdaten nicht verfügbar\nDie Daten konnten gerade nicht aus dem Sheet geladen werden. Die Spielerfunktionen stehen weiterhin zur Verfügung."),accent_colour=0x95A5A6))
-            self._add_league_actions(show_admin, compact=bool(data.get("today_matches")))
-        def _build_coop(self,data,note):
-            team=str(data.get("team_name") or "Coop League"); partner=str(data.get("partner") or "–"); status=str(data.get("status") or "nicht angemeldet"); self._add_header(f"👥 {team}","**Coop League** · gemeinsames Team-Dashboard",note)
-            if not data.get("found"): self.add_item(discord.ui.Container(discord.ui.TextDisplay("## 👥 Noch kein Coop-Team\nDu bist aktuell keinem offenen oder bestätigten Coop-Team zugeordnet."),accent_colour=0x95A5A6))
-            else:
-                self.add_item(discord.ui.Container(discord.ui.TextDisplay(f"## 🤝 Team\n**Team:** {team}\n**Partner:** {partner}\n**Status:** {status}\n**Spielbetrieb:** {int(data.get('played') or 0)}/{int(data.get('total') or 0)} gespielt · {int(data.get('open') or 0)} offen · {int(data.get('scheduled_open') or 0)} terminiert"),accent_colour=0x2ECC71 if status=="bestätigt" else 0xF1C40F))
-                if status=="bestätigt":
-                    terms=discord.ui.Container(accent_colour=0x3498DB); terms.add_item(discord.ui.TextDisplay("## 📅 Gemeinsame Termine\n-# Ergebnis direkt für euer Team eintragen")); matches=(data.get("next_matches") or [])[:2]
-                    if matches:
-                        for m in matches:
-                            w=m.get("datetime"); when=w.strftime("%d.%m.%Y · %H:%M") if w else str(m.get("date_text") or "Termin"); terms.add_item(discord.ui.Section(f"### {when} Uhr\n**{m.get('home') or '?'}** vs. **{m.get('away') or '?'}**\n🎮 **{m.get('mode') or 'Coop'}**",accessory=DashboardV2CoopResultButton(match=m,team_name=team,owner_id=self.owner_id)))
-                    else: terms.add_item(discord.ui.TextDisplay("Aktuell sind keine gemeinsamen Spieltermine eingetragen."))
-                    self.add_item(terms); self.add_item(discord.ui.Container(discord.ui.TextDisplay(f"## 🏆 Coop-Tabelle\n{_format_simple_table(data.get('coop_table') or [])}\n-# Sieg 2 Pkt · Remis 1 Pkt"),accent_colour=0xF1C40F))
-            ac=discord.ui.Container(accent_colour=0x2ECC71); ac.add_item(discord.ui.TextDisplay("## ⚙️ Coop-Aktionen")); ac.add_item(discord.ui.ActionRow(DashboardV2ActionButton(owner_id=self.owner_id,action="coop_menu",label="👥 Coop-Menü",style=discord.ButtonStyle.success,dashboard_mode="coop"),DashboardV2ActionButton(owner_id=self.owner_id,action="refresh",label="🔄 Aktualisieren",dashboard_mode="coop"))); self.add_item(ac)
-        def _build(self,data,show_admin,note):
-            self._add_banner(); self._build_coop(data,note) if self.dashboard_mode=="coop" else self._build_league(data,show_admin,note)
 
-    def build_dashboard_layout_view(*,data:dict,owner_id:int,show_admin:bool,note:str|None=None,dashboard_mode:str="league"):
-        return DashboardLayoutView(data=data,owner_id=owner_id,show_admin=show_admin,note=note,dashboard_mode=dashboard_mode)
+        def _add_league_actions(self, show_admin: bool):
+            card = discord.ui.Container(accent_colour=0x5865F2)
+            card.add_item(discord.ui.TextDisplay("## ⚙️ Schnellaktionen\n-# Die häufigsten Funktionen direkt erreichbar"))
+            card.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="plan",
+                        label="🎮 Spiel planen",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="offer",
+                        label="📅 Termine anbieten",
+                        style=discord.ButtonStyle.success,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="result",
+                        label="✅ Ergebnis",
+                        style=discord.ButtonStyle.success,
+                    ),
+                )
+            )
+            card.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="rest",
+                        label="📋 Restprogramm",
+                        style=discord.ButtonStyle.primary,
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="more",
+                        label="➕ Mehr",
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="refresh",
+                        label="🔄 Aktualisieren",
+                    ),
+                )
+            )
+            self.add_item(card)
+
+        def _build_league(self, data: dict, show_admin: bool, note: str | None):
+            found = bool(data.get("found"))
+            name = str(data.get("player_name") or "Spieler")
+            division = data.get("division")
+            self._add_header(
+                f"⚔️ {name} · Division {division}" if found else "⚔️ TFL SPIELERBEREICH",
+                f"**{CURRENT_SEASON_LABEL}** · TFL Bot – macht das Racen leichter!",
+                note,
+            )
+
+            if found:
+                division = int(division)
+                self._add_matchday(data, division)
+
+                played = int(data.get("played") or 0)
+                total = int(data.get("total") or 0)
+                open_games = int(data.get("open") or 0)
+                scheduled = int(data.get("scheduled_open") or 0)
+                without_date = max(0, open_games - scheduled)
+                deadline = get_deadline_traffic_light(played, total)
+                pct = round((played / total) * 100) if total else 0
+                progress_bar = _dashboard_progress_bar(played, total)
+
+                progress_text = (
+                    "## 🧭 Saisonfortschritt\n"
+                    f"`{progress_bar}` **{played} / {total} Spiele** · {pct}%\n"
+                    f"{deadline['emoji']} **{deadline['label']}** · {deadline['detail']}\n"
+                    f"⚔️ **{open_games}** offen · 📅 **{scheduled}** terminiert · "
+                    f"⏳ **{without_date}** noch ohne Termin\n"
+                    f"🚫 **Streichmodi:** {data.get('mode_1') or '–'} · {data.get('mode_2') or '–'}"
+                )
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(progress_text),
+                        accent_colour=_deadline_accent(deadline),
+                    )
+                )
+
+                today_rows = {int(x.get("row") or 0) for x in data.get("today_matches") or []}
+                future_matches = [
+                    match
+                    for match in (data.get("next_matches") or [])
+                    if int(match.get("row") or 0) not in today_rows
+                ]
+                visible_matches = future_matches[:3]
+                additional_count = max(0, len(future_matches) - len(visible_matches))
+                terms = discord.ui.Container(accent_colour=0x3498DB)
+                header = "## 📅 Nächste Spiele"
+                if additional_count:
+                    header += f"\n-# Die nächsten 3 Termine · +{additional_count} weitere eingetragen"
+                elif visible_matches:
+                    header += "\n-# Deine nächsten eingetragenen Spieltermine"
+                else:
+                    header += "\n-# Nach heute ist aktuell kein weiterer Termin eingetragen"
+                if without_date:
+                    header += f"\n-# {without_date} offene Saisonspiel{'e' if without_date != 1 else ''} noch ohne Termin"
+                terms.add_item(discord.ui.TextDisplay(header))
+                for match in visible_matches:
+                    when = match.get("datetime")
+                    when_text = when.strftime("%d.%m.%Y · %H:%M") if when else str(match.get("date_text") or "Termin")
+                    terms.add_item(
+                        discord.ui.Section(
+                            f"### {when_text} Uhr\n"
+                            f"**{match.get('home') or '?'}** vs. **{match.get('away') or '?'}**\n"
+                            f"🎮 **{match.get('mode') or 'Modus noch offen'}**",
+                            accessory=DashboardV2ResultButton(match, division, self.owner_id, compact=True),
+                        )
+                    )
+                self.add_item(terms)
+
+                achievements = data.get("achievements") or []
+                achievement_lines = [
+                    f"• **{_dashboard_achievement_label(item)}**"
+                    for item in achievements[:3]
+                ]
+                if achievement_lines:
+                    achievement_body = "\n".join(achievement_lines)
+                    if len(achievements) > 3:
+                        achievement_body += f"\n-# +{len(achievements) - 3} weitere über ➕ Mehr → Meine Achievements"
+                else:
+                    achievement_body = f"Noch kein Achievement in {CURRENT_SEASON_LABEL}."
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            f"## 🏅 Achievements · {CURRENT_SEASON_LABEL}\n{achievement_body}"
+                        ),
+                        accent_colour=0xF1C40F,
+                    )
+                )
+
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            f"## 🏆 Tabelle · Division {division}\n"
+                            f"{_dashboard_table_markdown(data)}\n"
+                            "-# ▶ = du · S = Siege · U = Remis · N = Niederlagen · Sieg 2 Pkt · Remis 1 Pkt"
+                        ),
+                        accent_colour=0xF1C40F,
+                    )
+                )
+            else:
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            "### ℹ️ Divisionsdaten nicht verfügbar\n"
+                            "Die Daten konnten gerade nicht aus dem Sheet geladen werden. "
+                            "Die Spielerfunktionen stehen weiterhin zur Verfügung."
+                        ),
+                        accent_colour=0x95A5A6,
+                    )
+                )
+
+            self._add_league_actions(show_admin)
+
+        def _add_coop_matchday(self, data: dict, team_name: str):
+            matches = (data.get("today_matches") or [])[:25]
+            if not matches:
+                return
+            state = {"row": int(matches[0].get("row") or 0)}
+            card = discord.ui.Container(accent_colour=0xE67E22)
+            lines = ["## 🔥 MATCHDAY", "-# Alle heutigen Coop-Spiele · Match auswählen, dann Aktion starten"]
+            for match in matches:
+                when = match.get("datetime")
+                time_text = when.strftime("%H:%M") if when else "?"
+                lines.append(
+                    f"**{time_text} Uhr** · **{match.get('home') or '?'} vs. {match.get('away') or '?'}** "
+                    f"· 🎮 **{match.get('mode') or 'Coop'}**"
+                )
+            card.add_item(discord.ui.TextDisplay("\n".join(lines)))
+            card.add_item(
+                discord.ui.ActionRow(
+                    DashboardMatchdaySelect(
+                        matches=matches,
+                        owner_id=self.owner_id,
+                        state=state,
+                        prefix="coopmatchday",
+                    )
+                )
+            )
+            card.add_item(
+                discord.ui.ActionRow(
+                    DashboardCoopMatchdayActionButton(
+                        owner_id=self.owner_id,
+                        team_name=team_name,
+                        matches=matches,
+                        state=state,
+                        action="result",
+                    ),
+                    DashboardCoopMatchdayActionButton(
+                        owner_id=self.owner_id,
+                        team_name=team_name,
+                        matches=matches,
+                        state=state,
+                        action="stream",
+                    ),
+                    DashboardCoopMatchdayActionButton(
+                        owner_id=self.owner_id,
+                        team_name=team_name,
+                        matches=matches,
+                        state=state,
+                        action="menu",
+                    ),
+                )
+            )
+            self.add_item(card)
+
+        def _build_coop(self, data: dict, note: str | None):
+            team = str(data.get("team_name") or "Coop League")
+            partner = str(data.get("partner") or "–")
+            status = str(data.get("status") or "nicht angemeldet")
+            self._add_header(
+                f"👥 {team}",
+                "**Coop League** · gemeinsames Team-Dashboard",
+                note,
+            )
+
+            if not data.get("found"):
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            "## 👥 Noch kein Coop-Team\n"
+                            "Du bist aktuell keinem offenen oder bestätigten Coop-Team zugeordnet."
+                        ),
+                        accent_colour=0x95A5A6,
+                    )
+                )
+            else:
+                played = int(data.get("played") or 0)
+                total = int(data.get("total") or 0)
+                open_games = int(data.get("open") or 0)
+                scheduled = int(data.get("scheduled_open") or 0)
+                without_date = max(0, open_games - scheduled)
+                progress_bar = _dashboard_progress_bar(played, total)
+                pct = round((played / total) * 100) if total else 0
+
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.TextDisplay(
+                            "## 🧭 Coop-Fortschritt\n"
+                            f"**Team:** {team} · **Partner:** {partner} · **Status:** {status}\n"
+                            f"`{progress_bar}` **{played} / {total} Spiele** · {pct}%\n"
+                            f"⚔️ **{open_games}** offen · 📅 **{scheduled}** terminiert · "
+                            f"⏳ **{without_date}** noch ohne Termin"
+                        ),
+                        accent_colour=0x2ECC71 if status == "bestätigt" else 0xF1C40F,
+                    )
+                )
+
+                if status == "bestätigt":
+                    self._add_coop_matchday(data, team)
+                    today_rows = {int(x.get("row") or 0) for x in data.get("today_matches") or []}
+                    future_matches = [
+                        match
+                        for match in (data.get("next_matches") or [])
+                        if int(match.get("row") or 0) not in today_rows
+                    ]
+                    visible = future_matches[:3]
+                    additional = max(0, len(future_matches) - len(visible))
+                    terms = discord.ui.Container(accent_colour=0x3498DB)
+                    header = "## 📅 Nächste Coop-Spiele"
+                    if additional:
+                        header += f"\n-# Die nächsten 3 Termine · +{additional} weitere eingetragen"
+                    elif visible:
+                        header += "\n-# Eure nächsten gemeinsamen Termine"
+                    else:
+                        header += "\n-# Nach heute ist aktuell kein weiterer Termin eingetragen"
+                    terms.add_item(discord.ui.TextDisplay(header))
+                    for match in visible:
+                        when = match.get("datetime")
+                        when_text = when.strftime("%d.%m.%Y · %H:%M") if when else str(match.get("date_text") or "Termin")
+                        terms.add_item(
+                            discord.ui.Section(
+                                f"### {when_text} Uhr\n"
+                                f"**{match.get('home') or '?'}** vs. **{match.get('away') or '?'}**\n"
+                                f"🎮 **{match.get('mode') or 'Coop'}**",
+                                accessory=DashboardV2CoopResultButton(
+                                    match=match,
+                                    team_name=team,
+                                    owner_id=self.owner_id,
+                                    compact=True,
+                                ),
+                            )
+                        )
+                    self.add_item(terms)
+                    self.add_item(
+                        discord.ui.Container(
+                            discord.ui.TextDisplay(
+                                f"## 🏆 Coop-Tabelle\n"
+                                f"{_format_simple_table(data.get('coop_table') or [])}\n"
+                                "-# Sieg 2 Pkt · Remis 1 Pkt"
+                            ),
+                            accent_colour=0xF1C40F,
+                        )
+                    )
+
+            actions = discord.ui.Container(accent_colour=0x2ECC71)
+            actions.add_item(discord.ui.TextDisplay("## ⚙️ Coop-Aktionen"))
+            actions.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="coop_menu",
+                        label="👥 Coop-Menü",
+                        style=discord.ButtonStyle.success,
+                        dashboard_mode="coop",
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="refresh",
+                        label="🔄 Aktualisieren",
+                        dashboard_mode="coop",
+                    ),
+                )
+            )
+            self.add_item(actions)
+
+        def _build(self, data: dict, show_admin: bool, note: str | None):
+            self._add_banner()
+            if self.dashboard_mode == "coop":
+                self._build_coop(data, note)
+            else:
+                self._build_league(data, show_admin, note)
+
+
+    def build_dashboard_layout_view(
+        *,
+        data: dict,
+        owner_id: int,
+        show_admin: bool,
+        note: str | None = None,
+        dashboard_mode: str = "league",
+    ):
+        return DashboardLayoutView(
+            data=data,
+            owner_id=owner_id,
+            show_admin=show_admin,
+            note=note,
+            dashboard_mode=dashboard_mode,
+        )
 else:
-    def build_dashboard_layout_view(*,data:dict,owner_id:int,show_admin:bool,note:str|None=None,dashboard_mode:str="league"):
+    def build_dashboard_layout_view(
+        *,
+        data: dict,
+        owner_id: int,
+        show_admin: bool,
+        note: str | None = None,
+        dashboard_mode: str = "league",
+    ):
         raise RuntimeError("Discord Components V2 sind mit dieser discord.py-Version nicht verfügbar.")
 
 
@@ -4521,7 +5273,7 @@ class PlayerMenuView(PlayerBaseView):
         super().__init__(owner_id)
 
         if division is not None:
-            for match in (next_matches or [])[:2]:
+            for match in (next_matches or [])[:3]:
                 self.add_item(DashboardResultButton(match, int(division)))
 
         if show_admin:
@@ -4540,7 +5292,7 @@ class PlayerMenuView(PlayerBaseView):
             attachments=[],
         )
 
-    @discord.ui.button(label="📅 Termine vorschlagen", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="📅 Termine anbieten", style=discord.ButtonStyle.success, row=0)
     async def term_offer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await term_offers.open_term_offer_modal(interaction)
 
@@ -4621,7 +5373,7 @@ class PlayerMenuView(PlayerBaseView):
     # Zeile 4: DASHBOARD / KRITISCHE AKTION
     # -----------------------------------------------------
 
-    @discord.ui.button(label="🗓️ Termin ändern", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="🗓️ Termine verwalten", style=discord.ButtonStyle.secondary, row=3)
     async def manage_schedule_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await term_offers.open_schedule_manage_menu(interaction)
 
