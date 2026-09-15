@@ -48,19 +48,14 @@ from matchcenter import (
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 
 CURRENT_SEASON_LABEL = os.getenv("TFL_SEASON_LABEL", "Saison #6")
-TFL_SEASON_START = os.getenv("TFL_SEASON_START", "").strip()
-TFL_SEASON_END = os.getenv("TFL_SEASON_END", "").strip()
+TFL_SEASON_START = os.getenv("TFL_SEASON_START", "2026-10-05").strip()
+TFL_SEASON_END = os.getenv("TFL_SEASON_END", "2027-01-31").strip()
 TFL_COLOR = 0x1F6FEB
 TFL_SUCCESS_COLOR = 0x2ECC71
 TFL_DANGER_COLOR = 0xE74C3C
 
 COOP_LEAGUE_SHEET = os.getenv("TFL_COOP_LEAGUE_SHEET", "Coop Liga").strip() or "Coop Liga"
 ACHIEVEMENT_SHEET = os.getenv("TFL_ACHIEVEMENT_SHEET", "Achievements").strip() or "Achievements"
-TFL_HERALD_CHANNEL_ID = int(os.getenv("TFL_HERALD_CHANNEL_ID", "0") or 0)
-TFL_HERALD_WEEKDAY = max(0, min(6, int(os.getenv("TFL_HERALD_WEEKDAY", "0") or 0)))
-TFL_HERALD_HOUR = max(0, min(23, int(os.getenv("TFL_HERALD_HOUR", "10") or 10)))
-TFL_HERALD_MINUTE = max(0, min(59, int(os.getenv("TFL_HERALD_MINUTE", "0") or 0)))
-TFL_HERALD_LOOKBACK_DAYS = max(1, min(14, int(os.getenv("TFL_HERALD_LOOKBACK_DAYS", "7") or 7)))
 
 DASHBOARD_BANNER_FILENAME = "tfl_dashboard_banner.png"
 TFL_DASHBOARD_BANNER_URL = os.getenv("TFL_DASHBOARD_BANNER_URL", "").strip()
@@ -120,7 +115,7 @@ STREICHMODUS_MODE_COLUMNS = {
     6: 16,  # P
 }
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v11-matchday-achievements-coop-herald"
+PLAYER_PERFORMANCE_VERSION = "player-performance-v12-matchday-achievements-coop"
 print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
 
 PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
@@ -519,83 +514,6 @@ def _format_simple_table(table: list[dict], name_key: str = "name") -> str:
         lines.append(f"{int(item.get('rank') or 0):>2}. {name}  {int(item.get('played') or 0):>2}  {int(item.get('wins') or 0):>2}  {int(item.get('draws') or 0):>2}  {int(item.get('losses') or 0):>2}  {int(item.get('points') or 0):>3}")
     return "```ansi\n" + "\n".join(lines) + "\n```"
 
-
-def _herald_division_summary(division: int, now: dt, since: dt) -> str | None:
-    ws = get_player_division_worksheet(division)
-    rows = get_all_values_cached(lambda: ws, sheet_name=player_sheet_name(ws, f"{division}.DIV"), ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS, force_refresh=True)
-    recent_indices = set(); recent_count = 0
-    for row_index, row in enumerate(rows[1:], start=2):
-        result = _safe_row_cell(row, 4)
-        if _is_open_result_value(result): continue
-        played_at = parse_sheet_datetime(_safe_row_cell(row, 1))
-        if played_at is not None and since <= played_at <= now: recent_indices.add(row_index); recent_count += 1
-    if recent_count == 0: return None
-    current_table = _load_division_table_for_dashboard(rows, "")
-    before_rows = [list(row) for row in rows]
-    for idx in recent_indices:
-        if idx - 1 < len(before_rows):
-            row = before_rows[idx - 1]
-            while len(row) <= 4: row.append("")
-            row[4] = "vs"
-    before_table = _load_division_table_for_dashboard(before_rows, "")
-    current_leader = current_table[0] if current_table else None
-    before_leader = before_table[0] if before_table and sum(int(x.get("played") or 0) for x in before_table) > 0 else None
-    pieces = [f"**Division {division}:** {recent_count} Spiel{'e' if recent_count != 1 else ''}"]
-    if current_leader:
-        pieces.append(f"**{current_leader['name']}** führt mit {current_leader['points']} Pkt")
-        if before_leader and normalize_name(before_leader['name']) != normalize_name(current_leader['name']): pieces.append(f"👑 {current_leader['name']} übernimmt die Spitze")
-    best_streak = (0, "")
-    for item in current_table:
-        streak = _current_win_streak(rows, item["name"])
-        if streak > best_streak[0]: best_streak = (streak, item["name"])
-    if best_streak[0] >= 3: pieces.append(f"🔥 {best_streak[1]} mit {best_streak[0]} Siegen in Folge")
-    return " · ".join(pieces)
-
-
-def generate_tfl_herald_text() -> str:
-    now = dt.now(BERLIN_TZ); since = now - timedelta(days=TFL_HERALD_LOOKBACK_DAYS)
-    lines = ["# 📰 TFL Herald", f"**Wochenrückblick {since.strftime('%d.%m.')} – {now.strftime('%d.%m.%Y')}**", ""]
-    summaries = []
-    for division in range(1, 7):
-        try:
-            summary = _herald_division_summary(division, now, since)
-            if summary: summaries.append(summary)
-        except Exception as exc: print(f"⚠️ [HERALD] Division {division} konnte nicht ausgewertet werden: {exc}")
-    lines.extend(summaries if summaries else ["Diese Woche wurden noch keine neuen Ligaergebnisse eingetragen."])
-    lines.extend(["", "-# Try Force League · macht das Racen leichter!"])
-    return "\n".join(lines)[:1990]
-
-
-async def post_tfl_herald(bot: commands.Bot) -> str:
-    if TFL_HERALD_CHANNEL_ID <= 0: raise RuntimeError("TFL_HERALD_CHANNEL_ID ist nicht gesetzt.")
-    channel = bot.get_channel(TFL_HERALD_CHANNEL_ID)
-    if channel is None: channel = await bot.fetch_channel(TFL_HERALD_CHANNEL_ID)
-    if not hasattr(channel, "send"): raise RuntimeError("Der konfigurierte Herald-Kanal ist kein beschreibbarer Discord-Kanal.")
-    herald_text = await asyncio.to_thread(generate_tfl_herald_text)
-    await channel.send(herald_text)
-    return herald_text
-
-
-def _next_herald_run(now: dt) -> dt:
-    days = (TFL_HERALD_WEEKDAY - now.weekday()) % 7
-    candidate = now.replace(hour=TFL_HERALD_HOUR, minute=TFL_HERALD_MINUTE, second=0, microsecond=0) + timedelta(days=days)
-    if candidate <= now: candidate += timedelta(days=7)
-    return candidate
-
-
-async def herald_weekly_loop(bot: commands.Bot):
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        if TFL_HERALD_CHANNEL_ID <= 0:
-            await asyncio.sleep(3600); continue
-        now = dt.now(BERLIN_TZ); target = _next_herald_run(now)
-        print(f"[HERALD] Nächster Wochenpost: {target.strftime('%d.%m.%Y %H:%M')}")
-        await asyncio.sleep(max(1.0, (target - now).total_seconds()))
-        try:
-            await post_tfl_herald(bot); print("✅ [HERALD] Wochenrückblick gepostet")
-        except asyncio.CancelledError: raise
-        except Exception as exc: print(f"⚠️ [HERALD] Wochenpost fehlgeschlagen: {exc}")
-        await asyncio.sleep(60)
 
 
 def _load_division_table_for_dashboard(rows: list[list[str]], player_name: str) -> list[dict]:
@@ -4207,23 +4125,11 @@ class AdminMenuView(AdminOnlyView):
             content=None,
         )
 
-    @discord.ui.button(
-        label="📰 TFL Herald posten",
-        style=discord.ButtonStyle.primary,
-        row=3,
-    )
-    async def herald_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            herald_text = await post_tfl_herald(interaction.client)
-            await interaction.edit_original_response(content=f"✅ Herald gepostet.\n\n{herald_text[:1200]}", embed=None, view=AdminMenuView(owner_id=interaction.user.id))
-        except Exception as exc:
-            await interaction.edit_original_response(content=f"❌ Herald konnte nicht gepostet werden: {exc}", embed=None, view=AdminMenuView(owner_id=interaction.user.id))
 
     @discord.ui.button(
         label="◀ Zurück",
         style=discord.ButtonStyle.secondary,
-        row=4,
+        row=3,
     )
     async def back_button(
         self,
@@ -5226,8 +5132,3 @@ async def setup(bot: commands.Bot):
         bot._exit_request_monitor_task = asyncio.create_task(
             exit_request_monitor_loop(bot)
         )
-
-    # Wöchentlicher TFL Herald. Ohne TFL_HERALD_CHANNEL_ID bleibt der Task
-    # passiv und prüft nur stündlich, ob ein Kanal konfiguriert wurde.
-    if not hasattr(bot, "_tfl_herald_task"):
-        bot._tfl_herald_task = asyncio.create_task(herald_weekly_loop(bot))
