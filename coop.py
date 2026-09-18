@@ -2,33 +2,35 @@ import asyncio
 import os
 import re
 import sys
+import threading
 from datetime import datetime as dt
 
 import discord
-import gspread
 import pytz
-from google.oauth2.service_account import Credentials
+from gspread.exceptions import WorksheetNotFound
 from sheets_connection import get_season_spreadsheet
 
 
 BERLIN_TZ = pytz.timezone("Europe/Berlin")
 
-COOP_SHEET = "Coop"
+# =========================================================
+# COOP STORAGE
+# =========================================================
+# WICHTIG:
+# Das bestehende Sheet "Coop" wird von diesem Modul NICHT mehr beschrieben.
+# Anmeldung und Konfiguration liegen bewusst in separaten Bot-Sheets.
+
+COOP_SIGNUP_SHEET = os.getenv("TFL_COOP_SIGNUP_SHEET", "CoopAnmeldungen").strip() or "CoopAnmeldungen"
+COOP_CONFIG_SHEET = os.getenv("TFL_COOP_CONFIG_SHEET", "CoopConfig").strip() or "CoopConfig"
 RUNNER_SHEET = "Runner"
 
-CREDS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-SPREADSHEET_TITLE = os.getenv("SPREADSHEET_TITLE", "Season #4 - Spielbetrieb")
-SPREADSHEET_ID = "1pZxg1_DUtbO4dZvX95ZrIqEZnkMc1MjmE7z5SEsMHQU"
-SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
+# Kompatibilitaets-Alias fuer eventuelle externe Imports.
+COOP_SHEET = COOP_SIGNUP_SHEET
 
-_COOP_GC = None
-_COOP_WB = None
 _COOP_WS_CACHE = {}
+_COOP_WRITE_LOCK = threading.RLock()
 
-# Tabellenaufbau:
+# CoopAnmeldungen:
 # A Teamname
 # B Spieler 1
 # C Spieler 2
@@ -36,13 +38,10 @@ _COOP_WS_CACHE = {}
 # E Twitch Spieler 2
 # F Status
 # G Erstellt am
-# H Bestätigt am
+# H Bestaetigt am
 # I Erstellt von
 # J Discord-ID Spieler 1
 # K Discord-ID Spieler 2
-#
-# M1 Anmeldung / M2 open|closed
-# N1 Max Teams / N2 Zahl, leer oder 0 = unbegrenzt
 
 COOP_HEADERS = [
     "Teamname",
@@ -58,9 +57,17 @@ COOP_HEADERS = [
     "Discord ID Spieler 2",
 ]
 
+CONFIG_HEADERS = ["Schlüssel", "Wert"]
+CONFIG_KEY_SIGNUP = "Anmeldung"
+CONFIG_KEY_LIMIT = "Max Teams"
+
 ACTIVE_STATUSES = {"offen", "bestätigt"}
 FINAL_STATUS = "bestätigt"
 
+
+# =========================================================
+# HELFER
+# =========================================================
 
 def normalize_name(value: str) -> str:
     value = (value or "").strip().lower()
@@ -119,69 +126,136 @@ def menu_embed(title: str, description: str, color: int = 0x00FFCC) -> discord.E
 
 
 def _cell(row, idx0: int) -> str:
-    return row[idx0].strip() if 0 <= idx0 < len(row) else ""
+    if not row or idx0 < 0 or idx0 >= len(row):
+        return ""
+    return str(row[idx0] or "").strip()
 
 
 def get_shared_workbook():
-    """Coop nutzt ausschließlich die zentrale Season-Spreadsheet-Verbindung."""
     return get_season_spreadsheet()
 
 
-def get_cached_ws(sheet_name: str):
+def _get_or_create_ws(sheet_name: str, rows: int, cols: int):
     if sheet_name in _COOP_WS_CACHE:
         return _COOP_WS_CACHE[sheet_name]
 
     wb = get_shared_workbook()
-
     try:
         ws = wb.worksheet(sheet_name)
-    except Exception as e:
-        print(
-            f"[COOP] Worksheet '{sheet_name}' konnte nicht geöffnet werden: "
-            f"{type(e).__name__}: {e!r}"
-        )
+    except WorksheetNotFound:
+        ws = wb.add_worksheet(title=sheet_name, rows=rows, cols=cols)
+        print(f"✅ [COOP] Sheet '{sheet_name}' wurde automatisch angelegt.")
+    except Exception as exc:
         raise RuntimeError(
-            f"Tabellenblatt '{sheet_name}' konnte nicht geöffnet werden. "
-            f"{type(e).__name__}: {e}"
-        ) from e
+            f"Tabellenblatt '{sheet_name}' konnte nicht geöffnet werden: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    _COOP_WS_CACHE[sheet_name] = ws
+    return ws
+
+
+def get_cached_ws(sheet_name: str):
+    """Kompatibilitaets-Helfer fuer bekannte bestehende Sheets."""
+    if sheet_name in _COOP_WS_CACHE:
+        return _COOP_WS_CACHE[sheet_name]
+
+    wb = get_shared_workbook()
+    try:
+        ws = wb.worksheet(sheet_name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Tabellenblatt '{sheet_name}' konnte nicht geöffnet werden: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
     _COOP_WS_CACHE[sheet_name] = ws
     return ws
 
 
 def get_coop_ws():
-    return get_cached_ws(COOP_SHEET)
+    """Anmelde-Sheet. Das alte Sheet 'Coop' wird nicht mehr verwendet."""
+    return ensure_coop_sheet_structure()
 
 
 def get_runner_ws_local():
     return get_cached_ws(RUNNER_SHEET)
 
 
+def _read_signup_rows(ws):
+    # Bewusst NUR A:K lesen. Inhalte rechts davon koennen die Anmeldelogik
+    # dadurch weder beeinflussen noch verschieben.
+    values = ws.get("A:K")
+    return values or []
+
+
 def ensure_coop_sheet_structure():
-    ws = get_coop_ws()
-    values = ws.get_all_values()
+    ws = _get_or_create_ws(COOP_SIGNUP_SHEET, rows=1000, cols=11)
+    first_row = ws.get("A1:K1")
+    current = first_row[0] if first_row else []
+    current = [_cell(current, i) for i in range(11)]
 
-    first_row = values[0] if values else []
-
-    # Nur wenn A1:K1 komplett leer ist, legen wir unsere Header an.
-    if not any(_cell(first_row, i) for i in range(11)):
+    if not any(current):
         ws.update("A1:K1", [COOP_HEADERS])
+    elif current != COOP_HEADERS:
+        raise RuntimeError(
+            f"'{COOP_SIGNUP_SHEET}' hat nicht die erwartete Struktur in A1:K1. "
+            "Der Bot schreibt aus Sicherheitsgründen nichts in dieses Sheet."
+        )
 
-    # Konfiguration nur in leere Zellen schreiben.
-    m1 = ws.acell("M1").value or ""
-    m2 = ws.acell("M2").value or ""
-    n1 = ws.acell("N1").value or ""
+    return ws
+
+
+def ensure_config_sheet_structure():
+    ws = _get_or_create_ws(COOP_CONFIG_SHEET, rows=20, cols=2)
+    values = ws.get("A1:B3")
+
+    row1 = values[0] if len(values) >= 1 else []
+    a1 = _cell(row1, 0)
+    b1 = _cell(row1, 1)
+
+    if not a1 and not b1:
+        ws.update(
+            "A1:B3",
+            [
+                CONFIG_HEADERS,
+                [CONFIG_KEY_SIGNUP, "open"],
+                [CONFIG_KEY_LIMIT, ""],
+            ],
+        )
+        return ws
+
+    if [a1, b1] != CONFIG_HEADERS:
+        raise RuntimeError(
+            f"'{COOP_CONFIG_SHEET}' hat nicht die erwartete Struktur in A1:B1. "
+            "Der Bot schreibt aus Sicherheitsgründen nichts in dieses Sheet."
+        )
+
+    # Fehlende Standardzeilen gezielt ergaenzen, ohne vorhandene Werte zu ueberschreiben.
+    key_map = {}
+    all_values = ws.get("A:B") or []
+    occupied_rows = set()
+    for index, row in enumerate(all_values[1:], start=2):
+        if any(_cell(row, i) for i in range(2)):
+            occupied_rows.add(index)
+        key = _cell(row, 0)
+        if key:
+            key_map[key.lower()] = index
+
+    def next_free_config_row():
+        row_index = 2
+        while row_index in occupied_rows:
+            row_index += 1
+        occupied_rows.add(row_index)
+        return row_index
 
     updates = []
-
-    if not m1.strip():
-        updates.append({"range": "M1", "values": [["Anmeldung"]]})
-
-    if not m2.strip():
-        updates.append({"range": "M2", "values": [["open"]]})
-
-    if not n1.strip():
-        updates.append({"range": "N1", "values": [["Max Teams"]]})
+    if CONFIG_KEY_SIGNUP.lower() not in key_map:
+        target_row = next_free_config_row()
+        updates.append({"range": f"A{target_row}:B{target_row}", "values": [[CONFIG_KEY_SIGNUP, "open"]]})
+    if CONFIG_KEY_LIMIT.lower() not in key_map:
+        target_row = next_free_config_row()
+        updates.append({"range": f"A{target_row}:B{target_row}", "values": [[CONFIG_KEY_LIMIT, ""]]})
 
     if updates:
         ws.batch_update(updates)
@@ -189,21 +263,32 @@ def ensure_coop_sheet_structure():
     return ws
 
 
+def _config_row_for_key(ws, key: str):
+    values = ws.get("A:B") or []
+    target = key.strip().lower()
+    for row_index, row in enumerate(values[1:], start=2):
+        if _cell(row, 0).lower() == target:
+            return row_index, _cell(row, 1)
+    return None, ""
+
+
 def get_coop_rows():
     ws = ensure_coop_sheet_structure()
-    return ws, ws.get_all_values()
+    return ws, _read_signup_rows(ws)
 
 
 def get_coop_config() -> dict:
-    ws = ensure_coop_sheet_structure()
+    ws = ensure_config_sheet_structure()
 
-    state = (ws.acell("M2").value or "open").strip().lower()
+    _, state_value = _config_row_for_key(ws, CONFIG_KEY_SIGNUP)
+    _, limit_value = _config_row_for_key(ws, CONFIG_KEY_LIMIT)
+
+    state = (state_value or "open").strip().lower()
     if state not in {"open", "closed"}:
         state = "closed"
 
-    raw_limit = (ws.acell("N2").value or "").strip()
-
     max_teams = None
+    raw_limit = (limit_value or "").strip()
     if raw_limit:
         try:
             parsed = int(raw_limit)
@@ -220,17 +305,21 @@ def get_coop_config() -> dict:
 
 
 def set_coop_open_state(is_open: bool):
-    ws = ensure_coop_sheet_structure()
-    ws.update("M2", [["open" if is_open else "closed"]])
+    with _COOP_WRITE_LOCK:
+        ws = ensure_config_sheet_structure()
+        row_index, _ = _config_row_for_key(ws, CONFIG_KEY_SIGNUP)
+        if row_index is None:
+            raise RuntimeError("Config-Eintrag 'Anmeldung' fehlt.")
+        ws.update(f"B{row_index}", [["open" if is_open else "closed"]])
 
 
 def set_coop_team_limit(limit: int | None):
-    ws = ensure_coop_sheet_structure()
-
-    if limit is None or limit <= 0:
-        ws.update("N2", [[""]])
-    else:
-        ws.update("N2", [[str(limit)]])
+    with _COOP_WRITE_LOCK:
+        ws = ensure_config_sheet_structure()
+        row_index, _ = _config_row_for_key(ws, CONFIG_KEY_LIMIT)
+        if row_index is None:
+            raise RuntimeError("Config-Eintrag 'Max Teams' fehlt.")
+        ws.update(f"B{row_index}", [["" if limit is None or limit <= 0 else str(limit)]])
 
 
 def coop_status_counts(rows=None) -> dict:
@@ -270,20 +359,29 @@ def _row_member_names(row) -> set[str]:
     } - {""}
 
 
-def find_active_team_for_member(member_id: int, names: list[str] | None = None):
-    ws, rows = get_coop_rows()
+def _row_matches_member(row, member_id: int, names: list[str] | None = None) -> bool:
+    ids = _row_member_ids(row)
+    if member_id > 0 and member_id in ids:
+        return True
+
+    # Wenn Discord-IDs vorhanden sind, sind diese verbindlich. Namensfallback
+    # nur fuer alte/handgeschriebene Datensaetze ohne IDs.
+    if ids:
+        return False
+
     target_names = {normalize_name(v) for v in (names or []) if v}
     target_names.discard("")
+    return bool(target_names and (_row_member_names(row) & target_names))
+
+
+def find_active_team_for_member(member_id: int, names: list[str] | None = None):
+    ws, rows = get_coop_rows()
 
     for row_index, row in enumerate(rows[1:], start=2):
         status = _cell(row, 5).lower()
         if status not in ACTIVE_STATUSES:
             continue
-
-        if member_id in _row_member_ids(row):
-            return ws, row_index, row
-
-        if target_names and (_row_member_names(row) & target_names):
+        if _row_matches_member(row, member_id, names):
             return ws, row_index, row
 
     return ws, None, None
@@ -299,19 +397,19 @@ def find_pending_invite_for_member(member_id: int, names: list[str] | None = Non
             continue
 
         player2_id = _cell(row, 10)
-        if player2_id.isdigit() and int(player2_id) == member_id:
-            return ws, row_index, row
+        if player2_id.isdigit():
+            if int(player2_id) == member_id:
+                return ws, row_index, row
+            continue
 
-        if not player2_id and normalize_name(_cell(row, 2)) in target_names:
+        # Nur Legacy-Fallback, wenn K leer ist.
+        if target_names and normalize_name(_cell(row, 2)) in target_names:
             return ws, row_index, row
 
     return ws, None, None
 
 
 def get_runner_mapping() -> dict[str, str]:
-    """
-    Liest Runner!A:B direkt über dieselbe robuste Workbook-Verbindung.
-    """
     try:
         ws = get_runner_ws_local()
         rows = ws.get_all_values()
@@ -320,19 +418,17 @@ def get_runner_mapping() -> dict[str, str]:
         for row in rows:
             player_name = _cell(row, 0)
             twitch_value = _cell(row, 1)
-
             if not player_name or not twitch_value:
                 continue
 
             key = normalize_name(player_name)
             twitch = normalize_twitch(twitch_value)
-
             if key and twitch:
                 mapping[key] = twitch
 
         return mapping
-    except Exception as e:
-        print(f"[COOP] Runner-Twitchmapping konnte nicht geladen werden: {e}")
+    except Exception as exc:
+        print(f"[COOP] Runner-Twitchmapping konnte nicht geladen werden: {exc}")
         return {}
 
 
@@ -346,17 +442,12 @@ def get_runner_twitch_for_names(names: list[str]) -> str:
 
 
 def ensure_runner_entry_if_missing(player_name: str, twitch: str):
-    """
-    Ergänzt Runner nur, wenn der Spieler fehlt oder sein Twitchfeld leer ist.
-    Bestehende Twitchdaten werden bewusst NICHT überschrieben.
-    """
     twitch = normalize_twitch(twitch)
     if not player_name or not twitch:
         return
 
     ws = get_runner_ws_local()
     rows = ws.get_all_values()
-
     target = normalize_name(player_name)
 
     for row_index, row in enumerate(rows, start=1):
@@ -364,11 +455,11 @@ def ensure_runner_entry_if_missing(player_name: str, twitch: str):
         if normalize_name(existing_name) != target:
             continue
 
-        existing_twitch = _cell(row, 1)
-        if not existing_twitch:
+        if not _cell(row, 1):
             ws.update(f"B{row_index}", [[twitch]])
         return
 
+    # Runner hat keine Mischkonfiguration rechts daneben; trotzdem gezielt A:B schreiben.
     new_row = max(len(rows) + 1, 2)
     ws.update(f"A{new_row}:B{new_row}", [[player_name, twitch]])
 
@@ -380,7 +471,7 @@ def validate_new_team(
     partner_names: list[str],
 ):
     config = get_coop_config()
-    ws, rows = get_coop_rows()
+    _, rows = get_coop_rows()
 
     if not config["open"]:
         raise RuntimeError("Die Anmeldung zur Coop League ist aktuell geschlossen.")
@@ -389,23 +480,31 @@ def validate_new_team(
     if row1 is not None:
         raise RuntimeError("Du bist bereits einem offenen oder bestätigten Coop-Team zugeordnet.")
 
-    _, row2, _ = find_active_team_for_member(partner_id, partner_names)
-    if row2 is not None:
-        raise RuntimeError("Dein ausgewählter Mitspieler ist bereits einem Coop-Team zugeordnet.")
+    if partner_id > 0:
+        _, row2, _ = find_active_team_for_member(partner_id, partner_names)
+        if row2 is not None:
+            raise RuntimeError("Dein ausgewählter Mitspieler ist bereits einem Coop-Team zugeordnet.")
 
     counts = coop_status_counts(rows)
     max_teams = config["max_teams"]
-
     if max_teams is not None and counts["reserviert"] >= max_teams:
         raise RuntimeError(
-            f"Die Coop League ist voll. "
-            f"Aktuell sind {counts['reserviert']} von {max_teams} Teamplätzen reserviert."
+            f"Die Coop League ist voll. Aktuell sind {counts['reserviert']} "
+            f"von {max_teams} Teamplätzen reserviert."
         )
 
-    return {
-        "config": config,
-        "counts": counts,
-    }
+    return {"config": config, "counts": counts}
+
+
+def _next_free_signup_row(ws) -> int:
+    rows = _read_signup_rows(ws)
+
+    # Vorhandene echte Leerzeilen in A:K duerfen wiederverwendet werden.
+    for row_index, row in enumerate(rows[1:], start=2):
+        if not any(_cell(row, i) for i in range(11)):
+            return row_index
+
+    return max(len(rows) + 1, 2)
 
 
 def create_pending_team(
@@ -418,28 +517,38 @@ def create_pending_team(
     partner_id: int,
 ):
     team_name = (team_name or "").strip()
+    creator_name = (creator_name or "").strip()
+    partner_name = (partner_name or "").strip()
     creator_twitch = normalize_twitch(creator_twitch)
     partner_twitch = normalize_twitch(partner_twitch)
 
     if not team_name:
         raise ValueError("Bitte einen Teamnamen angeben.")
+    if not creator_name or not partner_name:
+        raise ValueError("Beide Spielernamen müssen vorhanden sein.")
+    if creator_id <= 0 or partner_id <= 0:
+        raise ValueError("Die Discord-IDs beider Spieler konnten nicht ermittelt werden.")
+    if creator_id == partner_id:
+        raise ValueError("Du kannst dich nicht selbst als Coop-Partner auswählen.")
     if not creator_twitch:
         raise ValueError("Bitte deinen Twitchkanal angeben.")
     if not partner_twitch:
         raise ValueError("Bitte den Twitchkanal deines Mitspielers angeben.")
 
-    validate_new_team(
-        creator_id,
-        [creator_name],
-        partner_id,
-        [partner_name],
-    )
+    # Validierung und Write muessen atomar gegen parallele Anmeldungen laufen.
+    with _COOP_WRITE_LOCK:
+        validate_new_team(
+            creator_id,
+            [creator_name],
+            partner_id,
+            [partner_name],
+        )
 
-    ws = ensure_coop_sheet_structure()
-    created = now_str()
+        ws = ensure_coop_sheet_structure()
+        created = now_str()
+        row_index = _next_free_signup_row(ws)
 
-    ws.append_row(
-        [
+        payload = [
             team_name,
             creator_name,
             partner_name,
@@ -451,11 +560,29 @@ def create_pending_team(
             creator_name,
             str(creator_id),
             str(partner_id),
-        ],
-        value_input_option="USER_ENTERED",
-    )
+        ]
+
+        # Kein append_row(): ausschliesslich die exakt vorgesehene Range A:K.
+        ws.update(
+            f"A{row_index}:K{row_index}",
+            [payload],
+            value_input_option="USER_ENTERED",
+        )
+
+        # Direkt zuruecklesen. Wenn das nicht exakt stimmt, nicht so tun als sei
+        # eine Einladung erfolgreich angelegt worden.
+        verify = ws.get(f"A{row_index}:K{row_index}")
+        verify_row = verify[0] if verify else []
+        if (
+            _cell(verify_row, 0) != team_name
+            or _cell(verify_row, 9) != str(creator_id)
+            or _cell(verify_row, 10) != str(partner_id)
+            or _cell(verify_row, 5).lower() != "offen"
+        ):
+            raise RuntimeError("Die Coop-Anmeldung konnte nach dem Schreiben nicht verifiziert werden.")
 
     return {
+        "row": row_index,
         "team_name": team_name,
         "player1": creator_name,
         "player2": partner_name,
@@ -467,27 +594,38 @@ def create_pending_team(
 
 
 def confirm_pending_team(member_id: int, names: list[str]):
-    ws, row_index, row = find_pending_invite_for_member(member_id, names)
+    with _COOP_WRITE_LOCK:
+        ws, row_index, row = find_pending_invite_for_member(member_id, names)
+        if row_index is None:
+            raise RuntimeError("Für dich liegt keine offene Coop-Einladung vor.")
 
-    if row_index is None:
-        raise RuntimeError("Für dich liegt keine offene Coop-Einladung vor.")
+        # Vor Write nochmal live lesen.
+        live = ws.get(f"A{row_index}:K{row_index}")
+        row = live[0] if live else []
+        if _cell(row, 5).lower() != "offen":
+            raise RuntimeError("Diese Coop-Einladung ist nicht mehr offen.")
+        if _cell(row, 10) != str(member_id):
+            raise RuntimeError("Diese Coop-Einladung gehört nicht zu deinem Discord-Konto.")
 
-    team_name = _cell(row, 0)
-    player1 = _cell(row, 1)
-    player2 = _cell(row, 2)
-    twitch1 = _cell(row, 3)
-    twitch2 = _cell(row, 4)
+        team_name = _cell(row, 0)
+        player1 = _cell(row, 1)
+        player2 = _cell(row, 2)
+        twitch1 = _cell(row, 3)
+        twitch2 = _cell(row, 4)
+        confirmed = now_str()
 
-    confirmed = now_str()
+        ws.batch_update(
+            [
+                {"range": f"F{row_index}", "values": [["bestätigt"]]},
+                {"range": f"H{row_index}", "values": [[confirmed]]},
+            ]
+        )
 
-    ws.batch_update(
-        [
-            {"range": f"F{row_index}", "values": [["bestätigt"]]},
-            {"range": f"H{row_index}", "values": [[confirmed]]},
-        ]
-    )
+        check = ws.get(f"F{row_index}:H{row_index}")
+        check_row = check[0] if check else []
+        if _cell(check_row, 0).lower() != "bestätigt":
+            raise RuntimeError("Die Bestätigung konnte nicht verifiziert werden.")
 
-    # Erst bei finaler Bestätigung fehlende Runner-Einträge ergänzen.
     ensure_runner_entry_if_missing(player1, twitch1)
     ensure_runner_entry_if_missing(player2, twitch2)
 
@@ -505,12 +643,19 @@ def confirm_pending_team(member_id: int, names: list[str]):
 
 
 def decline_pending_team(member_id: int, names: list[str]):
-    ws, row_index, row = find_pending_invite_for_member(member_id, names)
+    with _COOP_WRITE_LOCK:
+        ws, row_index, row = find_pending_invite_for_member(member_id, names)
+        if row_index is None:
+            raise RuntimeError("Für dich liegt keine offene Coop-Einladung vor.")
 
-    if row_index is None:
-        raise RuntimeError("Für dich liegt keine offene Coop-Einladung vor.")
+        live = ws.get(f"A{row_index}:K{row_index}")
+        row = live[0] if live else []
+        if _cell(row, 5).lower() != "offen":
+            raise RuntimeError("Diese Coop-Einladung ist nicht mehr offen.")
+        if _cell(row, 10) != str(member_id):
+            raise RuntimeError("Diese Coop-Einladung gehört nicht zu deinem Discord-Konto.")
 
-    ws.update(f"F{row_index}", [["abgelehnt"]])
+        ws.update(f"F{row_index}", [["abgelehnt"]])
 
     return {
         "team_name": _cell(row, 0),
@@ -521,12 +666,19 @@ def decline_pending_team(member_id: int, names: list[str]):
 
 
 def withdraw_team_for_member(member_id: int, names: list[str]):
-    ws, row_index, row = find_active_team_for_member(member_id, names)
+    with _COOP_WRITE_LOCK:
+        ws, row_index, row = find_active_team_for_member(member_id, names)
+        if row_index is None:
+            raise RuntimeError("Du hast aktuell keine offene oder bestätigte Coop-Anmeldung.")
 
-    if row_index is None:
-        raise RuntimeError("Du hast aktuell keine offene oder bestätigte Coop-Anmeldung.")
+        live = ws.get(f"A{row_index}:K{row_index}")
+        row = live[0] if live else []
+        if _cell(row, 5).lower() not in ACTIVE_STATUSES:
+            raise RuntimeError("Diese Coop-Anmeldung ist nicht mehr aktiv.")
+        if member_id not in _row_member_ids(row):
+            raise RuntimeError("Diese Coop-Anmeldung gehört nicht zu deinem Discord-Konto.")
 
-    ws.update(f"F{row_index}", [["zurückgezogen"]])
+        ws.update(f"F{row_index}", [["zurückgezogen"]])
 
     ids = _row_member_ids(row)
     other_ids = [uid for uid in ids if uid != member_id]
@@ -540,7 +692,7 @@ def withdraw_team_for_member(member_id: int, names: list[str]):
 
 
 def get_member_coop_status(member_id: int, names: list[str]) -> dict:
-    ws, active_row_index, active_row = find_active_team_for_member(member_id, names)
+    _, active_row_index, active_row = find_active_team_for_member(member_id, names)
     _, invite_row_index, invite_row = find_pending_invite_for_member(member_id, names)
 
     return {
@@ -558,18 +710,11 @@ def build_coop_status_text(member_id: int, names: list[str]) -> str:
     if row is None:
         return "Du hast aktuell keine Coop-Anmeldung."
 
-    team_name = _cell(row, 0)
-    player1 = _cell(row, 1)
-    player2 = _cell(row, 2)
-    twitch1 = _cell(row, 3)
-    twitch2 = _cell(row, 4)
-    state = _cell(row, 5)
-
     return (
-        f"**Team:** {team_name}\n"
-        f"**Spieler 1:** {player1} ({twitch1 or '-'})\n"
-        f"**Spieler 2:** {player2} ({twitch2 or '-'})\n"
-        f"**Status:** {state}\n"
+        f"**Team:** {_cell(row, 0)}\n"
+        f"**Spieler 1:** {_cell(row, 1)} ({_cell(row, 3) or '-'})\n"
+        f"**Spieler 2:** {_cell(row, 2)} ({_cell(row, 4) or '-'})\n"
+        f"**Status:** {_cell(row, 5)}\n"
     )
 
 
@@ -581,7 +726,6 @@ def get_admin_team_rows() -> list[dict]:
         status = _cell(row, 5).lower()
         if status not in ACTIVE_STATUSES:
             continue
-
         out.append(
             {
                 "row": row_index,
@@ -596,13 +740,14 @@ def get_admin_team_rows() -> list[dict]:
 
 
 def admin_remove_team(row_index: int):
-    ws = ensure_coop_sheet_structure()
-    row = ws.row_values(row_index)
+    with _COOP_WRITE_LOCK:
+        ws = ensure_coop_sheet_structure()
+        values = ws.get(f"A{row_index}:K{row_index}")
+        row = values[0] if values else []
+        if not row:
+            raise RuntimeError("Teamzeile nicht gefunden.")
 
-    if not row:
-        raise RuntimeError("Teamzeile nicht gefunden.")
-
-    ws.update(f"F{row_index}", [["entfernt"]])
+        ws.update(f"F{row_index}", [["entfernt"]])
 
     return {
         "team": _cell(row, 0),
@@ -627,6 +772,10 @@ async def try_send_dm(user, text: str) -> bool:
     except Exception:
         return False
 
+
+# =========================================================
+# DISCORD UI
+# =========================================================
 
 class OwnerView(discord.ui.View):
     def __init__(self, owner_id: int, timeout: float = 1800):
@@ -696,7 +845,6 @@ class CoopTeamModal(discord.ui.Modal, title="Coop-Team anmelden"):
 
         if twitch_self_default:
             self.twitch_self.default = twitch_self_default
-
         if twitch_partner_default:
             self.twitch_partner.default = twitch_partner_default
 
@@ -720,25 +868,22 @@ class CoopTeamModal(discord.ui.Modal, title="Coop-Team anmelden"):
                 f"**{result['player1']}** möchte mit dir als Team "
                 f"**{result['team_name']}** an der Coop League teilnehmen.\n\n"
                 "Die Anmeldung ist erst final, wenn du zustimmst.\n"
-                "Bitte öffne auf dem TFL-Server **/player → Saisonmeldung → Coop League** "
-                "und bestätige dort die Einladung."
+                "Öffne **/player → 👥 Coop → Coop-Menü → Einladung prüfen**."
             )
 
             dm_sent = await try_send_dm(self.partner, dm_text)
-
             extra = (
-                "\n\nDer Mitspieler wurde per DM informiert."
+                "\n\n✅ Der Mitspieler wurde per DM informiert."
                 if dm_sent
                 else (
-                    "\n\n⚠️ Ich konnte dem Mitspieler keine DM schicken. "
-                    "Bitte informiere ihn selbst, dass er die Einladung über "
-                    "**/player → Saisonmeldung → Coop League** bestätigen muss."
+                    "\n\n⚠️ Die DM konnte nicht zugestellt werden. "
+                    "Die Einladung liegt trotzdem sicher im Coop-Menü vor."
                 )
             )
 
             await interaction.edit_original_response(
                 content=(
-                    f"✅ Coop-Anmeldung angelegt.\n\n"
+                    "✅ Coop-Anmeldung angelegt.\n\n"
                     f"**Team:** {result['team_name']}\n"
                     f"**Spieler 1:** {result['player1']}\n"
                     f"**Spieler 2:** {result['player2']}\n"
@@ -746,10 +891,9 @@ class CoopTeamModal(discord.ui.Modal, title="Coop-Team anmelden"):
                     f"{extra}"
                 )
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                content=f"❌ Coop-Anmeldung konnte nicht angelegt werden: {e}"
+                content=f"❌ Coop-Anmeldung konnte nicht angelegt werden: {exc}"
             )
 
 
@@ -817,13 +961,11 @@ class CoopInviteDecisionView(OwnerView):
     @discord.ui.button(label="Bestätigen", style=discord.ButtonStyle.success, row=0)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
             result = await asyncio.to_thread(
                 confirm_pending_team,
@@ -831,21 +973,18 @@ class CoopInviteDecisionView(OwnerView):
                 get_member_names(member),
             )
 
-            if result.get("player1_id"):
-                try:
-                    creator = interaction.guild.get_member(result["player1_id"])
-                    if creator:
-                        await try_send_dm(
-                            creator,
-                            (
-                                "✅ **Coop-League-Anmeldung bestätigt**\n\n"
-                                f"**{result['player2']}** hat eure Anmeldung bestätigt.\n"
-                                f"**Team:** {result['team_name']}\n\n"
-                                "Euer Team ist damit final angemeldet."
-                            ),
-                        )
-                except Exception:
-                    pass
+            if result.get("player1_id") and interaction.guild:
+                creator = interaction.guild.get_member(result["player1_id"])
+                if creator:
+                    await try_send_dm(
+                        creator,
+                        (
+                            "✅ **Coop-League-Anmeldung bestätigt**\n\n"
+                            f"**{result['player2']}** hat eure Anmeldung bestätigt.\n"
+                            f"**Team:** {result['team_name']}\n\n"
+                            "Euer Team ist damit final angemeldet."
+                        ),
+                    )
 
             await interaction.edit_original_response(
                 embed=menu_embed(
@@ -859,10 +998,9 @@ class CoopInviteDecisionView(OwnerView):
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🤝 Coop League", f"Fehler: {exc}"),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -870,13 +1008,11 @@ class CoopInviteDecisionView(OwnerView):
     @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, row=0)
     async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
             result = await asyncio.to_thread(
                 decline_pending_team,
@@ -884,20 +1020,17 @@ class CoopInviteDecisionView(OwnerView):
                 get_member_names(member),
             )
 
-            if result.get("player1_id"):
-                try:
-                    creator = interaction.guild.get_member(result["player1_id"])
-                    if creator:
-                        await try_send_dm(
-                            creator,
-                            (
-                                "❌ **Coop-League-Einladung abgelehnt**\n\n"
-                                f"**{result['player2']}** hat die Anmeldung für "
-                                f"**{result['team_name']}** abgelehnt."
-                            ),
-                        )
-                except Exception:
-                    pass
+            if result.get("player1_id") and interaction.guild:
+                creator = interaction.guild.get_member(result["player1_id"])
+                if creator:
+                    await try_send_dm(
+                        creator,
+                        (
+                            "❌ **Coop-League-Einladung abgelehnt**\n\n"
+                            f"**{result['player2']}** hat die Anmeldung für "
+                            f"**{result['team_name']}** abgelehnt."
+                        ),
+                    )
 
             await interaction.edit_original_response(
                 embed=menu_embed(
@@ -907,10 +1040,9 @@ class CoopInviteDecisionView(OwnerView):
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🤝 Coop League", f"Fehler: {exc}"),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -920,13 +1052,11 @@ class CoopWithdrawConfirmView(OwnerView):
     @discord.ui.button(label="Ja, zurückziehen", style=discord.ButtonStyle.danger, row=0)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
             result = await asyncio.to_thread(
                 withdraw_team_for_member,
@@ -934,17 +1064,18 @@ class CoopWithdrawConfirmView(OwnerView):
                 get_member_names(member),
             )
 
-            for other_id in result.get("other_ids", []):
-                other = interaction.guild.get_member(other_id)
-                if other:
-                    await try_send_dm(
-                        other,
-                        (
-                            "⚠️ **Coop-Anmeldung zurückgezogen**\n\n"
-                            f"Die Anmeldung des Teams **{result['team_name']}** "
-                            "wurde von deinem Teampartner zurückgezogen."
-                        ),
-                    )
+            if interaction.guild:
+                for other_id in result.get("other_ids", []):
+                    other = interaction.guild.get_member(other_id)
+                    if other:
+                        await try_send_dm(
+                            other,
+                            (
+                                "⚠️ **Coop-Anmeldung zurückgezogen**\n\n"
+                                f"Die Anmeldung des Teams **{result['team_name']}** "
+                                "wurde von deinem Teampartner zurückgezogen."
+                            ),
+                        )
 
             await interaction.edit_original_response(
                 embed=menu_embed(
@@ -954,10 +1085,9 @@ class CoopWithdrawConfirmView(OwnerView):
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🤝 Coop League", f"Fehler: {exc}"),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -975,14 +1105,13 @@ class CoopMenuView(OwnerView):
     @discord.ui.button(label="Team anmelden", style=discord.ButtonStyle.success, row=0)
     async def signup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
+            # Nur eigenen Status + Anmeldung offen/Limit vorpruefen.
             await asyncio.to_thread(
                 validate_new_team,
                 member.id,
@@ -990,20 +1119,9 @@ class CoopMenuView(OwnerView):
                 -1,
                 [],
             )
-        except RuntimeError as e:
-            # Bei der Vorprüfung ist Partner -1 absichtlich noch nicht vorhanden.
-            # Nur Fehler für Anmeldung/Teamlimit/eigenes Team weitergeben.
-            text = str(e)
-            if "Mitspieler" not in text:
-                await interaction.edit_original_response(
-                    embed=menu_embed("🤝 Coop League", text),
-                    view=CoopMenuView(owner_id=interaction.user.id),
-                    content=None,
-                )
-                return
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {e}"),
+                embed=menu_embed("🤝 Coop League", str(exc)),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1011,7 +1129,6 @@ class CoopMenuView(OwnerView):
 
         try:
             runner_mapping = await asyncio.to_thread(get_runner_mapping)
-
             await interaction.edit_original_response(
                 embed=menu_embed(
                     "🤝 Coop League → Team anmelden",
@@ -1028,10 +1145,9 @@ class CoopMenuView(OwnerView):
                 ),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {e}"),
+                embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {exc}"),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1039,13 +1155,11 @@ class CoopMenuView(OwnerView):
     @discord.ui.button(label="Meine Anmeldung", style=discord.ButtonStyle.primary, row=0)
     async def status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
             status = await asyncio.to_thread(
                 get_member_coop_status,
@@ -1064,7 +1178,6 @@ class CoopMenuView(OwnerView):
                     f"**Mitspieler:** {_cell(invite_row, 2)}\n\n"
                     "Bitte bestätige oder lehne die Einladung ab."
                 )
-
                 await interaction.edit_original_response(
                     embed=menu_embed("🤝 Coop League → Einladung", text),
                     view=CoopInviteDecisionView(owner_id=interaction.user.id),
@@ -1087,10 +1200,9 @@ class CoopMenuView(OwnerView):
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {e}"),
+                embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {exc}"),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1098,13 +1210,11 @@ class CoopMenuView(OwnerView):
     @discord.ui.button(label="Einladung prüfen", style=discord.ButtonStyle.primary, row=1)
     async def invite_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
             _, row_index, row = await asyncio.to_thread(
                 find_pending_invite_for_member,
@@ -1136,10 +1246,9 @@ class CoopMenuView(OwnerView):
                 view=CoopInviteDecisionView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {e}"),
+                embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {exc}"),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1147,13 +1256,11 @@ class CoopMenuView(OwnerView):
     @discord.ui.button(label="Anmeldung zurückziehen", style=discord.ButtonStyle.danger, row=1)
     async def withdraw_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
-
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
         try:
             _, row_index, row = await asyncio.to_thread(
                 find_active_team_for_member,
@@ -1184,10 +1291,9 @@ class CoopMenuView(OwnerView):
                 view=CoopWithdrawConfirmView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🤝 Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🤝 Coop League", f"Fehler: {exc}"),
                 view=CoopMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1203,7 +1309,6 @@ class CoopMenuView(OwnerView):
 
 async def open_coop_menu_from_player(interaction: discord.Interaction):
     member = interaction.user
-
     if not isinstance(member, discord.Member):
         await interaction.response.send_message(
             "Diese Funktion ist nur auf dem TFL-Server verfügbar.",
@@ -1212,23 +1317,33 @@ async def open_coop_menu_from_player(interaction: discord.Interaction):
         return
 
     await interaction.response.defer()
-
     try:
         config = await asyncio.to_thread(get_coop_config)
         _, rows = await asyncio.to_thread(get_coop_rows)
         counts = coop_status_counts(rows)
 
-        limit_text = (
-            str(config["max_teams"])
-            if config["max_teams"] is not None
-            else "unbegrenzt"
+        limit_text = str(config["max_teams"]) if config["max_teams"] is not None else "unbegrenzt"
+        status = await asyncio.to_thread(
+            get_member_coop_status,
+            member.id,
+            get_member_names(member),
         )
+
+        own_status = "keine Anmeldung"
+        if status.get("invite_row") is not None:
+            own_status = f"Einladung für **{_cell(status['invite_row'], 0)}** wartet auf dich"
+        elif status.get("active_row") is not None:
+            own_status = (
+                f"**{_cell(status['active_row'], 0)}** "
+                f"({_cell(status['active_row'], 5)})"
+            )
 
         text = (
             f"**Anmeldung:** {'offen' if config['open'] else 'geschlossen'}\n"
             f"**Bestätigte Teams:** {counts['bestätigt']}\n"
             f"**Offene Einladungen:** {counts['offen']}\n"
-            f"**Reservierte Plätze:** {counts['reserviert']} / {limit_text}\n\n"
+            f"**Reservierte Plätze:** {counts['reserviert']} / {limit_text}\n"
+            f"**Dein Status:** {own_status}\n\n"
             "Ein Team ist erst final angemeldet, wenn **beide Spieler zugestimmt** haben."
         )
 
@@ -1237,10 +1352,9 @@ async def open_coop_menu_from_player(interaction: discord.Interaction):
             view=CoopMenuView(owner_id=interaction.user.id),
             content=None,
         )
-
-    except Exception as e:
+    except Exception as exc:
         await interaction.edit_original_response(
-            embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {e}"),
+            embed=menu_embed("🤝 Coop League", f"Fehler beim Laden: {exc}"),
             view=back_to_season_view(interaction.user.id),
             content=None,
         )
@@ -1269,7 +1383,6 @@ class AdminOwnerView(OwnerView):
                 ephemeral=True,
             )
             return False
-
         return True
 
 
@@ -1287,7 +1400,6 @@ class CoopLimitModal(discord.ui.Modal, title="Coop-Teamlimit setzen"):
             return
 
         raw = str(self.limit.value).strip()
-
         try:
             value = int(raw)
             if value < 0:
@@ -1300,21 +1412,15 @@ class CoopLimitModal(discord.ui.Modal, title="Coop-Teamlimit setzen"):
             return
 
         await interaction.response.defer(ephemeral=True)
-
         try:
-            await asyncio.to_thread(
-                set_coop_team_limit,
-                None if value == 0 else value,
-            )
-
+            await asyncio.to_thread(set_coop_team_limit, None if value == 0 else value)
             text = "unbegrenzt" if value == 0 else str(value)
             await interaction.edit_original_response(
                 content=f"✅ Coop-Teamlimit auf **{text}** gesetzt."
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                content=f"❌ Teamlimit konnte nicht gesetzt werden: {e}"
+                content=f"❌ Teamlimit konnte nicht gesetzt werden: {exc}"
             )
 
 
@@ -1328,7 +1434,6 @@ class CoopAdminRemoveSelect(discord.ui.Select):
             )
             for item in teams[:25]
         ]
-
         super().__init__(
             placeholder="Team auswählen …",
             min_values=1,
@@ -1344,10 +1449,8 @@ class CoopAdminRemoveSelect(discord.ui.Select):
 
         row_index = int(self.values[0])
         await interaction.response.defer()
-
         try:
             result = await asyncio.to_thread(admin_remove_team, row_index)
-
             await interaction.edit_original_response(
                 embed=menu_embed(
                     "🟨 Administration → Coop League",
@@ -1359,13 +1462,9 @@ class CoopAdminRemoveSelect(discord.ui.Select):
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed(
-                    "🟨 Administration → Coop League",
-                    f"Fehler: {e}",
-                ),
+                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {exc}"),
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1390,7 +1489,6 @@ class CoopAdminMenuView(AdminOwnerView):
     @discord.ui.button(label="Anmeldung öffnen", style=discord.ButtonStyle.success, row=0)
     async def open_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-
         try:
             await asyncio.to_thread(set_coop_open_state, True)
             await interaction.edit_original_response(
@@ -1401,9 +1499,9 @@ class CoopAdminMenuView(AdminOwnerView):
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {exc}"),
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1411,7 +1509,6 @@ class CoopAdminMenuView(AdminOwnerView):
     @discord.ui.button(label="Anmeldung schließen", style=discord.ButtonStyle.danger, row=0)
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-
         try:
             await asyncio.to_thread(set_coop_open_state, False)
             await interaction.edit_original_response(
@@ -1425,9 +1522,9 @@ class CoopAdminMenuView(AdminOwnerView):
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {exc}"),
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1439,7 +1536,6 @@ class CoopAdminMenuView(AdminOwnerView):
     @discord.ui.button(label="Status / Anmeldungen", style=discord.ButtonStyle.primary, row=1)
     async def status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-
         try:
             config = await asyncio.to_thread(get_coop_config)
             _, rows = await asyncio.to_thread(get_coop_rows)
@@ -1453,12 +1549,7 @@ class CoopAdminMenuView(AdminOwnerView):
                         f"• **{_cell(row, 0)}** – {_cell(row, 1)} & {_cell(row, 2)} ({status})"
                     )
 
-            limit_text = (
-                str(config["max_teams"])
-                if config["max_teams"] is not None
-                else "unbegrenzt"
-            )
-
+            limit_text = str(config["max_teams"]) if config["max_teams"] is not None else "unbegrenzt"
             text = (
                 f"**Anmeldung:** {'offen' if config['open'] else 'geschlossen'}\n"
                 f"**Teamlimit:** {limit_text}\n"
@@ -1473,10 +1564,9 @@ class CoopAdminMenuView(AdminOwnerView):
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {exc}"),
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1484,10 +1574,8 @@ class CoopAdminMenuView(AdminOwnerView):
     @discord.ui.button(label="Team entfernen", style=discord.ButtonStyle.danger, row=2)
     async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-
         try:
             teams = await asyncio.to_thread(get_admin_team_rows)
-
             if not teams:
                 await interaction.edit_original_response(
                     embed=menu_embed(
@@ -1510,10 +1598,9 @@ class CoopAdminMenuView(AdminOwnerView):
                 ),
                 content=None,
             )
-
-        except Exception as e:
+        except Exception as exc:
             await interaction.edit_original_response(
-                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {e}"),
+                embed=menu_embed("🟨 Administration → Coop League", f"Fehler: {exc}"),
                 view=CoopAdminMenuView(owner_id=interaction.user.id),
                 content=None,
             )
@@ -1536,18 +1623,12 @@ async def open_coop_admin_from_player(interaction: discord.Interaction):
         return
 
     await interaction.response.defer()
-
     try:
         config = await asyncio.to_thread(get_coop_config)
         _, rows = await asyncio.to_thread(get_coop_rows)
         counts = coop_status_counts(rows)
 
-        limit_text = (
-            str(config["max_teams"])
-            if config["max_teams"] is not None
-            else "unbegrenzt"
-        )
-
+        limit_text = str(config["max_teams"]) if config["max_teams"] is not None else "unbegrenzt"
         await interaction.edit_original_response(
             embed=menu_embed(
                 "🟨 Administration → Coop League",
@@ -1556,18 +1637,19 @@ async def open_coop_admin_from_player(interaction: discord.Interaction):
                     f"**Teamlimit:** {limit_text}\n"
                     f"**Bestätigte Teams:** {counts['bestätigt']}\n"
                     f"**Offene Einladungen:** {counts['offen']}\n"
-                    f"**Reservierte Plätze:** {counts['reserviert']}"
+                    f"**Reservierte Plätze:** {counts['reserviert']}\n\n"
+                    f"**Anmeldedaten:** `{COOP_SIGNUP_SHEET}`\n"
+                    f"**Konfiguration:** `{COOP_CONFIG_SHEET}`"
                 ),
             ),
             view=CoopAdminMenuView(owner_id=interaction.user.id),
             content=None,
         )
-
-    except Exception as e:
+    except Exception as exc:
         await interaction.edit_original_response(
             embed=menu_embed(
                 "🟨 Administration → Coop League",
-                f"Fehler beim Laden: {e}",
+                f"Fehler beim Laden: {exc}",
             ),
             view=back_to_admin_view(interaction.user.id),
             content=None,
