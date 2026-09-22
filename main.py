@@ -10,6 +10,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
 from aiohttp import web
 from datetime import datetime as dt, timedelta
+from sheets_connection import get_season_worksheet
 
 # =========================================================
 # .env laden / Konfiguration
@@ -168,7 +169,7 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp = web.json_response({"items": data[:n]})
         return add_cors(resp)
 
-        @routes.get("/api/results")
+    @routes.get("/api/results")
     async def api_results(request: web.Request):
         try:
             n = int(request.query.get("n", "5"))
@@ -228,6 +229,97 @@ async def _build_web_app(client: discord.Client) -> web.Application:
         resp = web.json_response({"items": items[:n]})
         return add_cors(resp)
 
+    @routes.get("/api/results-db")
+    async def api_results_db(request: web.Request):
+        """
+        Liefert Liga-Ergebnisse direkt aus dem aktuellen Divisions-Sheet.
+
+        Sheet-Spalten:
+        B = Datum/Uhrzeit
+        C = Modus
+        D = Spieler 1
+        E = Ergebnis
+        F = Spieler 2
+        G = Racetime-Link
+        H = Eingetragen von
+        """
+        division = str(request.query.get("division", "") or "").strip()
+
+        if division not in {"1", "2", "3", "4", "5", "6"}:
+            resp = web.json_response({"items": [], "count": 0})
+            return add_cors(resp)
+
+        try:
+            limit = int(request.query.get("limit", "50"))
+        except Exception:
+            limit = 50
+
+        limit = max(1, min(336, limit))
+
+        try:
+            ws = get_season_worksheet(f"{division}.DIV")
+            rows = await asyncio.to_thread(ws.get_all_values)
+
+            items = []
+
+            for row in rows[1:]:
+                date_value = _cell(row, 1)   # B
+                mode = _cell(row, 2)         # C
+                player1 = _cell(row, 3)      # D
+                score = _cell(row, 4)        # E
+                player2 = _cell(row, 5)      # F
+                link = _cell(row, 6)         # G
+                reporter = _cell(row, 7)     # H
+
+                if not date_value or not player1 or not player2 or not score:
+                    continue
+
+                score_norm = score.strip().lower()
+
+                if score_norm in {"vs", "-", "–", "—"} or "vs" in score_norm:
+                    continue
+
+                items.append({
+                    "date": date_value,
+                    "player1": player1,
+                    "score": score,
+                    "player2": player2,
+                    "mode": mode,
+                    "link": link,
+                    "reporter": reporter,
+                })
+
+            items = items[-limit:][::-1]
+
+            print(
+                f"[API] /api/results-db division={division}: "
+                f"{len(items)} Ergebnisse direkt aus {division}.DIV"
+            )
+
+            resp = web.json_response({
+                "items": items,
+                "count": len(items),
+            })
+            return add_cors(resp)
+
+        except Exception as e:
+            print(
+                f"[API] /api/results-db Fehler division={division}: "
+                f"{type(e).__name__}: {e}"
+            )
+            resp = web.json_response(
+                {
+                    "items": [],
+                    "count": 0,
+                    "error": "sheet_read_failed",
+                },
+                status=500,
+            )
+            return add_cors(resp)
+
+    app = web.Application()
+    app.add_routes(routes)
+    return app
 
 
 async def start_webserver(client: discord.Client):
@@ -244,7 +336,7 @@ async def start_webserver(client: discord.Client):
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(
-        f"[WEB] running on 0.0.0.0:{port}   endpoints: /health, /api/upcoming, /api/results",
+        f"[WEB] running on 0.0.0.0:{port}   endpoints: /health, /api/upcoming, /api/results, /api/results-db",
     )
 
 
