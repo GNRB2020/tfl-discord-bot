@@ -4,6 +4,7 @@ import asyncio
 import re
 import sys
 import time
+import traceback
 import uuid
 from threading import RLock
 from dataclasses import dataclass
@@ -116,6 +117,11 @@ def _invalidate_prefixes(ws, fallback: str) -> list[str]:
 
 
 def _ensure_offer_store_ws():
+    """Liefert das Persistenz-Sheet und stellt A:J sicher.
+
+    Wichtig: Terminangebote benutzen ausschließlich A:J. Schreibzugriffe laufen
+    über sheet_write_call, damit Quota-/Retry-Schutz auch hier greift.
+    """
     global _OFFER_STORE_WS
 
     with _OFFER_STORE_LOCK:
@@ -132,13 +138,21 @@ def _ensure_offer_store_ws():
                 ws = spreadsheet.add_worksheet(
                     title=OFFER_STORE_SHEET,
                     rows=1000,
-                    cols=len(OFFER_STORE_HEADERS),
+                    cols=max(10, len(OFFER_STORE_HEADERS)),
                 )
-                ws.update(
-                    f"A1:J1",
-                    [OFFER_STORE_HEADERS],
+                sheet_write_call(
+                    lambda: ws.update("A1:J1", [OFFER_STORE_HEADERS]),
+                    invalidate_prefixes=_invalidate_prefixes(ws, OFFER_STORE_SHEET),
                 )
                 print(f"✅ [TERMINBÖRSE] Sheet '{OFFER_STORE_SHEET}' angelegt")
+
+        # Falls ein altes Blatt weniger als 10 Spalten besitzt, erweitern.
+        try:
+            current_cols = int(getattr(ws, "col_count", 0) or 0)
+            if current_cols < 10:
+                ws.add_cols(10 - current_cols)
+        except Exception:
+            pass
 
         try:
             header = ws.row_values(1)
@@ -146,14 +160,13 @@ def _ensure_offer_store_ws():
             header = []
 
         if header[: len(OFFER_STORE_HEADERS)] != OFFER_STORE_HEADERS:
-            ws.update(
-                "A1:J1",
-                [OFFER_STORE_HEADERS],
+            sheet_write_call(
+                lambda: ws.update("A1:J1", [OFFER_STORE_HEADERS]),
+                invalidate_prefixes=_invalidate_prefixes(ws, OFFER_STORE_SHEET),
             )
 
         _OFFER_STORE_WS = ws
         return ws
-
 
 def _offer_store_all_values() -> list[list[str]]:
     ws = _ensure_offer_store_ws()
@@ -170,7 +183,13 @@ def _offer_status_for_view(view, slot_index: int) -> str:
 
 
 def _persist_offer_rows(view) -> None:
-    """Legt/aktualisiert alle Slots eines Terminangebots im Persistenz-Sheet."""
+    """Legt/aktualisiert alle Slots eines Terminangebots in A:J ab.
+
+    Kein append_rows(): Die Zielzeilen werden explizit bestimmt. Dadurch kann
+    Google Sheets das Angebot nicht anhand anderer Tabellenbereiche an eine
+    unerwartete Stelle verschieben. Alle Writes laufen über den zentralen
+    Retry-/Quota-Schutz.
+    """
     if view.channel_id is None or view.message_id is None:
         raise RuntimeError("Terminangebot hat noch keine Discord-Nachricht.")
 
@@ -180,7 +199,11 @@ def _persist_offer_rows(view) -> None:
     with _OFFER_STORE_LOCK:
         values = ws.get_all_values()
         existing: dict[int, int] = {}
+        last_used_row = 1
+
         for row_index, row in enumerate(values[1:], start=2):
+            if any(_cell(row, i) for i in range(10)):
+                last_used_row = row_index
             if _cell(row, 0) != view.offer_id:
                 continue
             try:
@@ -189,7 +212,9 @@ def _persist_offer_rows(view) -> None:
                 continue
             existing[slot_index] = row_index
 
-        append_rows = []
+        requests = []
+        next_row = max(2, last_used_row + 1)
+
         for slot in view.slots:
             status = _offer_status_for_view(view, slot.index)
             row_values = [
@@ -204,28 +229,23 @@ def _persist_offer_rows(view) -> None:
                 status,
                 now_text,
             ]
+
             row_index = existing.get(slot.index)
             if row_index is None:
-                append_rows.append(row_values)
-            else:
-                ws.update(f"A{row_index}:J{row_index}", [row_values])
-                view.store_rows[slot.index] = row_index
+                row_index = next_row
+                next_row += 1
 
-        if append_rows:
-            ws.append_rows(append_rows, value_input_option="RAW")
+            requests.append({
+                "range": f"A{row_index}:J{row_index}",
+                "values": [row_values],
+            })
+            view.store_rows[slot.index] = row_index
 
-            # Nach dem Append nochmals auflösen. Dadurch bleibt die Zuordnung auch
-            # korrekt, wenn mehrere Angebote kurz nacheinander gespeichert werden.
-            values = ws.get_all_values()
-            for row_index, row in enumerate(values[1:], start=2):
-                if _cell(row, 0) != view.offer_id:
-                    continue
-                try:
-                    slot_index = int(_cell(row, 6))
-                except ValueError:
-                    continue
-                view.store_rows[slot_index] = row_index
-
+        if requests:
+            sheet_write_call(
+                lambda: ws.batch_update(requests),
+                invalidate_prefixes=_invalidate_prefixes(ws, OFFER_STORE_SHEET),
+            )
 
 def _persist_offer_slot_state(view, slot_index: int) -> None:
     ws = _ensure_offer_store_ws()
@@ -241,9 +261,12 @@ def _persist_offer_slot_state(view, slot_index: int) -> None:
         if row_index is None:
             raise RuntimeError("Persistenzzeile für Terminangebot nicht gefunden.")
 
-        ws.update(
-            f"I{row_index}:J{row_index}",
-            [[status, now_text]],
+        sheet_write_call(
+            lambda: ws.update(
+                f"I{row_index}:J{row_index}",
+                [[status, now_text]],
+            ),
+            invalidate_prefixes=_invalidate_prefixes(ws, OFFER_STORE_SHEET),
         )
 
 
@@ -795,7 +818,11 @@ async def _get_division_channel(client: discord.Client, division: int):
 
     try:
         return await client.fetch_channel(channel_id)
-    except Exception:
+    except Exception as exc:
+        print(
+            f"❌ [TERMINBÖRSE] Divisionschat für Div {division} "
+            f"(Channel-ID {channel_id}) nicht erreichbar: {type(exc).__name__}: {exc}"
+        )
         return None
 
 
@@ -992,8 +1019,13 @@ class OfferConfirmView(discord.ui.View):
     @discord.ui.button(label="Termine anbieten", style=discord.ButtonStyle.success)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        stage = "Vorprüfung"
 
         try:
+            print(
+                f"[TERMINBÖRSE] Veröffentlichung gestartet: "
+                f"{self.profile.player_name}, Div {self.profile.division}, {len(self.slots)} Slot(s)"
+            )
             # Vor Veröffentlichung nochmals prüfen: zwischen Modal und Bestätigung
             # kann bereits ein anderer Termin eingetragen worden sein.
             for slot in self.slots:
@@ -1014,6 +1046,7 @@ class OfferConfirmView(discord.ui.View):
                     self.stop()
                     return
 
+            stage = "Divisionschat ermitteln"
             channel = await _get_division_channel(interaction.client, self.profile.division)
             if channel is None or not hasattr(channel, "send"):
                 await interaction.edit_original_response(
@@ -1030,6 +1063,7 @@ class OfferConfirmView(discord.ui.View):
                 slots=self.slots,
             )
 
+            stage = "Discord-Post erstellen"
             message = await channel.send(
                 content=view.render_public_content(),
                 view=view,
@@ -1037,6 +1071,7 @@ class OfferConfirmView(discord.ui.View):
             view.message_id = message.id
             view.channel_id = message.channel.id
 
+            stage = "Terminangebote speichern"
             try:
                 await asyncio.to_thread(_persist_offer_rows, view)
             except Exception:
@@ -1050,7 +1085,12 @@ class OfferConfirmView(discord.ui.View):
                 )
 
             _OFFER_VIEWS[(message.channel.id, message.id)] = view
+            print(
+                f"✅ [TERMINBÖRSE] Angebot veröffentlicht: "
+                f"Div {self.profile.division}, Message {message.id}, Offer {view.offer_id}"
+            )
 
+            stage = "Bestätigung anzeigen"
             await interaction.edit_original_response(
                 content=(
                     f"✅ Deine {len(self.slots)} Termin"
@@ -1061,8 +1101,14 @@ class OfferConfirmView(discord.ui.View):
             )
             self.stop()
         except Exception as exc:
+            print(f"❌ [TERMINBÖRSE] Fehler in Schritt '{stage}': {type(exc).__name__}: {exc}")
+            traceback.print_exc()
             await interaction.edit_original_response(
-                content=f"❌ Terminangebot konnte nicht veröffentlicht werden: {exc}",
+                content=(
+                    f"❌ Terminangebot konnte nicht veröffentlicht werden.\n"
+                    f"**Schritt:** {stage}\n"
+                    f"**Fehler:** {type(exc).__name__}: {exc}"
+                ),
                 view=None,
             )
             self.stop()
