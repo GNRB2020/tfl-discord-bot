@@ -951,7 +951,7 @@ class TermOfferModal(discord.ui.Modal, title="Race-Termine anbieten"):
             await interaction.response.send_message("\n".join(errors), ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
             profile = await asyncio.to_thread(find_member_profile, interaction.user)
@@ -1197,7 +1197,7 @@ class TermOfferView(discord.ui.View):
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
             reactor = await asyncio.to_thread(find_member_profile, interaction.user)
@@ -2487,7 +2487,7 @@ async def _send_schedule_change_approval_request(
     # aus dem /player-Dashboard aufgerufen. Dashboard-Aktionen können bereits
     # deferred sein; eine zweite Interaction-Response würde dann fehlschlagen.
     if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
     guild = interaction.guild
     if guild is None:
