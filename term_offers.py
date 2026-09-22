@@ -1935,6 +1935,296 @@ async def _recover_legacy_after_ready(
         print(f"⚠️ [TERMINBÖRSE] Legacy-Migration fehlgeschlagen: {exc}")
 
 
+
+
+def _parse_legacy_mode_choice_message(content: str):
+    """Liest eine Modus-DM aus der Version vor TerminModusAnfragen.
+
+    Alte Modus-DMs enthielten bereits Paarung und Termin, hatten aber keine
+    persistente request_id. Diese Informationen reichen zusammen mit dem
+    Terminangebote-Sheet und dem Divisionsspielplan für eine eindeutige
+    Rekonstruktion aus.
+    """
+    text = content or ""
+    home = away = timestamp = ""
+    selected_mode = None
+
+    for raw_line in text.splitlines():
+        line = clean_text(raw_line)
+        if not line:
+            continue
+
+        m = re.match(r"^\*\*Spiel:\*\*\s*(.+?)\s+vs\.?\s+(.+?)\s*$", line, flags=re.IGNORECASE)
+        if m:
+            home = clean_text(m.group(1)).strip("* ")
+            away = clean_text(m.group(2)).strip("* ")
+            continue
+
+        m = re.match(r"^\*\*Termin:\*\*\s*(.+?)\s*$", line, flags=re.IGNORECASE)
+        if m:
+            value = clean_text(m.group(1)).strip("* ")
+            date_match = re.search(
+                r"(\d{2}\.\d{2}\.\d{4})\s*[–—-]\s*(\d{2}:\d{2})\s*Uhr",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if date_match:
+                timestamp = f"{date_match.group(1)} {date_match.group(2)}"
+            continue
+
+        m = re.match(r"^\*\*Aktuelle Auswahl:\*\*\s*(.+?)\s*$", line, flags=re.IGNORECASE)
+        if m:
+            value = clean_text(m.group(1)).strip("* ")
+            if value and normalize_name(value) not in {"nochnichtgewählt", "nochnichtgewaehlt"}:
+                selected_mode = value
+
+    if not home or not away or not timestamp:
+        return None
+    return {
+        "home": home,
+        "away": away,
+        "timestamp": timestamp,
+        "selected_mode": selected_mode,
+    }
+
+
+async def _find_legacy_mode_dm_for_match(
+    client: discord.Client,
+    *,
+    owner_member: discord.abc.User,
+    home: str,
+    away: str,
+    timestamp: str,
+):
+    """Sucht die jüngste passende alte Modus-DM innerhalb der 24h-Frist."""
+    try:
+        channel = getattr(owner_member, "dm_channel", None)
+        if channel is None:
+            channel = await owner_member.create_dm()
+    except Exception:
+        return None, None
+
+    bot_user_id = getattr(client.user, "id", None)
+    cutoff = dt.now(BERLIN_TZ) - timedelta(seconds=MODE_CHOICE_SECONDS)
+
+    try:
+        async for message in channel.history(limit=50):
+            if bot_user_id is not None and getattr(message.author, "id", None) != bot_user_id:
+                continue
+            created = message.created_at
+            if created.tzinfo is None:
+                created = pytz.UTC.localize(created)
+            created_berlin = created.astimezone(BERLIN_TZ)
+            if created_berlin < cutoff:
+                break
+
+            parsed = _parse_legacy_mode_choice_message(message.content)
+            if parsed is None:
+                continue
+            if clean_text(parsed["timestamp"]) != clean_text(timestamp):
+                continue
+            if normalize_name(parsed["home"]) != normalize_name(home):
+                continue
+            if normalize_name(parsed["away"]) != normalize_name(away):
+                continue
+            return message, parsed
+    except Exception as exc:
+        print(
+            f"⚠️ [TERMINBÖRSE] Legacy-Modus-DMs von {getattr(owner_member, 'id', '?')} "
+            f"konnten nicht gelesen werden: {exc}"
+        )
+    return None, None
+
+
+async def _recover_legacy_mode_requests(client: discord.Client) -> int:
+    """Reaktiviert alte, noch keine 24h alten Modus-DMs.
+
+    Rekonstruktion erfolgt aus drei bereits vorhandenen Quellen:
+      * Terminangebote: Offer/Slot/Discord-Post/Zeitpunkt
+      * Divisionsspielplan: konkrete Heim-/Gast-Begegnung und Zeile
+      * alte Modus-DM: gewählte Begegnung und ggf. bereits gewählter Modus
+
+    Die alte DM wird mit einer neuen persistenten View editiert und anschließend
+    in TerminModusAnfragen gespeichert. Damit ist sie ab dann restartfest.
+    """
+    await client.wait_until_ready()
+    now = dt.now(BERLIN_TZ)
+    recovered = 0
+
+    # Bereits persistierte DMs niemals doppelt migrieren.
+    known_dm_ids = {
+        int(v.dm_message_id)
+        for v in _MODE_REQUEST_VIEWS.values()
+        if getattr(v, "dm_message_id", None)
+    }
+
+    guild = client.get_guild(matchcenter.GUILD_ID)
+    if guild is None:
+        try:
+            guild = await client.fetch_guild(matchcenter.GUILD_ID)
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] Legacy-Modus-Recovery ohne Guild: {exc}")
+            return 0
+
+    for offer_view in list(_OFFER_VIEWS.values()):
+        # Nur wirklich offene Slots der alten Generation betrachten.
+        for slot in list(offer_view.slots):
+            if slot.index in offer_view.booked_slots:
+                continue
+            if slot.index in offer_view.removed_slots:
+                continue
+            if slot.index in offer_view.pending_slots:
+                continue
+            if slot.when <= now:
+                continue
+
+            try:
+                # Alle noch freien Begegnungen des Anbieters in seiner Division.
+                ws = matchcenter.get_div_ws_from_label(f"Div {offer_view.division}")
+                rows = matchcenter.get_matchcenter_values(ws, force_refresh=True)
+                creator_norm = normalize_name(offer_view.creator_name)
+                candidates: list[MatchRow] = []
+
+                for row_index, row in enumerate(rows, start=1):
+                    if row_index == 1:
+                        continue
+                    home = _cell(row, 3)
+                    marker = _cell(row, 4)
+                    away = _cell(row, 5)
+                    when = _cell(row, 1)
+                    if not home or not away or marker.lower() != "vs" or when:
+                        continue
+                    if creator_norm not in {normalize_name(home), normalize_name(away)}:
+                        continue
+                    candidates.append(
+                        MatchRow(
+                            row_index=row_index,
+                            home=home,
+                            away=away,
+                            timestamp="",
+                            marker_or_result=marker,
+                            mode=_cell(row, 2),
+                        )
+                    )
+
+                for match in candidates:
+                    owner = await matchcenter.find_member_by_player_name(guild, match.home)
+                    if owner is None:
+                        continue
+
+                    message, parsed = await _find_legacy_mode_dm_for_match(
+                        client,
+                        owner_member=owner,
+                        home=match.home,
+                        away=match.away,
+                        timestamp=slot.timestamp,
+                    )
+                    if message is None or message.id in known_dm_ids:
+                        continue
+
+                    # Derjenige, der das Angebot angeklickt hat, ist der andere
+                    # Spieler des Matches (der Anbieter kann sein eigenes Angebot
+                    # nicht anklicken).
+                    if normalize_name(match.home) == creator_norm:
+                        requester_name = match.away
+                    else:
+                        requester_name = match.home
+                    requester = await matchcenter.find_member_by_player_name(guild, requester_name)
+                    if requester is None:
+                        continue
+
+                    guest_profile = await asyncio.to_thread(
+                        find_profile_by_player_name,
+                        offer_view.division,
+                        match.away,
+                    )
+                    ban_1 = guest_profile.ban_1 if guest_profile else ""
+                    ban_2 = guest_profile.ban_2 if guest_profile else ""
+                    modes = await asyncio.to_thread(get_division_modes, offer_view.division)
+                    bans = {normalize_name(v) for v in (ban_1, ban_2) if v}
+                    allowed_modes = [m for m in modes if normalize_name(m) not in bans]
+                    if not allowed_modes:
+                        continue
+
+                    created_at = message.created_at
+                    if created_at.tzinfo is None:
+                        created_at = pytz.UTC.localize(created_at)
+                    created_at = created_at.astimezone(BERLIN_TZ)
+                    expires_at = created_at + timedelta(seconds=MODE_CHOICE_SECONDS)
+                    if expires_at <= now:
+                        continue
+
+                    reservation_key = offer_view.reservation_key(slot.index)
+                    request_id = f"legacy{message.id}"
+                    selected_mode = parsed.get("selected_mode") if parsed else None
+                    if selected_mode and normalize_name(selected_mode) not in {
+                        normalize_name(m) for m in allowed_modes
+                    }:
+                        selected_mode = None
+
+                    view = ModeChoiceView(
+                        owner_id=owner.id,
+                        division=offer_view.division,
+                        match=match,
+                        slot=slot,
+                        allowed_modes=allowed_modes,
+                        ban_1=ban_1,
+                        ban_2=ban_2,
+                        reservation_key=reservation_key,
+                        reservation_owner_id=requester.id,
+                        offer_channel_id=offer_view.channel_id,
+                        offer_message_id=offer_view.message_id,
+                        slot_index=slot.index,
+                        request_id=request_id,
+                        created_at=created_at,
+                        expires_at=expires_at,
+                        selected_mode=selected_mode,
+                        status=MODE_REQUEST_PENDING,
+                        dm_channel_id=message.channel.id,
+                        dm_message_id=message.id,
+                    )
+                    view.message = message
+
+                    # Ab hier wird aus der Legacy-DM eine normale persistente
+                    # 24h-Anfrage der neuen Version.
+                    await asyncio.to_thread(_persist_mode_request, view, MODE_REQUEST_PENDING)
+                    await offer_view.mark_pending(client, slot.index)
+                    reserve_slot(
+                        reservation_key,
+                        requester.id,
+                        max(1, int((expires_at - now).total_seconds())),
+                    )
+                    client.add_view(view, message_id=message.id)
+                    _MODE_REQUEST_VIEWS[view.request_id] = view
+                    _schedule_mode_request_expiry(client, view)
+                    await message.edit(content=view.render_text(), view=view)
+                    known_dm_ids.add(message.id)
+                    recovered += 1
+                    print(
+                        f"✅ [TERMINBÖRSE] Legacy-Modus-DM {message.id} reaktiviert: "
+                        f"{match.home} vs. {match.away}, {slot.timestamp}"
+                    )
+                    break
+            except Exception as exc:
+                print(
+                    f"⚠️ [TERMINBÖRSE] Legacy-Modus-Recovery für Offer "
+                    f"{offer_view.offer_id}, Slot {slot.index} fehlgeschlagen: {exc}"
+                )
+
+    print(f"✅ [TERMINBÖRSE] {recovered} alte Modusanfrage(n) reaktiviert")
+    return recovered
+
+
+async def _recover_legacy_mode_after_ready(client: discord.Client) -> None:
+    try:
+        await client.wait_until_ready()
+        await _recover_legacy_mode_requests(client)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ [TERMINBÖRSE] Legacy-Modus-Migration fehlgeschlagen: {exc}")
+
+
 async def restore_persistent_offer_views(client: discord.Client) -> dict:
     """Lädt offene Terminangebote und registriert ihre persistenten Buttons neu.
 
@@ -1975,6 +2265,13 @@ async def restore_persistent_offer_views(client: discord.Client) -> dict:
         )
 
     mode_restored = await _restore_persistent_mode_requests(client)
+
+    # Alte Modus-DMs aus der Version vor TerminModusAnfragen werden nach on_ready
+    # aus DM + Offer-Sheet + Divisionsspielplan rekonstruiert und reaktiviert.
+    if not hasattr(client, "_term_offer_legacy_mode_migration_task"):
+        client._term_offer_legacy_mode_migration_task = asyncio.create_task(
+            _recover_legacy_mode_after_ready(client)
+        )
 
     print(
         f"✅ [TERMINBÖRSE] {restored} persistente Angebotspost(s) und "
