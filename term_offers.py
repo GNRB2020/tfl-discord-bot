@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sys
 import time
@@ -60,7 +61,11 @@ DIVISION_MODE_COLUMNS = {
 
 PROFILE_CACHE_TTL = 60
 MODE_CACHE_TTL = 300
-RESERVATION_SECONDS = 10 * 60
+# Kurze Reservierung während der unmittelbaren Heim-/Gast-Auswahl.
+RESERVATION_SECONDS = 30 * 60
+# Die eigentliche Modusbestätigung darf bewusst lange offen bleiben: Ein
+# Heimspieler kann beim Eingang der DM offline sein.
+MODE_CHOICE_SECONDS = 24 * 60 * 60
 
 # Offene Terminangebote werden zusätzlich im Season-Spreadsheet persistiert.
 # Dadurch können Views und Buttons nach einem Bot-Neustart wieder registriert werden.
@@ -78,14 +83,51 @@ OFFER_STORE_HEADERS = [
     "updated_at",
 ]
 OFFER_STATUS_OPEN = "OPEN"
+OFFER_STATUS_PENDING = "PENDING"
 OFFER_STATUS_BOOKED = "BOOKED"
 OFFER_STATUS_REMOVED = "REMOVED"
 LEGACY_OFFER_SCAN_LIMIT = 500
 
+# Persistente Modus-Anfragen. Damit bleibt eine 24h-Anfrage auch nach einem
+# Bot-/Render-Neustart bedienbar.
+MODE_REQUEST_SHEET = "TerminModusAnfragen"
+MODE_REQUEST_HEADERS = [
+    "request_id",
+    "status",
+    "created_at",
+    "expires_at",
+    "owner_id",
+    "division",
+    "row_index",
+    "home",
+    "away",
+    "slot_timestamp",
+    "allowed_modes_json",
+    "ban_1",
+    "ban_2",
+    "reservation_key",
+    "reservation_owner_id",
+    "offer_channel_id",
+    "offer_message_id",
+    "slot_index",
+    "dm_channel_id",
+    "dm_message_id",
+    "selected_mode",
+    "updated_at",
+]
+MODE_REQUEST_PENDING = "PENDING"
+MODE_REQUEST_COMPLETED = "COMPLETED"
+MODE_REQUEST_EXPIRED = "EXPIRED"
+MODE_REQUEST_CANCELLED = "CANCELLED"
+
 _OFFER_VIEWS: dict[tuple[int, int], "TermOfferView"] = {}
+_MODE_REQUEST_VIEWS: dict[str, "ModeChoiceView"] = {}
+_MODE_REQUEST_EXPIRY_TASKS: dict[str, asyncio.Task] = {}
 _RESERVATIONS: dict[str, tuple[int, float]] = {}
 _OFFER_STORE_WS = None
 _OFFER_STORE_LOCK = RLock()
+_MODE_REQUEST_WS = None
+_MODE_REQUEST_LOCK = RLock()
 
 
 def normalize_name(value: str | None) -> str:
@@ -179,6 +221,8 @@ def _offer_status_for_view(view, slot_index: int) -> str:
         return OFFER_STATUS_BOOKED
     if slot_index in view.removed_slots:
         return OFFER_STATUS_REMOVED
+    if slot_index in getattr(view, "pending_slots", set()):
+        return OFFER_STATUS_PENDING
     return OFFER_STATUS_OPEN
 
 
@@ -302,6 +346,7 @@ def _load_persisted_offer_records() -> list[dict]:
                 "slots": [],
                 "booked_slots": set(),
                 "removed_slots": set(),
+                "pending_slots": set(),
                 "store_rows": {},
             },
         )
@@ -311,6 +356,8 @@ def _load_persisted_offer_records() -> list[dict]:
             record["booked_slots"].add(slot_index)
         elif status == OFFER_STATUS_REMOVED:
             record["removed_slots"].add(slot_index)
+        elif status == OFFER_STATUS_PENDING:
+            record["pending_slots"].add(slot_index)
 
     out = []
     for record in grouped.values():
@@ -577,6 +624,242 @@ def _parse_offer_datetime(value: str) -> dt:
     return BERLIN_TZ.localize(parsed)
 
 
+def _mode_request_time_text(value: dt) -> str:
+    return value.astimezone(BERLIN_TZ).isoformat(timespec="seconds")
+
+
+def _parse_mode_request_time(value: str) -> dt:
+    parsed = dt.fromisoformat(clean_text(value))
+    if parsed.tzinfo is None:
+        parsed = BERLIN_TZ.localize(parsed)
+    return parsed.astimezone(BERLIN_TZ)
+
+
+def _ensure_mode_request_ws():
+    """Persistenz für 24h-Modusfreigaben.
+
+    Das Sheet wird getrennt von ``Terminangebote`` geführt, damit die
+    bestehende Angebotspersistenz kompatibel bleibt.
+    """
+    global _MODE_REQUEST_WS
+
+    with _MODE_REQUEST_LOCK:
+        if _MODE_REQUEST_WS is not None:
+            return _MODE_REQUEST_WS
+
+        try:
+            ws = get_season_worksheet(MODE_REQUEST_SHEET)
+        except Exception:
+            spreadsheet = get_season_spreadsheet()
+            try:
+                ws = spreadsheet.worksheet(MODE_REQUEST_SHEET)
+            except Exception:
+                ws = spreadsheet.add_worksheet(
+                    title=MODE_REQUEST_SHEET,
+                    rows=1000,
+                    cols=len(MODE_REQUEST_HEADERS),
+                )
+                sheet_write_call(
+                    lambda: ws.update(
+                        f"A1:V1",
+                        [MODE_REQUEST_HEADERS],
+                    ),
+                    invalidate_prefixes=_invalidate_prefixes(ws, MODE_REQUEST_SHEET),
+                )
+                print(f"✅ [TERMINBÖRSE] Sheet '{MODE_REQUEST_SHEET}' angelegt")
+
+        try:
+            current_cols = int(getattr(ws, "col_count", 0) or 0)
+            if current_cols < len(MODE_REQUEST_HEADERS):
+                ws.add_cols(len(MODE_REQUEST_HEADERS) - current_cols)
+        except Exception:
+            pass
+
+        try:
+            header = ws.row_values(1)
+        except Exception:
+            header = []
+
+        if header[: len(MODE_REQUEST_HEADERS)] != MODE_REQUEST_HEADERS:
+            sheet_write_call(
+                lambda: ws.update("A1:V1", [MODE_REQUEST_HEADERS]),
+                invalidate_prefixes=_invalidate_prefixes(ws, MODE_REQUEST_SHEET),
+            )
+
+        _MODE_REQUEST_WS = ws
+        return ws
+
+
+def _mode_request_row_values(view, status: str | None = None) -> list[str]:
+    current_status = status or getattr(view, "status", MODE_REQUEST_PENDING)
+    created_at = getattr(view, "created_at", dt.now(BERLIN_TZ))
+    expires_at = getattr(view, "expires_at", created_at + timedelta(seconds=MODE_CHOICE_SECONDS))
+    message = getattr(view, "message", None)
+    dm_channel_id = getattr(view, "dm_channel_id", None)
+    dm_message_id = getattr(view, "dm_message_id", None)
+    if message is not None:
+        dm_channel_id = getattr(getattr(message, "channel", None), "id", dm_channel_id)
+        dm_message_id = getattr(message, "id", dm_message_id)
+
+    return [
+        str(view.request_id),
+        str(current_status),
+        _mode_request_time_text(created_at),
+        _mode_request_time_text(expires_at),
+        str(view.owner_id),
+        str(view.division),
+        str(view.match.row_index),
+        str(view.match.home),
+        str(view.match.away),
+        str(view.slot.timestamp),
+        json.dumps(list(view.allowed_modes), ensure_ascii=False),
+        str(view.ban_1 or ""),
+        str(view.ban_2 or ""),
+        str(view.reservation_key),
+        str(view.reservation_owner_id),
+        str(view.offer_channel_id),
+        str(view.offer_message_id),
+        str(view.slot_index),
+        str(dm_channel_id or ""),
+        str(dm_message_id or ""),
+        str(view.selected_mode or ""),
+        _mode_request_time_text(dt.now(BERLIN_TZ)),
+    ]
+
+
+def _persist_mode_request(view, status: str | None = None) -> None:
+    """Schreibt eine Modusfreigabe eindeutig in A:V.
+
+    Bewusst kein append_row/append_rows, damit andere Tabellenbereiche die
+    Zielzeile nicht beeinflussen können.
+    """
+    ws = _ensure_mode_request_ws()
+    row_values = _mode_request_row_values(view, status=status)
+
+    with _MODE_REQUEST_LOCK:
+        values = ws.get_all_values()
+        row_index = getattr(view, "store_row", None)
+        last_used_row = 1
+
+        if not row_index:
+            for idx, row in enumerate(values[1:], start=2):
+                if any(_cell(row, i) for i in range(min(len(MODE_REQUEST_HEADERS), len(row)))):
+                    last_used_row = idx
+                if _cell(row, 0) == str(view.request_id):
+                    row_index = idx
+                    break
+            if not row_index:
+                row_index = max(2, last_used_row + 1)
+
+        sheet_write_call(
+            lambda: ws.update(f"A{row_index}:V{row_index}", [row_values]),
+            invalidate_prefixes=_invalidate_prefixes(ws, MODE_REQUEST_SHEET),
+        )
+        view.store_row = int(row_index)
+        if status is not None:
+            view.status = status
+
+
+def _load_pending_mode_request_records() -> list[dict]:
+    ws = _ensure_mode_request_ws()
+    with _MODE_REQUEST_LOCK:
+        rows = ws.get_all_values()
+
+    records = []
+    for row_index, row in enumerate(rows[1:], start=2):
+        if (_cell(row, 1) or "").upper() != MODE_REQUEST_PENDING:
+            continue
+        try:
+            allowed_modes_raw = _cell(row, 10) or "[]"
+            allowed_modes = json.loads(allowed_modes_raw)
+            if not isinstance(allowed_modes, list):
+                allowed_modes = []
+            record = {
+                "store_row": row_index,
+                "request_id": _cell(row, 0),
+                "status": MODE_REQUEST_PENDING,
+                "created_at": _parse_mode_request_time(_cell(row, 2)),
+                "expires_at": _parse_mode_request_time(_cell(row, 3)),
+                "owner_id": int(_cell(row, 4)),
+                "division": int(_cell(row, 5)),
+                "row_index": int(_cell(row, 6)),
+                "home": _cell(row, 7),
+                "away": _cell(row, 8),
+                "slot": OfferSlot(index=int(_cell(row, 17)), when=_parse_offer_datetime(_cell(row, 9))),
+                "allowed_modes": [clean_text(v) for v in allowed_modes if clean_text(v)],
+                "ban_1": _cell(row, 11),
+                "ban_2": _cell(row, 12),
+                "reservation_key": _cell(row, 13),
+                "reservation_owner_id": int(_cell(row, 14)),
+                "offer_channel_id": int(_cell(row, 15)),
+                "offer_message_id": int(_cell(row, 16)),
+                "slot_index": int(_cell(row, 17)),
+                "dm_channel_id": int(_cell(row, 18)) if _cell(row, 18).isdigit() else None,
+                "dm_message_id": int(_cell(row, 19)) if _cell(row, 19).isdigit() else None,
+                "selected_mode": _cell(row, 20),
+            }
+            if record["request_id"] and record["allowed_modes"]:
+                records.append(record)
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] Modusanfrage in Zeile {row_index} konnte nicht gelesen werden: {exc}")
+    return records
+
+
+async def _fetch_mode_request_message(client: discord.Client, view):
+    if getattr(view, "message", None) is not None:
+        return view.message
+
+    owner_id = int(view.owner_id)
+    message_id = getattr(view, "dm_message_id", None)
+    if not message_id:
+        return None
+
+    try:
+        user = client.get_user(owner_id)
+        if user is None:
+            user = await client.fetch_user(owner_id)
+        channel = getattr(user, "dm_channel", None)
+        if channel is None:
+            channel = await user.create_dm()
+        message = await channel.fetch_message(int(message_id))
+        view.message = message
+        view.dm_channel_id = channel.id
+        return message
+    except Exception as exc:
+        print(f"⚠️ [TERMINBÖRSE] Modus-DM {message_id} konnte nicht geladen werden: {exc}")
+        return None
+
+
+def _cancel_mode_expiry_task(request_id: str) -> None:
+    task = _MODE_REQUEST_EXPIRY_TASKS.pop(str(request_id), None)
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+def _schedule_mode_request_expiry(client: discord.Client, view) -> None:
+    request_id = str(view.request_id)
+    _cancel_mode_expiry_task(request_id)
+
+    async def worker():
+        try:
+            await client.wait_until_ready()
+            remaining = (view.expires_at - dt.now(BERLIN_TZ)).total_seconds()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            if getattr(view, "status", None) == MODE_REQUEST_PENDING:
+                await view.expire(client)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] Ablauf-Task {request_id} fehlgeschlagen: {exc}")
+        finally:
+            current = _MODE_REQUEST_EXPIRY_TASKS.get(request_id)
+            if current is asyncio.current_task():
+                _MODE_REQUEST_EXPIRY_TASKS.pop(request_id, None)
+
+    _MODE_REQUEST_EXPIRY_TASKS[request_id] = asyncio.create_task(worker())
+
+
 def _cleanup_reservations() -> None:
     now = time.monotonic()
     expired = [key for key, (_, until) in _RESERVATIONS.items() if until <= now]
@@ -584,12 +867,12 @@ def _cleanup_reservations() -> None:
         _RESERVATIONS.pop(key, None)
 
 
-def reserve_slot(key: str, user_id: int) -> bool:
+def reserve_slot(key: str, user_id: int, ttl_seconds: int = RESERVATION_SECONDS) -> bool:
     _cleanup_reservations()
     current = _RESERVATIONS.get(key)
     if current and current[0] != user_id:
         return False
-    _RESERVATIONS[key] = (user_id, time.monotonic() + RESERVATION_SECONDS)
+    _RESERVATIONS[key] = (user_id, time.monotonic() + max(1, int(ttl_seconds)))
     return True
 
 
@@ -863,6 +1146,7 @@ async def _send_mode_dm(
         release_slot(reservation_key, interaction.user.id)
         return False
 
+    created_at = dt.now(BERLIN_TZ)
     view = ModeChoiceView(
         owner_id=home_member.id,
         division=division,
@@ -876,14 +1160,57 @@ async def _send_mode_dm(
         offer_channel_id=offer_channel_id,
         offer_message_id=offer_message_id,
         slot_index=slot_index,
+        created_at=created_at,
+        expires_at=created_at + timedelta(seconds=MODE_CHOICE_SECONDS),
     )
 
+    message = None
     try:
-        await home_member.send(view.render_text(), view=view)
+        message = await home_member.send(view.render_text(), view=view)
+        view.message = message
+        view.dm_channel_id = message.channel.id
+        view.dm_message_id = message.id
+
+        # Erst persistieren, dann den öffentlichen Slot auf PENDING setzen. So ist
+        # die 24h-Anfrage nach einem Render-Neustart rekonstruierbar.
+        await asyncio.to_thread(_persist_mode_request, view, MODE_REQUEST_PENDING)
+
+        offer_view = _OFFER_VIEWS.get((offer_channel_id, offer_message_id))
+        if offer_view is None:
+            raise RuntimeError("Das zugehörige Terminangebot ist nicht mehr aktiv.")
+        await offer_view.mark_pending(interaction.client, slot_index)
+
+        # Die Reservierung läuft ab jetzt genauso lange wie die Modusfreigabe.
+        reserve_slot(reservation_key, interaction.user.id, MODE_CHOICE_SECONDS)
+        _MODE_REQUEST_VIEWS[view.request_id] = view
+        _schedule_mode_request_expiry(interaction.client, view)
+        print(
+            f"✅ [TERMINBÖRSE] 24h-Modusanfrage {view.request_id} an {match.home} "
+            f"bis {view.expiry_label()} gesendet"
+        )
         return True
     except Exception as exc:
         print(f"⚠️ [TERMINBÖRSE] Modus-DM an {match.home} fehlgeschlagen: {exc}")
+        view.status = MODE_REQUEST_CANCELLED
+        try:
+            if view.dm_message_id:
+                await asyncio.to_thread(_persist_mode_request, view, MODE_REQUEST_CANCELLED)
+        except Exception:
+            pass
+        if message is not None:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        offer_view = _OFFER_VIEWS.get((offer_channel_id, offer_message_id))
+        if offer_view is not None and slot_index in offer_view.pending_slots:
+            try:
+                await offer_view.mark_open(interaction.client, slot_index)
+            except Exception:
+                pass
         release_slot(reservation_key, interaction.user.id)
+        _MODE_REQUEST_VIEWS.pop(view.request_id, None)
+        _cancel_mode_expiry_task(view.request_id)
         return False
 
 
@@ -1148,6 +1475,7 @@ class TermOfferView(discord.ui.View):
         offer_id: str | None = None,
         booked_slots: set[int] | None = None,
         removed_slots: set[int] | None = None,
+        pending_slots: set[int] | None = None,
         store_rows: dict[int, int] | None = None,
     ):
         super().__init__(timeout=None)
@@ -1160,6 +1488,7 @@ class TermOfferView(discord.ui.View):
         self.channel_id: int | None = None
         self.booked_slots: set[int] = set(booked_slots or set())
         self.removed_slots: set[int] = set(removed_slots or set())
+        self.pending_slots: set[int] = set(pending_slots or set())
         self.store_rows: dict[int, int] = dict(store_rows or {})
 
         for slot in slots:
@@ -1172,12 +1501,23 @@ class TermOfferView(discord.ui.View):
                 button.disabled = True
                 button.style = discord.ButtonStyle.secondary
                 button.label = f"❌ {slot.short_label}"
+            elif slot.index in self.pending_slots:
+                button.disabled = True
+                button.style = discord.ButtonStyle.secondary
+                button.label = f"⏳ {slot.short_label}"
             self.add_item(button)
 
     def reservation_key(self, slot_index: int) -> str:
         return f"{self.channel_id}:{self.message_id}:{slot_index}"
 
     async def handle_slot_click(self, interaction: discord.Interaction, slot: OfferSlot):
+        if slot.index in self.pending_slots:
+            await interaction.response.send_message(
+                "Dieser Termin wartet bereits auf die Modusbestätigung des Heimspielers.",
+                ephemeral=True,
+            )
+            return
+
         if interaction.user.id == self.creator_id:
             await interaction.response.send_message(
                 "Du kannst dein eigenes Terminangebot nicht annehmen.",
@@ -1297,6 +1637,8 @@ class TermOfferView(discord.ui.View):
                 state = " ✅ vergeben"
             elif slot.index in self.removed_slots:
                 state = " ❌ zurückgezogen"
+            elif slot.index in self.pending_slots:
+                state = " ⏳ wartet auf Modusbestätigung"
             else:
                 state = ""
             lines.append(f"• **{slot.long_label}**{state}")
@@ -1330,7 +1672,43 @@ class TermOfferView(discord.ui.View):
         except Exception as exc:
             print(f"⚠️ [TERMINBÖRSE] Offer-Post konnte nicht aktualisiert werden: {exc}")
 
+    async def mark_pending(self, client: discord.Client, slot_index: int) -> None:
+        if slot_index in self.booked_slots or slot_index in self.removed_slots:
+            raise RuntimeError("Dieser Termin ist nicht mehr verfügbar.")
+        self.pending_slots.add(slot_index)
+        try:
+            await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
+        except Exception:
+            self.pending_slots.discard(slot_index)
+            raise
+        for item in self.children:
+            if isinstance(item, TermSlotButton) and item.slot.index == slot_index:
+                item.disabled = True
+                item.style = discord.ButtonStyle.secondary
+                item.label = f"⏳ {item.slot.short_label}"
+                break
+        await self._refresh_message(client)
+
+    async def mark_open(self, client: discord.Client, slot_index: int) -> None:
+        if slot_index in self.booked_slots or slot_index in self.removed_slots:
+            return
+        self.pending_slots.discard(slot_index)
+        try:
+            await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
+        except Exception as exc:
+            self.pending_slots.add(slot_index)
+            print(f"⚠️ [TERMINBÖRSE] OPEN-Status konnte nicht persistiert werden: {exc}")
+            return
+        for item in self.children:
+            if isinstance(item, TermSlotButton) and item.slot.index == slot_index:
+                item.disabled = False
+                item.style = discord.ButtonStyle.primary
+                item.label = item.slot.short_label
+                break
+        await self._refresh_message(client)
+
     async def mark_booked(self, client: discord.Client, slot_index: int) -> None:
+        self.pending_slots.discard(slot_index)
         self.booked_slots.add(slot_index)
         try:
             await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
@@ -1345,7 +1723,7 @@ class TermOfferView(discord.ui.View):
         await self._refresh_message(client)
 
     async def remove_slot(self, client: discord.Client, slot_index: int) -> bool:
-        if slot_index in self.booked_slots or slot_index in self.removed_slots:
+        if slot_index in self.booked_slots or slot_index in self.removed_slots or slot_index in self.pending_slots:
             return False
 
         self.removed_slots.add(slot_index)
@@ -1369,7 +1747,7 @@ class TermOfferView(discord.ui.View):
     async def withdraw_all(self, client: discord.Client) -> int:
         removed_indices = []
         for slot in self.slots:
-            if slot.index in self.booked_slots or slot.index in self.removed_slots:
+            if slot.index in self.booked_slots or slot.index in self.removed_slots or slot.index in self.pending_slots:
                 continue
             self.removed_slots.add(slot.index)
             release_slot(self.reservation_key(slot.index))
@@ -1403,6 +1781,7 @@ def _view_from_persisted_record(record: dict) -> TermOfferView:
         offer_id=record["offer_id"],
         booked_slots=record["booked_slots"],
         removed_slots=record["removed_slots"],
+        pending_slots=record.get("pending_slots", set()),
         store_rows=record["store_rows"],
     )
     view.channel_id = record["channel_id"]
@@ -1595,8 +1974,18 @@ async def restore_persistent_offer_views(client: discord.Client) -> dict:
             _recover_legacy_after_ready(client, known_keys)
         )
 
-    print(f"✅ [TERMINBÖRSE] {restored} persistente Angebotspost(s) registriert")
-    return {"restored": restored, "recovery_scheduled": True, "error": None}
+    mode_restored = await _restore_persistent_mode_requests(client)
+
+    print(
+        f"✅ [TERMINBÖRSE] {restored} persistente Angebotspost(s) und "
+        f"{mode_restored} Modusanfrage(n) registriert"
+    )
+    return {
+        "restored": restored,
+        "mode_requests_restored": mode_restored,
+        "recovery_scheduled": True,
+        "error": None,
+    }
 
 
 class HomeAwayChoiceView(discord.ui.View):
@@ -1640,10 +2029,16 @@ class HomeAwayChoiceView(discord.ui.View):
         return None
 
     async def _choose(self, interaction: discord.Interaction, want_home: bool):
+        # Komponenten immer sofort quittieren. Sheet-/Discord-I/O darf nicht vor
+        # der ersten Interaction-Antwort stattfinden, sonst zeigt Discord nach
+        # wenigen Sekunden fälschlich „nicht rechtzeitig reagiert“ an.
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
         match = self._find_match(want_home)
         if match is None:
             release_slot(self.reservation_key, self.owner_id)
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="Die gewünschte Begegnung ist nicht mehr verfügbar.",
                 view=None,
             )
@@ -1660,7 +2055,7 @@ class HomeAwayChoiceView(discord.ui.View):
         match = live_rows.get(match.row_index)
         if match is None:
             release_slot(self.reservation_key, self.owner_id)
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="Diese Begegnung wurde inzwischen anderweitig terminiert.",
                 view=None,
             )
@@ -1677,7 +2072,7 @@ class HomeAwayChoiceView(discord.ui.View):
             slot_index=self.slot_index,
         )
         if not ok:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=(
                     f"Der Heimspieler **{match.home}** konnte nicht per DM erreicht werden. "
                     "Der Termin wurde wieder freigegeben."
@@ -1691,7 +2086,7 @@ class HomeAwayChoiceView(discord.ui.View):
         else:
             text = f"✅ Du spielst zuerst dein Gastspiel. **{match.home}** erhält jetzt die Modusauswahl per DM."
 
-        await interaction.response.edit_message(content=text, view=None)
+        await interaction.edit_original_response(content=text, view=None)
         self.stop()
 
     @discord.ui.button(label="Mein Heimspiel", style=discord.ButtonStyle.primary)
@@ -1707,22 +2102,71 @@ class HomeAwayChoiceView(discord.ui.View):
 
 
 class ModeSelect(discord.ui.Select):
-    def __init__(self, modes: list[str]):
-        options = [discord.SelectOption(label=mode, value=mode) for mode in modes[:25]]
+    def __init__(self, modes: list[str], request_id: str, selected_mode: str | None = None):
+        options = [
+            discord.SelectOption(
+                label=mode,
+                value=mode,
+                default=(clean_text(mode) == clean_text(selected_mode)),
+            )
+            for mode in modes[:25]
+        ]
         super().__init__(
             placeholder="Spielmodus auswählen",
             min_values=1,
             max_values=1,
             options=options,
             row=0,
+            custom_id=f"tfl_mode_select:{request_id}",
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if not isinstance(view, ModeChoiceView):
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        if view.is_expired():
+            await view.expire(interaction.client)
+            try:
+                await interaction.edit_original_response(content=view.expired_text(), view=None)
+            except Exception:
+                pass
+            return
+
         view.selected_mode = self.values[0]
-        await interaction.response.edit_message(content=view.render_text(), view=view)
+        try:
+            await asyncio.to_thread(_persist_mode_request, view)
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] Modusauswahl konnte nicht persistiert werden: {exc}")
+
+        # Defaults neu setzen, damit nach der Auswahl sichtbar bleibt, was gewählt wurde.
+        for option in self.options:
+            option.default = option.value == view.selected_mode
+
+        await interaction.edit_original_response(content=view.render_text(), view=view)
+
+
+class ModeConfirmButton(discord.ui.Button):
+    def __init__(self, request_id: str):
+        super().__init__(
+            label="Modus bestätigen",
+            style=discord.ButtonStyle.success,
+            row=1,
+            custom_id=f"tfl_mode_confirm:{request_id}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, ModeChoiceView):
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            return
+        await view.confirm_mode(interaction)
 
 
 class ModeChoiceView(discord.ui.View):
@@ -1741,28 +2185,55 @@ class ModeChoiceView(discord.ui.View):
         offer_channel_id: int,
         offer_message_id: int,
         slot_index: int,
+        request_id: str | None = None,
+        created_at: dt | None = None,
+        expires_at: dt | None = None,
+        selected_mode: str | None = None,
+        status: str = MODE_REQUEST_PENDING,
+        dm_channel_id: int | None = None,
+        dm_message_id: int | None = None,
+        store_row: int | None = None,
     ):
-        super().__init__(timeout=RESERVATION_SECONDS)
-        self.owner_id = owner_id
-        self.division = division
+        # timeout=None ist absichtlich persistent. Die 24h-Grenze wird anhand
+        # expires_at selbst verwaltet und dadurch auch über Bot-Restarts hinweg
+        # eingehalten.
+        super().__init__(timeout=None)
+        self.request_id = request_id or uuid.uuid4().hex[:20]
+        self.owner_id = int(owner_id)
+        self.division = int(division)
         self.match = match
         self.slot = slot
-        self.allowed_modes = allowed_modes
+        self.allowed_modes = list(allowed_modes)
         self.ban_1 = ban_1
         self.ban_2 = ban_2
         self.reservation_key = reservation_key
-        self.reservation_owner_id = reservation_owner_id
-        self.offer_channel_id = offer_channel_id
-        self.offer_message_id = offer_message_id
-        self.slot_index = slot_index
-        self.selected_mode: str | None = None
-        self.add_item(ModeSelect(allowed_modes))
+        self.reservation_owner_id = int(reservation_owner_id)
+        self.offer_channel_id = int(offer_channel_id)
+        self.offer_message_id = int(offer_message_id)
+        self.slot_index = int(slot_index)
+        self.selected_mode: str | None = selected_mode or None
+        self.created_at = created_at or dt.now(BERLIN_TZ)
+        self.expires_at = expires_at or (self.created_at + timedelta(seconds=MODE_CHOICE_SECONDS))
+        self.status = status
+        self.dm_channel_id = dm_channel_id
+        self.dm_message_id = dm_message_id
+        self.store_row = store_row
+        self.message: discord.Message | None = None
+
+        self.add_item(ModeSelect(self.allowed_modes, self.request_id, self.selected_mode))
+        self.add_item(ModeConfirmButton(self.request_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Diese Modusauswahl gehört nicht dir.", ephemeral=True)
             return False
         return True
+
+    def is_expired(self) -> bool:
+        return dt.now(BERLIN_TZ) >= self.expires_at
+
+    def expiry_label(self) -> str:
+        return self.expires_at.strftime("%d.%m.%Y · %H:%M Uhr")
 
     def render_text(self) -> str:
         bans = [b for b in (self.ban_1, self.ban_2) if b]
@@ -1781,11 +2252,61 @@ class ModeChoiceView(discord.ui.View):
             "Du hast Heimrecht und bestimmst den Spielmodus.\n"
             f"**{self.match.away}** hat folgende Spielmodis gebannt: {ban_text}.\n\n"
             f"**Aktuelle Auswahl:** {selected}\n"
-            "Wähle einen Modus und bestätige anschließend."
+            "Wähle einen Modus und bestätige anschließend.\n\n"
+            f"⏱️ **Gültig bis:** {self.expiry_label()}"
         )
 
-    @discord.ui.button(label="Modus bestätigen", style=discord.ButtonStyle.success, row=1)
-    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    def expired_text(self) -> str:
+        return (
+            "⌛ **Modusauswahl abgelaufen**\n\n"
+            f"**Spiel:** {self.match.home} vs. {self.match.away}\n"
+            f"**Termin:** {self.slot.long_label}\n\n"
+            "Die 24 Stunden sind abgelaufen. Der angebotene Termin wurde wieder "
+            "freigegeben und kann im Divisionspost erneut ausgewählt werden."
+        )
+
+    async def expire(self, client: discord.Client) -> None:
+        if self.status != MODE_REQUEST_PENDING:
+            return
+
+        self.status = MODE_REQUEST_EXPIRED
+        try:
+            await asyncio.to_thread(_persist_mode_request, self, MODE_REQUEST_EXPIRED)
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] Ablaufstatus konnte nicht gespeichert werden: {exc}")
+
+        offer_view = _OFFER_VIEWS.get((self.offer_channel_id, self.offer_message_id))
+        if offer_view is not None:
+            await offer_view.mark_open(client, self.slot_index)
+
+        # Auch der Spieler, der den angebotenen Termin angeklickt hat, bekommt
+        # Bescheid, falls die Modusfreigabe bei einem anderen Heimspieler lag.
+        if self.reservation_owner_id != self.owner_id:
+            try:
+                requester = client.get_user(self.reservation_owner_id)
+                if requester is None:
+                    requester = await client.fetch_user(self.reservation_owner_id)
+                await requester.send(
+                    "⌛ **Modusbestätigung abgelaufen**\n\n"
+                    f"Für **{self.match.home} vs. {self.match.away}** am "
+                    f"**{self.slot.long_label}** wurde innerhalb von 24 Stunden kein Modus bestätigt.\n"
+                    "Der angebotene Termin ist wieder freigegeben und kann erneut ausgewählt werden."
+                )
+            except Exception as exc:
+                print(f"⚠️ [TERMINBÖRSE] Ablaufhinweis an Anfragenden fehlgeschlagen: {exc}")
+
+        release_slot(self.reservation_key, self.reservation_owner_id)
+        _MODE_REQUEST_VIEWS.pop(self.request_id, None)
+        _cancel_mode_expiry_task(self.request_id)
+
+        message = await _fetch_mode_request_message(client, self)
+        if message is not None:
+            try:
+                await message.edit(content=self.expired_text(), view=None)
+            except Exception as exc:
+                print(f"⚠️ [TERMINBÖRSE] Abgelaufene Modus-DM konnte nicht aktualisiert werden: {exc}")
+
+    async def confirm_mode(self, interaction: discord.Interaction) -> None:
         if not self.selected_mode:
             await interaction.response.send_message(
                 "Bitte zuerst einen Spielmodus auswählen.",
@@ -1793,12 +2314,19 @@ class ModeChoiceView(discord.ui.View):
             )
             return
 
-        await interaction.response.defer()
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        if self.is_expired():
+            await self.expire(interaction.client)
+            try:
+                await interaction.edit_original_response(content=self.expired_text(), view=None)
+            except Exception:
+                pass
+            return
 
         try:
             if interaction.guild is None:
-                # Component-Interaktionen in DMs enthalten guild nicht. Der Guild-Kontext
-                # wird daher über den Client und die bekannte Server-ID aus matchcenter geholt.
                 guild = interaction.client.get_guild(matchcenter.GUILD_ID)
                 if guild is None:
                     guild = await interaction.client.fetch_guild(matchcenter.GUILD_ID)
@@ -1820,7 +2348,15 @@ class ModeChoiceView(discord.ui.View):
             if offer_view is not None:
                 await offer_view.mark_booked(interaction.client, self.slot_index)
 
+            self.status = MODE_REQUEST_COMPLETED
+            try:
+                await asyncio.to_thread(_persist_mode_request, self, MODE_REQUEST_COMPLETED)
+            except Exception as exc:
+                print(f"⚠️ [TERMINBÖRSE] Abschlussstatus konnte nicht gespeichert werden: {exc}")
+
             release_slot(self.reservation_key, self.reservation_owner_id)
+            _MODE_REQUEST_VIEWS.pop(self.request_id, None)
+            _cancel_mode_expiry_task(self.request_id)
             self.stop()
 
             await interaction.edit_original_response(
@@ -1834,14 +2370,100 @@ class ModeChoiceView(discord.ui.View):
                 view=None,
             )
         except Exception as exc:
-            release_slot(self.reservation_key, self.reservation_owner_id)
+            # Die Anfrage bleibt bei einem technischen Fehler bis zum Ablauf aktiv.
+            # Der Spieler kann also erneut auf "Modus bestätigen" drücken.
             await interaction.edit_original_response(
-                content=f"❌ Der Spieltermin wurde nicht eingetragen: {exc}",
-                view=None,
+                content=(
+                    f"❌ Der Spieltermin wurde nicht eingetragen: {exc}\n\n"
+                    f"Die Modusauswahl bleibt bis **{self.expiry_label()}** aktiv."
+                ),
+                view=self,
             )
 
-    async def on_timeout(self):
-        release_slot(self.reservation_key, self.reservation_owner_id)
+
+def _mode_view_from_record(record: dict) -> ModeChoiceView:
+    match = MatchRow(
+        row_index=record["row_index"],
+        home=record["home"],
+        away=record["away"],
+        timestamp="",
+        marker_or_result="vs",
+        mode="",
+    )
+    return ModeChoiceView(
+        owner_id=record["owner_id"],
+        division=record["division"],
+        match=match,
+        slot=record["slot"],
+        allowed_modes=record["allowed_modes"],
+        ban_1=record["ban_1"],
+        ban_2=record["ban_2"],
+        reservation_key=record["reservation_key"],
+        reservation_owner_id=record["reservation_owner_id"],
+        offer_channel_id=record["offer_channel_id"],
+        offer_message_id=record["offer_message_id"],
+        slot_index=record["slot_index"],
+        request_id=record["request_id"],
+        created_at=record["created_at"],
+        expires_at=record["expires_at"],
+        selected_mode=record.get("selected_mode") or None,
+        status=record.get("status", MODE_REQUEST_PENDING),
+        dm_channel_id=record.get("dm_channel_id"),
+        dm_message_id=record.get("dm_message_id"),
+        store_row=record.get("store_row"),
+    )
+
+
+async def _restore_persistent_mode_requests(client: discord.Client) -> int:
+    try:
+        records = await asyncio.to_thread(_load_pending_mode_request_records)
+    except Exception as exc:
+        print(f"⚠️ [TERMINBÖRSE] Modusanfragen konnten nicht geladen werden: {exc}")
+        return 0
+
+    restored = 0
+    for record in records:
+        try:
+            view = _mode_view_from_record(record)
+            offer_view = _OFFER_VIEWS.get((view.offer_channel_id, view.offer_message_id))
+
+            # Alte PENDING-Zeilen werden auch dann korrekt bereinigt, wenn der Bot
+            # während der 24h neu gestartet wurde.
+            if view.is_expired():
+                _MODE_REQUEST_VIEWS[view.request_id] = view
+                _schedule_mode_request_expiry(client, view)
+                continue
+
+            # Der zugehörige Angebotsslot bleibt während der 24h blockiert.
+            if offer_view is not None:
+                offer_view.pending_slots.add(view.slot_index)
+                for item in offer_view.children:
+                    if isinstance(item, TermSlotButton) and item.slot.index == view.slot_index:
+                        item.disabled = True
+                        item.style = discord.ButtonStyle.secondary
+                        item.label = f"⏳ {item.slot.short_label}"
+                        break
+
+            reserve_slot(
+                view.reservation_key,
+                view.reservation_owner_id,
+                max(1, int((view.expires_at - dt.now(BERLIN_TZ)).total_seconds())),
+            )
+            _MODE_REQUEST_VIEWS[view.request_id] = view
+            if view.dm_message_id:
+                client.add_view(view, message_id=view.dm_message_id)
+            else:
+                client.add_view(view)
+            _schedule_mode_request_expiry(client, view)
+            restored += 1
+        except Exception as exc:
+            print(
+                f"⚠️ [TERMINBÖRSE] Modusanfrage {record.get('request_id', '?')} "
+                f"konnte nicht registriert werden: {exc}"
+            )
+
+    print(f"✅ [TERMINBÖRSE] {restored} persistente 24h-Modusanfrage(n) registriert")
+    return restored
 
 
 async def open_term_offer_modal(interaction: discord.Interaction) -> None:
