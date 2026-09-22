@@ -4,6 +4,8 @@ import asyncio
 from aiohttp import web
 import json
 
+from sheets_connection import get_season_worksheet
+
 # =========================================================
 # GLOBAL CACHE
 # =========================================================
@@ -275,23 +277,90 @@ async def get_results_db(request: web.Request):
     Route:
     /api/results-db?division=1&limit=50
 
-    - division: "1"–"6"
-    - limit: max. Anzahl Einträge
-    """
-    ensure_cache_keys()
+    Liest Liga-Ergebnisse direkt aus dem aktuellen Divisions-Sheet.
 
-    division = request.query.get("division")
-    if division not in ["1", "2", "3", "4", "5", "6"]:
-        return web.json_response({"items": []})
+    Sheet-Spalten:
+    B = Datum/Uhrzeit
+    C = Modus
+    D = Spieler 1
+    E = Ergebnis
+    F = Spieler 2
+    G = Racetime-Link
+    H = Eingetragen von
+    """
+    division = str(request.query.get("division", "") or "").strip()
+
+    if division not in {"1", "2", "3", "4", "5", "6"}:
+        return web.json_response({"items": [], "count": 0})
 
     limit = parse_limit(request, default=50, maximum=336)
 
-    # Neueste zuerst: nach Eintrags-Reihenfolge rückwärts,
-    # da CACHE["results"] vom Bot chronologisch gefüllt wird.
-    items = get_results_db_items_for_division(division)
-    items = items[-limit:][::-1]
+    try:
+        ws = get_season_worksheet(f"{division}.DIV")
+        rows = await asyncio.to_thread(ws.get_all_values)
 
-    return web.json_response({"items": items})
+        items: list[dict] = []
+
+        for row in rows[1:]:
+            def cell(idx: int) -> str:
+                if 0 <= idx < len(row):
+                    return str(row[idx] or "").strip()
+                return ""
+
+            date_value = cell(1)   # B
+            mode = cell(2)         # C
+            player1 = cell(3)      # D
+            score = cell(4)        # E
+            player2 = cell(5)      # F
+            link = cell(6)         # G
+            reporter = cell(7)     # H
+
+            if not date_value or not player1 or not player2 or not score:
+                continue
+
+            score_norm = score.lower()
+
+            # Noch offene Begegnungen ignorieren
+            if score_norm in {"vs", "-", "–", "—"} or "vs" in score_norm:
+                continue
+
+            items.append({
+                "date": date_value,
+                "player1": player1,
+                "score": score,
+                "player2": player2,
+                "mode": mode,
+                "link": link,
+                "reporter": reporter,
+            })
+
+        # Das Divisions-Sheet ist chronologisch aufgebaut.
+        # Für die API die neuesten Ergebnisse zuerst liefern.
+        items = items[-limit:][::-1]
+
+        print(
+            f"[API] results-db division={division}: "
+            f"{len(items)} Ergebnisse direkt aus {division}.DIV"
+        )
+
+        return web.json_response({
+            "items": items,
+            "count": len(items),
+        })
+
+    except Exception as e:
+        print(
+            f"[API] results-db Sheet-Fehler division={division}: "
+            f"{type(e).__name__}: {e}"
+        )
+        return web.json_response(
+            {
+                "items": [],
+                "count": 0,
+                "error": "sheet_read_failed",
+            },
+            status=500,
+        )
 
 
 async def get_tfnl_season_ranking(request: web.Request):
