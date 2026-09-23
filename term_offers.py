@@ -86,6 +86,7 @@ OFFER_STATUS_OPEN = "OPEN"
 OFFER_STATUS_PENDING = "PENDING"
 OFFER_STATUS_BOOKED = "BOOKED"
 OFFER_STATUS_REMOVED = "REMOVED"
+OFFER_STATUS_EXPIRED = "EXPIRED"
 LEGACY_OFFER_SCAN_LIMIT = 500
 
 # Persistente Modus-Anfragen. Damit bleibt eine 24h-Anfrage auch nach einem
@@ -123,6 +124,7 @@ MODE_REQUEST_CANCELLED = "CANCELLED"
 _OFFER_VIEWS: dict[tuple[int, int], "TermOfferView"] = {}
 _MODE_REQUEST_VIEWS: dict[str, "ModeChoiceView"] = {}
 _MODE_REQUEST_EXPIRY_TASKS: dict[str, asyncio.Task] = {}
+_OFFER_EXPIRY_TASK = None
 _RESERVATIONS: dict[str, tuple[int, float]] = {}
 _OFFER_STORE_WS = None
 _OFFER_STORE_LOCK = RLock()
@@ -137,6 +139,12 @@ def normalize_name(value: str | None) -> str:
 
 def clean_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _slot_is_past(slot, now: dt | None = None) -> bool:
+    """Ein angebotener Termin ist ab seinem Startzeitpunkt nicht mehr buchbar."""
+    current = now or dt.now(BERLIN_TZ)
+    return slot.when <= current
 
 
 def _cell(row: list[str], idx0: int) -> str:
@@ -221,6 +229,8 @@ def _offer_status_for_view(view, slot_index: int) -> str:
         return OFFER_STATUS_BOOKED
     if slot_index in view.removed_slots:
         return OFFER_STATUS_REMOVED
+    if slot_index in getattr(view, "expired_slots", set()):
+        return OFFER_STATUS_EXPIRED
     if slot_index in getattr(view, "pending_slots", set()):
         return OFFER_STATUS_PENDING
     return OFFER_STATUS_OPEN
@@ -346,6 +356,7 @@ def _load_persisted_offer_records() -> list[dict]:
                 "slots": [],
                 "booked_slots": set(),
                 "removed_slots": set(),
+                "expired_slots": set(),
                 "pending_slots": set(),
                 "store_rows": {},
             },
@@ -356,8 +367,17 @@ def _load_persisted_offer_records() -> list[dict]:
             record["booked_slots"].add(slot_index)
         elif status == OFFER_STATUS_REMOVED:
             record["removed_slots"].add(slot_index)
+        elif status == OFFER_STATUS_EXPIRED:
+            record["expired_slots"].add(slot_index)
         elif status == OFFER_STATUS_PENDING:
             record["pending_slots"].add(slot_index)
+
+        # Alte OPEN/PENDING-Zeilen werden beim Laden sofort als abgelaufen
+        # erkannt, wenn ihr Startzeitpunkt bereits vorbei ist.
+        if _slot_is_past(record["slots"][-1]):
+            record["pending_slots"].discard(slot_index)
+            if slot_index not in record["booked_slots"] and slot_index not in record["removed_slots"]:
+                record["expired_slots"].add(slot_index)
 
     out = []
     for record in grouped.values():
@@ -843,7 +863,8 @@ def _schedule_mode_request_expiry(client: discord.Client, view) -> None:
     async def worker():
         try:
             await client.wait_until_ready()
-            remaining = (view.expires_at - dt.now(BERLIN_TZ)).total_seconds()
+            deadline = min(view.expires_at, view.slot.when)
+            remaining = (deadline - dt.now(BERLIN_TZ)).total_seconds()
             if remaining > 0:
                 await asyncio.sleep(remaining)
             if getattr(view, "status", None) == MODE_REQUEST_PENDING:
@@ -1161,7 +1182,10 @@ async def _send_mode_dm(
         offer_message_id=offer_message_id,
         slot_index=slot_index,
         created_at=created_at,
-        expires_at=created_at + timedelta(seconds=MODE_CHOICE_SECONDS),
+        expires_at=min(
+            created_at + timedelta(seconds=MODE_CHOICE_SECONDS),
+            slot.when,
+        ),
     )
 
     message = None
@@ -1475,6 +1499,7 @@ class TermOfferView(discord.ui.View):
         offer_id: str | None = None,
         booked_slots: set[int] | None = None,
         removed_slots: set[int] | None = None,
+        expired_slots: set[int] | None = None,
         pending_slots: set[int] | None = None,
         store_rows: dict[int, int] | None = None,
     ):
@@ -1488,8 +1513,16 @@ class TermOfferView(discord.ui.View):
         self.channel_id: int | None = None
         self.booked_slots: set[int] = set(booked_slots or set())
         self.removed_slots: set[int] = set(removed_slots or set())
+        self.expired_slots: set[int] = set(expired_slots or set())
         self.pending_slots: set[int] = set(pending_slots or set())
         self.store_rows: dict[int, int] = dict(store_rows or {})
+
+        # Persistente alte Angebote dürfen nach einem Neustart nicht wieder
+        # klickbar werden, wenn ihr Termin inzwischen vorbei ist.
+        for slot in self.slots:
+            if _slot_is_past(slot) and slot.index not in self.booked_slots and slot.index not in self.removed_slots:
+                self.pending_slots.discard(slot.index)
+                self.expired_slots.add(slot.index)
 
         for slot in slots:
             button = TermSlotButton(slot, self.offer_id)
@@ -1501,6 +1534,10 @@ class TermOfferView(discord.ui.View):
                 button.disabled = True
                 button.style = discord.ButtonStyle.secondary
                 button.label = f"❌ {slot.short_label}"
+            elif slot.index in self.expired_slots:
+                button.disabled = True
+                button.style = discord.ButtonStyle.secondary
+                button.label = f"⌛ {slot.short_label}"
             elif slot.index in self.pending_slots:
                 button.disabled = True
                 button.style = discord.ButtonStyle.secondary
@@ -1511,6 +1548,17 @@ class TermOfferView(discord.ui.View):
         return f"{self.channel_id}:{self.message_id}:{slot_index}"
 
     async def handle_slot_click(self, interaction: discord.Interaction, slot: OfferSlot):
+        # Live-Guard: Auch ein optisch noch alter Discord-Button darf keinen
+        # Termin aus der Vergangenheit mehr annehmen.
+        if slot.index in self.expired_slots or _slot_is_past(slot):
+            await interaction.response.send_message(
+                "⌛ Dieser angebotene Termin liegt bereits in der Vergangenheit und kann nicht mehr angenommen werden.",
+                ephemeral=True,
+            )
+            if slot.index not in self.expired_slots:
+                await self.mark_expired(interaction.client, slot.index)
+            return
+
         if slot.index in self.pending_slots:
             await interaction.response.send_message(
                 "Dieser Termin wartet bereits auf die Modusbestätigung des Heimspielers.",
@@ -1627,7 +1675,9 @@ class TermOfferView(discord.ui.View):
     def active_slots(self) -> list[OfferSlot]:
         return [
             slot for slot in self.slots
-            if slot.index not in self.booked_slots and slot.index not in self.removed_slots
+            if slot.index not in self.booked_slots
+            and slot.index not in self.removed_slots
+            and slot.index not in self.expired_slots
         ]
 
     def render_public_content(self) -> str:
@@ -1637,6 +1687,8 @@ class TermOfferView(discord.ui.View):
                 state = " ✅ vergeben"
             elif slot.index in self.removed_slots:
                 state = " ❌ zurückgezogen"
+            elif slot.index in self.expired_slots:
+                state = " ⌛ abgelaufen"
             elif slot.index in self.pending_slots:
                 state = " ⏳ wartet auf Modusbestätigung"
             else:
@@ -1673,7 +1725,7 @@ class TermOfferView(discord.ui.View):
             print(f"⚠️ [TERMINBÖRSE] Offer-Post konnte nicht aktualisiert werden: {exc}")
 
     async def mark_pending(self, client: discord.Client, slot_index: int) -> None:
-        if slot_index in self.booked_slots or slot_index in self.removed_slots:
+        if slot_index in self.booked_slots or slot_index in self.removed_slots or slot_index in self.expired_slots:
             raise RuntimeError("Dieser Termin ist nicht mehr verfügbar.")
         self.pending_slots.add(slot_index)
         try:
@@ -1692,6 +1744,11 @@ class TermOfferView(discord.ui.View):
     async def mark_open(self, client: discord.Client, slot_index: int) -> None:
         if slot_index in self.booked_slots or slot_index in self.removed_slots:
             return
+        slot = next((s for s in self.slots if s.index == slot_index), None)
+        if slot is not None and _slot_is_past(slot):
+            await self.mark_expired(client, slot_index)
+            return
+        self.expired_slots.discard(slot_index)
         self.pending_slots.discard(slot_index)
         try:
             await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
@@ -1704,6 +1761,24 @@ class TermOfferView(discord.ui.View):
                 item.disabled = False
                 item.style = discord.ButtonStyle.primary
                 item.label = item.slot.short_label
+                break
+        await self._refresh_message(client)
+
+    async def mark_expired(self, client: discord.Client, slot_index: int) -> None:
+        if slot_index in self.booked_slots or slot_index in self.removed_slots:
+            return
+        self.pending_slots.discard(slot_index)
+        self.expired_slots.add(slot_index)
+        release_slot(self.reservation_key(slot_index))
+        try:
+            await asyncio.to_thread(_persist_offer_slot_state, self, slot_index)
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] EXPIRED-Status konnte nicht persistiert werden: {exc}")
+        for item in self.children:
+            if isinstance(item, TermSlotButton) and item.slot.index == slot_index:
+                item.disabled = True
+                item.style = discord.ButtonStyle.secondary
+                item.label = f"⌛ {item.slot.short_label}"
                 break
         await self._refresh_message(client)
 
@@ -1723,7 +1798,12 @@ class TermOfferView(discord.ui.View):
         await self._refresh_message(client)
 
     async def remove_slot(self, client: discord.Client, slot_index: int) -> bool:
-        if slot_index in self.booked_slots or slot_index in self.removed_slots or slot_index in self.pending_slots:
+        if (
+            slot_index in self.booked_slots
+            or slot_index in self.removed_slots
+            or slot_index in self.expired_slots
+            or slot_index in self.pending_slots
+        ):
             return False
 
         self.removed_slots.add(slot_index)
@@ -1747,7 +1827,12 @@ class TermOfferView(discord.ui.View):
     async def withdraw_all(self, client: discord.Client) -> int:
         removed_indices = []
         for slot in self.slots:
-            if slot.index in self.booked_slots or slot.index in self.removed_slots or slot.index in self.pending_slots:
+            if (
+                slot.index in self.booked_slots
+                or slot.index in self.removed_slots
+                or slot.index in self.expired_slots
+                or slot.index in self.pending_slots
+            ):
                 continue
             self.removed_slots.add(slot.index)
             release_slot(self.reservation_key(slot.index))
@@ -1781,6 +1866,7 @@ def _view_from_persisted_record(record: dict) -> TermOfferView:
         offer_id=record["offer_id"],
         booked_slots=record["booked_slots"],
         removed_slots=record["removed_slots"],
+        expired_slots=record.get("expired_slots", set()),
         pending_slots=record.get("pending_slots", set()),
         store_rows=record["store_rows"],
     )
@@ -2225,6 +2311,62 @@ async def _recover_legacy_mode_after_ready(client: discord.Client) -> None:
         print(f"⚠️ [TERMINBÖRSE] Legacy-Modus-Migration fehlgeschlagen: {exc}")
 
 
+async def _expire_past_offer_slots_once(client: discord.Client) -> int:
+    """Schließt alle inzwischen vergangenen OPEN/PENDING-Angebotsslots."""
+    expired = 0
+    now = dt.now(BERLIN_TZ)
+    for view in list(_OFFER_VIEWS.values()):
+        for slot in list(view.slots):
+            if not _slot_is_past(slot, now):
+                continue
+            if (
+                slot.index in view.booked_slots
+                or slot.index in view.removed_slots
+                or slot.index in view.expired_slots
+            ):
+                continue
+
+            pending_request = next(
+                (
+                    req for req in list(_MODE_REQUEST_VIEWS.values())
+                    if req.status == MODE_REQUEST_PENDING
+                    and req.offer_channel_id == view.channel_id
+                    and req.offer_message_id == view.message_id
+                    and req.slot_index == slot.index
+                ),
+                None,
+            )
+            if pending_request is not None:
+                await pending_request.expire(client)
+            else:
+                await view.mark_expired(client, slot.index)
+            expired += 1
+    return expired
+
+
+async def _offer_expiry_loop(client: discord.Client) -> None:
+    """Aktualisiert Angebotsposts automatisch; Live-Guard schützt zusätzlich."""
+    try:
+        await client.wait_until_ready()
+
+        # Direkt nach einem Restart auch bereits abgelaufene Altposts sichtbar
+        # korrigieren. So bleiben keine klickbar wirkenden Buttons zurück.
+        for view in list(_OFFER_VIEWS.values()):
+            if view.expired_slots:
+                await view._refresh_message(client)
+
+        while not client.is_closed():
+            try:
+                count = await _expire_past_offer_slots_once(client)
+                if count:
+                    print(f"✅ [TERMINBÖRSE] {count} abgelaufene Angebotstermin(e) geschlossen")
+            except Exception as exc:
+                print(f"⚠️ [TERMINBÖRSE] Ablaufprüfung der Terminangebote fehlgeschlagen: {exc}")
+            await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        raise
+
+
 async def restore_persistent_offer_views(client: discord.Client) -> dict:
     """Lädt offene Terminangebote und registriert ihre persistenten Buttons neu.
 
@@ -2245,14 +2387,23 @@ async def restore_persistent_offer_views(client: discord.Client) -> dict:
     for record in records:
         try:
             view = _view_from_persisted_record(record)
-            if view.channel_id is None or view.message_id is None or not view.active_slots():
+            if view.channel_id is None or view.message_id is None:
                 continue
 
             key = (view.channel_id, view.message_id)
-            client.add_view(view, message_id=view.message_id)
             _OFFER_VIEWS[key] = view
             known_keys.add(key)
-            restored += 1
+
+            # Beim Restore erkannte Alttermine direkt als EXPIRED persistieren.
+            for slot_index in sorted(view.expired_slots):
+                try:
+                    await asyncio.to_thread(_persist_offer_slot_state, view, slot_index)
+                except Exception as exc:
+                    print(f"⚠️ [TERMINBÖRSE] EXPIRED-Restore konnte nicht gespeichert werden: {exc}")
+
+            if view.active_slots():
+                client.add_view(view, message_id=view.message_id)
+                restored += 1
         except Exception as exc:
             print(
                 f"⚠️ [TERMINBÖRSE] Angebot {record.get('offer_id', '?')} "
@@ -2272,6 +2423,9 @@ async def restore_persistent_offer_views(client: discord.Client) -> dict:
         client._term_offer_legacy_mode_migration_task = asyncio.create_task(
             _recover_legacy_mode_after_ready(client)
         )
+
+    if not hasattr(client, "_term_offer_expiry_task"):
+        client._term_offer_expiry_task = asyncio.create_task(_offer_expiry_loop(client))
 
     print(
         f"✅ [TERMINBÖRSE] {restored} persistente Angebotspost(s) und "
@@ -2331,6 +2485,15 @@ class HomeAwayChoiceView(discord.ui.View):
         # wenigen Sekunden fälschlich „nicht rechtzeitig reagiert“ an.
         if not interaction.response.is_done():
             await interaction.response.defer()
+
+        if _slot_is_past(self.slot):
+            release_slot(self.reservation_key, self.owner_id)
+            await interaction.edit_original_response(
+                content="⌛ Dieser angebotene Termin ist inzwischen abgelaufen.",
+                view=None,
+            )
+            self.stop()
+            return
 
         match = self._find_match(want_home)
         if match is None:
@@ -2510,7 +2673,10 @@ class ModeChoiceView(discord.ui.View):
         self.slot_index = int(slot_index)
         self.selected_mode: str | None = selected_mode or None
         self.created_at = created_at or dt.now(BERLIN_TZ)
-        self.expires_at = expires_at or (self.created_at + timedelta(seconds=MODE_CHOICE_SECONDS))
+        self.expires_at = expires_at or min(
+            self.created_at + timedelta(seconds=MODE_CHOICE_SECONDS),
+            self.slot.when,
+        )
         self.status = status
         self.dm_channel_id = dm_channel_id
         self.dm_message_id = dm_message_id
@@ -2527,7 +2693,8 @@ class ModeChoiceView(discord.ui.View):
         return True
 
     def is_expired(self) -> bool:
-        return dt.now(BERLIN_TZ) >= self.expires_at
+        now = dt.now(BERLIN_TZ)
+        return now >= self.expires_at or self.slot.when <= now
 
     def expiry_label(self) -> str:
         return self.expires_at.strftime("%d.%m.%Y · %H:%M Uhr")
@@ -2554,12 +2721,21 @@ class ModeChoiceView(discord.ui.View):
         )
 
     def expired_text(self) -> str:
+        if _slot_is_past(self.slot):
+            reason = (
+                "Der angebotene Spieltermin ist inzwischen verstrichen und kann nicht mehr "
+                "bestätigt oder erneut ausgewählt werden."
+            )
+        else:
+            reason = (
+                "Die 24 Stunden für die Modusbestätigung sind abgelaufen. Der angebotene "
+                "Termin wurde wieder freigegeben und kann im Divisionspost erneut ausgewählt werden."
+            )
         return (
             "⌛ **Modusauswahl abgelaufen**\n\n"
             f"**Spiel:** {self.match.home} vs. {self.match.away}\n"
             f"**Termin:** {self.slot.long_label}\n\n"
-            "Die 24 Stunden sind abgelaufen. Der angebotene Termin wurde wieder "
-            "freigegeben und kann im Divisionspost erneut ausgewählt werden."
+            f"{reason}"
         )
 
     async def expire(self, client: discord.Client) -> None:
@@ -2574,7 +2750,10 @@ class ModeChoiceView(discord.ui.View):
 
         offer_view = _OFFER_VIEWS.get((self.offer_channel_id, self.offer_message_id))
         if offer_view is not None:
-            await offer_view.mark_open(client, self.slot_index)
+            if _slot_is_past(self.slot):
+                await offer_view.mark_expired(client, self.slot_index)
+            else:
+                await offer_view.mark_open(client, self.slot_index)
 
         # Auch der Spieler, der den angebotenen Termin angeklickt hat, bekommt
         # Bescheid, falls die Modusfreigabe bei einem anderen Heimspieler lag.
@@ -2583,11 +2762,20 @@ class ModeChoiceView(discord.ui.View):
                 requester = client.get_user(self.reservation_owner_id)
                 if requester is None:
                     requester = await client.fetch_user(self.reservation_owner_id)
+                if _slot_is_past(self.slot):
+                    info = (
+                        f"Der angebotene Termin **{self.slot.long_label}** ist inzwischen verstrichen "
+                        "und wurde geschlossen."
+                    )
+                else:
+                    info = (
+                        "Innerhalb von 24 Stunden wurde kein Modus bestätigt. Der angebotene Termin "
+                        "ist wieder freigegeben und kann erneut ausgewählt werden."
+                    )
                 await requester.send(
                     "⌛ **Modusbestätigung abgelaufen**\n\n"
-                    f"Für **{self.match.home} vs. {self.match.away}** am "
-                    f"**{self.slot.long_label}** wurde innerhalb von 24 Stunden kein Modus bestätigt.\n"
-                    "Der angebotene Termin ist wieder freigegeben und kann erneut ausgewählt werden."
+                    f"Für **{self.match.home} vs. {self.match.away}**:\n"
+                    f"{info}"
                 )
             except Exception as exc:
                 print(f"⚠️ [TERMINBÖRSE] Ablaufhinweis an Anfragenden fehlgeschlagen: {exc}")
