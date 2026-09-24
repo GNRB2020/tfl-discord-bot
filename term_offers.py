@@ -2350,11 +2350,21 @@ async def _offer_expiry_loop(client: discord.Client) -> None:
     try:
         await client.wait_until_ready()
 
-        # Direkt nach einem Restart auch bereits abgelaufene Altposts sichtbar
-        # korrigieren. So bleiben keine klickbar wirkenden Buttons zurück.
+        # Direkt nach einem Restart ALLE wiederhergestellten Angebotsposts
+        # einmal neu rendern. Dadurch erhalten auch bereits bestehende aktive
+        # Angebote Änderungen an Button-Labels (z. B. den Wochentag), ohne dass
+        # der Spieler das Angebot neu erstellen muss. Gleichzeitig werden
+        # erkannte EXPIRED-Zustände sichtbar aktualisiert.
+        refreshed_posts = 0
         for view in list(_OFFER_VIEWS.values()):
-            if view.expired_slots:
-                await view._refresh_message(client)
+            await view._refresh_message(client)
+            refreshed_posts += 1
+
+        if refreshed_posts:
+            print(
+                f"✅ [TERMINBÖRSE] {refreshed_posts} bestehende Angebotspost(s) "
+                "nach Restart neu gerendert"
+            )
 
         while not client.is_closed():
             try:
