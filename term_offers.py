@@ -443,7 +443,8 @@ class OfferSlot:
 
     @property
     def short_label(self) -> str:
-        return self.when.strftime("%d.%m. · %H:%M")
+        weekdays_short = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+        return f"{weekdays_short[self.when.weekday()]} · {self.when.strftime('%d.%m. · %H:%M')}"
 
     @property
     def long_label(self) -> str:
