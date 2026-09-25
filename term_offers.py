@@ -117,19 +117,67 @@ MODE_REQUEST_HEADERS = [
     "updated_at",
 ]
 MODE_REQUEST_PENDING = "PENDING"
+MODE_REQUEST_AWAITING_APPROVAL = "AWAITING_APPROVAL"
 MODE_REQUEST_COMPLETED = "COMPLETED"
 MODE_REQUEST_EXPIRED = "EXPIRED"
 MODE_REQUEST_CANCELLED = "CANCELLED"
 
+# Gemeinsame, persistente Zustimmung für Fremdmodi. Diese Logik wird sowohl
+# von der Terminbörse als auch von /player -> Spiel planen verwendet.
+FOREIGN_MODE_APPROVAL_SHEET = "FremdmodusAnfragen"
+FOREIGN_MODE_APPROVAL_HEADERS = [
+    "request_id",
+    "status",
+    "source",
+    "created_at",
+    "expires_at",
+    "approver_id",
+    "requester_id",
+    "requester_name",
+    "division",
+    "row_index",
+    "home",
+    "away",
+    "mode",
+    "mode_division",
+    "slot_timestamp",
+    "offer_channel_id",
+    "offer_message_id",
+    "slot_index",
+    "mode_request_id",
+    "dm_channel_id",
+    "dm_message_id",
+    "updated_at",
+]
+FOREIGN_MODE_PENDING = "PENDING"
+FOREIGN_MODE_APPROVED = "APPROVED"
+FOREIGN_MODE_REJECTED = "REJECTED"
+FOREIGN_MODE_EXPIRED = "EXPIRED"
+FOREIGN_MODE_CANCELLED = "CANCELLED"
+FOREIGN_MODE_SOURCE_OFFER = "TERMINBOERSE"
+FOREIGN_MODE_SOURCE_DIRECT = "SPIELPLANUNG"
+
 _OFFER_VIEWS: dict[tuple[int, int], "TermOfferView"] = {}
 _MODE_REQUEST_VIEWS: dict[str, "ModeChoiceView"] = {}
 _MODE_REQUEST_EXPIRY_TASKS: dict[str, asyncio.Task] = {}
+_FOREIGN_MODE_VIEWS: dict[str, "ForeignModeApprovalView"] = {}
+_FOREIGN_MODE_EXPIRY_TASKS: dict[str, asyncio.Task] = {}
 _OFFER_EXPIRY_TASK = None
 _RESERVATIONS: dict[str, tuple[int, float]] = {}
 _OFFER_STORE_WS = None
 _OFFER_STORE_LOCK = RLock()
 _MODE_REQUEST_WS = None
 _MODE_REQUEST_LOCK = RLock()
+_FOREIGN_MODE_WS = None
+_FOREIGN_MODE_LOCK = RLock()
+_FINALIZE_LOCK: asyncio.Lock | None = None
+
+
+def _get_finalize_lock() -> asyncio.Lock:
+    global _FINALIZE_LOCK
+    if _FINALIZE_LOCK is None:
+        _FINALIZE_LOCK = asyncio.Lock()
+    return _FINALIZE_LOCK
 
 
 def normalize_name(value: str | None) -> str:
@@ -569,6 +617,86 @@ def get_division_modes(division: int) -> list[str]:
     return out[:25]
 
 
+def get_mode_division_map() -> dict[str, dict]:
+    """Mappt jeden TFL-Modus auf Anzeigename und Division(en)."""
+    mapping: dict[str, dict] = {}
+    order: list[str] = []
+    for division in range(1, 7):
+        for mode in get_division_modes(division):
+            key = normalize_name(mode)
+            if not key:
+                continue
+            if key not in mapping:
+                mapping[key] = {"mode": mode, "divisions": []}
+                order.append(key)
+            if division not in mapping[key]["divisions"]:
+                mapping[key]["divisions"].append(division)
+    mapping["__order__"] = {"keys": order}
+    return mapping
+
+
+def get_all_tfl_modes() -> list[str]:
+    """Alle in den sechs Divisionen hinterlegten TFL-Modi, ohne Duplikate."""
+    mapping = get_mode_division_map()
+    order = mapping.get("__order__", {}).get("keys", [])
+    out = [mapping[key]["mode"] for key in order if key in mapping]
+
+    # Fallback für alte/abweichende Config-Sheets.
+    if not out:
+        try:
+            out = [clean_text(v) for v in matchcenter.get_runner_modes() if clean_text(v)]
+        except Exception:
+            out = []
+    return out
+
+
+def get_mode_divisions(mode: str) -> list[int]:
+    target = normalize_name(mode)
+    if not target:
+        return []
+    mapping = get_mode_division_map()
+    record = mapping.get(target, {})
+    return list(record.get("divisions", []))
+
+
+def is_mode_native_to_division(division: int, mode: str) -> bool:
+    return int(division) in get_mode_divisions(mode)
+
+
+def mode_origin_label(mode: str, match_division: int | None = None) -> str:
+    divisions = get_mode_divisions(mode)
+    if match_division is not None and int(match_division) in divisions:
+        return f"{int(match_division)}. Division"
+    if len(divisions) == 1:
+        return f"{divisions[0]}. Division"
+    if divisions:
+        return "Division " + "/".join(str(v) for v in divisions)
+    return "anderer TFL-Modus"
+
+
+def get_allowed_modes_for_match(division: int, ban_1: str = "", ban_2: str = "") -> list[str]:
+    """
+    Eigene Division: Streichmodi des Gastspielers bleiben wirksam.
+    Fremde Division: der Modus bleibt auswählbar, weil der Gast anschließend
+    ausdrücklich zustimmen muss.
+    """
+    division = int(division)
+    native_modes = {normalize_name(v) for v in get_division_modes(division)}
+    bans = {normalize_name(v) for v in (ban_1, ban_2) if clean_text(v)}
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for mode in get_all_tfl_modes():
+        key = normalize_name(mode)
+        if not key or key in seen:
+            continue
+        if key in native_modes and key in bans:
+            continue
+        seen.add(key)
+        out.append(mode)
+    return out
+
+
 def _pair_matches(division: int, player_a: str, player_b: str) -> list[MatchRow]:
     ws = matchcenter.get_div_ws_from_label(f"Div {division}")
     rows = matchcenter.get_matchcenter_values(ws, force_refresh=True)
@@ -882,6 +1010,247 @@ def _schedule_mode_request_expiry(client: discord.Client, view) -> None:
     _MODE_REQUEST_EXPIRY_TASKS[request_id] = asyncio.create_task(worker())
 
 
+def _ensure_foreign_mode_ws():
+    global _FOREIGN_MODE_WS
+
+    with _FOREIGN_MODE_LOCK:
+        if _FOREIGN_MODE_WS is not None:
+            return _FOREIGN_MODE_WS
+
+        try:
+            ws = get_season_worksheet(FOREIGN_MODE_APPROVAL_SHEET)
+        except Exception:
+            spreadsheet = get_season_spreadsheet()
+            try:
+                ws = spreadsheet.worksheet(FOREIGN_MODE_APPROVAL_SHEET)
+            except Exception:
+                ws = spreadsheet.add_worksheet(
+                    title=FOREIGN_MODE_APPROVAL_SHEET,
+                    rows=1000,
+                    cols=len(FOREIGN_MODE_APPROVAL_HEADERS),
+                )
+                sheet_write_call(
+                    lambda: ws.update("A1:V1", [FOREIGN_MODE_APPROVAL_HEADERS]),
+                    invalidate_prefixes=_invalidate_prefixes(ws, FOREIGN_MODE_APPROVAL_SHEET),
+                )
+                print(f"✅ [FREMDMODUS] Sheet '{FOREIGN_MODE_APPROVAL_SHEET}' angelegt")
+
+        try:
+            current_cols = int(getattr(ws, "col_count", 0) or 0)
+            if current_cols < len(FOREIGN_MODE_APPROVAL_HEADERS):
+                ws.add_cols(len(FOREIGN_MODE_APPROVAL_HEADERS) - current_cols)
+        except Exception:
+            pass
+
+        try:
+            header = ws.row_values(1)
+        except Exception:
+            header = []
+
+        if header[: len(FOREIGN_MODE_APPROVAL_HEADERS)] != FOREIGN_MODE_APPROVAL_HEADERS:
+            sheet_write_call(
+                lambda: ws.update("A1:V1", [FOREIGN_MODE_APPROVAL_HEADERS]),
+                invalidate_prefixes=_invalidate_prefixes(ws, FOREIGN_MODE_APPROVAL_SHEET),
+            )
+
+        _FOREIGN_MODE_WS = ws
+        return ws
+
+
+def _foreign_approval_row_values(view, status: str | None = None) -> list[str]:
+    current_status = status or getattr(view, "status", FOREIGN_MODE_PENDING)
+    message = getattr(view, "message", None)
+    dm_channel_id = getattr(view, "dm_channel_id", None)
+    dm_message_id = getattr(view, "dm_message_id", None)
+    if message is not None:
+        dm_channel_id = getattr(getattr(message, "channel", None), "id", dm_channel_id)
+        dm_message_id = getattr(message, "id", dm_message_id)
+
+    return [
+        str(view.request_id),
+        str(current_status),
+        str(view.source),
+        _mode_request_time_text(view.created_at),
+        _mode_request_time_text(view.expires_at),
+        str(view.approver_id),
+        str(view.requester_id),
+        str(view.requester_name),
+        str(view.division),
+        str(view.row_index),
+        str(view.home),
+        str(view.away),
+        str(view.mode),
+        str(view.mode_division or ""),
+        str(view.slot.timestamp),
+        str(view.offer_channel_id or ""),
+        str(view.offer_message_id or ""),
+        str(view.slot_index if view.slot_index is not None else ""),
+        str(view.mode_request_id or ""),
+        str(dm_channel_id or ""),
+        str(dm_message_id or ""),
+        _mode_request_time_text(dt.now(BERLIN_TZ)),
+    ]
+
+
+def _persist_foreign_mode_approval(view, status: str | None = None) -> None:
+    ws = _ensure_foreign_mode_ws()
+    row_values = _foreign_approval_row_values(view, status=status)
+
+    with _FOREIGN_MODE_LOCK:
+        values = ws.get_all_values()
+        row_index = getattr(view, "store_row", None)
+        last_used_row = 1
+        if not row_index:
+            for idx, row in enumerate(values[1:], start=2):
+                if any(_cell(row, i) for i in range(min(len(FOREIGN_MODE_APPROVAL_HEADERS), len(row)))):
+                    last_used_row = idx
+                if _cell(row, 0) == str(view.request_id):
+                    row_index = idx
+                    break
+            if not row_index:
+                row_index = max(2, last_used_row + 1)
+
+        sheet_write_call(
+            lambda: ws.update(f"A{row_index}:V{row_index}", [row_values]),
+            invalidate_prefixes=_invalidate_prefixes(ws, FOREIGN_MODE_APPROVAL_SHEET),
+        )
+        view.store_row = int(row_index)
+        if status is not None:
+            view.status = status
+
+
+def _load_pending_foreign_mode_approval_records() -> list[dict]:
+    ws = _ensure_foreign_mode_ws()
+    with _FOREIGN_MODE_LOCK:
+        rows = ws.get_all_values()
+
+    records: list[dict] = []
+    for row_index, row in enumerate(rows[1:], start=2):
+        if (_cell(row, 1) or "").upper() != FOREIGN_MODE_PENDING:
+            continue
+        try:
+            record = {
+                "store_row": row_index,
+                "request_id": _cell(row, 0),
+                "status": FOREIGN_MODE_PENDING,
+                "source": _cell(row, 2),
+                "created_at": _parse_mode_request_time(_cell(row, 3)),
+                "expires_at": _parse_mode_request_time(_cell(row, 4)),
+                "approver_id": int(_cell(row, 5)),
+                "requester_id": int(_cell(row, 6)),
+                "requester_name": _cell(row, 7),
+                "division": int(_cell(row, 8)),
+                "row_index": int(_cell(row, 9)),
+                "home": _cell(row, 10),
+                "away": _cell(row, 11),
+                "mode": _cell(row, 12),
+                "mode_division": int(_cell(row, 13)) if _cell(row, 13).isdigit() else None,
+                "slot": OfferSlot(index=int(_cell(row, 17) or 0), when=_parse_offer_datetime(_cell(row, 14))),
+                "offer_channel_id": int(_cell(row, 15)) if _cell(row, 15).isdigit() else None,
+                "offer_message_id": int(_cell(row, 16)) if _cell(row, 16).isdigit() else None,
+                "slot_index": int(_cell(row, 17)) if _cell(row, 17).isdigit() else None,
+                "mode_request_id": _cell(row, 18) or None,
+                "dm_channel_id": int(_cell(row, 19)) if _cell(row, 19).isdigit() else None,
+                "dm_message_id": int(_cell(row, 20)) if _cell(row, 20).isdigit() else None,
+            }
+            if record["request_id"] and record["mode"]:
+                records.append(record)
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Anfrage in Zeile {row_index} konnte nicht gelesen werden: {exc}")
+    return records
+
+
+def _load_mode_request_record_by_id(request_id: str) -> dict | None:
+    ws = _ensure_mode_request_ws()
+    with _MODE_REQUEST_LOCK:
+        rows = ws.get_all_values()
+
+    for row_index, row in enumerate(rows[1:], start=2):
+        if _cell(row, 0) != str(request_id):
+            continue
+        try:
+            allowed_modes_raw = _cell(row, 10) or "[]"
+            allowed_modes = json.loads(allowed_modes_raw)
+            if not isinstance(allowed_modes, list):
+                allowed_modes = []
+            return {
+                "store_row": row_index,
+                "request_id": _cell(row, 0),
+                "status": (_cell(row, 1) or MODE_REQUEST_PENDING).upper(),
+                "created_at": _parse_mode_request_time(_cell(row, 2)),
+                "expires_at": _parse_mode_request_time(_cell(row, 3)),
+                "owner_id": int(_cell(row, 4)),
+                "division": int(_cell(row, 5)),
+                "row_index": int(_cell(row, 6)),
+                "home": _cell(row, 7),
+                "away": _cell(row, 8),
+                "slot": OfferSlot(index=int(_cell(row, 17)), when=_parse_offer_datetime(_cell(row, 9))),
+                "allowed_modes": [clean_text(v) for v in allowed_modes if clean_text(v)],
+                "ban_1": _cell(row, 11),
+                "ban_2": _cell(row, 12),
+                "reservation_key": _cell(row, 13),
+                "reservation_owner_id": int(_cell(row, 14)),
+                "offer_channel_id": int(_cell(row, 15)),
+                "offer_message_id": int(_cell(row, 16)),
+                "slot_index": int(_cell(row, 17)),
+                "dm_channel_id": int(_cell(row, 18)) if _cell(row, 18).isdigit() else None,
+                "dm_message_id": int(_cell(row, 19)) if _cell(row, 19).isdigit() else None,
+                "selected_mode": _cell(row, 20),
+            }
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Modusanfrage {request_id} konnte nicht gelesen werden: {exc}")
+            return None
+    return None
+
+
+async def _fetch_foreign_approval_message(client: discord.Client, view):
+    if getattr(view, "message", None) is not None:
+        return view.message
+    if not getattr(view, "dm_message_id", None):
+        return None
+    try:
+        user = client.get_user(int(view.approver_id)) or await client.fetch_user(int(view.approver_id))
+        channel = getattr(user, "dm_channel", None) or await user.create_dm()
+        message = await channel.fetch_message(int(view.dm_message_id))
+        view.message = message
+        view.dm_channel_id = channel.id
+        return message
+    except Exception as exc:
+        print(f"⚠️ [FREMDMODUS] Zustimmungs-DM konnte nicht geladen werden: {exc}")
+        return None
+
+
+def _cancel_foreign_mode_expiry_task(request_id: str) -> None:
+    task = _FOREIGN_MODE_EXPIRY_TASKS.pop(str(request_id), None)
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+def _schedule_foreign_mode_expiry(client: discord.Client, view) -> None:
+    request_id = str(view.request_id)
+    _cancel_foreign_mode_expiry_task(request_id)
+
+    async def worker():
+        try:
+            await client.wait_until_ready()
+            deadline = min(view.expires_at, view.slot.when)
+            remaining = (deadline - dt.now(BERLIN_TZ)).total_seconds()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            if getattr(view, "status", None) == FOREIGN_MODE_PENDING:
+                await view.expire(client)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Ablauf-Task {request_id} fehlgeschlagen: {exc}")
+        finally:
+            current = _FOREIGN_MODE_EXPIRY_TASKS.get(request_id)
+            if current is asyncio.current_task():
+                _FOREIGN_MODE_EXPIRY_TASKS.pop(request_id, None)
+
+    _FOREIGN_MODE_EXPIRY_TASKS[request_id] = asyncio.create_task(worker())
+
+
 def _cleanup_reservations() -> None:
     now = time.monotonic()
     expired = [key for key, (_, until) in _RESERVATIONS.items() if until <= now]
@@ -983,7 +1352,7 @@ def _verify_league_schedule(
         )
 
 
-async def finalize_match_schedule(
+async def _finalize_match_schedule_unlocked(
     *,
     guild: discord.Guild,
     actor: discord.Member | discord.User,
@@ -993,6 +1362,7 @@ async def finalize_match_schedule(
     away: str,
     mode: str,
     slot: OfferSlot,
+    source_label: str = "Terminbörse",
 ) -> dict:
     """
     Zentrale Transaktion der Terminbörse:
@@ -1016,7 +1386,7 @@ async def finalize_match_schedule(
     )
 
     multistream_url = await asyncio.to_thread(matchcenter.build_multistream_url, home, away)
-    entered_by = f"Terminbörse: {actor.display_name}"
+    entered_by = f"{source_label}: {actor.display_name}"
 
     await asyncio.to_thread(
         matchcenter.write_league_schedule,
@@ -1045,7 +1415,7 @@ async def finalize_match_schedule(
     start_dt = slot.when
     end_dt = start_dt + timedelta(hours=2)
     title = f"{division_label} | {home} vs. {away} | {mode}"
-    description = f"Geplant über TFL Terminbörse von {actor.display_name}"
+    description = f"Geplant über TFL {source_label} von {actor.display_name}"
 
     try:
         event = await matchcenter.create_scheduled_event(
@@ -1112,6 +1482,37 @@ async def finalize_match_schedule(
     }
 
 
+async def finalize_match_schedule(
+    *,
+    guild: discord.Guild,
+    actor: discord.Member | discord.User,
+    division: int,
+    row_index: int,
+    home: str,
+    away: str,
+    mode: str,
+    slot: OfferSlot,
+    source_label: str = "Terminbörse",
+) -> dict:
+    """Serialisiert Prüfung -> Sheet -> Verifikation -> Discord-Event.
+
+    Dadurch können zwei nahezu zeitgleiche Bestätigungen innerhalb derselben
+    Bot-Instanz nicht beide durch die Live-Prüfung rutschen.
+    """
+    async with _get_finalize_lock():
+        return await _finalize_match_schedule_unlocked(
+            guild=guild,
+            actor=actor,
+            division=division,
+            row_index=row_index,
+            home=home,
+            away=away,
+            mode=mode,
+            slot=slot,
+            source_label=source_label,
+        )
+
+
 async def _get_division_channel(client: discord.Client, division: int):
     channel_id = DIVISION_CHANNELS.get(division)
     if not channel_id:
@@ -1160,9 +1561,12 @@ async def _send_mode_dm(
     ban_1 = guest_profile.ban_1 if guest_profile else ""
     ban_2 = guest_profile.ban_2 if guest_profile else ""
 
-    modes = await asyncio.to_thread(get_division_modes, division)
-    bans_normalized = {normalize_name(v) for v in (ban_1, ban_2) if v}
-    allowed_modes = [m for m in modes if normalize_name(m) not in bans_normalized]
+    allowed_modes = await asyncio.to_thread(
+        get_allowed_modes_for_match,
+        division,
+        ban_1,
+        ban_2,
+    )
 
     if not allowed_modes:
         release_slot(reservation_key, interaction.user.id)
@@ -2227,9 +2631,12 @@ async def _recover_legacy_mode_requests(client: discord.Client) -> int:
                     )
                     ban_1 = guest_profile.ban_1 if guest_profile else ""
                     ban_2 = guest_profile.ban_2 if guest_profile else ""
-                    modes = await asyncio.to_thread(get_division_modes, offer_view.division)
-                    bans = {normalize_name(v) for v in (ban_1, ban_2) if v}
-                    allowed_modes = [m for m in modes if normalize_name(m) not in bans]
+                    allowed_modes = await asyncio.to_thread(
+                        get_allowed_modes_for_match,
+                        offer_view.division,
+                        ban_1,
+                        ban_2,
+                    )
                     if not allowed_modes:
                         continue
 
@@ -2427,6 +2834,7 @@ async def restore_persistent_offer_views(client: discord.Client) -> dict:
         )
 
     mode_restored = await _restore_persistent_mode_requests(client)
+    foreign_mode_restored = await _restore_persistent_foreign_mode_approvals(client)
 
     # Alte Modus-DMs aus der Version vor TerminModusAnfragen werden nach on_ready
     # aus DM + Offer-Sheet + Divisionsspielplan rekonstruiert und reaktiviert.
@@ -2439,12 +2847,13 @@ async def restore_persistent_offer_views(client: discord.Client) -> dict:
         client._term_offer_expiry_task = asyncio.create_task(_offer_expiry_loop(client))
 
     print(
-        f"✅ [TERMINBÖRSE] {restored} persistente Angebotspost(s) und "
-        f"{mode_restored} Modusanfrage(n) registriert"
+        f"✅ [TERMINBÖRSE] {restored} persistente Angebotspost(s), "
+        f"{mode_restored} Modusanfrage(n) und {foreign_mode_restored} Fremdmodus-Zustimmung(en) registriert"
     )
     return {
         "restored": restored,
         "mode_requests_restored": mode_restored,
+        "foreign_mode_approvals_restored": foreign_mode_restored,
         "recovery_scheduled": True,
         "error": None,
     }
@@ -2572,23 +2981,645 @@ class HomeAwayChoiceView(discord.ui.View):
         release_slot(self.reservation_key, self.owner_id)
 
 
-class ModeSelect(discord.ui.Select):
-    def __init__(self, modes: list[str], request_id: str, selected_mode: str | None = None):
-        options = [
-            discord.SelectOption(
-                label=mode,
-                value=mode,
-                default=(clean_text(mode) == clean_text(selected_mode)),
+class ForeignModeApprovalView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        source: str,
+        approver_id: int,
+        requester_id: int,
+        requester_name: str,
+        division: int,
+        row_index: int,
+        home: str,
+        away: str,
+        mode: str,
+        mode_division: int | None,
+        slot: OfferSlot,
+        offer_channel_id: int | None = None,
+        offer_message_id: int | None = None,
+        slot_index: int | None = None,
+        mode_request_id: str | None = None,
+        request_id: str | None = None,
+        created_at: dt | None = None,
+        expires_at: dt | None = None,
+        status: str = FOREIGN_MODE_PENDING,
+        dm_channel_id: int | None = None,
+        dm_message_id: int | None = None,
+        store_row: int | None = None,
+    ):
+        super().__init__(timeout=None)
+        self.request_id = request_id or uuid.uuid4().hex[:20]
+        self.source = source
+        self.approver_id = int(approver_id)
+        self.requester_id = int(requester_id)
+        self.requester_name = requester_name
+        self.division = int(division)
+        self.row_index = int(row_index)
+        self.home = home
+        self.away = away
+        self.mode = mode
+        self.mode_division = mode_division
+        self.slot = slot
+        self.offer_channel_id = offer_channel_id
+        self.offer_message_id = offer_message_id
+        self.slot_index = slot_index
+        self.mode_request_id = mode_request_id
+        self.created_at = created_at or dt.now(BERLIN_TZ)
+        self.expires_at = expires_at or min(
+            self.created_at + timedelta(seconds=MODE_CHOICE_SECONDS),
+            self.slot.when,
+        )
+        self.status = status
+        self.dm_channel_id = dm_channel_id
+        self.dm_message_id = dm_message_id
+        self.store_row = store_row
+        self.message: discord.Message | None = None
+
+        self.add_item(ForeignModeApproveButton(self.request_id))
+        self.add_item(ForeignModeRejectButton(self.request_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.approver_id:
+            await interaction.response.send_message("Diese Modusanfrage ist nicht für dich bestimmt.", ephemeral=True)
+            return False
+        return True
+
+    def is_expired(self) -> bool:
+        return dt.now(BERLIN_TZ) >= min(self.expires_at, self.slot.when)
+
+    def expiry_label(self) -> str:
+        return min(self.expires_at, self.slot.when).strftime("%d.%m.%Y · %H:%M Uhr")
+
+    def render_text(self) -> str:
+        origin = f"{self.mode_division}. Division" if self.mode_division else "einer anderen Division"
+        return (
+            "🤝 **Zustimmung zu einem Fremdmodus**\n\n"
+            f"**Spiel:** {self.home} vs. {self.away}\n"
+            f"**Termin:** {self.slot.long_label}\n"
+            f"**Vorgeschlagener Modus:** {self.mode}\n"
+            f"**Modus stammt aus:** {origin}\n\n"
+            f"**{self.requester_name}** möchte diesen Modus spielen. "
+            "Da er nicht zur eigenen Division gehört, müssen beide Spieler zustimmen.\n\n"
+            f"⏱️ **Gültig bis:** {self.expiry_label()}"
+        )
+
+    async def _requester_user(self, client: discord.Client):
+        return client.get_user(self.requester_id) or await client.fetch_user(self.requester_id)
+
+    async def _notify_requester(self, client: discord.Client, text: str) -> None:
+        try:
+            user = await self._requester_user(client)
+            await user.send(text)
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Rückmeldung an Antragsteller fehlgeschlagen: {exc}")
+
+    async def _mode_request_view(self):
+        if not self.mode_request_id:
+            return None
+        existing = _MODE_REQUEST_VIEWS.get(str(self.mode_request_id))
+        if existing is not None:
+            return existing
+        record = await asyncio.to_thread(_load_mode_request_record_by_id, str(self.mode_request_id))
+        if record is None:
+            return None
+        return _mode_view_from_record(record)
+
+    async def _complete_offer_mode_request(self, client: discord.Client, success_text: str) -> None:
+        if not self.mode_request_id:
+            return
+        mode_view = await self._mode_request_view()
+        if mode_view is None:
+            return
+        mode_view.status = MODE_REQUEST_COMPLETED
+        try:
+            await asyncio.to_thread(_persist_mode_request, mode_view, MODE_REQUEST_COMPLETED)
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Modusanfrage konnte nicht abgeschlossen werden: {exc}")
+        release_slot(mode_view.reservation_key, mode_view.reservation_owner_id)
+        _MODE_REQUEST_VIEWS.pop(str(mode_view.request_id), None)
+        _cancel_mode_expiry_task(str(mode_view.request_id))
+        message = await _fetch_mode_request_message(client, mode_view)
+        if message is not None:
+            try:
+                await message.edit(content=success_text, view=None)
+            except Exception:
+                pass
+
+    async def _resume_offer_mode_request(self, client: discord.Client) -> None:
+        mode_view = await self._mode_request_view()
+        if mode_view is None:
+            return
+        mode_view.status = MODE_REQUEST_PENDING
+        mode_view.selected_mode = None
+        mode_view.rebuild_mode_controls()
+
+        if mode_view.is_expired():
+            await mode_view.expire(client)
+            return
+
+        await asyncio.to_thread(_persist_mode_request, mode_view, MODE_REQUEST_PENDING)
+        _MODE_REQUEST_VIEWS[str(mode_view.request_id)] = mode_view
+        reserve_slot(
+            mode_view.reservation_key,
+            mode_view.reservation_owner_id,
+            max(1, int((mode_view.expires_at - dt.now(BERLIN_TZ)).total_seconds())),
+        )
+        if mode_view.dm_message_id:
+            client.add_view(mode_view, message_id=mode_view.dm_message_id)
+        else:
+            client.add_view(mode_view)
+        _schedule_mode_request_expiry(client, mode_view)
+        message = await _fetch_mode_request_message(client, mode_view)
+        if message is not None:
+            await message.edit(
+                content=(
+                    f"❌ **{self.mode}** wurde vom Gegner abgelehnt.\n"
+                    "Bitte wähle einen anderen Modus.\n\n"
+                    + mode_view.render_text()
+                ),
+                view=mode_view,
             )
-            for mode in modes[:25]
-        ]
+
+    async def approve(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        if self.is_expired():
+            await self.expire(interaction.client)
+            try:
+                await interaction.edit_original_response(content="⌛ Diese Modusanfrage ist bereits abgelaufen.", view=None)
+            except Exception:
+                pass
+            return
+
+        try:
+            guild = interaction.client.get_guild(matchcenter.GUILD_ID)
+            if guild is None:
+                guild = await interaction.client.fetch_guild(matchcenter.GUILD_ID)
+            requester = await self._requester_user(interaction.client)
+
+            result = await finalize_match_schedule(
+                guild=guild,
+                actor=requester,
+                division=self.division,
+                row_index=self.row_index,
+                home=self.home,
+                away=self.away,
+                mode=self.mode,
+                slot=self.slot,
+                source_label="Spielplanung" if self.source == FOREIGN_MODE_SOURCE_DIRECT else "Terminbörse",
+            )
+
+            if self.source == FOREIGN_MODE_SOURCE_OFFER:
+                offer_view = _OFFER_VIEWS.get((int(self.offer_channel_id or 0), int(self.offer_message_id or 0)))
+                if offer_view is not None and self.slot_index is not None:
+                    await offer_view.mark_booked(interaction.client, int(self.slot_index))
+                await self._complete_offer_mode_request(
+                    interaction.client,
+                    (
+                        "✅ **Fremdmodus bestätigt – Spieltermin eingetragen**\n\n"
+                        f"**{self.home} vs. {self.away}**\n"
+                        f"📅 {self.slot.long_label}\n"
+                        f"🎮 {self.mode}\n"
+                        f"🔗 {result['event_url'] or result['multistream_url']}"
+                    ),
+                )
+            else:
+                release_slot(f"direct:{self.division}:{self.row_index}", self.requester_id)
+
+            self.status = FOREIGN_MODE_APPROVED
+            await asyncio.to_thread(_persist_foreign_mode_approval, self, FOREIGN_MODE_APPROVED)
+            _FOREIGN_MODE_VIEWS.pop(self.request_id, None)
+            _cancel_foreign_mode_expiry_task(self.request_id)
+            self.stop()
+
+            final_text = (
+                "✅ **Fremdmodus bestätigt – Spieltermin eingetragen.**\n\n"
+                f"**{self.home} vs. {self.away}**\n"
+                f"📅 {self.slot.long_label}\n"
+                f"🎮 {self.mode}\n"
+                f"🔗 {result['event_url'] or result['multistream_url']}"
+            )
+            await interaction.edit_original_response(content=final_text, view=None)
+            await self._notify_requester(interaction.client, final_text)
+        except Exception as exc:
+            await interaction.edit_original_response(
+                content=(
+                    f"❌ Der Spieltermin konnte nicht eingetragen werden: {exc}\n\n"
+                    f"Die Zustimmung bleibt bis **{self.expiry_label()}** aktiv."
+                ),
+                view=self,
+            )
+
+    async def reject(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        self.status = FOREIGN_MODE_REJECTED
+        try:
+            await asyncio.to_thread(_persist_foreign_mode_approval, self, FOREIGN_MODE_REJECTED)
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Ablehnung konnte nicht gespeichert werden: {exc}")
+
+        _FOREIGN_MODE_VIEWS.pop(self.request_id, None)
+        _cancel_foreign_mode_expiry_task(self.request_id)
+        self.stop()
+
+        if self.source == FOREIGN_MODE_SOURCE_OFFER:
+            try:
+                await self._resume_offer_mode_request(interaction.client)
+            except Exception as exc:
+                print(f"⚠️ [FREMDMODUS] Modusauswahl konnte nicht wieder geöffnet werden: {exc}")
+            requester_text = (
+                f"❌ **{self.mode}** wurde für **{self.home} vs. {self.away}** abgelehnt. "
+                "Die Modusauswahl ist wieder geöffnet."
+            )
+        else:
+            release_slot(f"direct:{self.division}:{self.row_index}", self.requester_id)
+            requester_text = (
+                f"❌ **{self.mode}** wurde für **{self.home} vs. {self.away}** abgelehnt. "
+                "Der Spieltermin wurde nicht eingetragen."
+            )
+
+        await interaction.edit_original_response(
+            content=f"❌ **Fremdmodus abgelehnt.**\n\n{self.mode} wird nicht eingetragen.",
+            view=None,
+        )
+        await self._notify_requester(interaction.client, requester_text)
+
+    async def expire(self, client: discord.Client) -> None:
+        if self.status != FOREIGN_MODE_PENDING:
+            return
+        self.status = FOREIGN_MODE_EXPIRED
+        try:
+            await asyncio.to_thread(_persist_foreign_mode_approval, self, FOREIGN_MODE_EXPIRED)
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Ablauf konnte nicht gespeichert werden: {exc}")
+
+        if self.source == FOREIGN_MODE_SOURCE_OFFER:
+            mode_view = await self._mode_request_view()
+            if mode_view is not None:
+                mode_view.status = MODE_REQUEST_PENDING
+                await mode_view.expire(client)
+        else:
+            release_slot(f"direct:{self.division}:{self.row_index}", self.requester_id)
+            await self._notify_requester(
+                client,
+                f"⌛ Die Zustimmung zu **{self.mode}** für **{self.home} vs. {self.away}** ist abgelaufen. "
+                "Der Spieltermin wurde nicht eingetragen.",
+            )
+
+        message = await _fetch_foreign_approval_message(client, self)
+        if message is not None:
+            try:
+                await message.edit(
+                    content=(
+                        "⌛ **Fremdmodus-Anfrage abgelaufen**\n\n"
+                        f"**{self.home} vs. {self.away}**\n"
+                        f"🎮 {self.mode}\n"
+                        "Es wurde kein Spieltermin eingetragen."
+                    ),
+                    view=None,
+                )
+            except Exception:
+                pass
+
+        _FOREIGN_MODE_VIEWS.pop(self.request_id, None)
+        _cancel_foreign_mode_expiry_task(self.request_id)
+        self.stop()
+
+
+class ForeignModeApproveButton(discord.ui.Button):
+    def __init__(self, request_id: str):
         super().__init__(
-            placeholder="Spielmodus auswählen",
+            label="Zustimmen",
+            style=discord.ButtonStyle.success,
+            custom_id=f"tfl_foreign_mode_yes:{request_id}",
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if isinstance(view, ForeignModeApprovalView):
+            await view.approve(interaction)
+
+
+class ForeignModeRejectButton(discord.ui.Button):
+    def __init__(self, request_id: str):
+        super().__init__(
+            label="Ablehnen",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"tfl_foreign_mode_no:{request_id}",
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if isinstance(view, ForeignModeApprovalView):
+            await view.reject(interaction)
+
+
+def _foreign_view_from_record(record: dict) -> ForeignModeApprovalView:
+    return ForeignModeApprovalView(
+        source=record["source"],
+        approver_id=record["approver_id"],
+        requester_id=record["requester_id"],
+        requester_name=record["requester_name"],
+        division=record["division"],
+        row_index=record["row_index"],
+        home=record["home"],
+        away=record["away"],
+        mode=record["mode"],
+        mode_division=record.get("mode_division"),
+        slot=record["slot"],
+        offer_channel_id=record.get("offer_channel_id"),
+        offer_message_id=record.get("offer_message_id"),
+        slot_index=record.get("slot_index"),
+        mode_request_id=record.get("mode_request_id"),
+        request_id=record["request_id"],
+        created_at=record["created_at"],
+        expires_at=record["expires_at"],
+        status=record.get("status", FOREIGN_MODE_PENDING),
+        dm_channel_id=record.get("dm_channel_id"),
+        dm_message_id=record.get("dm_message_id"),
+        store_row=record.get("store_row"),
+    )
+
+
+async def _restore_persistent_foreign_mode_approvals(client: discord.Client) -> int:
+    try:
+        records = await asyncio.to_thread(_load_pending_foreign_mode_approval_records)
+    except Exception as exc:
+        print(f"⚠️ [FREMDMODUS] Anfragen konnten nicht geladen werden: {exc}")
+        return 0
+
+    restored = 0
+    for record in records:
+        try:
+            view = _foreign_view_from_record(record)
+            _FOREIGN_MODE_VIEWS[view.request_id] = view
+
+            if view.source == FOREIGN_MODE_SOURCE_OFFER:
+                offer_view = _OFFER_VIEWS.get((int(view.offer_channel_id or 0), int(view.offer_message_id or 0)))
+                if offer_view is not None and view.slot_index is not None:
+                    offer_view.pending_slots.add(int(view.slot_index))
+            else:
+                reserve_slot(
+                    f"direct:{view.division}:{view.row_index}",
+                    view.requester_id,
+                    max(1, int((view.expires_at - dt.now(BERLIN_TZ)).total_seconds())),
+                )
+
+            if view.dm_message_id:
+                client.add_view(view, message_id=view.dm_message_id)
+            else:
+                client.add_view(view)
+            _schedule_foreign_mode_expiry(client, view)
+            restored += 1
+        except Exception as exc:
+            print(f"⚠️ [FREMDMODUS] Anfrage {record.get('request_id', '?')} konnte nicht registriert werden: {exc}")
+
+    print(f"✅ [FREMDMODUS] {restored} persistente Zustimmungsanfrage(n) registriert")
+    return restored
+
+
+async def _send_foreign_mode_approval(
+    *,
+    client: discord.Client,
+    approver: discord.abc.User,
+    requester: discord.abc.User,
+    requester_name: str,
+    source: str,
+    division: int,
+    row_index: int,
+    home: str,
+    away: str,
+    mode: str,
+    slot: OfferSlot,
+    expires_at: dt,
+    offer_channel_id: int | None = None,
+    offer_message_id: int | None = None,
+    slot_index: int | None = None,
+    mode_request_id: str | None = None,
+) -> ForeignModeApprovalView:
+    divisions = await asyncio.to_thread(get_mode_divisions, mode)
+    foreign_divisions = [value for value in divisions if value != int(division)]
+    mode_division = foreign_divisions[0] if foreign_divisions else (divisions[0] if divisions else None)
+
+    view = ForeignModeApprovalView(
+        source=source,
+        approver_id=approver.id,
+        requester_id=requester.id,
+        requester_name=requester_name,
+        division=division,
+        row_index=row_index,
+        home=home,
+        away=away,
+        mode=mode,
+        mode_division=mode_division,
+        slot=slot,
+        offer_channel_id=offer_channel_id,
+        offer_message_id=offer_message_id,
+        slot_index=slot_index,
+        mode_request_id=mode_request_id,
+        expires_at=expires_at,
+    )
+
+    message = await approver.send(view.render_text(), view=view)
+    view.message = message
+    view.dm_channel_id = message.channel.id
+    view.dm_message_id = message.id
+    try:
+        await asyncio.to_thread(_persist_foreign_mode_approval, view, FOREIGN_MODE_PENDING)
+    except Exception:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        raise
+
+    _FOREIGN_MODE_VIEWS[view.request_id] = view
+    _schedule_foreign_mode_expiry(client, view)
+    return view
+
+
+async def request_foreign_mode_approval_for_direct_schedule(
+    *,
+    interaction: discord.Interaction,
+    division: int,
+    row_index: int,
+    home: str,
+    away: str,
+    mode: str,
+    slot: OfferSlot,
+) -> bool:
+    """Gemeinsamer Fremdmodus-Flow für /player -> Spiel planen."""
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
+    if _slot_is_past(slot):
+        await interaction.edit_original_response(content="Der Spieltermin muss in der Zukunft liegen.", view=None)
+        return False
+
+    guild = interaction.guild or interaction.client.get_guild(matchcenter.GUILD_ID)
+    if guild is None:
+        try:
+            guild = await interaction.client.fetch_guild(matchcenter.GUILD_ID)
+        except Exception:
+            guild = None
+    if guild is None:
+        await interaction.edit_original_response(content="Der TFL-Server konnte nicht geladen werden.", view=None)
+        return False
+
+    home_member = await matchcenter.find_member_by_player_name(guild, home)
+    away_member = await matchcenter.find_member_by_player_name(guild, away)
+    if home_member is None or away_member is None:
+        await interaction.edit_original_response(content="Einer der beiden Spieler konnte auf Discord nicht gefunden werden.", view=None)
+        return False
+
+    if interaction.user.id == home_member.id:
+        approver = away_member
+    elif interaction.user.id == away_member.id:
+        approver = home_member
+    else:
+        await interaction.edit_original_response(
+            content="Ein Fremdmodus kann über die Spielplanung nur von einem der beiden beteiligten Spieler vorgeschlagen werden.",
+            view=None,
+        )
+        return False
+
+    try:
+        await asyncio.to_thread(_validate_target_match, division, row_index, home, away, slot.timestamp)
+    except Exception as exc:
+        await interaction.edit_original_response(content=f"❌ Das Spiel kann nicht angefragt werden: {exc}", view=None)
+        return False
+
+    reservation_key = f"direct:{int(division)}:{int(row_index)}"
+    if not reserve_slot(reservation_key, interaction.user.id, MODE_CHOICE_SECONDS):
+        await interaction.edit_original_response(
+            content="Für diese Begegnung läuft bereits eine andere Termin-/Modusanfrage.",
+            view=None,
+        )
+        return False
+
+    try:
+        approval = await _send_foreign_mode_approval(
+            client=interaction.client,
+            approver=approver,
+            requester=interaction.user,
+            requester_name=interaction.user.display_name,
+            source=FOREIGN_MODE_SOURCE_DIRECT,
+            division=division,
+            row_index=row_index,
+            home=home,
+            away=away,
+            mode=mode,
+            slot=slot,
+            expires_at=min(dt.now(BERLIN_TZ) + timedelta(seconds=MODE_CHOICE_SECONDS), slot.when),
+        )
+    except Exception as exc:
+        release_slot(reservation_key, interaction.user.id)
+        await interaction.edit_original_response(
+            content=f"❌ Die Zustimmung zum Fremdmodus konnte nicht angefragt werden: {exc}",
+            view=None,
+        )
+        return False
+
+    await interaction.edit_original_response(
+        content=(
+            "🤝 **Zustimmung angefragt**\n\n"
+            f"**{home} vs. {away}**\n"
+            f"📅 {slot.long_label}\n"
+            f"🎮 {mode} ({mode_origin_label(mode, division)})\n\n"
+            f"**{approver.display_name}** hat bis **{approval.expiry_label()}** Zeit zuzustimmen. "
+            "Erst danach wird der Termin eingetragen."
+        ),
+        view=None,
+    )
+    return True
+
+
+async def _request_foreign_mode_approval_for_offer(
+    interaction: discord.Interaction,
+    mode_view: "ModeChoiceView",
+) -> bool:
+    guild = interaction.client.get_guild(matchcenter.GUILD_ID)
+    if guild is None:
+        try:
+            guild = await interaction.client.fetch_guild(matchcenter.GUILD_ID)
+        except Exception:
+            guild = None
+    if guild is None:
+        return False
+
+    approver = await matchcenter.find_member_by_player_name(guild, mode_view.match.away)
+    if approver is None:
+        return False
+
+    requester = interaction.user
+    try:
+        approval = await _send_foreign_mode_approval(
+            client=interaction.client,
+            approver=approver,
+            requester=requester,
+            requester_name=requester.display_name,
+            source=FOREIGN_MODE_SOURCE_OFFER,
+            division=mode_view.division,
+            row_index=mode_view.match.row_index,
+            home=mode_view.match.home,
+            away=mode_view.match.away,
+            mode=mode_view.selected_mode or "",
+            slot=mode_view.slot,
+            expires_at=mode_view.expires_at,
+            offer_channel_id=mode_view.offer_channel_id,
+            offer_message_id=mode_view.offer_message_id,
+            slot_index=mode_view.slot_index,
+            mode_request_id=mode_view.request_id,
+        )
+    except Exception as exc:
+        print(f"⚠️ [FREMDMODUS] Zustimmung konnte nicht gesendet werden: {exc}")
+        return False
+
+    mode_view.status = MODE_REQUEST_AWAITING_APPROVAL
+    await asyncio.to_thread(_persist_mode_request, mode_view, MODE_REQUEST_AWAITING_APPROVAL)
+    _cancel_mode_expiry_task(mode_view.request_id)
+
+    await interaction.edit_original_response(
+        content=(
+            "🤝 **Zustimmung zum Fremdmodus angefragt**\n\n"
+            f"**Spiel:** {mode_view.match.home} vs. {mode_view.match.away}\n"
+            f"**Termin:** {mode_view.slot.long_label}\n"
+            f"**Modus:** {mode_view.selected_mode} ({mode_origin_label(mode_view.selected_mode or '', mode_view.division)})\n\n"
+            f"**{mode_view.match.away}** hat bis **{approval.expiry_label()}** Zeit zuzustimmen. "
+            "Erst danach wird das Spiel eingetragen."
+        ),
+        view=None,
+    )
+    return True
+
+
+class ModeDivisionSelect(discord.ui.Select):
+    def __init__(self, request_id: str, selected_division: int, match_division: int):
+        options = []
+        for division in range(1, 7):
+            label = f"{division}. Division"
+            description = "Eigene Division" if division == int(match_division) else "Fremdmodus · Zustimmung nötig"
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(division),
+                    description=description,
+                    default=(division == int(selected_division)),
+                )
+            )
+        super().__init__(
+            placeholder="Aus welcher Division soll der Modus kommen?",
             min_values=1,
             max_values=1,
             options=options,
             row=0,
-            custom_id=f"tfl_mode_select:{request_id}",
+            custom_id=f"tfl_mode_division:{request_id}",
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -2609,13 +3640,69 @@ class ModeSelect(discord.ui.Select):
                 pass
             return
 
+        view.selected_mode_division = int(self.values[0])
+        view.selected_mode = None
+        view.rebuild_mode_controls()
+        try:
+            await asyncio.to_thread(_persist_mode_request, view)
+        except Exception as exc:
+            print(f"⚠️ [TERMINBÖRSE] Modus-Division konnte nicht persistiert werden: {exc}")
+
+        await interaction.edit_original_response(content=view.render_text(), view=view)
+
+
+class ModeSelect(discord.ui.Select):
+    def __init__(self, modes: list[str], request_id: str, selected_mode: str | None = None):
+        options = [
+            discord.SelectOption(
+                label=mode[:100],
+                value=mode,
+                default=(clean_text(mode) == clean_text(selected_mode)),
+            )
+            for mode in modes[:25]
+        ]
+        if not options:
+            options = [discord.SelectOption(label="Keine Modi verfügbar", value="__none__")]
+            disabled = True
+        else:
+            disabled = False
+        super().__init__(
+            placeholder="Spielmodus auswählen",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+            custom_id=f"tfl_mode_select:{request_id}",
+            disabled=disabled,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, ModeChoiceView):
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        if view.is_expired():
+            await view.expire(interaction.client)
+            try:
+                await interaction.edit_original_response(content=view.expired_text(), view=None)
+            except Exception:
+                pass
+            return
+
+        if self.values[0] == "__none__":
+            return
+
         view.selected_mode = self.values[0]
         try:
             await asyncio.to_thread(_persist_mode_request, view)
         except Exception as exc:
             print(f"⚠️ [TERMINBÖRSE] Modusauswahl konnte nicht persistiert werden: {exc}")
 
-        # Defaults neu setzen, damit nach der Auswahl sichtbar bleibt, was gewählt wurde.
         for option in self.options:
             option.default = option.value == view.selected_mode
 
@@ -2627,7 +3714,7 @@ class ModeConfirmButton(discord.ui.Button):
         super().__init__(
             label="Modus bestätigen",
             style=discord.ButtonStyle.success,
-            row=1,
+            row=2,
             custom_id=f"tfl_mode_confirm:{request_id}",
         )
 
@@ -2694,8 +3781,44 @@ class ModeChoiceView(discord.ui.View):
         self.store_row = store_row
         self.message: discord.Message | None = None
 
-        self.add_item(ModeSelect(self.allowed_modes, self.request_id, self.selected_mode))
+        selected_divisions = get_mode_divisions(self.selected_mode or "")
+        if self.selected_mode and self.division in selected_divisions:
+            self.selected_mode_division = self.division
+        elif self.selected_mode and selected_divisions:
+            self.selected_mode_division = selected_divisions[0]
+        else:
+            self.selected_mode_division = self.division
+
+        self.rebuild_mode_controls()
         self.add_item(ModeConfirmButton(self.request_id))
+
+    def modes_for_selected_division(self) -> list[str]:
+        allowed = {normalize_name(mode): mode for mode in self.allowed_modes}
+        out = []
+        for mode in get_division_modes(self.selected_mode_division):
+            key = normalize_name(mode)
+            if key in allowed:
+                out.append(allowed[key])
+        return out[:25]
+
+    def rebuild_mode_controls(self) -> None:
+        for item in list(self.children):
+            if isinstance(item, (ModeDivisionSelect, ModeSelect)):
+                self.remove_item(item)
+        self.add_item(
+            ModeDivisionSelect(
+                self.request_id,
+                self.selected_mode_division,
+                self.division,
+            )
+        )
+        self.add_item(
+            ModeSelect(
+                self.modes_for_selected_division(),
+                self.request_id,
+                self.selected_mode,
+            )
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -2720,14 +3843,19 @@ class ModeChoiceView(discord.ui.View):
             ban_text = "keine Streichmodi hinterlegt"
 
         selected = self.selected_mode or "noch nicht gewählt"
+        source_text = f"{self.selected_mode_division}. Division"
+        if self.selected_mode_division != self.division:
+            source_text += " · Fremdmodus (Zustimmung nötig)"
         return (
             "🎮 **Spielmodus wählen**\n\n"
             f"**Spiel:** {self.match.home} vs. {self.match.away}\n"
             f"**Termin:** {self.slot.long_label}\n\n"
             "Du hast Heimrecht und bestimmst den Spielmodus.\n"
-            f"**{self.match.away}** hat folgende Spielmodis gebannt: {ban_text}.\n\n"
+            f"**{self.match.away}** hat folgende Spielmodis in eurer Division gebannt: {ban_text}.\n"
+            "Modi aus anderen Divisionen können ebenfalls gewählt werden; dafür muss der Gegner anschließend zustimmen.\n\n"
+            f"**Modusbereich:** {source_text}\n"
             f"**Aktuelle Auswahl:** {selected}\n"
-            "Wähle einen Modus und bestätige anschließend.\n\n"
+            "Wähle eine Division, anschließend einen Modus und bestätige.\n\n"
             f"⏱️ **Gültig bis:** {self.expiry_label()}"
         )
 
@@ -2822,6 +3950,23 @@ class ModeChoiceView(discord.ui.View):
             return
 
         try:
+            is_native = await asyncio.to_thread(
+                is_mode_native_to_division,
+                self.division,
+                self.selected_mode,
+            )
+            if not is_native:
+                sent = await _request_foreign_mode_approval_for_offer(interaction, self)
+                if not sent:
+                    await interaction.edit_original_response(
+                        content=(
+                            "❌ Die Zustimmung des Gegners konnte nicht angefragt werden.\n\n"
+                            f"Die Modusauswahl bleibt bis **{self.expiry_label()}** aktiv."
+                        ),
+                        view=self,
+                    )
+                return
+
             if interaction.guild is None:
                 guild = interaction.client.get_guild(matchcenter.GUILD_ID)
                 if guild is None:
