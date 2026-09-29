@@ -238,6 +238,7 @@ async def start_webserver(client: discord.Client):
     _webserver_started = True
 
     app = await _build_web_app(client)
+    register_dartmarathon(app)
     runner = web.AppRunner(app)
     await runner.setup()
     _webapp_runner = runner
