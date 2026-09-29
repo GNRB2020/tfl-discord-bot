@@ -40,6 +40,12 @@ SPECIAL_NAMES = {
     "score171": "Score 171+",
 }
 
+AD_POPUPS = {
+    "foltershop": {"label": "Foltershop", "image": "/dartmarathon/static/ads/foltershop.png", "position": "right"},
+    "malteser": {"label": "Malteser", "image": "/dartmarathon/static/ads/malteser.png", "position": "center"},
+    "koala": {"label": "KoalaDarts", "image": "/dartmarathon/static/ads/koala.png", "position": "center"},
+}
+
 _state_lock = asyncio.Lock()
 _clients: set[web.WebSocketResponse] = set()
 _ticker_task: asyncio.Task | None = None
@@ -60,6 +66,7 @@ def default_state() -> Dict[str, Any]:
         "pause_seconds": float(INITIAL_PAUSE_SECONDS),
         "pause_active": False,
         "pause_started_at": None,
+        "pause_used_seconds": 0.0,
         "legs": {"tzmarty": 0, "korsar": 0},
         "specials": _empty_specials(),
         # Nur eigene Spenden von Tzmarty/Korsar.
@@ -85,6 +92,7 @@ def _sanitize_state(data: Dict[str, Any]) -> Dict[str, Any]:
         max(0.0, float(clean.get("pause_seconds", INITIAL_PAUSE_SECONDS))),
     )
     clean["pause_active"] = bool(clean.get("pause_active", False))
+    clean["pause_used_seconds"] = max(0.0, float(clean.get("pause_used_seconds", 0.0)))
     clean["event_ended"] = bool(clean.get("event_ended", False))
     clean["own_donations"] = max(
         0.0,
@@ -279,18 +287,20 @@ def _public_state_locked() -> Dict[str, Any]:
         "pause_seconds": int(_state["pause_seconds"]),
         "pause_display": _clock(_state["pause_seconds"]),
         "pause_active": _state["pause_active"],
+        "pause_full": _state["pause_seconds"] >= MAX_PAUSE_SECONDS,
+        "pause_used_seconds": int(_state["pause_used_seconds"]),
+        "pause_used_display": _clock(_state["pause_used_seconds"], with_hours=True),
         "event_ended": _state["event_ended"],
         "legs": deepcopy(_state["legs"]),
-        "total_legs": (
-            _state["legs"]["tzmarty"]
-            + _state["legs"]["korsar"]
-        ),
+        "total_legs": total_legs,
         "specials": deepcopy(_state["specials"]),
         "player_special_totals": {
             player: _player_special_total_locked(player)
             for player in PLAYERS
         },
-        "total_specials": _total_specials_locked(),
+        "total_specials": total_specials,
+        "legs_per_hour": round(legs_per_hour, 1),
+        "specials_per_hour": round(specials_per_hour, 1),
         "own_donations": round(_state["own_donations"], 2),
         "history": deepcopy(_state["history"]),
         "can_undo": bool(_state["undo_stack"]),
@@ -311,6 +321,21 @@ def _request_can_control(request: web.Request) -> bool:
 
 _state = _load_state()
 _reconcile_running_timers_locked(save=True)
+
+
+async def _broadcast_payload(payload: Dict[str, Any]) -> None:
+    encoded = json.dumps(payload, ensure_ascii=False)
+    dead: list[web.WebSocketResponse] = []
+    for ws in list(_clients):
+        if ws.closed:
+            dead.append(ws)
+            continue
+        try:
+            await ws.send_str(encoded)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _clients.discard(ws)
 
 
 async def _broadcast_state() -> None:
@@ -619,6 +644,25 @@ async def _process_message(
             f"Eigene Spende {sign}{actual_amount:.2f} €",
             fn,
         )
+        return
+
+    if msg_type == "ad_popup":
+        sponsor = str(message.get("sponsor", "")).lower()
+        if sponsor not in AD_POPUPS:
+            return
+        ad = AD_POPUPS[sponsor]
+        await _broadcast_payload({
+            "type": "ad_popup",
+            "sponsor": sponsor,
+            "label": ad["label"],
+            "image": ad["image"],
+            "position": ad["position"],
+            "duration_ms": 20000,
+        })
+        async with _state_lock:
+            _add_history_locked(f"Werbeeinblendung: {ad['label']}")
+            _save_state_locked()
+        await _broadcast_state()
         return
 
     if msg_type == "undo":
