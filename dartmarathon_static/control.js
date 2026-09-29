@@ -1,6 +1,7 @@
 (() => {
   let ws;
   let reconnectTimer;
+  let lastState = null;
 
   const $ = (id) => document.getElementById(id);
   const all = (sel) => [...document.querySelectorAll(sel)];
@@ -12,11 +13,13 @@
     ws.onopen = () => {
       $("connectionDot").className = "dot online";
       $("connectionText").textContent = "live verbunden";
+      $("connectionAlarm").classList.add("hidden");
     };
 
     ws.onclose = () => {
       $("connectionDot").className = "dot offline";
       $("connectionText").textContent = "Verbindung getrennt";
+      $("connectionAlarm").classList.remove("hidden");
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 1500);
     };
@@ -62,6 +65,7 @@
   }
 
   function render(s) {
+    lastState = s;
     $("streamTime").textContent = s.stream_display;
     $("pauseTime").textContent = s.pause_display;
 
@@ -340,6 +344,11 @@
     }
   );
 
+  all('[data-ad]').forEach(b => b.onclick = () => {
+    send({type:"ad_popup", sponsor:b.dataset.ad});
+    toast(`${b.textContent.trim()} wird für 20 Sekunden eingeblendet.`);
+  });
+
   function donationAmount(sign) {
     const input =
       $("donationAmount");
@@ -374,5 +383,6 @@
   $("donationSubtract").onclick =
     () => donationAmount(-1);
 
+  updateFullscreenButton();
   connect();
 })();

@@ -390,3 +390,10 @@ body {
       );
   }
 }
+
+
+/* Stunden-Meilensteine */
+.hour-popup-inner.major-milestone{width:860px;border-color:#ff3d2e;box-shadow:0 0 0 4px rgba(255,183,17,.75),0 0 110px rgba(255,60,20,.7);animation:majorPulse 1.1s ease-in-out infinite}.major-milestone .hour-popup-number{font-size:72px;color:#fff;text-shadow:0 0 18px rgba(255,190,36,.8),0 0 34px rgba(255,50,20,.6)}@keyframes majorPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.025)}}
+
+/* Werbeeinblendungen */
+.ad-popup{position:absolute;inset:0;z-index:55;pointer-events:none}.ad-popup-inner{position:absolute;display:flex;align-items:center;justify-content:center;padding:18px;border-radius:22px;background:rgba(6,9,14,.92);border:3px solid rgba(255,190,36,.9);box-shadow:0 0 60px rgba(255,125,0,.38),inset 0 0 24px rgba(255,255,255,.04);animation:adPopupIn .38s ease-out}.ad-position-right{right:40px;top:120px;width:470px;height:235px}.ad-position-center{left:50%;top:50%;transform:translate(-50%,-50%);width:640px;height:340px}.ad-popup-image{max-width:100%;max-height:100%;object-fit:contain;display:block}@keyframes adPopupIn{from{opacity:0;transform:translateY(-18px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}}

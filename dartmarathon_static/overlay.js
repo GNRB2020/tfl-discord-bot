@@ -4,6 +4,7 @@
   let initialized = false;
   let lastWholeHour = 0;
   let hourPopupTimer = null;
+  let adPopupTimer = null;
 
   const $ = (id) =>
     document.getElementById(id);
@@ -24,6 +25,9 @@
 
       if (msg.type === "state") {
         render(msg.data);
+      }
+      if (msg.type === "ad_popup") {
+        showAdPopup(msg);
       }
     };
 
@@ -96,46 +100,43 @@
   }
 
   function showHourPopup(hours) {
-    const popup =
-      $("hourPopup");
+    const popup = $("hourPopup");
+    const inner = $("hourPopupInner") || popup.querySelector(".hour-popup-inner");
+    const number = $("hourPopupNumber");
+    const text = $("hourPopupText");
+    const isMajor = [6, 12, 18, 24].includes(hours);
 
-    const number =
-      $("hourPopupNumber");
+    if (inner) inner.classList.toggle("major-milestone", isMajor);
 
-    const text =
-      $("hourPopupText");
-
-    if (hours === 1) {
-      number.textContent =
-        "1 STUNDE!";
-
-      text.textContent =
-        "WIR SPIELEN BEREITS SEIT 1 STUNDE";
+    if (isMajor) {
+      number.textContent = `${hours}-STUNDEN-MEILENSTEIN!`;
+      text.textContent = `SEIT ${hours} STUNDEN AM BOARD`;
+    } else if (hours === 1) {
+      number.textContent = "1 STUNDE!";
+      text.textContent = "WIR SPIELEN BEREITS SEIT 1 STUNDE";
     } else {
-      number.textContent =
-        `${hours} STUNDEN!`;
-
-      text.textContent =
-        `WIR SPIELEN BEREITS SEIT ${hours} STUNDEN`;
+      number.textContent = `${hours} STUNDEN!`;
+      text.textContent = `WIR SPIELEN BEREITS SEIT ${hours} STUNDEN`;
     }
 
-    popup.classList.remove(
-      "hidden"
-    );
+    popup.classList.remove("hidden");
+    clearTimeout(hourPopupTimer);
+    hourPopupTimer = setTimeout(() => popup.classList.add("hidden"), 15000);
+  }
 
-    clearTimeout(
-      hourPopupTimer
-    );
+  function showAdPopup(msg) {
+    const popup = $("adPopup");
+    const inner = $("adPopupInner");
+    const image = $("adPopupImage");
 
-    hourPopupTimer =
-      setTimeout(
-        () => {
-          popup.classList.add(
-            "hidden"
-          );
-        },
-        15000
-      );
+    inner.classList.remove("ad-position-right", "ad-position-center");
+    inner.classList.add(msg.position === "right" ? "ad-position-right" : "ad-position-center");
+    image.src = `${msg.image}?t=${Date.now()}`;
+    image.alt = msg.label || "Werbeeinblendung";
+
+    popup.classList.remove("hidden");
+    clearTimeout(adPopupTimer);
+    adPopupTimer = setTimeout(() => popup.classList.add("hidden"), Number(msg.duration_ms) || 20000);
   }
 
   function render(s) {
