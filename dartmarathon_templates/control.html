@@ -7,6 +7,12 @@
   <link rel="stylesheet" href="/dartmarathon/static/control.css">
 </head>
 <body>
+  <div id="connectionAlarm" class="connection-alarm">
+    <div class="connection-alarm-box">
+      <strong>VERBINDUNG UNTERBROCHEN</strong>
+      <span>Bitte keine Eingaben machen. Verbindung zum Server wird wiederhergestellt.</span>
+    </div>
+  </div>
   <main class="shell">
     <header class="topbar">
       <div>
@@ -23,6 +29,11 @@
       <strong>EVENT BEENDET</strong>
       <span>Die Pausenuhr ist abgelaufen. Neue Zeitgutschriften sind gesperrt.</span>
       <button id="unlockEvent" class="btn warning">EVENT FREIGEBEN</button>
+    </section>
+
+    <section id="pauseFullBanner" class="pause-full-banner hidden">
+      <strong>PAUSENKONTO VOLL · 30:00</strong>
+      <span>Weitere Legs, Specials und Spenden werden gezählt, erhöhen die Pausenzeit aber nicht über 30 Minuten.</span>
     </section>
 
     <section class="grid top-grid">
@@ -99,6 +110,18 @@
         <div class="player-counter-caption">LEGS / SPECIALS</div>
         <div class="hint">+1 Leg = +30 Sek. Pausenguthaben</div>
       </article>
+    </section>
+
+    <section class="card stats-card">
+      <div class="card-title">EVENT-KENNZAHLEN</div>
+      <div class="stats-grid">
+        <div class="stat"><span>Online</span><strong id="statOnline">00:00:00</strong></div>
+        <div class="stat"><span>Legs</span><strong id="statLegs">0</strong></div>
+        <div class="stat"><span>Specials</span><strong id="statSpecials">0</strong></div>
+        <div class="stat"><span>Legs / Std.</span><strong id="statLegsPerHour">0,0</strong></div>
+        <div class="stat"><span>Specials / Std.</span><strong id="statSpecialsPerHour">0,0</strong></div>
+        <div class="stat"><span>Pause genutzt</span><strong id="statPauseUsed">00:00:00</strong></div>
+      </div>
     </section>
 
     <section class="grid content-grid">
@@ -246,6 +269,16 @@
           GESAMTES EVENT RESETTEN
         </button>
       </article>
+    </section>
+
+    <section class="card ads-card">
+      <div class="card-title">WERBEEINBLENDUNGEN · 20 SEKUNDEN</div>
+      <div class="button-row three ad-buttons">
+        <button data-ad="foltershop" class="btn ad-btn foltershop-btn">FOLTERSHOP</button>
+        <button data-ad="malteser" class="btn ad-btn malteser-btn">MALTESER</button>
+        <button data-ad="koala" class="btn ad-btn koala-btn">KOALADARTS</button>
+      </div>
+      <div class="hint ad-hint">Bilddateien: <code>dartmarathon_static/ads/foltershop.png</code>, <code>malteser.png</code>, <code>koala.png</code></div>
     </section>
 
     <footer>
