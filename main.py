@@ -9,6 +9,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import asyncio
 from aiohttp import web
+from dartmarathon import register_dartmarathon
 from datetime import datetime as dt, timedelta
 
 # =========================================================
