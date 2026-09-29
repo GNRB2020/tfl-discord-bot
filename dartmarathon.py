@@ -42,8 +42,8 @@ SPECIAL_NAMES = {
 
 AD_POPUPS = {
     "foltershop": {"label": "Foltershop", "image": "/dartmarathon/static/ads/foltershop.png", "position": "right"},
-    "malteser": {"label": "Malteser", "image": "/dartmarathon/static/ads/malteser.png", "position": "center"},
-    "koala": {"label": "KoalaDarts", "image": "/dartmarathon/static/ads/koala.png", "position": "center"},
+    "malteser": {"label": "Malteser", "image": "/dartmarathon/static/ads/malteser.png", "position": "right"},
+    "koala": {"label": "KoalaDarts", "image": "/dartmarathon/static/ads/koala.png", "position": "right"},
 }
 
 _state_lock = asyncio.Lock()
@@ -288,6 +288,7 @@ def _public_state_locked() -> Dict[str, Any]:
     stream_hours = _state["stream_elapsed"] / 3600.0
     legs_per_hour = total_legs / stream_hours if stream_hours > 0 else 0.0
     specials_per_hour = total_specials / stream_hours if stream_hours > 0 else 0.0
+    specials_per_leg = total_specials / total_legs if total_legs > 0 else 0.0
 
     return {
         "stream_seconds": int(_state["stream_elapsed"]),
@@ -313,6 +314,7 @@ def _public_state_locked() -> Dict[str, Any]:
         "total_specials": total_specials,
         "legs_per_hour": round(legs_per_hour, 1),
         "specials_per_hour": round(specials_per_hour, 1),
+        "specials_per_leg": round(specials_per_leg, 2),
         "own_donations": round(_state["own_donations"], 2),
         "history": deepcopy(_state["history"]),
         "can_undo": bool(_state["undo_stack"]),
