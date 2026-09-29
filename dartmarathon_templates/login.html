@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dartmarathon Control – Login</title>
+  <link rel="stylesheet" href="/dartmarathon/static/control.css">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="/dartmarathon/login">
+    <div class="eyebrow">TZMARTY VS. KORSAR · DAS REVIVAL</div>
+    <h1>CONTROL PANEL</h1>
+    <p>Dieses Control Panel ist geschützt.</p>
+    <!--LOGIN_ERROR-->
+    <input type="password" name="token" placeholder="Control-Token" required autofocus>
+    <button class="btn positive full" type="submit">ÖFFNEN</button>
+    <p class="muted">Den Token legst du bei Render als <code>DARTMARATHON_CONTROL_TOKEN</code> fest.</p>
+  </form>
+</body>
+</html>
