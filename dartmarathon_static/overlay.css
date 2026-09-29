@@ -20,7 +20,6 @@ body {
   width: 1920px;
   height: 1080px;
   pointer-events: none;
-
   font-family: Arial, Helvetica, sans-serif;
   color: #ffffff;
 }
@@ -31,7 +30,6 @@ body {
 
 .value-box {
   position: absolute;
-
   display: flex;
   align-items: center;
   justify-content: center;
@@ -47,18 +45,15 @@ body {
     0 0 4px rgba(0, 0, 0, 0.8);
 }
 
-
 /* =========================================================
    SPIELER-LEGS
    ========================================================= */
 
 .player-value {
-  top: 383px;
-
+  top: 386px;
   width: 236px;
-  height: 72px;
-
-  font-size: 60px;
+  height: 68px;
+  font-size: 58px;
 }
 
 /* Tzmarty */
@@ -73,17 +68,14 @@ body {
   left: 1600px;
 }
 
-
 /* =========================================================
    UNTERE ANZEIGEN
    ========================================================= */
 
 .bottom-value {
-  top: 958px;
-
-  height: 56px;
-
-  font-size: 44px;
+  top: 966px;
+  height: 48px;
+  font-size: 40px;
 }
 
 /* Legs Gesamt */
@@ -105,6 +97,7 @@ body {
 .pause-value {
   left: 1044px;
   width: 234px;
+  font-size: 38px;
 }
 
 /* Stream Online */
@@ -112,10 +105,8 @@ body {
 .stream-value {
   left: 1600px;
   width: 236px;
-
-  font-size: 40px;
+  font-size: 35px;
 }
-
 
 /* =========================================================
    ZENTRALE PAUSENANZEIGE
@@ -168,7 +159,6 @@ body {
 .pause-kicker {
   font-size: 42px;
   letter-spacing: 0.18em;
-
   font-weight: 900;
 
   color: #ffbd23;
@@ -179,9 +169,7 @@ body {
 
 .pause-center-time {
   font-size: 154px;
-
   font-weight: 800;
-
   line-height: 1.05;
 
   margin: 18px 0 8px;
@@ -191,21 +179,16 @@ body {
 
 .pause-caption {
   font-size: 20px;
-
   letter-spacing: 0.12em;
-
   color: #d9d9d9;
-
   font-weight: 800;
 }
-
 
 /* Pausenrahmen leicht pulsieren */
 
 .pause-center:not(.hidden) .pause-center-inner {
   animation: pulseFrame 1.5s ease-in-out infinite;
 }
-
 
 /* =========================================================
    EVENT BEENDET
@@ -243,19 +226,14 @@ body {
 
 .event-ended-kicker {
   font-size: 42px;
-
   color: #ffbe24;
-
   letter-spacing: 0.18em;
-
   font-weight: 900;
 }
 
 .event-ended-title {
   font-size: 92px;
-
   line-height: 1.02;
-
   font-weight: 950;
 
   margin-top: 22px;
@@ -264,7 +242,6 @@ body {
     0 0 28px rgba(255, 50, 20, 0.46);
 }
 
-
 /* =========================================================
    HILFSKLASSEN
    ========================================================= */
@@ -272,7 +249,6 @@ body {
 .hidden {
   display: none !important;
 }
-
 
 /* =========================================================
    ANIMATIONEN
@@ -295,14 +271,12 @@ body {
   }
 }
 
-
 /* =========================================================
    PREVIEW-SEITE
    ========================================================= */
 
 .preview-body {
   margin: 0;
-
   min-height: 100vh;
 
   background: #111111;
@@ -331,7 +305,6 @@ body {
 
   object-fit: contain;
 }
-
 
 /* Preview auf kleineren Monitoren skalieren */
 
