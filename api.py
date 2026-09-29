@@ -2,6 +2,7 @@
 import os
 import asyncio
 from aiohttp import web
+from dartmarathon import register_dartmarathon
 import json
 
 # =========================================================
@@ -491,6 +492,8 @@ async def start():
     app.router.add_post("/api/update/tfnl-season-ranking", update_tfnl_season_ranking)
     app.router.add_post("/api/update/tfnl-overall-ranking", update_tfnl_overall_ranking)
     app.router.add_post("/api/update/tfnl-results", update_tfnl_results)
+
+    register_dartmarathon(app)
 
     port = int(os.getenv("PORT", "10000"))
     print(f"[API] STARTING on port {port}")
