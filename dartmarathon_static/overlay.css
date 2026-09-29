@@ -20,23 +20,33 @@ body {
   width: 1920px;
   height: 1080px;
   pointer-events: none;
+
   font-family: Arial, Helvetica, sans-serif;
   color: #ffffff;
 }
 
+
 /* =========================================================
-   ALLGEMEINE WERTE
+   ALLGEMEINE ZAHLENANZEIGE
    ========================================================= */
 
 .value-box {
   position: absolute;
+
   display: flex;
   align-items: center;
   justify-content: center;
 
+  box-sizing: border-box;
+
+  padding: 0;
+  margin: 0;
+
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+
+  text-align: center;
 
   color: #ffffff;
 
@@ -45,68 +55,96 @@ body {
     0 0 4px rgba(0, 0, 0, 0.8);
 }
 
+
 /* =========================================================
    SPIELER-LEGS
+   Tatsächliche Boxhöhe ca. Y 379 - 475
    ========================================================= */
 
 .player-value {
-  top: 386px;
-  width: 236px;
-  height: 68px;
+  top: 380px;
+  height: 94px;
+
   font-size: 58px;
 }
 
-/* Tzmarty */
+
+/* TZMARTY
+   Rahmen ungefähr X 52 - 291
+*/
 
 .tzmarty-value {
   left: 52px;
+  width: 239px;
 }
 
-/* Korsar */
+
+/* KORSAR
+   Rahmen ungefähr X 1624 - 1868
+*/
 
 .korsar-value {
-  left: 1600px;
+  left: 1624px;
+  width: 244px;
 }
+
 
 /* =========================================================
    UNTERE ANZEIGEN
+   Boxen ungefähr Y 967 - 1041
    ========================================================= */
 
 .bottom-value {
-  top: 966px;
-  height: 48px;
-  font-size: 40px;
+  top: 968px;
+  height: 72px;
+
+  font-size: 44px;
 }
 
-/* Legs Gesamt */
+
+/* =========================================================
+   LEGS GESAMT
+   ========================================================= */
 
 .total-legs-value {
-  left: 52px;
-  width: 220px;
+  left: 51px;
+  width: 228px;
 }
 
-/* Specials */
+
+/* =========================================================
+   SPECIALS
+   ========================================================= */
 
 .specials-value {
-  left: 287px;
-  width: 226px;
+  left: 290px;
+  width: 236px;
 }
 
-/* Pausenuhr */
+
+/* =========================================================
+   PAUSENUHR
+   ========================================================= */
 
 .pause-value {
-  left: 1044px;
-  width: 234px;
+  left: 1053px;
+  width: 257px;
+
+  font-size: 42px;
+}
+
+
+/* =========================================================
+   STREAM ONLINE
+   ========================================================= */
+
+.stream-value {
+  left: 1627px;
+  width: 248px;
+
   font-size: 38px;
 }
 
-/* Stream Online */
-
-.stream-value {
-  left: 1600px;
-  width: 236px;
-  font-size: 35px;
-}
 
 /* =========================================================
    ZENTRALE PAUSENANZEIGE
@@ -129,6 +167,11 @@ body {
       transparent 78%
     );
 }
+
+
+/* =========================================================
+   PAUSENBOX MITTIG IM STREAM
+   ========================================================= */
 
 .pause-center-inner {
   width: 620px;
@@ -156,9 +199,13 @@ body {
     inset 0 0 35px rgba(255, 129, 0, 0.08);
 }
 
+
+/* PAUSE Überschrift */
+
 .pause-kicker {
   font-size: 42px;
   letter-spacing: 0.18em;
+
   font-weight: 900;
 
   color: #ffbd23;
@@ -167,9 +214,14 @@ body {
     0 0 18px rgba(255, 165, 0, 0.5);
 }
 
+
+/* Großer Countdown */
+
 .pause-center-time {
   font-size: 154px;
+
   font-weight: 800;
+
   line-height: 1.05;
 
   margin: 18px 0 8px;
@@ -177,18 +229,26 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+
+/* Untertitel */
+
 .pause-caption {
   font-size: 20px;
+
   letter-spacing: 0.12em;
+
   color: #d9d9d9;
+
   font-weight: 800;
 }
 
-/* Pausenrahmen leicht pulsieren */
+
+/* Pausenrahmen pulsieren */
 
 .pause-center:not(.hidden) .pause-center-inner {
   animation: pulseFrame 1.5s ease-in-out infinite;
 }
+
 
 /* =========================================================
    EVENT BEENDET
@@ -197,6 +257,7 @@ body {
 .event-ended {
   background: rgba(0, 0, 0, 0.78);
 }
+
 
 .event-ended-inner {
   width: 900px;
@@ -224,16 +285,23 @@ body {
     0 0 90px rgba(255, 24, 12, 0.5);
 }
 
+
 .event-ended-kicker {
   font-size: 42px;
+
   color: #ffbe24;
+
   letter-spacing: 0.18em;
+
   font-weight: 900;
 }
 
+
 .event-ended-title {
   font-size: 92px;
+
   line-height: 1.02;
+
   font-weight: 950;
 
   margin-top: 22px;
@@ -241,6 +309,7 @@ body {
   text-shadow:
     0 0 28px rgba(255, 50, 20, 0.46);
 }
+
 
 /* =========================================================
    HILFSKLASSEN
@@ -250,11 +319,13 @@ body {
   display: none !important;
 }
 
+
 /* =========================================================
-   ANIMATIONEN
+   PAUSENANIMATION
    ========================================================= */
 
 @keyframes pulseFrame {
+
   0%,
   100% {
     box-shadow:
@@ -271,12 +342,14 @@ body {
   }
 }
 
+
 /* =========================================================
-   PREVIEW-SEITE
+   PREVIEW
    ========================================================= */
 
 .preview-body {
   margin: 0;
+
   min-height: 100vh;
 
   background: #111111;
@@ -287,6 +360,7 @@ body {
   overflow: auto;
 }
 
+
 .preview-stage {
   position: relative;
 
@@ -296,9 +370,12 @@ body {
   transform-origin: top center;
 }
 
+
 .reference-overlay {
   position: absolute;
-  inset: 0;
+
+  left: 0;
+  top: 0;
 
   width: 1920px;
   height: 1080px;
@@ -306,9 +383,13 @@ body {
   object-fit: contain;
 }
 
-/* Preview auf kleineren Monitoren skalieren */
+
+/* =========================================================
+   PREVIEW AUF KLEINEREN MONITOREN
+   ========================================================= */
 
 @media (max-width: 1920px) {
+
   .preview-stage {
     transform: scale(calc(100vw / 1920));
 
