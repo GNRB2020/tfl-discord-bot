@@ -13,7 +13,10 @@
         <div class="eyebrow">TZMARTY VS. KORSAR · DAS REVIVAL</div>
         <h1>DARTMARATHON CONTROL</h1>
       </div>
-      <div class="connection"><span id="connectionDot" class="dot"></span><span id="connectionText">verbinde…</span></div>
+      <div class="connection">
+        <span id="connectionDot" class="dot"></span>
+        <span id="connectionText">verbinde…</span>
+      </div>
     </header>
 
     <section id="endedBanner" class="ended-banner hidden">
@@ -34,19 +37,24 @@
       </article>
 
       <article class="card accent-gold pause-card">
-        <div class="card-title">PAUSENKONTO <span class="small">MAX. 30:00</span></div>
-        <div id="pauseTime" class="big-time gold">00:00</div>
+        <div class="card-title">
+          PAUSENKONTO
+          <span class="small">START 15:00 · MAX. 30:00</span>
+        </div>
+        <div id="pauseTime" class="big-time pause-yellow">15:00</div>
         <div id="pauseStatus" class="status-line">bereit</div>
+
         <div class="button-row two">
           <button id="pauseStart" class="btn positive xl">PAUSE STARTEN</button>
           <button id="pauseStop" class="btn danger xl">PAUSE STOPPEN</button>
         </div>
+
         <div class="button-row five compact">
           <button data-pause="-60" class="btn ghost">−1:00</button>
           <button data-pause="-30" class="btn ghost">−0:30</button>
           <button data-pause="30" class="btn ghost">+0:30</button>
           <button data-pause="60" class="btn ghost">+1:00</button>
-          <button id="pauseReset" class="btn neutral">RESET</button>
+          <button id="pauseReset" class="btn neutral">RESET AUF 15:00</button>
         </div>
       </article>
     </section>
@@ -54,76 +62,213 @@
     <section class="players-grid">
       <article class="card player red">
         <div class="player-name">TZMARTY</div>
+        <div class="player-stats-label">LEGS</div>
         <div class="counter-row">
           <button class="counter-btn minus" data-leg-player="tzmarty" data-delta="-1">−</button>
-          <div id="legsTzmarty" class="counter-value">0</div>
+          <div class="counter-value">
+            <span id="legsTzmarty">0</span>
+            <span class="counter-separator">/</span>
+            <span id="specialsTzmarty">0</span>
+          </div>
           <button class="counter-btn plus" data-leg-player="tzmarty" data-delta="1">+</button>
         </div>
+        <div class="player-counter-caption">LEGS / SPECIALS</div>
         <div class="hint">+1 Leg = +30 Sek. Pausenguthaben</div>
       </article>
 
       <article class="card total-card">
         <div class="card-title">LEGS GESAMT</div>
         <div id="totalLegs" class="mega-number">0</div>
+        <div class="total-specials-small">
+          Specials gesamt: <strong id="totalSpecialsTop">0</strong>
+        </div>
       </article>
 
       <article class="card player blue">
         <div class="player-name">KORSAR</div>
+        <div class="player-stats-label">LEGS</div>
         <div class="counter-row">
           <button class="counter-btn minus" data-leg-player="korsar" data-delta="-1">−</button>
-          <div id="legsKorsar" class="counter-value">0</div>
+          <div class="counter-value">
+            <span id="legsKorsar">0</span>
+            <span class="counter-separator">/</span>
+            <span id="specialsKorsar">0</span>
+          </div>
           <button class="counter-btn plus" data-leg-player="korsar" data-delta="1">+</button>
         </div>
+        <div class="player-counter-caption">LEGS / SPECIALS</div>
         <div class="hint">+1 Leg = +30 Sek. Pausenguthaben</div>
       </article>
     </section>
 
     <section class="grid content-grid">
       <article class="card specials-card">
-        <div class="card-title">SPECIALS</div>
-        <div class="special-grid">
-          <div class="special-item"><div class="special-name">Highfinish 100+</div><div class="mini-counter"><button data-special="highfinish" data-delta="-1">−</button><strong id="specialHighfinish">0</strong><button data-special="highfinish" data-delta="1">+</button></div></div>
-          <div class="special-item"><div class="special-name">Bullfinish</div><div class="mini-counter"><button data-special="bullfinish" data-delta="-1">−</button><strong id="specialBullfinish">0</strong><button data-special="bullfinish" data-delta="1">+</button></div></div>
-          <div class="special-item"><div class="special-name">Low Darts &lt;18</div><div class="mini-counter"><button data-special="lowdarts" data-delta="-1">−</button><strong id="specialLowdarts">0</strong><button data-special="lowdarts" data-delta="1">+</button></div></div>
-          <div class="special-item"><div class="special-name">Score 171+</div><div class="mini-counter"><button data-special="score171" data-delta="-1">−</button><strong id="specialScore171">0</strong><button data-special="score171" data-delta="1">+</button></div></div>
+        <div class="card-title">SPECIALS PRO SPIELER</div>
+
+        <div class="special-player-block red-block">
+          <div class="special-player-title">TZMARTY</div>
+
+          <div class="special-grid">
+            <div class="special-item">
+              <div class="special-name">Highfinish 100+</div>
+              <div class="mini-counter">
+                <button data-special-player="tzmarty" data-special="highfinish" data-delta="-1">−</button>
+                <strong id="specialTzmartyHighfinish">0</strong>
+                <button data-special-player="tzmarty" data-special="highfinish" data-delta="1">+</button>
+              </div>
+            </div>
+
+            <div class="special-item">
+              <div class="special-name">Bullfinish</div>
+              <div class="mini-counter">
+                <button data-special-player="tzmarty" data-special="bullfinish" data-delta="-1">−</button>
+                <strong id="specialTzmartyBullfinish">0</strong>
+                <button data-special-player="tzmarty" data-special="bullfinish" data-delta="1">+</button>
+              </div>
+            </div>
+
+            <div class="special-item">
+              <div class="special-name">Low Darts &lt;18</div>
+              <div class="mini-counter">
+                <button data-special-player="tzmarty" data-special="lowdarts" data-delta="-1">−</button>
+                <strong id="specialTzmartyLowdarts">0</strong>
+                <button data-special-player="tzmarty" data-special="lowdarts" data-delta="1">+</button>
+              </div>
+            </div>
+
+            <div class="special-item">
+              <div class="special-name">Score 171+</div>
+              <div class="mini-counter">
+                <button data-special-player="tzmarty" data-special="score171" data-delta="-1">−</button>
+                <strong id="specialTzmartyScore171">0</strong>
+                <button data-special-player="tzmarty" data-special="score171" data-delta="1">+</button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="summary-line"><span>SPECIALS GESAMT</span><strong id="totalSpecials">0</strong></div>
+
+        <div class="special-player-block blue-block">
+          <div class="special-player-title">KORSAR</div>
+
+          <div class="special-grid">
+            <div class="special-item">
+              <div class="special-name">Highfinish 100+</div>
+              <div class="mini-counter">
+                <button data-special-player="korsar" data-special="highfinish" data-delta="-1">−</button>
+                <strong id="specialKorsarHighfinish">0</strong>
+                <button data-special-player="korsar" data-special="highfinish" data-delta="1">+</button>
+              </div>
+            </div>
+
+            <div class="special-item">
+              <div class="special-name">Bullfinish</div>
+              <div class="mini-counter">
+                <button data-special-player="korsar" data-special="bullfinish" data-delta="-1">−</button>
+                <strong id="specialKorsarBullfinish">0</strong>
+                <button data-special-player="korsar" data-special="bullfinish" data-delta="1">+</button>
+              </div>
+            </div>
+
+            <div class="special-item">
+              <div class="special-name">Low Darts &lt;18</div>
+              <div class="mini-counter">
+                <button data-special-player="korsar" data-special="lowdarts" data-delta="-1">−</button>
+                <strong id="specialKorsarLowdarts">0</strong>
+                <button data-special-player="korsar" data-special="lowdarts" data-delta="1">+</button>
+              </div>
+            </div>
+
+            <div class="special-item">
+              <div class="special-name">Score 171+</div>
+              <div class="mini-counter">
+                <button data-special-player="korsar" data-special="score171" data-delta="-1">−</button>
+                <strong id="specialKorsarScore171">0</strong>
+                <button data-special-player="korsar" data-special="score171" data-delta="1">+</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="summary-line">
+          <span>SPECIALS GESAMT</span>
+          <strong id="totalSpecials">0</strong>
+        </div>
+
         <div class="hint">Jedes Special = +1 Minute Pausenguthaben</div>
       </article>
 
       <article class="card donation-card">
         <div class="card-title">EIGENE SPENDEN</div>
-        <p class="muted">Nur Tzmarty/Korsar. Zuschauer-Spenden bleiben vollständig bei StreamElements.</p>
+        <p class="muted">
+          Nur Tzmarty/Korsar. Zuschauer-Spenden bleiben vollständig bei StreamElements.
+        </p>
+
         <div class="button-row three donation-quick">
           <button data-donation="1" class="btn bluebtn">+1 €</button>
           <button data-donation="5" class="btn bluebtn">+5 €</button>
           <button data-donation="10" class="btn bluebtn">+10 €</button>
         </div>
+
         <div class="amount-row">
-          <input id="donationAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Betrag">
+          <input
+            id="donationAmount"
+            type="number"
+            min="0.01"
+            step="0.01"
+            inputmode="decimal"
+            placeholder="Betrag"
+          >
           <button id="donationAdd" class="btn positive">HINZUFÜGEN</button>
           <button id="donationSubtract" class="btn danger">ABZIEHEN</button>
         </div>
-        <div class="summary-line"><span>EIGENE SPENDEN GESAMT</span><strong><span id="ownDonations">0,00</span> €</strong></div>
-        <div class="hint">1 € eigene Spende = +1 Minute Pausenguthaben</div>
+
+        <div class="summary-line">
+          <span>EIGENE SPENDEN GESAMT</span>
+          <strong><span id="ownDonations">0,00</span> €</strong>
+        </div>
+
+        <div class="hint">
+          1 € eigene Spende = +1 Minute Pausenguthaben
+        </div>
       </article>
 
       <article class="card action-card">
         <div class="card-title">AKTIONEN</div>
-        <button id="undoButton" class="btn warning full">LETZTE AKTION RÜCKGÄNGIG</button>
+
+        <button id="undoButton" class="btn warning full">
+          LETZTE AKTION RÜCKGÄNGIG
+        </button>
+
         <div class="history-title">LETZTE 10 AKTIONEN</div>
         <div id="history" class="history"></div>
-        <button id="fullReset" class="btn danger full reset-all">GESAMTES EVENT RESETTEN</button>
+
+        <button id="fullReset" class="btn danger full reset-all">
+          GESAMTES EVENT RESETTEN
+        </button>
       </article>
     </section>
 
     <footer>
-      <a href="/dartmarathon/preview" target="_blank">Overlay-Vorschau öffnen</a>
-      <span>OBS: <code>/dartmarathon/overlay</code> · Zuschauer-Spenden: StreamElements</span>
-      <form method="post" action="/dartmarathon/logout"><button class="text-button">Control abmelden</button></form>
+      <a href="/dartmarathon/preview" target="_blank">
+        Overlay-Vorschau öffnen
+      </a>
+
+      <span>
+        OBS:
+        <code>/dartmarathon/overlay</code>
+        · Zuschauer-Spenden: StreamElements
+      </span>
+
+      <form method="post" action="/dartmarathon/logout">
+        <button class="text-button">
+          Control abmelden
+        </button>
+      </form>
     </footer>
   </main>
+
   <div id="toast" class="toast hidden"></div>
+
   <script src="/dartmarathon/static/control.js"></script>
 </body>
 </html>

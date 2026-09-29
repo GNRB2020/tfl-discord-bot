@@ -8,28 +8,67 @@
 </head>
 <body class="overlay-body">
   <div id="overlayRoot" class="overlay-root">
-    <div id="ovTzmarty" class="value-box player-value tzmarty-value">0</div>
-    <div id="ovKorsar" class="value-box player-value korsar-value">0</div>
-    <div id="ovTotalLegs" class="value-box bottom-value total-legs-value">0</div>
-    <div id="ovSpecials" class="value-box bottom-value specials-value">0</div>
-    <div id="ovPause" class="value-box bottom-value pause-value">00:00</div>
-    <div id="ovStream" class="value-box bottom-value stream-value">00:00:00</div>
+
+    <div id="ovTzmarty" class="value-box player-value tzmarty-value">
+      0 / 0
+    </div>
+
+    <div id="ovKorsar" class="value-box player-value korsar-value">
+      0 / 0
+    </div>
+
+    <div id="ovTotalLegs" class="value-box bottom-value total-legs-value">
+      0
+    </div>
+
+    <div id="ovSpecials" class="value-box bottom-value specials-value">
+      0
+    </div>
+
+    <div id="ovPause" class="value-box bottom-value pause-value">
+      15:00
+    </div>
+
+    <div id="ovStream" class="value-box bottom-value stream-value">
+      00:00:00
+    </div>
 
     <div id="pauseCenter" class="pause-center hidden">
       <div class="pause-center-inner">
         <div class="pause-kicker">PAUSE</div>
-        <div id="pauseCenterTime" class="pause-center-time">00:00</div>
-        <div class="pause-caption">VERBLEIBENDES PAUSENGUTHABEN</div>
+        <div id="pauseCenterTime" class="pause-center-time">
+          15:00
+        </div>
+        <div class="pause-caption">
+          VERBLEIBENDES PAUSENGUTHABEN
+        </div>
+      </div>
+    </div>
+
+    <div id="hourPopup" class="hour-popup hidden">
+      <div class="hour-popup-inner">
+        <div id="hourPopupNumber" class="hour-popup-number">
+          1 STUNDE!
+        </div>
+        <div id="hourPopupText" class="hour-popup-text">
+          WIR SPIELEN BEREITS SEIT 1 STUNDE
+        </div>
       </div>
     </div>
 
     <div id="eventEnded" class="event-ended hidden">
       <div class="event-ended-inner">
-        <div class="event-ended-kicker">ZEIT ABGELAUFEN</div>
-        <div class="event-ended-title">DARTMARATHON<br>BEENDET</div>
+        <div class="event-ended-kicker">
+          ZEIT ABGELAUFEN
+        </div>
+        <div class="event-ended-title">
+          DARTMARATHON<br>BEENDET
+        </div>
       </div>
     </div>
+
   </div>
+
   <script src="/dartmarathon/static/overlay.js"></script>
 </body>
 </html>
