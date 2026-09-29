@@ -13,7 +13,6 @@ import discord
 import gspread
 import pytz
 from aiohttp import web
-from dartmarathon import register_dartmarathon
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -541,8 +540,7 @@ async def start_webserver(_client: discord.Client):
 
     _webserver_started = True
     app = await _build_web_app(_client)
-    register_dartmarathon(app)
-
+    
     runner = web.AppRunner(app)
     await runner.setup()
     _webapp_runner = runner
