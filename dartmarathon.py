@@ -199,10 +199,13 @@ def _reconcile_running_timers_locked(save: bool = False) -> None:
     if _state["pause_active"]:
         started = _state.get("pause_started_at")
         if isinstance(started, (int, float)):
+            elapsed = max(0.0, now - float(started))
+            actually_used = min(elapsed, _state["pause_seconds"])
             _state["pause_seconds"] = max(
                 0.0,
-                _state["pause_seconds"] - max(0.0, now - float(started)),
+                _state["pause_seconds"] - elapsed,
             )
+            _state["pause_used_seconds"] += actually_used
         _state["pause_started_at"] = now
         changed = True
 
@@ -276,6 +279,15 @@ def _total_specials_locked() -> int:
 
 def _public_state_locked() -> Dict[str, Any]:
     _reconcile_running_timers_locked(save=False)
+
+    total_legs = (
+        _state["legs"]["tzmarty"]
+        + _state["legs"]["korsar"]
+    )
+    total_specials = _total_specials_locked()
+    stream_hours = _state["stream_elapsed"] / 3600.0
+    legs_per_hour = total_legs / stream_hours if stream_hours > 0 else 0.0
+    specials_per_hour = total_specials / stream_hours if stream_hours > 0 else 0.0
 
     return {
         "stream_seconds": int(_state["stream_elapsed"]),
@@ -483,6 +495,8 @@ async def _process_message(
                 _state["event_ended"] = False
                 _state["pause_active"] = False
                 _state["pause_started_at"] = None
+                if _state["pause_seconds"] <= 0:
+                    _state["pause_seconds"] = float(INITIAL_PAUSE_SECONDS)
                 return True
 
             await _mutate(
