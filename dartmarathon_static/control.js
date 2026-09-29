@@ -135,7 +135,10 @@
         (value > 0 && s.pause_full);
     });
 
-    $("statOnline").textContent = s.stream_display;
+    $("statSpecialsPerLeg").textContent = Number(s.specials_per_leg).toLocaleString("de-DE", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
     $("statLegs").textContent = s.total_legs;
     $("statSpecials").textContent = s.total_specials;
     $("statLegsPerHour").textContent = Number(s.legs_per_hour).toLocaleString("de-DE", {
