@@ -100,3 +100,130 @@ button{cursor:pointer}
 .item-image-wrap.image-error{
   display:none;
 }
+
+
+/* V6.3.2 – feste Medienfläche, kein Springen/Flackern */
+.item-grid{
+  align-items:stretch;
+}
+
+.item-card{
+  min-height:500px;
+  padding:0;
+  overflow:hidden;
+}
+
+.item-media{
+  position:relative;
+  flex:0 0 155px;
+  width:100%;
+  height:155px;
+  overflow:hidden;
+  border-bottom:1px solid #263a50;
+  background:
+    radial-gradient(circle at center,rgba(255,189,36,.08),transparent 58%),
+    #08111a;
+}
+
+.item-media-fallback{
+  position:absolute;
+  inset:0;
+  display:grid;
+  place-items:center;
+  z-index:1;
+}
+
+.item-media-fallback span{
+  display:grid;
+  place-items:center;
+  width:70px;
+  height:70px;
+  border:1px solid #324860;
+  border-radius:18px;
+  background:#0a121c;
+  font-size:36px;
+}
+
+.item-media-image{
+  position:absolute;
+  inset:0;
+  z-index:2;
+  display:block;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  opacity:0;
+  transition:opacity .18s ease;
+}
+
+.item-media.image-loaded .item-media-image{
+  opacity:1;
+}
+
+.item-media.image-failed .item-media-image{
+  display:none;
+}
+
+.item-media-target{
+  position:absolute;
+  right:12px;
+  top:12px;
+  z-index:4;
+  padding:6px 8px;
+  border:1px solid #37546f;
+  border-radius:999px;
+  background:rgba(12,28,43,.92);
+  color:#fff;
+  font-size:9px;
+  font-weight:950;
+  text-transform:uppercase;
+  box-shadow:0 2px 12px rgba(0,0,0,.35);
+}
+
+.item-card-body{
+  flex:1 1 auto;
+  display:flex;
+  flex-direction:column;
+  padding:16px 17px 10px;
+}
+
+.item-card-body h3{
+  margin:0 0 6px;
+}
+
+.item-card .item-description{
+  min-height:76px;
+}
+
+.item-card .item-meta{
+  margin-top:auto;
+  padding-top:14px;
+}
+
+.item-card .item-buy-row{
+  flex:0 0 auto;
+  margin:0 17px 17px;
+}
+
+.item-card > .item-head,
+.item-card > .item-image,
+.item-card > .item-image-wrap{
+  display:none!important;
+}
+
+@media(max-width:900px){
+  .item-card{
+    min-height:490px;
+  }
+}
+
+@media(max-width:620px){
+  .item-card{
+    min-height:470px;
+  }
+
+  .item-media{
+    height:145px;
+    flex-basis:145px;
+  }
+}

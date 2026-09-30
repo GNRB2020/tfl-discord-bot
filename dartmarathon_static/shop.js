@@ -3,13 +3,19 @@
   let reconnectTimer = null;
   let latestShop = null;
   let paying = false;
+  let lastItemsSignature = "";
+  const failedImages = new Set();
 
   const $ = (id) => document.getElementById(id);
   const all = (selector) => [...document.querySelectorAll(selector)];
 
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>'"]/g, (char) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "'": "&#39;",
+      '"': "&quot;",
     }[char]));
   }
 
@@ -28,7 +34,13 @@
   }
 
   function targetLabel(target) {
-    return ({tzmarty:"Tzmarty", korsar:"Korsar", both:"Beide", general:"Allgemein", on_site:"Vor Ort"})[target] || "Allgemein";
+    return ({
+      tzmarty:"Tzmarty",
+      korsar:"Korsar",
+      both:"Beide",
+      general:"Allgemein",
+      on_site:"Vor Ort",
+    })[target] || "Allgemein";
   }
 
   function toast(text) {
@@ -36,83 +48,234 @@
     el.textContent = text;
     el.classList.remove("hidden");
     clearTimeout(el._timer);
-    el._timer = setTimeout(() => el.classList.add("hidden"), 3500);
+    el._timer = setTimeout(
+      () => el.classList.add("hidden"),
+      3500
+    );
+  }
+
+  function imageKey(item) {
+    return [
+      Number(item.id),
+      String(item.updated_at || ""),
+      String(item.image_url || ""),
+    ].join(":");
+  }
+
+  function structuralItemsSignature(items, testMode, paypalConfigured) {
+    return JSON.stringify(
+      (Array.isArray(items) ? items : []).map((item) => ({
+        id:Number(item.id),
+        name:String(item.name || ""),
+        description:String(item.description || ""),
+        price_cents:Number(item.price_cents || 0),
+        max_quantity:Number(item.max_quantity || 0),
+        sold_count:Number(item.sold_count || 0),
+        remaining:item.remaining === null ? null : Number(item.remaining || 0),
+        cooldown_seconds:Number(item.cooldown_seconds || 0),
+        target:String(item.target || ""),
+        icon:String(item.icon || ""),
+        image_url:String(item.image_url || ""),
+        updated_at:String(item.updated_at || ""),
+        action_type:String(item.action_type || ""),
+        action_value:Number(item.action_value || 0),
+        available:Boolean(item.available),
+        availability_reason:String(item.availability_reason || ""),
+        testMode:Boolean(testMode),
+        paypalConfigured:Boolean(paypalConfigured),
+      }))
+    );
+  }
+
+  function bindItemImages() {
+    all("[data-shop-image]").forEach((image) => {
+      const key = image.dataset.shopImage || "";
+
+      image.addEventListener("load", () => {
+        const media = image.closest(".item-media");
+        if (media) {
+          media.classList.add("image-loaded");
+          media.classList.remove("image-failed");
+        }
+      }, {once:true});
+
+      image.addEventListener("error", () => {
+        if (key) failedImages.add(key);
+        const media = image.closest(".item-media");
+        if (media) {
+          media.classList.add("image-failed");
+          media.classList.remove("image-loaded");
+        }
+        image.remove();
+      }, {once:true});
+    });
+  }
+
+  function updateDynamicItemValues(items) {
+    for (const item of (Array.isArray(items) ? items : [])) {
+      const cooldown = document.querySelector(
+        `[data-cooldown-item="${Number(item.id)}"]`
+      );
+      if (!cooldown) continue;
+
+      const remaining = Number(item.cooldown_remaining || 0);
+      cooldown.textContent = remaining > 0
+        ? `Wieder in ${duration(remaining)}`
+        : "";
+      cooldown.classList.toggle("hidden", remaining <= 0);
+    }
+  }
+
+  function renderItems(shop, testMode) {
+    const items = Array.isArray(shop.items) ? shop.items : [];
+    const container = $("shopItems");
+
+    if (!items.length) {
+      if (lastItemsSignature !== "EMPTY") {
+        container.innerHTML =
+          '<div class="empty-shop">Aktuell sind keine Foltershop-Artikel freigeschaltet. Spenden sind trotzdem möglich.</div>';
+        lastItemsSignature = "EMPTY";
+      }
+      return;
+    }
+
+    const signature = structuralItemsSignature(
+      items,
+      testMode,
+      shop.paypal_configured
+    );
+
+    if (signature === lastItemsSignature) {
+      updateDynamicItemValues(items);
+      return;
+    }
+
+    lastItemsSignature = signature;
+
+    container.innerHTML = items.map((item) => {
+      const meta = [];
+
+      if (item.max_quantity > 0) {
+        meta.push(
+          `Noch ${Math.max(0, Number(item.remaining || 0))} verfügbar`
+        );
+      } else {
+        meta.push("Unbegrenzt");
+      }
+
+      if (item.cooldown_seconds > 0) {
+        meta.push(
+          `Cooldown ${Math.round(Number(item.cooldown_seconds) / 60)} Min.`
+        );
+      }
+
+      if (item.action_type === "pause_minus") {
+        meta.push(
+          `Pausendieb −${Math.round(Number(item.action_value || 0) / 60)} Min.`
+        );
+        meta.push("Nur kaufbar, wenn keine Pause läuft");
+      }
+
+      if (item.availability_reason && !item.available) {
+        meta.push(item.availability_reason);
+      }
+
+      const key = imageKey(item);
+      const tryImage = Boolean(item.image_url) && !failedImages.has(key);
+
+      const imageHtml = tryImage
+        ? (
+            `<img class="item-media-image" `
+            + `loading="lazy" decoding="async" `
+            + `data-shop-image="${escapeHtml(key)}" `
+            + `src="/dartmarathon/shop/image/${Number(item.id)}?v=${encodeURIComponent(String(item.updated_at || item.id))}" `
+            + `alt="${escapeHtml(item.name)}">`
+          )
+        : "";
+
+      return `
+        <article class="item-card ${item.available ? "" : "unavailable"}" data-item-id="${Number(item.id)}">
+          <div class="item-media ${tryImage ? "has-image-source" : "image-failed"}">
+            <div class="item-media-fallback">
+              <span>${escapeHtml(item.icon || "🎯")}</span>
+            </div>
+            ${imageHtml}
+            <span class="item-media-target">${escapeHtml(targetLabel(item.target))}</span>
+          </div>
+
+          <div class="item-card-body">
+            <h3>${escapeHtml(item.name)}</h3>
+            <p class="item-description">${escapeHtml(item.description || "")}</p>
+
+            <div class="item-meta">
+              ${meta.map(
+                (entry) => `<span class="meta-pill">${escapeHtml(entry)}</span>`
+              ).join("")}
+              <span
+                class="meta-pill ${Number(item.cooldown_remaining || 0) > 0 ? "" : "hidden"}"
+                data-cooldown-item="${Number(item.id)}"
+              >${Number(item.cooldown_remaining || 0) > 0 ? escapeHtml(`Wieder in ${duration(item.cooldown_remaining)}`) : ""}</span>
+            </div>
+          </div>
+
+          <div class="item-buy-row">
+            <div class="item-price">${euro(Number(item.price_cents || 0) / 100)}</div>
+            <button
+              type="button"
+              class="buy-button ${testMode ? "test-buy" : ""}"
+              data-buy-item="${Number(item.id)}"
+              ${item.available && (shop.paypal_configured || testMode) ? "" : "disabled"}
+            >${
+              item.available
+                ? (testMode ? "TESTKAUF AUSLÖSEN" : "MIT PAYPAL KAUFEN")
+                : escapeHtml(item.availability_reason || "NICHT VERFÜGBAR")
+            }</button>
+          </div>
+        </article>`;
+    }).join("");
+
+    bindItemImages();
+
+    all("[data-buy-item]").forEach((button) => {
+      button.onclick = () => startPayment({
+        kind:"item",
+        item_id:Number(button.dataset.buyItem),
+      });
+    });
+
+    updateDynamicItemValues(items);
   }
 
   function render(shop) {
     if (!shop) return;
     latestShop = shop;
-    $("shopEventTotal").textContent = euro(Number(shop.event_total_cents || 0) / 100);
+
+    $("shopEventTotal").textContent = euro(
+      Number(shop.event_total_cents || 0) / 100
+    );
 
     const paypal = $("paypalStatus");
     const testMode = Boolean(shop.test_mode);
-    $("shopTestBanner").classList.toggle("hidden", !testMode);
+
+    $("shopTestBanner").classList.toggle(
+      "hidden",
+      !testMode
+    );
 
     if (testMode) {
       paypal.textContent = "TESTMODUS · KEIN ECHTES GELD";
       paypal.className = "status-pill test";
     } else if (shop.paypal_configured) {
-      paypal.textContent = shop.paypal_mode === "live" ? "PAYPAL LIVE" : "PAYPAL SANDBOX";
+      paypal.textContent = shop.paypal_mode === "live"
+        ? "PAYPAL LIVE"
+        : "PAYPAL SANDBOX";
       paypal.className = "status-pill ok";
     } else {
       paypal.textContent = "PAYPAL NICHT KONFIGURIERT";
       paypal.className = "status-pill bad";
     }
 
-    const items = Array.isArray(shop.items) ? shop.items : [];
-    const container = $("shopItems");
-    if (!items.length) {
-      container.innerHTML = '<div class="empty-shop">Aktuell sind keine Foltershop-Artikel freigeschaltet. Spenden sind trotzdem möglich.</div>';
-      return;
-    }
-
-    container.innerHTML = items.map((item) => {
-      const meta = [];
-      if (item.max_quantity > 0) meta.push(`Noch ${Math.max(0, Number(item.remaining || 0))} verfügbar`);
-      else meta.push("Unbegrenzt");
-      if (item.cooldown_seconds > 0) meta.push(`Cooldown ${Math.round(item.cooldown_seconds / 60)} Min.`);
-      if (item.cooldown_remaining > 0) meta.push(`Wieder in ${duration(item.cooldown_remaining)}`);
-      if (item.action_type === "pause_minus") {
-        meta.push(`Pausendieb −${Math.round(Number(item.action_value || 0) / 60)} Min.`);
-        meta.push("Nur kaufbar, wenn keine Pause läuft");
-      }
-      if (item.availability_reason && !item.available) meta.push(item.availability_reason);
-
-      const image = item.image_url
-        ? (
-            `<div class="item-image-wrap">`
-            + `<img class="item-image" `
-            + `src="/dartmarathon/shop/image/${Number(item.id)}?v=${encodeURIComponent(String(item.updated_at || item.id))}" `
-            + `alt="${escapeHtml(item.name)}" `
-            + `onerror="this.parentElement.classList.add('image-error')">`
-            + `</div>`
-          )
-        : "";
-
-      return `
-        <article class="item-card ${item.available ? "" : "unavailable"}">
-          ${image}
-          <div class="item-head">
-            <div class="item-icon">${escapeHtml(item.icon || "🎯")}</div>
-            <span class="target-badge">${escapeHtml(targetLabel(item.target))}</span>
-          </div>
-          <h3>${escapeHtml(item.name)}</h3>
-          <p class="item-description">${escapeHtml(item.description || "")}</p>
-          <div class="item-meta">${meta.map((x) => `<span class="meta-pill">${escapeHtml(x)}</span>`).join("")}</div>
-          <div class="item-buy-row">
-            <div class="item-price">${euro(Number(item.price_cents || 0) / 100)}</div>
-            <button type="button" class="buy-button ${testMode ? "test-buy" : ""}" data-buy-item="${Number(item.id)}" ${item.available && (shop.paypal_configured || testMode) ? "" : "disabled"}>
-              ${item.available
-                ? (testMode ? "TESTKAUF AUSLÖSEN" : "MIT PAYPAL KAUFEN")
-                : escapeHtml(item.availability_reason || "NICHT VERFÜGBAR")}
-            </button>
-          </div>
-        </article>`;
-    }).join("");
-
-    all("[data-buy-item]").forEach((button) => {
-      button.onclick = () => startPayment({kind:"item", item_id:Number(button.dataset.buyItem)});
-    });
+    renderItems(shop, testMode);
 
     all("[data-donate]").forEach((button) => {
       const amount = button.dataset.donate;
@@ -124,6 +287,7 @@
     $("customDonateButton").textContent = testMode
       ? "TESTSPENDE AUSLÖSEN"
       : "MIT PAYPAL SPENDEN";
+
     $("customDonateButton").classList.toggle(
       "test-buy",
       testMode
@@ -132,44 +296,88 @@
 
   function connect() {
     clearTimeout(reconnectTimer);
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/dartmarathon/ws`);
+
+    const proto = location.protocol === "https:"
+      ? "wss"
+      : "ws";
+
+    ws = new WebSocket(
+      `${proto}://${location.host}/dartmarathon/ws`
+    );
+
     ws.onmessage = (event) => {
       let message;
-      try { message = JSON.parse(event.data); } catch (_) { return; }
-      if (message.type === "state") render(message.data?.shop);
+      try {
+        message = JSON.parse(event.data);
+      } catch (_) {
+        return;
+      }
+
+      if (message.type === "state") {
+        render(message.data?.shop);
+      }
     };
+
     ws.onclose = () => {
-      reconnectTimer = setTimeout(connect, 1800);
+      reconnectTimer = setTimeout(
+        connect,
+        1800
+      );
     };
-    ws.onerror = () => { try { ws.close(); } catch (_) {} };
+
+    ws.onerror = () => {
+      try {
+        ws.close();
+      } catch (_) {}
+    };
   }
 
   async function startPayment(payload) {
     if (paying) return;
-    const testMode = Boolean(latestShop?.test_mode);
-    if (!testMode && !latestShop?.paypal_configured) {
-      return toast("PayPal ist aktuell noch nicht konfiguriert.");
+
+    const testMode = Boolean(
+      latestShop?.test_mode
+    );
+
+    if (
+      !testMode
+      && !latestShop?.paypal_configured
+    ) {
+      return toast(
+        "PayPal ist aktuell noch nicht konfiguriert."
+      );
     }
+
     paying = true;
+
     try {
       const body = {
         ...payload,
-        display_name: $("buyerName").value.trim(),
-        message: $("buyerMessage").value.trim(),
+        display_name:$("buyerName").value.trim(),
+        message:$("buyerMessage").value.trim(),
       };
-      const response = await fetch("/dartmarathon/shop/api/create-order", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify(body),
-      });
+
+      const response = await fetch(
+        "/dartmarathon/shop/api/create-order",
+        {
+          method:"POST",
+          headers:{
+            "Content-Type":"application/json",
+          },
+          body:JSON.stringify(body),
+        }
+      );
+
       const data = await response.json();
+
       if (!response.ok || !data.ok) {
         throw new Error(
           data.error
-          || (testMode
-            ? "Testkauf konnte nicht ausgelöst werden."
-            : "PayPal-Zahlung konnte nicht gestartet werden.")
+          || (
+            testMode
+              ? "Testkauf konnte nicht ausgelöst werden."
+              : "PayPal-Zahlung konnte nicht gestartet werden."
+          )
         );
       }
 
@@ -184,45 +392,88 @@
       }
 
       if (!data.approval_url) {
-        throw new Error("PayPal-Zahlung konnte nicht gestartet werden.");
+        throw new Error(
+          "PayPal-Zahlung konnte nicht gestartet werden."
+        );
       }
 
       location.href = data.approval_url;
+
     } catch (error) {
-      toast(error.message || "Zahlung konnte nicht gestartet werden.");
+      toast(
+        error.message
+        || "Zahlung konnte nicht gestartet werden."
+      );
       paying = false;
     }
   }
 
   all("[data-donate]").forEach((button) => {
-    button.onclick = () => startPayment({kind:"donation", amount:Number(button.dataset.donate)});
+    button.onclick = () => startPayment({
+      kind:"donation",
+      amount:Number(button.dataset.donate),
+    });
   });
 
   $("customDonateButton").onclick = () => {
-    const amount = Number(String($("customDonation").value || "").replace(",", "."));
-    if (!Number.isFinite(amount) || amount < 1) return toast("Bitte mindestens 1 € eingeben.");
-    startPayment({kind:"donation", amount});
+    const amount = Number(
+      String(
+        $("customDonation").value || ""
+      ).replace(",", ".")
+    );
+
+    if (
+      !Number.isFinite(amount)
+      || amount < 1
+    ) {
+      return toast(
+        "Bitte mindestens 1 € eingeben."
+      );
+    }
+
+    startPayment({
+      kind:"donation",
+      amount,
+    });
   };
 
-  const params = new URLSearchParams(location.search);
+  const params = new URLSearchParams(
+    location.search
+  );
+
   const payment = params.get("payment");
+
   if (payment) {
     const notice = $("paymentNotice");
     notice.classList.remove("hidden");
+
     if (payment === "success") {
-      notice.className = "payment-notice success";
-      notice.textContent = "Zahlung erfolgreich. Vielen Dank – die Aktion ist bereits im Stream und Control Center angekommen.";
+      notice.className =
+        "payment-notice success";
+      notice.textContent =
+        "Zahlung erfolgreich. Vielen Dank – die Aktion ist bereits im Stream und Control Center angekommen.";
     } else if (payment === "cancelled") {
-      notice.className = "payment-notice warning";
-      notice.textContent = "Die PayPal-Zahlung wurde abgebrochen.";
+      notice.className =
+        "payment-notice warning";
+      notice.textContent =
+        "Die PayPal-Zahlung wurde abgebrochen.";
     } else if (payment === "pending") {
-      notice.className = "payment-notice warning";
-      notice.textContent = "PayPal verarbeitet die Zahlung noch. Sobald sie bestätigt ist, wird sie automatisch übernommen.";
+      notice.className =
+        "payment-notice warning";
+      notice.textContent =
+        "PayPal verarbeitet die Zahlung noch. Sobald sie bestätigt ist, wird sie automatisch übernommen.";
     } else {
-      notice.className = "payment-notice error";
-      notice.textContent = "Die Zahlung konnte nicht abgeschlossen werden. Es wurde keine Shop-Aktion ausgelöst.";
+      notice.className =
+        "payment-notice error";
+      notice.textContent =
+        "Die Zahlung konnte nicht abgeschlossen werden. Es wurde keine Shop-Aktion ausgelöst.";
     }
-    history.replaceState({}, "", location.pathname);
+
+    history.replaceState(
+      {},
+      "",
+      location.pathname
+    );
   }
 
   connect();
