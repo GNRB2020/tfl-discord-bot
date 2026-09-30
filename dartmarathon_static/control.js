@@ -611,19 +611,47 @@
     });
   }
 
+  function compactValueList(values) {
+    const source = Array.isArray(values) ? values : [];
+    const counts = new Map();
+    const order = [];
+
+    for (const raw of source) {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) continue;
+
+      if (!counts.has(value)) {
+        counts.set(value, 0);
+        order.push(value);
+      }
+
+      counts.set(
+        value,
+        counts.get(value) + 1
+      );
+    }
+
+    return order.map((value) => {
+      const count = counts.get(value);
+      return count > 1
+        ? `${count}x${value}`
+        : String(value);
+    }).join(", ");
+  }
+
   function formatSpecialSummary(detail) {
     const safe = detail || {};
     const parts = [];
 
     if (safe.hf?.length) {
       parts.push(
-        `HF ${safe.hf.join(", ")}`
+        `HF ${compactValueList(safe.hf)}`
       );
     }
 
     if (safe.bf?.length) {
       parts.push(
-        `BF ${safe.bf.join(", ")}`
+        `BF ${compactValueList(safe.bf)}`
       );
     }
 
@@ -642,7 +670,7 @@
 
     if (safe.ld?.length) {
       parts.push(
-        `LD ${safe.ld.join(", ")}`
+        `LD ${compactValueList(safe.ld)}`
       );
     }
 
@@ -899,6 +927,47 @@
 
     $("totalSpecials").textContent = Number(
       state.total_specials || 0
+    );
+
+    $("statMatches").textContent = Number(
+      state.match_count || 0
+    );
+
+    const tzmartyWins = Number(
+      state.match_wins?.tzmarty || 0
+    );
+
+    const korsarWins = Number(
+      state.match_wins?.korsar || 0
+    );
+
+    const draws = Number(
+      state.match_draws || 0
+    );
+
+    $("statMatchBalance").textContent = (
+      `${tzmartyWins} : ${korsarWins}`
+      + (draws > 0 ? ` · ${draws} U` : "")
+    );
+
+    $("statAvgLegsMatch").textContent = Number(
+      state.avg_legs_per_match || 0
+    ).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }
+    );
+
+    $("statAvgSpecialsMatch").textContent = Number(
+      state.avg_specials_per_match || 0
+    ).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }
     );
 
     $("statSpecialsPerLeg").textContent = Number(

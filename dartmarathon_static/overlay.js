@@ -103,6 +103,129 @@
     }
   }
 
+  function formatNumber(value, digits) {
+    return Number(value || 0).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      }
+    );
+  }
+
+  function matchBalance(state) {
+    const tzmarty = Number(
+      state.match_wins?.tzmarty || 0
+    );
+    const korsar = Number(
+      state.match_wins?.korsar || 0
+    );
+    const draws = Number(
+      state.match_draws || 0
+    );
+
+    return (
+      `${tzmarty} : ${korsar}`
+      + (draws > 0 ? ` · ${draws} U` : "")
+    );
+  }
+
+  function renderFinalSpecialList(id, detail) {
+    const lines = detailLines(detail);
+
+    $(id).innerHTML = lines.length
+      ? lines.map(
+          ([label, value]) => (
+            '<div class="final-special-row">'
+            + `<span>${escapeHtml(label)}</span>`
+            + `<strong>${escapeHtml(value)}</strong>`
+            + "</div>"
+          )
+        ).join("")
+      : '<div class="final-empty">Keine Specials</div>';
+  }
+
+  function renderFinalStats(state) {
+    $("endStreamTime").textContent = (
+      state.stream_display || "00:00:00"
+    );
+
+    $("endMatches").textContent = Number(
+      state.match_count || 0
+    );
+
+    $("endMatchBalance").textContent = (
+      matchBalance(state)
+    );
+
+    $("endLegs").textContent = Number(
+      state.total_legs || 0
+    );
+
+    $("endSpecials").textContent = Number(
+      state.total_specials || 0
+    );
+
+    $("endPauseUsed").textContent = (
+      state.pause_used_display || "00:00:00"
+    );
+
+    $("endDonations").textContent = (
+      `${Number(state.own_donations || 0).toLocaleString(
+        "de-DE",
+        {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }
+      )} €`
+    );
+
+    $("endAvgLegs").textContent = formatNumber(
+      state.avg_legs_per_match,
+      1
+    );
+
+    $("endAvgSpecials").textContent = formatNumber(
+      state.avg_specials_per_match,
+      1
+    );
+
+    $("endSpecialsPerLeg").textContent = formatNumber(
+      state.specials_per_leg,
+      2
+    );
+
+    $("endLegsPerHour").textContent = formatNumber(
+      state.legs_per_hour,
+      1
+    );
+
+    $("endSpecialsPerHour").textContent = formatNumber(
+      state.specials_per_hour,
+      1
+    );
+
+    $("endTzScore").textContent = (
+      `${Number(state.legs?.tzmarty || 0)} Legs · `
+      + `${Number(state.player_special_totals?.tzmarty || 0)} Specials`
+    );
+
+    $("endKoScore").textContent = (
+      `${Number(state.legs?.korsar || 0)} Legs · `
+      + `${Number(state.player_special_totals?.korsar || 0)} Specials`
+    );
+
+    renderFinalSpecialList(
+      "endTzSpecialDetail",
+      state.special_detail?.tzmarty || {}
+    );
+
+    renderFinalSpecialList(
+      "endKoSpecialDetail",
+      state.special_detail?.korsar || {}
+    );
+  }
+
   function render(state) {
     if (!state) return;
 
@@ -154,6 +277,8 @@
       || state.event_ended
     );
 
+    renderFinalStats(state);
+
     $("eventEnded").classList.toggle(
       "hidden",
       !state.event_ended
@@ -164,7 +289,7 @@
     const image = $("adPopupImage");
 
     image.src = (
-      `${message.image}?v=5.1.0&t=${Date.now()}`
+      `${message.image}?v=5.3.0&t=${Date.now()}`
     );
 
     image.alt = (
@@ -226,6 +351,34 @@
     );
   }
 
+  function compactValueList(values) {
+    const source = Array.isArray(values) ? values : [];
+    const counts = new Map();
+    const order = [];
+
+    for (const raw of source) {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) continue;
+
+      if (!counts.has(value)) {
+        counts.set(value, 0);
+        order.push(value);
+      }
+
+      counts.set(
+        value,
+        counts.get(value) + 1
+      );
+    }
+
+    return order.map((value) => {
+      const count = counts.get(value);
+      return count > 1
+        ? `${count}x${value}`
+        : String(value);
+    }).join(", ");
+  }
+
   function detailLines(detail) {
     const safe = detail || {};
     const lines = [];
@@ -233,14 +386,14 @@
     if (safe.hf?.length) {
       lines.push([
         "HF",
-        safe.hf.join(", "),
+        compactValueList(safe.hf),
       ]);
     }
 
     if (safe.bf?.length) {
       lines.push([
         "BF",
-        safe.bf.join(", "),
+        compactValueList(safe.bf),
       ]);
     }
 
@@ -261,7 +414,7 @@
     if (safe.ld?.length) {
       lines.push([
         "LD",
-        safe.ld.join(", "),
+        compactValueList(safe.ld),
       ]);
     }
 
@@ -338,6 +491,47 @@
       message.title
       || "EVENT-KENNZAHLEN"
     );
+    $("popMatches").textContent = Number(
+      stats.match_count || 0
+    );
+
+    const tzmartyWins = Number(
+      stats.match_wins?.tzmarty || 0
+    );
+
+    const korsarWins = Number(
+      stats.match_wins?.korsar || 0
+    );
+
+    const draws = Number(
+      stats.match_draws || 0
+    );
+
+    $("popMatchBalance").textContent = (
+      `${tzmartyWins} : ${korsarWins}`
+      + (draws > 0 ? ` · ${draws} U` : "")
+    );
+
+    $("popAvgLegsMatch").textContent = Number(
+      stats.avg_legs_per_match || 0
+    ).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }
+    );
+
+    $("popAvgSpecialsMatch").textContent = Number(
+      stats.avg_specials_per_match || 0
+    ).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }
+    );
+
 
     $("popLegs").textContent = Number(
       stats.total_legs || 0

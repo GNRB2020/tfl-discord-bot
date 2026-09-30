@@ -197,3 +197,19 @@ button{touch-action:manipulation}
   .regie-buttons{grid-template-columns:1fr}
   .top-actions{flex-wrap:wrap}
 }
+
+
+/* V5.3 Matchstatistik */
+.event-card .metric-grid{
+  grid-template-columns:1fr 1fr;
+  gap:4px;
+}
+.event-card .metric{
+  padding:5px 4px;
+}
+.event-card .metric span{
+  font-size:6.8px;
+}
+.event-card .metric strong{
+  font-size:15px;
+}
