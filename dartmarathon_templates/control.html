@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.4.0">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.5.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -335,6 +335,7 @@
         <button class="tab shop-tab" data-tab="shop" type="button">
           FOLTERSHOP <span id="shopTaskBadge" class="tab-badge hot">0</span>
         </button>
+        <button class="tab overlay-tab" data-tab="overlay" type="button">OVERLAY</button>
         <button class="tab" data-tab="admin" type="button">ADMIN</button>
       </nav>
 
@@ -436,6 +437,95 @@
           </div>
         </section>
 
+        <section id="tab-overlay" class="tab-panel overlay-editor-panel">
+          <div class="overlay-editor-toolbar">
+            <div class="overlay-editor-title">
+              <strong>OVERLAY-EDITOR</strong>
+              <span id="overlayEditorStatus">Live-Layout wird geladen…</span>
+            </div>
+
+            <div class="overlay-editor-options">
+              <label><input id="overlaySnap" type="checkbox" checked> 10px Raster</label>
+              <label><input id="overlayGrid" type="checkbox" checked> Hilfslinien</label>
+            </div>
+
+            <div class="overlay-editor-actions">
+              <button id="overlaySaveLive" class="mini-btn positive" type="button">LIVE ÜBERNEHMEN</button>
+              <button id="overlayResetAll" class="mini-btn danger" type="button">ALLE STANDARD</button>
+              <button id="overlayExport" class="mini-btn ghost" type="button">EXPORT</button>
+              <button id="overlayImport" class="mini-btn ghost" type="button">IMPORT</button>
+              <input id="overlayImportFile" class="hidden" type="file" accept=".json,application/json">
+              <a class="mini-btn ghost link-btn" href="/dartmarathon/preview" target="_blank">GROSSE VORSCHAU</a>
+            </div>
+          </div>
+
+          <div class="overlay-editor-layout">
+            <div class="overlay-stage-shell">
+              <div id="overlayEditorViewport" class="overlay-editor-viewport show-grid">
+                <div id="overlayEditorCanvas" class="overlay-editor-canvas"></div>
+                <div class="overlay-center-line overlay-center-v"></div>
+                <div class="overlay-center-line overlay-center-h"></div>
+              </div>
+              <div class="overlay-editor-help">
+                Element anklicken und ziehen · Ecke unten rechts zum Skalieren · Änderungen bleiben bis „LIVE ÜBERNEHMEN“ nur Vorschau.
+              </div>
+            </div>
+
+            <aside class="overlay-inspector">
+              <div class="overlay-inspector-head">
+                <span>ELEMENT</span>
+                <select id="overlayElementSelect"></select>
+              </div>
+
+              <div class="overlay-inspector-grid">
+                <label>X<input id="overlayX" type="number" min="0" max="1920" step="1"></label>
+                <label>Y<input id="overlayY" type="number" min="0" max="1080" step="1"></label>
+                <label>BREITE<input id="overlayW" type="number" min="40" max="1920" step="1"></label>
+                <label>HÖHE<input id="overlayH" type="number" min="20" max="1080" step="1"></label>
+                <label>SCHRIFT<input id="overlayFont" type="number" min="8" max="160" step="1"></label>
+
+                <label>AUSRICHTUNG
+                  <select id="overlayAlign">
+                    <option value="left">Links</option>
+                    <option value="center">Mitte</option>
+                    <option value="right">Rechts</option>
+                  </select>
+                </label>
+
+                <label>VERTIKAL
+                  <select id="overlayValign">
+                    <option value="top">Oben</option>
+                    <option value="center">Mitte</option>
+                    <option value="bottom">Unten</option>
+                  </select>
+                </label>
+
+                <label class="overlay-visible-check">
+                  <input id="overlayVisible" type="checkbox" checked>
+                  SICHTBAR
+                </label>
+              </div>
+
+              <div class="overlay-nudge">
+                <span>PIXELGENAU</span>
+                <div class="overlay-nudge-grid">
+                  <button data-nudge-x="-1" class="mini-btn ghost" type="button">← 1</button>
+                  <button data-nudge-y="-1" class="mini-btn ghost" type="button">↑ 1</button>
+                  <button data-nudge-y="1" class="mini-btn ghost" type="button">↓ 1</button>
+                  <button data-nudge-x="1" class="mini-btn ghost" type="button">1 →</button>
+                </div>
+              </div>
+
+              <button id="overlayResetSelected" class="btn neutral full-width" type="button">AUSWAHL AUF STANDARD</button>
+
+              <div class="overlay-inspector-note">
+                <strong>VORSCHAU ≠ LIVE</strong>
+                <span>OBS ändert sich erst mit „LIVE ÜBERNEHMEN“.</span>
+              </div>
+            </aside>
+          </div>
+        </section>
+
         <section id="tab-admin" class="tab-panel">
           <div class="admin-layout">
             <div>
@@ -458,7 +548,8 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/dartmarathon/static/control.js?v=6.4.0"></script>
-  <script src="/dartmarathon/static/shop-control.js?v=6.4.0"></script>
+  <script src="/dartmarathon/static/control.js?v=6.5.0"></script>
+  <script src="/dartmarathon/static/shop-control.js?v=6.5.0"></script>
+  <script src="/dartmarathon/static/overlay-editor.js?v=6.5.0"></script>
 </body>
 </html>
