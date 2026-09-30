@@ -3,13 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon OBS Overlay</title>
-  <link rel="stylesheet" href="/dartmarathon/static/overlay.css">
+  <link rel="stylesheet" href="/dartmarathon/static/overlay.css?v=5.1.0">
 </head>
 <body class="overlay-body">
   <div id="overlayRoot" class="overlay-root">
     <div id="ovTzmarty" class="value-box player-value tzmarty-value">0 / 0</div>
     <div id="ovKorsar" class="value-box player-value korsar-value">0 / 0</div>
+
     <div id="ovTotalLegs" class="value-box bottom-value total-legs-value">0</div>
     <div id="ovSpecials" class="value-box bottom-value specials-value">0</div>
     <div id="ovPause" class="value-box bottom-value pause-value">15:00</div>
@@ -24,30 +26,38 @@
     </div>
 
     <div id="adPopup" class="popup-layer hidden">
-      <div class="popup-card ad-card right-popup"><img id="adPopupImage" alt="Werbeeinblendung"></div>
+      <div class="popup-card right-popup ad-card">
+        <img id="adPopupImage" alt="Werbeeinblendung">
+      </div>
     </div>
 
     <div id="recentPopup" class="popup-layer hidden">
-      <div class="popup-card right-popup list-popup">
+      <div class="popup-card right-popup recent-card">
+        <div class="popup-kicker">MATCHHISTORIE</div>
         <h2>LETZTE 5 SPIELE</h2>
-        <div id="recentMatchesList"></div>
+        <div id="recentMatchesList" class="recent-list"></div>
       </div>
     </div>
 
     <div id="specialsPopup" class="popup-layer hidden">
       <div class="popup-card player-popup left-player-popup">
-        <h2>TZMARTY · SPECIALS</h2>
+        <div class="popup-kicker">EVENT-SPECIALS</div>
+        <h2 id="tzSpecialTitle">TZMARTY</h2>
         <div id="tzSpecialPopup"></div>
       </div>
+
       <div class="popup-card player-popup right-player-popup">
-        <h2>KORSAR · SPECIALS</h2>
+        <div class="popup-kicker">EVENT-SPECIALS</div>
+        <h2 id="koSpecialTitle">KORSAR</h2>
         <div id="koSpecialPopup"></div>
       </div>
     </div>
 
     <div id="statsPopup" class="popup-layer hidden">
       <div class="popup-card right-popup stats-popup-card">
+        <div class="popup-kicker">DARTMARATHON</div>
         <h2 id="statsPopupTitle">EVENT-KENNZAHLEN</h2>
+
         <div class="popup-stats">
           <div><span>Legs</span><strong id="popLegs">0</strong></div>
           <div><span>Specials</span><strong id="popSpecials">0</strong></div>
@@ -66,6 +76,7 @@
       </div>
     </div>
   </div>
-  <script src="/dartmarathon/static/overlay.js"></script>
+
+  <script src="/dartmarathon/static/overlay.js?v=5.1.0"></script>
 </body>
 </html>

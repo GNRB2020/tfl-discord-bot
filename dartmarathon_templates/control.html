@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=5.1.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -14,43 +15,43 @@
     </div>
   </div>
 
-  <main class="shell">
+  <main class="app-shell">
     <header class="topbar">
       <div class="brand">
         <div class="eyebrow">TZMARTY VS. KORSAR · DAS REVIVAL</div>
         <h1>DARTMARATHON CONTROL</h1>
       </div>
 
-      <div class="timer-strip">
-        <div class="timer-box stream-box">
-          <span>STREAM</span>
-          <strong id="streamTime">00:00:00</strong>
-          <div class="mini-actions">
-            <button id="streamStart" class="mini positive">START</button>
-            <button id="streamStop" class="mini danger">STOP</button>
-            <button id="streamReset" class="mini neutral">RESET</button>
+      <div class="timer-cluster">
+        <section class="timer-card stream-timer-card">
+          <div class="timer-caption">STREAM</div>
+          <div id="streamTime" class="timer-value">00:00:00</div>
+          <div class="timer-actions">
+            <button id="streamStart" class="mini-btn positive" type="button">START</button>
+            <button id="streamStop" class="mini-btn danger" type="button">STOP</button>
+            <button id="streamReset" class="mini-btn neutral" type="button">RESET</button>
           </div>
-        </div>
+        </section>
 
-        <div class="timer-box pause-box">
-          <span>PAUSE</span>
-          <strong id="pauseTime" class="pause-yellow">15:00</strong>
-          <div id="pauseStatus" class="tiny-status">PAUSE STEHT</div>
-          <div class="mini-actions pause-actions">
-            <button id="pauseStart" class="mini positive">START</button>
-            <button id="pauseStop" class="mini danger">STOP</button>
-            <button data-pause="-60" class="mini ghost">−1:00</button>
-            <button data-pause="-30" class="mini ghost">−0:30</button>
-            <button data-pause="30" class="mini ghost">+0:30</button>
-            <button data-pause="60" class="mini ghost">+1:00</button>
-            <button id="pauseReset" class="mini neutral">15:00</button>
+        <section class="timer-card pause-timer-card">
+          <div class="timer-caption">PAUSE</div>
+          <div id="pauseTime" class="timer-value pause-yellow">15:00</div>
+          <div id="pauseStatus" class="timer-status">PAUSE STEHT</div>
+          <div class="timer-actions pause-actions">
+            <button id="pauseStart" class="mini-btn positive" type="button">START</button>
+            <button id="pauseStop" class="mini-btn danger" type="button">STOP</button>
+            <button data-pause="-60" class="mini-btn ghost" type="button">−1:00</button>
+            <button data-pause="-30" class="mini-btn ghost" type="button">−0:30</button>
+            <button data-pause="30" class="mini-btn ghost" type="button">+0:30</button>
+            <button data-pause="60" class="mini-btn ghost" type="button">+1:00</button>
+            <button id="pauseReset" class="mini-btn neutral" type="button">15:00</button>
           </div>
-        </div>
+        </section>
       </div>
 
       <div class="top-actions">
-        <button id="undoButton" class="btn warning">UNDO</button>
-        <button id="fullscreenButton" class="btn ghost">VOLLBILD</button>
+        <button id="undoButton" class="btn warning" type="button">UNDO</button>
+        <button id="fullscreenButton" class="btn ghost" type="button">VOLLBILD</button>
         <div class="connection">
           <span id="connectionDot" class="dot"></span>
           <span id="connectionText">verbinde…</span>
@@ -58,25 +59,26 @@
       </div>
     </header>
 
-    <section id="endedBanner" class="ended-banner hidden">
+    <section id="endedBanner" class="status-banner ended-banner hidden">
       <strong>EVENT BEENDET</strong>
       <span>Die Pausenuhr ist abgelaufen. Neue Match- und Spendeneingaben sind gesperrt.</span>
-      <button id="unlockEvent" class="btn warning">EVENT FREIGEBEN</button>
+      <button id="unlockEvent" class="btn warning" type="button">EVENT FREIGEBEN</button>
     </section>
 
-    <section id="pauseFullBanner" class="pause-full-banner hidden">
+    <section id="pauseFullBanner" class="status-banner pause-full-banner hidden">
       <strong>PAUSENKONTO VOLL · 30:00</strong>
-      <span>Neue Legs und Specials werden weiter gezählt, die Pausenzeit bleibt bei maximal 30 Minuten.</span>
+      <span>Legs und Specials werden weiter gezählt. Das Pausenkonto bleibt bei maximal 30 Minuten.</span>
     </section>
 
-    <section class="workspace">
-      <article class="card match-entry-card">
-        <div class="card-head">
+    <section class="dashboard">
+      <article class="card match-card">
+        <div class="section-head">
           <div>
-            <div class="card-title">MATCH EINTRAGEN</div>
-            <div id="editHint" class="subtle">Neues Match</div>
+            <div class="section-kicker">MATCHVERWALTUNG</div>
+            <h2 id="editHint">Neues Match eintragen</h2>
           </div>
-          <label class="mode-select">
+
+          <label class="mode-picker">
             <span>Spielmodus</span>
             <select id="matchMode">
               <option value="sido" selected>SI/DO</option>
@@ -89,155 +91,264 @@
           </label>
         </div>
 
-        <div id="normalResult" class="result-row">
-          <span class="player-label red-text">TZMARTY</span>
-          <input id="resultTzmarty" class="score-input" type="number" min="0" step="1" value="0">
-          <span class="colon">:</span>
-          <input id="resultKorsar" class="score-input" type="number" min="0" step="1" value="0">
-          <span class="player-label blue-text">KORSAR</span>
+        <div class="result-shell">
+          <div id="normalResult" class="score-line">
+            <div class="score-player red-text">TZMARTY</div>
+            <input id="resultTzmarty" class="score-input" type="number" min="0" step="1" value="0">
+            <div class="score-colon">:</div>
+            <input id="resultKorsar" class="score-input" type="number" min="0" step="1" value="0">
+            <div class="score-player blue-text">KORSAR</div>
+          </div>
+
+          <div id="setResult" class="set-score-shell hidden">
+            <div class="set-score-labels">
+              <span></span>
+              <strong>TZMARTY</strong>
+              <span></span>
+              <strong>KORSAR</strong>
+            </div>
+
+            <div class="set-score-row">
+              <span>SETS</span>
+              <input id="setsTzmarty" class="score-input small-score" type="number" min="0" step="1" value="0">
+              <div class="score-colon">:</div>
+              <input id="setsKorsar" class="score-input small-score" type="number" min="0" step="1" value="0">
+            </div>
+
+            <div class="set-score-row">
+              <span>LEGS</span>
+              <input id="setLegsTzmarty" class="score-input small-score" type="number" min="0" step="1" value="0">
+              <div class="score-colon">:</div>
+              <input id="setLegsKorsar" class="score-input small-score" type="number" min="0" step="1" value="0">
+            </div>
+          </div>
         </div>
 
-        <div id="setResult" class="set-result hidden">
-          <div class="set-line">
-            <span>SETS</span>
-            <input id="setsTzmarty" class="score-input small-score" type="number" min="0" step="1" value="0">
-            <b>:</b>
-            <input id="setsKorsar" class="score-input small-score" type="number" min="0" step="1" value="0">
-          </div>
-          <div class="set-line">
-            <span>LEGS</span>
-            <input id="setLegsTzmarty" class="score-input small-score" type="number" min="0" step="1" value="0">
-            <b>:</b>
-            <input id="setLegsKorsar" class="score-input small-score" type="number" min="0" step="1" value="0">
-          </div>
-        </div>
+        <div class="specials-columns">
+          <section class="player-special-card red-special-card">
+            <div class="player-special-head">
+              <strong>TZMARTY</strong>
+              <span><b id="tzFormSpecialCount">0</b> Specials in diesem Match</span>
+            </div>
 
-        <div class="special-columns">
-          <section class="special-panel red-panel">
-            <h2>TZMARTY · SPECIALS</h2>
-            <div class="special-form-grid">
-              <label class="wide"><span>HF ≥100</span><input id="tzHF" type="text" placeholder="100, 114, 132"></label>
-              <label class="wide"><span>BF ≥50</span><input id="tzBF" type="text" placeholder="51, 65, 82"></label>
+            <div class="free-special-fields">
+              <label>
+                <span>HF · Highfinishes ab 100</span>
+                <input id="tzHF" type="text" inputmode="numeric" placeholder="z. B. 100, 114, 132">
+              </label>
+
+              <label>
+                <span>BF · Bullfinishes ab 50</span>
+                <input id="tzBF" type="text" inputmode="numeric" placeholder="z. B. 51, 65, 82">
+              </label>
+
+              <label>
+                <span>LD · Low Darts 9–18</span>
+                <input id="tzLD" type="text" inputmode="numeric" placeholder="z. B. 18, 18, 15">
+              </label>
+            </div>
+
+            <div class="count-special-fields">
               <label><span>180</span><input id="tz180" type="number" min="0" step="1" value="0"></label>
               <label><span>177</span><input id="tz177" type="number" min="0" step="1" value="0"></label>
               <label><span>174</span><input id="tz174" type="number" min="0" step="1" value="0"></label>
               <label><span>171</span><input id="tz171" type="number" min="0" step="1" value="0"></label>
-              <label class="wide"><span>LD 9–18</span><input id="tzLD" type="text" placeholder="18, 18, 15"></label>
             </div>
           </section>
 
-          <section class="special-panel blue-panel">
-            <h2>KORSAR · SPECIALS</h2>
-            <div class="special-form-grid">
-              <label class="wide"><span>HF ≥100</span><input id="koHF" type="text" placeholder="100, 114, 132"></label>
-              <label class="wide"><span>BF ≥50</span><input id="koBF" type="text" placeholder="51, 65, 82"></label>
+          <section class="player-special-card blue-special-card">
+            <div class="player-special-head">
+              <strong>KORSAR</strong>
+              <span><b id="koFormSpecialCount">0</b> Specials in diesem Match</span>
+            </div>
+
+            <div class="free-special-fields">
+              <label>
+                <span>HF · Highfinishes ab 100</span>
+                <input id="koHF" type="text" inputmode="numeric" placeholder="z. B. 100, 114, 132">
+              </label>
+
+              <label>
+                <span>BF · Bullfinishes ab 50</span>
+                <input id="koBF" type="text" inputmode="numeric" placeholder="z. B. 51, 65, 82">
+              </label>
+
+              <label>
+                <span>LD · Low Darts 9–18</span>
+                <input id="koLD" type="text" inputmode="numeric" placeholder="z. B. 18, 18, 15">
+              </label>
+            </div>
+
+            <div class="count-special-fields">
               <label><span>180</span><input id="ko180" type="number" min="0" step="1" value="0"></label>
               <label><span>177</span><input id="ko177" type="number" min="0" step="1" value="0"></label>
               <label><span>174</span><input id="ko174" type="number" min="0" step="1" value="0"></label>
               <label><span>171</span><input id="ko171" type="number" min="0" step="1" value="0"></label>
-              <label class="wide"><span>LD 9–18</span><input id="koLD" type="text" placeholder="18, 18, 15"></label>
             </div>
           </section>
         </div>
 
-        <div class="save-row">
-          <button id="saveMatch" class="btn positive save-match">MATCH SPEICHERN</button>
-          <button id="cancelEdit" class="btn neutral hidden">BEARBEITUNG ABBRECHEN</button>
-          <span id="matchPreview" class="match-preview">0 Legs · 0 Specials · +00:00 Pause</span>
+        <div class="match-footer">
+          <div class="match-preview-box">
+            <span>Auswirkung dieses Matches</span>
+            <strong id="matchPreview">Bitte Ergebnis eingeben</strong>
+          </div>
+
+          <div class="save-actions">
+            <button id="cancelEdit" class="btn ghost hidden" type="button">ABBRECHEN</button>
+            <button id="saveMatch" class="btn save-match-btn" type="button">MATCH SPEICHERN</button>
+          </div>
         </div>
       </article>
 
-      <aside class="right-column">
-        <article class="card totals-card">
-          <div class="mini-total red-total"><span>TZMARTY</span><strong id="legsTzmarty">0</strong><small>Legs</small></div>
-          <div class="mini-total"><span>GESAMT</span><strong id="totalLegs">0</strong><small>Legs</small></div>
-          <div class="mini-total blue-total"><span>KORSAR</span><strong id="legsKorsar">0</strong><small>Legs</small></div>
-          <div class="mini-total red-total"><span>TZMARTY</span><strong id="specialsTzmarty">0</strong><small>Specials</small></div>
-          <div class="mini-total"><span>GESAMT</span><strong id="totalSpecials">0</strong><small>Specials</small></div>
-          <div class="mini-total blue-total"><span>KORSAR</span><strong id="specialsKorsar">0</strong><small>Specials</small></div>
-        </article>
+      <aside class="card event-card">
+        <div class="section-kicker">LIVE-ÜBERSICHT</div>
+        <h2>Eventstand</h2>
 
-        <article class="card stats-card">
-          <div class="card-title">EVENT-KENNZAHLEN</div>
-          <div class="stats-grid">
-            <div class="stat"><span>Legs</span><strong id="statLegs">0</strong></div>
-            <div class="stat"><span>Specials</span><strong id="statSpecials">0</strong></div>
-            <div class="stat"><span>Specials / Leg</span><strong id="statSpecialsPerLeg">0,00</strong></div>
-            <div class="stat"><span>Legs / Std.</span><strong id="statLegsPerHour">0,0</strong></div>
-            <div class="stat"><span>Specials / Std.</span><strong id="statSpecialsPerHour">0,0</strong></div>
-            <div class="stat"><span>Pause genutzt</span><strong id="statPauseUsed">00:00:00</strong></div>
+        <div class="player-overview">
+          <div class="overview-player red-overview">
+            <div>
+              <strong>TZMARTY</strong>
+              <span>LEGS / SPECIALS</span>
+            </div>
+            <b><span id="legsTzmarty">0</span> / <span id="specialsTzmarty">0</span></b>
           </div>
-        </article>
+
+          <div class="overview-player blue-overview">
+            <div>
+              <strong>KORSAR</strong>
+              <span>LEGS / SPECIALS</span>
+            </div>
+            <b><span id="legsKorsar">0</span> / <span id="specialsKorsar">0</span></b>
+          </div>
+        </div>
+
+        <div class="total-overview">
+          <div>
+            <span>LEGS GESAMT</span>
+            <strong id="totalLegs">0</strong>
+          </div>
+          <div>
+            <span>SPECIALS GESAMT</span>
+            <strong id="totalSpecials">0</strong>
+          </div>
+        </div>
+
+        <div class="metric-grid">
+          <div class="metric"><span>Specials / Leg</span><strong id="statSpecialsPerLeg">0,00</strong></div>
+          <div class="metric"><span>Legs / Std.</span><strong id="statLegsPerHour">0,0</strong></div>
+          <div class="metric"><span>Specials / Std.</span><strong id="statSpecialsPerHour">0,0</strong></div>
+          <div class="metric"><span>Pause genutzt</span><strong id="statPauseUsed">00:00:00</strong></div>
+        </div>
+
+        <div class="overview-note">
+          Gesamtwerte werden ausschließlich aus gespeicherten Matches plus vorhandenem Altbestand berechnet.
+        </div>
       </aside>
     </section>
 
-    <section class="card tab-card">
-      <nav class="tabs">
-        <button class="tab active" data-tab="matches">MATCHES</button>
-        <button class="tab" data-tab="specials">SPECIALS</button>
-        <button class="tab" data-tab="donations">SPENDEN</button>
-        <button class="tab" data-tab="stream">STREAM-REGIE</button>
-        <button class="tab" data-tab="admin">ADMIN</button>
+    <section class="dock card">
+      <nav class="tabs" aria-label="Dartmarathon Bereiche">
+        <button class="tab active" data-tab="matches" type="button">
+          MATCHES <span id="matchCountBadge" class="tab-badge">0</span>
+        </button>
+        <button class="tab" data-tab="specials" type="button">
+          SPECIALS <span id="specialEntryBadge" class="tab-badge">0</span>
+        </button>
+        <button class="tab" data-tab="stream" type="button">STREAM-REGIE</button>
+        <button class="tab" data-tab="donations" type="button">SPENDEN</button>
+        <button class="tab" data-tab="admin" type="button">ADMIN</button>
       </nav>
 
-      <div id="tab-matches" class="tab-panel active"><div id="matchHistory" class="scroll-panel"></div></div>
-      <div id="tab-specials" class="tab-panel"><div id="specialHistory" class="scroll-panel"></div></div>
-
-      <div id="tab-donations" class="tab-panel">
-        <div class="donation-panel">
-          <div class="donation-total">Eigene Spenden: <strong><span id="ownDonations">0,00</span> €</strong></div>
-          <div class="button-row three">
-            <button data-donation="1" class="btn bluebtn">+1 €</button>
-            <button data-donation="5" class="btn bluebtn">+5 €</button>
-            <button data-donation="10" class="btn bluebtn">+10 €</button>
+      <div class="tab-body">
+        <section id="tab-matches" class="tab-panel active">
+          <div class="history-head">
+            <strong>MATCHHISTORIE</strong>
+            <span>Neueste Spiele zuerst · Bearbeiten oder Löschen korrigiert alle Gesamtwerte automatisch.</span>
           </div>
-          <div class="amount-row">
-            <input id="donationAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Betrag">
-            <button id="donationAdd" class="btn positive">HINZUFÜGEN</button>
-            <button id="donationSubtract" class="btn danger">ABZIEHEN</button>
-          </div>
-          <div class="subtle">1 € eigene Spende = +1 Minute Pausenguthaben. Zuschauer-Spenden bleiben bei StreamElements.</div>
-        </div>
-      </div>
+          <div id="matchHistory" class="history-scroll"></div>
+        </section>
 
-      <div id="tab-stream" class="tab-panel">
-        <div class="stream-regie-grid">
-          <div>
-            <h3>WERBUNG · 20 SEKUNDEN</h3>
-            <div class="button-row three">
-              <button data-popup="foltershop" class="btn foltershop-btn">FOLTERSHOP</button>
-              <button data-popup="malteser" class="btn malteser-btn">MALTESER</button>
-              <button data-popup="koala" class="btn koala-btn">KOALADARTS</button>
+        <section id="tab-specials" class="tab-panel">
+          <div class="history-head">
+            <strong>SPECIALHISTORIE</strong>
+            <span>Detaillierte Specials pro Match und Spieler.</span>
+          </div>
+          <div id="specialHistory" class="history-scroll"></div>
+        </section>
+
+        <section id="tab-stream" class="tab-panel">
+          <div class="regie-grid">
+            <div class="regie-group">
+              <div class="regie-title">WERBUNG · 20 SEKUNDEN</div>
+              <div class="regie-buttons">
+                <button data-popup="foltershop" class="btn foltershop-btn" type="button">FOLTERSHOP</button>
+                <button data-popup="malteser" class="btn malteser-btn" type="button">MALTESER</button>
+                <button data-popup="koala" class="btn koala-btn" type="button">KOALADARTS</button>
+              </div>
+            </div>
+
+            <div class="regie-group">
+              <div class="regie-title">STATISTIK · 20 SEKUNDEN</div>
+              <div class="regie-buttons">
+                <button data-popup="recent_matches" class="btn ghost" type="button">LETZTE SPIELE</button>
+                <button data-popup="specials" class="btn ghost" type="button">SPECIALS</button>
+                <button data-popup="stats" class="btn ghost" type="button">EVENT-KENNZAHLEN</button>
+              </div>
+            </div>
+
+            <div class="auto-plan">
+              <strong>AUTOMATIK</strong>
+              <span>:00 Kennzahlen · :10 Foltershop · :20 letzte Spiele · :30 Malteser · :40 Specials · :50 KoalaDarts</span>
             </div>
           </div>
-          <div>
-            <h3>STATISTIK · 20 SEKUNDEN</h3>
-            <div class="button-row three">
-              <button data-popup="recent_matches" class="btn ghost">LETZTE SPIELE ANZEIGEN</button>
-              <button data-popup="specials" class="btn ghost">SPECIALS ANZEIGEN</button>
-              <button data-popup="stats" class="btn ghost">EVENT-KENNZAHLEN ANZEIGEN</button>
+        </section>
+
+        <section id="tab-donations" class="tab-panel">
+          <div class="donation-layout">
+            <div>
+              <div class="donation-total">Eigene Spenden: <strong><span id="ownDonations">0,00</span> €</strong></div>
+              <div class="donation-quick">
+                <button data-donation="1" class="btn bluebtn" type="button">+1 €</button>
+                <button data-donation="5" class="btn bluebtn" type="button">+5 €</button>
+                <button data-donation="10" class="btn bluebtn" type="button">+10 €</button>
+              </div>
+            </div>
+
+            <div class="amount-row">
+              <input id="donationAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Betrag">
+              <button id="donationAdd" class="btn positive" type="button">HINZUFÜGEN</button>
+              <button id="donationSubtract" class="btn danger" type="button">ABZIEHEN</button>
+            </div>
+
+            <div class="donation-hint">
+              1 € eigene Spende = +1 Minute Pausenguthaben. Zuschauer-Spenden bleiben vollständig bei StreamElements.
             </div>
           </div>
-        </div>
-      </div>
+        </section>
 
-      <div id="tab-admin" class="tab-panel">
-        <div class="admin-grid">
-          <div>
-            <h3>LETZTE AKTIONEN</h3>
-            <div id="history" class="action-history"></div>
+        <section id="tab-admin" class="tab-panel">
+          <div class="admin-layout">
+            <div>
+              <div class="regie-title">LETZTE AKTIONEN</div>
+              <div id="history" class="action-history"></div>
+            </div>
+
+            <div class="admin-actions">
+              <button id="fullReset" class="btn danger" type="button">GESAMTES EVENT RESETTEN</button>
+              <a class="btn ghost link-btn" href="/dartmarathon/preview" target="_blank">OVERLAY-VORSCHAU</a>
+              <form method="post" action="/dartmarathon/logout">
+                <button class="btn neutral full-width" type="submit">CONTROL ABMELDEN</button>
+              </form>
+            </div>
           </div>
-          <div class="admin-actions">
-            <button id="fullReset" class="btn danger">GESAMTES EVENT RESETTEN</button>
-            <a class="btn ghost link-btn" href="/dartmarathon/preview" target="_blank">OVERLAY-VORSCHAU</a>
-            <form method="post" action="/dartmarathon/logout"><button class="btn neutral" type="submit">CONTROL ABMELDEN</button></form>
-          </div>
-        </div>
+        </section>
       </div>
     </section>
   </main>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/dartmarathon/static/control.js"></script>
+
+  <script src="/dartmarathon/static/control.js?v=5.1.0"></script>
 </body>
 </html>
