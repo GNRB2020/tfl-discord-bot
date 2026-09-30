@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon OBS Overlay</title>
-  <link rel="stylesheet" href="/dartmarathon/static/overlay.css?v=5.1.0">
+  <link rel="stylesheet" href="/dartmarathon/static/overlay.css?v=5.3.0">
 </head>
 <body class="overlay-body">
   <div id="overlayRoot" class="overlay-root">
@@ -59,6 +59,10 @@
         <h2 id="statsPopupTitle">EVENT-KENNZAHLEN</h2>
 
         <div class="popup-stats">
+          <div><span>Matches</span><strong id="popMatches">0</strong></div>
+          <div><span>Bilanz T : K</span><strong id="popMatchBalance">0 : 0</strong></div>
+          <div><span>Ø Legs / Match</span><strong id="popAvgLegsMatch">0,0</strong></div>
+          <div><span>Ø Specials / Match</span><strong id="popAvgSpecialsMatch">0,0</strong></div>
           <div><span>Legs</span><strong id="popLegs">0</strong></div>
           <div><span>Specials</span><strong id="popSpecials">0</strong></div>
           <div><span>Specials / Leg</span><strong id="popSpecialsPerLeg">0,00</strong></div>
@@ -70,13 +74,60 @@
     </div>
 
     <div id="eventEnded" class="event-ended hidden">
-      <div class="event-ended-inner">
-        <div class="event-ended-kicker">ZEIT ABGELAUFEN</div>
-        <div class="event-ended-title">DARTMARATHON<br>BEENDET</div>
+      <div class="event-final">
+        <div class="final-header">
+          <div>
+            <div class="event-ended-kicker">ZEIT ABGELAUFEN · DARTMARATHON BEENDET</div>
+            <div class="final-title">DIE EVENT-STATISTIK</div>
+          </div>
+          <div class="final-online">
+            <span>ONLINEZEIT</span>
+            <strong id="endStreamTime">00:00:00</strong>
+          </div>
+        </div>
+
+        <div class="final-kpis">
+          <div><span>Matches</span><strong id="endMatches">0</strong></div>
+          <div><span>Matchbilanz T : K</span><strong id="endMatchBalance">0 : 0</strong></div>
+          <div><span>Legs gesamt</span><strong id="endLegs">0</strong></div>
+          <div><span>Specials gesamt</span><strong id="endSpecials">0</strong></div>
+          <div><span>Pause genutzt</span><strong id="endPauseUsed">00:00:00</strong></div>
+          <div><span>Eigene Spenden</span><strong id="endDonations">0,00 €</strong></div>
+        </div>
+
+        <div class="final-rates">
+          <div><span>Ø Legs / Match</span><strong id="endAvgLegs">0,0</strong></div>
+          <div><span>Ø Specials / Match</span><strong id="endAvgSpecials">0,0</strong></div>
+          <div><span>Specials / Leg</span><strong id="endSpecialsPerLeg">0,00</strong></div>
+          <div><span>Legs / Std.</span><strong id="endLegsPerHour">0,0</strong></div>
+          <div><span>Specials / Std.</span><strong id="endSpecialsPerHour">0,0</strong></div>
+        </div>
+
+        <div class="final-players">
+          <section class="final-player final-player-left">
+            <div class="final-player-head">
+              <div>
+                <span>TZMARTY</span>
+                <strong id="endTzScore">0 Legs · 0 Specials</strong>
+              </div>
+            </div>
+            <div id="endTzSpecialDetail" class="final-special-list"></div>
+          </section>
+
+          <section class="final-player final-player-right">
+            <div class="final-player-head">
+              <div>
+                <span>KORSAR</span>
+                <strong id="endKoScore">0 Legs · 0 Specials</strong>
+              </div>
+            </div>
+            <div id="endKoSpecialDetail" class="final-special-list"></div>
+          </section>
+        </div>
       </div>
     </div>
   </div>
 
-  <script src="/dartmarathon/static/overlay.js?v=5.1.0"></script>
+  <script src="/dartmarathon/static/overlay.js?v=5.3.0"></script>
 </body>
 </html>

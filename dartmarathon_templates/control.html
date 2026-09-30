@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=5.2.0">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=5.3.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -234,6 +234,10 @@
         </div>
 
         <div class="metric-grid">
+          <div class="metric"><span>Matches</span><strong id="statMatches">0</strong></div>
+          <div class="metric"><span>Matchbilanz T : K</span><strong id="statMatchBalance">0 : 0</strong></div>
+          <div class="metric"><span>Ø Legs / Match</span><strong id="statAvgLegsMatch">0,0</strong></div>
+          <div class="metric"><span>Ø Specials / Match</span><strong id="statAvgSpecialsMatch">0,0</strong></div>
           <div class="metric"><span>Specials / Leg</span><strong id="statSpecialsPerLeg">0,00</strong></div>
           <div class="metric"><span>Legs / Std.</span><strong id="statLegsPerHour">0,0</strong></div>
           <div class="metric"><span>Specials / Std.</span><strong id="statSpecialsPerHour">0,0</strong></div>
@@ -352,6 +356,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/dartmarathon/static/control.js?v=5.2.0"></script>
+  <script src="/dartmarathon/static/control.js?v=5.3.0"></script>
 </body>
 </html>
