@@ -31,11 +31,6 @@
     return ({tzmarty:"Tzmarty", korsar:"Korsar", both:"Beide", general:"Allgemein", on_site:"Vor Ort"})[target] || "Allgemein";
   }
 
-  function isLikelyDirectImage(url) {
-    return /^https?:\/\//i.test(String(url || ""))
-      && /\.(png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(String(url || ""));
-  }
-
   function toast(text) {
     const el = $("shopToast");
     el.textContent = text;
@@ -83,8 +78,15 @@
       }
       if (item.availability_reason && !item.available) meta.push(item.availability_reason);
 
-      const image = isLikelyDirectImage(item.image_url)
-        ? `<img class="item-image" src="${escapeHtml(item.image_url)}" alt="">`
+      const image = item.image_url
+        ? (
+            `<div class="item-image-wrap">`
+            + `<img class="item-image" `
+            + `src="/dartmarathon/shop/image/${Number(item.id)}?v=${encodeURIComponent(String(item.updated_at || item.id))}" `
+            + `alt="${escapeHtml(item.name)}" `
+            + `onerror="this.parentElement.classList.add('image-error')">`
+            + `</div>`
+          )
         : "";
 
       return `
