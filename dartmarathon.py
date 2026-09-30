@@ -33,7 +33,7 @@ CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "6.1.0"
+ASSET_VERSION = "6.2.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -2891,6 +2891,81 @@ async def _ws(
     return ws
 
 
+def _shop_event_state() -> Dict[str, Any]:
+    return {
+        "pause_active": bool(_state.get("pause_active", False)),
+        "pause_seconds": float(_state.get("pause_seconds", 0.0) or 0.0),
+        "event_ended": bool(_state.get("event_ended", False)),
+    }
+
+
+async def _apply_shop_event_action(
+    action_type: str,
+    action_value: int,
+    order_id: int,
+) -> Dict[str, Any]:
+    if action_type != "pause_minus":
+        return {
+            "applied": True,
+            "actual_value": 0,
+        }
+
+    async with _state_lock:
+        _reconcile_running_timers_locked(save=False)
+
+        # Pausendiebe dürfen niemals während einer aktiv laufenden Pause wirken.
+        if _state["pause_active"]:
+            return {
+                "applied": False,
+                "deferred": True,
+                "reason": "pause_active",
+            }
+
+        if _state["event_ended"]:
+            return {
+                "applied": True,
+                "actual_value": 0,
+                "reason": "event_ended",
+            }
+
+        before = float(_state["pause_seconds"])
+        requested = max(0.0, float(action_value))
+
+        # Der Shop darf das Event niemals durch einen Pausendieb beenden.
+        minimum = 1.0
+        after = max(minimum, before - requested)
+        actual = max(0.0, before - after)
+
+        _state["pause_seconds"] = after
+
+        _add_history_locked(
+            "Foltershop Pausendieb "
+            f"#{order_id}: -{int(actual)} Sek."
+        )
+        _save_state_locked()
+
+        return {
+            "applied": True,
+            "actual_value": int(actual),
+            "pause_seconds": int(after),
+        }
+
+
+async def _shop_import(
+    request: web.Request,
+) -> web.Response:
+    if not _request_can_control(request):
+        return web.json_response(
+            {
+                "ok": False,
+                "errors": ["Nicht angemeldet."],
+            },
+            status=403,
+        )
+
+    return await SHOP.import_items(request)
+
+
 async def _ticker() -> None:
     global _auto_popup_cursor_seconds
 
@@ -2946,6 +3021,10 @@ async def _ticker() -> None:
                     ):
                         _save_state_locked()
                         last_save = now
+
+                # Bezahlte Pausendiebe, die während einer laufenden Pause
+                # bestätigt wurden, werden erst nach Ende dieser Pause angewendet.
+                await SHOP.process_pending_actions()
 
                 for payload in auto_payloads:
                     await _broadcast_payload(
@@ -3004,6 +3083,8 @@ def register_dartmarathon(
     SHOP.set_callbacks(
         _broadcast_state,
         _broadcast_payload,
+        _shop_event_state,
+        _apply_shop_event_action,
     )
 
     app.router.add_get(
@@ -3039,6 +3120,11 @@ def register_dartmarathon(
     app.router.add_get(
         f"{PREFIX}/ws",
         _ws,
+    )
+
+    app.router.add_post(
+        f"{PREFIX}/shop/api/import-items",
+        _shop_import,
     )
 
     SHOP.register_routes(app)

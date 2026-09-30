@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
+import re
 import secrets
 import time
 from copy import deepcopy
@@ -71,6 +74,11 @@ class ShopManager:
         self._paypal_token_expires_at = 0.0
         self._broadcast_state: Callable[[], Awaitable[None]] | None = None
         self._broadcast_payload: Callable[[Dict[str, Any]], Awaitable[None]] | None = None
+        self._get_event_state: Callable[[], Dict[str, Any]] | None = None
+        self._apply_event_action: Callable[
+            [str, int, int],
+            Awaitable[Dict[str, Any]],
+        ] | None = None
 
     @property
     def paypal_api_base(self) -> str:
@@ -90,13 +98,20 @@ class ShopManager:
         self,
         broadcast_state: Callable[[], Awaitable[None]],
         broadcast_payload: Callable[[Dict[str, Any]], Awaitable[None]],
+        get_event_state: Callable[[], Dict[str, Any]] | None = None,
+        apply_event_action: Callable[
+            [str, int, int],
+            Awaitable[Dict[str, Any]],
+        ] | None = None,
     ) -> None:
         self._broadcast_state = broadcast_state
         self._broadcast_payload = broadcast_payload
+        self._get_event_state = get_event_state
+        self._apply_event_action = apply_event_action
 
     def _default_state(self) -> Dict[str, Any]:
         return {
-            "version": 2,
+            "version": 3,
             "test_mode": False,
             "items": [],
             "orders": [],
@@ -126,7 +141,7 @@ class ShopManager:
             cleaned = self._sanitize_item(item)
             if cleaned:
                 items.append(cleaned)
-        items.sort(key=lambda x: x["id"])
+        items.sort(key=lambda x: (int(x.get("sort_order", x["id"] * 10)), x["id"]))
         state["items"] = items
 
         orders: list[Dict[str, Any]] = []
@@ -159,8 +174,30 @@ class ShopManager:
         if item_id <= 0:
             return None
         target = str(raw.get("target", "general"))
-        if target not in {"tzmarty", "korsar", "both", "general"}:
+        if target not in {"tzmarty", "korsar", "both", "general", "on_site"}:
             target = "general"
+
+        action_type = str(raw.get("action_type", "")).strip().lower()
+        if action_type not in {"", "pause_minus"}:
+            action_type = ""
+
+        try:
+            action_value = max(
+                0,
+                min(24 * 3600, int(raw.get("action_value", 0) or 0)),
+            )
+        except (TypeError, ValueError):
+            action_value = 0
+
+        try:
+            sort_order = int(raw.get("sort_order", item_id * 10) or item_id * 10)
+        except (TypeError, ValueError):
+            sort_order = item_id * 10
+
+        image_url = str(raw.get("image_url", "")).strip()[:600]
+        if image_url and not image_url.lower().startswith(("http://", "https://")):
+            image_url = ""
+
         return {
             "id": item_id,
             "name": str(raw.get("name", "Artikel"))[:80],
@@ -171,6 +208,10 @@ class ShopManager:
             "target": target,
             "stream_text": str(raw.get("stream_text", ""))[:220],
             "icon": str(raw.get("icon", "🎯"))[:12] or "🎯",
+            "image_url": image_url,
+            "sort_order": sort_order,
+            "action_type": action_type,
+            "action_value": action_value,
             "active": bool(raw.get("active", True)),
             "created_at": str(raw.get("created_at", "")),
             "updated_at": str(raw.get("updated_at", "")),
@@ -218,6 +259,17 @@ class ShopManager:
             "paypal_order_id": str(raw.get("paypal_order_id", ""))[:100],
             "capture_id": str(raw.get("capture_id", ""))[:120],
             "is_test": bool(raw.get("is_test", False)),
+            "action_type": (
+                str(raw.get("action_type", "")).strip().lower()
+                if str(raw.get("action_type", "")).strip().lower() in {"", "pause_minus"}
+                else ""
+            ),
+            "action_value": max(0, int(raw.get("action_value", 0) or 0)),
+            "action_status": (
+                str(raw.get("action_status", "none"))
+                if str(raw.get("action_status", "none")) in {"none", "pending", "applied"}
+                else "none"
+            ),
         }
 
     def _save_locked(self) -> None:
@@ -241,16 +293,45 @@ class ShopManager:
         return f"{max(0, cents) / 100:.2f}"
 
     @staticmethod
-    def _parse_money_to_cents(value: Any, minimum_cents: int = 50, maximum_cents: int = 100000) -> int:
-        text = str(value or "").strip().replace(",", ".")
-        try:
-            amount = float(text)
-        except ValueError as exc:
-            raise ShopError("Ungültiger Betrag.") from exc
+    def _parse_money_to_cents(
+        value: Any,
+        minimum_cents: int = 50,
+        maximum_cents: int = 100000,
+    ) -> int:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            amount = float(value)
+        else:
+            text = (
+                str(value or "")
+                .strip()
+                .replace("\xa0", "")
+                .replace("€", "")
+                .replace("EUR", "")
+                .replace("eur", "")
+                .replace(" ", "")
+            )
+            if not text:
+                raise ShopError("Ungültiger Betrag.")
+
+            if "," in text and "." in text:
+                # deutsches 1.234,56 oder internationales 1,234.56
+                if text.rfind(",") > text.rfind("."):
+                    text = text.replace(".", "").replace(",", ".")
+                else:
+                    text = text.replace(",", "")
+            elif "," in text:
+                text = text.replace(",", ".")
+
+            try:
+                amount = float(text)
+            except ValueError as exc:
+                raise ShopError("Ungültiger Betrag.") from exc
+
         cents = int(round(amount * 100))
         if cents < minimum_cents or cents > maximum_cents:
             raise ShopError(
-                f"Betrag muss zwischen {minimum_cents / 100:.2f} € und {maximum_cents / 100:.2f} € liegen."
+                f"Betrag muss zwischen {minimum_cents / 100:.2f} € "
+                f"und {maximum_cents / 100:.2f} € liegen."
             )
         return cents
 
@@ -301,6 +382,16 @@ class ShopManager:
                 pending += 1
         return paid, pending, last_paid_ts
 
+    def _event_state(self) -> Dict[str, Any]:
+        if not self._get_event_state:
+            return {}
+        try:
+            state = self._get_event_state()
+            return state if isinstance(state, dict) else {}
+        except Exception as exc:
+            print(f"[SHOP] Event-State konnte nicht gelesen werden: {exc}")
+            return {}
+
     def _public_item_locked(self, item: Dict[str, Any]) -> Dict[str, Any]:
         paid, pending, last_paid_ts = self._item_sales_locked(item["id"])
         now = time.time()
@@ -328,6 +419,15 @@ class ShopManager:
             available = False
             reason = "Reserviert"
 
+        event_state = self._event_state()
+        if (
+            available
+            and item.get("action_type") == "pause_minus"
+            and bool(event_state.get("pause_active", False))
+        ):
+            available = False
+            reason = "Pause aktiv – derzeit nicht verfügbar"
+
         return {
             "id": item["id"],
             "name": item["name"],
@@ -343,6 +443,10 @@ class ShopManager:
             "target": item["target"],
             "stream_text": item["stream_text"],
             "icon": item["icon"],
+            "image_url": item.get("image_url", ""),
+            "sort_order": int(item.get("sort_order", item["id"] * 10)),
+            "action_type": item.get("action_type", ""),
+            "action_value": int(item.get("action_value", 0) or 0),
             "active": item["active"],
             "available": available,
             "availability_reason": reason,
@@ -405,6 +509,7 @@ class ShopManager:
     def public_state(self) -> Dict[str, Any]:
         self._cleanup_expired_locked()
         items = [self._public_item_locked(item) for item in self._state["items"]]
+        items.sort(key=lambda item: (int(item.get("sort_order", item["id"] * 10)), item["id"]))
         active_items = [item for item in items if item["active"]]
 
         public_orders: list[Dict[str, Any]] = []
@@ -427,6 +532,9 @@ class ShopManager:
                 "paid_ts": order["paid_ts"],
                 "task_status": order["task_status"],
                 "is_test": bool(order.get("is_test", False)),
+                "action_type": order.get("action_type", ""),
+                "action_value": int(order.get("action_value", 0) or 0),
+                "action_status": order.get("action_status", "none"),
             })
             if len(public_orders) >= 100:
                 break
@@ -502,15 +610,30 @@ class ShopManager:
         description = str(message.get("description", "")).strip()[:320]
         stream_text = str(message.get("stream_text", "")).strip()[:220]
         icon = str(message.get("icon", "🎯")).strip()[:12] or "🎯"
+        image_url = str(message.get("image_url", "")).strip()[:600]
+        if image_url and not image_url.lower().startswith(("http://", "https://")):
+            raise ShopError("Bild-URL muss mit http:// oder https:// beginnen.")
+
         target = str(message.get("target", "general"))
-        if target not in {"tzmarty", "korsar", "both", "general"}:
+        if target not in {"tzmarty", "korsar", "both", "general", "on_site"}:
             raise ShopError("Ungültiges Ziel.")
+
+        action_type = str(message.get("action_type", "")).strip().lower()
+        if action_type not in {"", "pause_minus"}:
+            raise ShopError("Ungültiger Aktionstyp.")
+
         price_cents = self._parse_money_to_cents(message.get("price"), 50, 100000)
         try:
             max_quantity = max(0, min(999, int(message.get("max_quantity", 0) or 0)))
             cooldown_minutes = max(0, min(1440, int(message.get("cooldown_minutes", 0) or 0)))
+            sort_order = int(message.get("sort_order", 0) or 0)
+            action_value = max(0, min(24 * 3600, int(message.get("action_value", 0) or 0)))
         except (TypeError, ValueError) as exc:
-            raise ShopError("Maximalanzahl/Cooldown ist ungültig.") from exc
+            raise ShopError("Anzahl/Cooldown/Sortierung/Aktionswert ist ungültig.") from exc
+
+        if action_type == "pause_minus" and action_value <= 0:
+            raise ShopError("Pausendieb benötigt einen Aktionswert in Sekunden.")
+
         active = bool(message.get("active", True))
         raw_id = message.get("id")
 
@@ -529,6 +652,10 @@ class ShopManager:
                     "target": target,
                     "stream_text": stream_text,
                     "icon": icon,
+                    "image_url": image_url,
+                    "sort_order": sort_order if sort_order else item_id * 10,
+                    "action_type": action_type,
+                    "action_value": action_value,
                     "active": active,
                     "created_at": now,
                     "updated_at": now,
@@ -550,6 +677,10 @@ class ShopManager:
                     "target": target,
                     "stream_text": stream_text,
                     "icon": icon,
+                    "image_url": image_url,
+                    "sort_order": sort_order if sort_order else item_id * 10,
+                    "action_type": action_type,
+                    "action_value": action_value,
                     "active": active,
                     "updated_at": self._now_text(),
                 })
@@ -730,6 +861,8 @@ class ShopManager:
             item_name = ""
             target = "general"
             stream_text = ""
+            action_type = ""
+            action_value = 0
             if kind == "item":
                 item = self._item_by_id_locked(item_id)
                 if not item:
@@ -741,7 +874,9 @@ class ShopManager:
                 amount_cents = item["price_cents"]
                 item_name = item["name"]
                 target = item["target"]
-                stream_text = item["stream_text"] or item["name"]
+                stream_text = item["stream_text"] or item["description"] or item["name"]
+                action_type = item.get("action_type", "")
+                action_value = int(item.get("action_value", 0) or 0)
 
             order_id = int(self._state["next_order_id"])
             self._state["next_order_id"] = order_id + 1
@@ -766,6 +901,9 @@ class ShopManager:
                 "paypal_order_id": "",
                 "capture_id": "",
                 "is_test": False,
+                "action_type": action_type,
+                "action_value": action_value,
+                "action_status": "none",
             }
             self._state["orders"].append(order)
             self._save_locked()
@@ -811,6 +949,10 @@ class ShopManager:
             order["paid_ts"] = time.time()
             order["expires_at"] = 0.0
             order["task_status"] = "open" if order["kind"] == "item" else "none"
+            if order["kind"] == "item" and order.get("action_type") == "pause_minus":
+                order["action_status"] = "pending"
+            else:
+                order["action_status"] = "none"
             self._save_locked()
             order_public = deepcopy(order)
             name = order["display_name"] or "Anonym"
@@ -834,11 +976,86 @@ class ShopManager:
                     "message": order["message"],
                 }
 
+        if order_public and order_public.get("action_status") == "pending":
+            await self._try_apply_order_action(int(order_public["id"]))
+
         if self._broadcast_state:
             await self._broadcast_state()
         if popup_payload and self._broadcast_payload:
             await self._broadcast_payload(popup_payload)
         return order_public
+
+    async def _try_apply_order_action(self, order_id: int) -> bool:
+        async with self._lock:
+            order = next(
+                (
+                    entry
+                    for entry in self._state["orders"]
+                    if int(entry["id"]) == int(order_id)
+                ),
+                None,
+            )
+            if (
+                not order
+                or order.get("status") != "paid"
+                or order.get("action_status") != "pending"
+            ):
+                return False
+
+            action_type = str(order.get("action_type", ""))
+            action_value = int(order.get("action_value", 0) or 0)
+
+        if not action_type:
+            return False
+        if not self._apply_event_action:
+            return False
+
+        try:
+            result = await self._apply_event_action(
+                action_type,
+                action_value,
+                int(order_id),
+            )
+        except Exception as exc:
+            print(f"[SHOP] Event-Aktion fehlgeschlagen: {exc}")
+            return False
+
+        if not isinstance(result, dict) or not bool(result.get("applied", False)):
+            return False
+
+        async with self._lock:
+            order = next(
+                (
+                    entry
+                    for entry in self._state["orders"]
+                    if int(entry["id"]) == int(order_id)
+                ),
+                None,
+            )
+            if not order or order.get("action_status") != "pending":
+                return False
+
+            order["action_status"] = "applied"
+            # Automatisch ausgeführte Pausendiebe gelten als erledigt.
+            if order.get("task_status") in {"open", "in_progress"}:
+                order["task_status"] = "done"
+            self._save_locked()
+
+        return True
+
+    async def process_pending_actions(self) -> None:
+        async with self._lock:
+            pending_ids = [
+                int(order["id"])
+                for order in self._state["orders"]
+                if (
+                    order.get("status") == "paid"
+                    and order.get("action_status") == "pending"
+                )
+            ]
+
+        for order_id in pending_ids[:20]:
+            await self._try_apply_order_action(order_id)
 
     async def shop_page(self, request: web.Request) -> web.Response:
         path = self.template_dir / "shop.html"
@@ -1078,6 +1295,534 @@ class ShopManager:
                 await self._mark_paid(paypal_order_id, capture_id)
 
         return web.Response(status=200, text="ok")
+
+    @staticmethod
+    def _normalize_header(value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        text = re.sub(r"\s+", " ", text)
+        text = text.replace("_", " ").replace("-", " ")
+        text = re.sub(r"\s*\+\s*", " + ", text)
+        return text.strip()
+
+    @staticmethod
+    def _parse_active(value: Any, default: bool = True) -> bool:
+        text = str(value or "").strip().casefold()
+        if not text:
+            return default
+        if text in {"ja", "j", "yes", "y", "true", "1", "aktiv"}:
+            return True
+        if text in {"nein", "n", "no", "false", "0", "inaktiv", "pausiert"}:
+            return False
+        raise ShopError(f"Aktiv-Wert '{value}' ist ungültig. Erlaubt: JA/NEIN.")
+
+    @staticmethod
+    def _parse_target(value: Any) -> str:
+        text = str(value or "").strip().casefold()
+        aliases = {
+            "": "general",
+            "allgemein": "general",
+            "general": "general",
+            "tzmarty": "tzmarty",
+            "korsar": "korsar",
+            "beide": "both",
+            "both": "both",
+            "vor ort": "on_site",
+            "vorort": "on_site",
+            "on site": "on_site",
+            "on_site": "on_site",
+        }
+        if text not in aliases:
+            raise ShopError(
+                f"Ziel '{value}' ist ungültig. "
+                "Erlaubt: Tzmarty, Korsar, Beide, Allgemein, Vor Ort."
+            )
+        return aliases[text]
+
+    @staticmethod
+    def _parse_action_type(value: Any) -> str:
+        text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "": "",
+            "keine": "",
+            "none": "",
+            "pause_minus": "pause_minus",
+            "pausendieb": "pause_minus",
+        }
+        if text not in aliases:
+            raise ShopError(
+                f"Aktionstyp '{value}' ist ungültig. Erlaubt: leer oder pause_minus."
+            )
+        return aliases[text]
+
+    def _canonical_import_headers(self, headers: list[Any]) -> dict[str, int]:
+        aliases = {
+            "id": {"id", "artikel id", "artikelid"},
+            "active": {"aktiv"},
+            "max_quantity": {"anzahl", "maximalanzahl", "max anzahl", "maximum"},
+            "name": {"name", "artikel", "artikelname"},
+            "description": {"beschreibung"},
+            "description_stream": {
+                "beschreibung + streamtext",
+                "beschreibung streamtext",
+                "beschreibung+streamtext",
+            },
+            "stream_text": {"streamtext", "stream text"},
+            "price": {"preis", "price"},
+            "cooldown": {"cooldown", "cool down"},
+            "target": {"ziel", "target"},
+            "image_url": {"bild url", "bildurl", "image url", "imageurl", "bild"},
+            "sort_order": {"sortierung", "reihenfolge", "sort order"},
+            "action_type": {"aktionstyp", "aktions typ", "action type"},
+            "action_value": {"aktionswert", "aktions wert", "action value"},
+            "icon": {"icon", "emoji", "symbol"},
+        }
+
+        result: dict[str, int] = {}
+        for index, raw in enumerate(headers):
+            normalized = self._normalize_header(raw)
+            if not normalized:
+                continue
+            for canonical, names in aliases.items():
+                if normalized in names:
+                    if canonical in result:
+                        raise ShopError(
+                            f"Spalte '{raw}' ist doppelt bzw. entspricht einer bereits erkannten Spalte."
+                        )
+                    result[canonical] = index
+                    break
+
+        required = ["id", "name", "price"]
+        missing = [name for name in required if name not in result]
+        if missing:
+            labels = {"id": "ID", "name": "Name", "price": "Preis"}
+            raise ShopError(
+                "Pflichtspalte(n) fehlen: "
+                + ", ".join(labels[name] for name in missing)
+            )
+
+        if "description" not in result and "description_stream" not in result:
+            raise ShopError(
+                "Es fehlt 'Beschreibung' oder 'Beschreibung + Streamtext'."
+            )
+
+        return result
+
+    def _read_import_table(
+        self,
+        filename: str,
+        payload: bytes,
+    ) -> tuple[list[Any], list[list[Any]], dict[int, str]]:
+        suffix = Path(filename or "").suffix.casefold()
+        if suffix == ".csv":
+            try:
+                text = payload.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = payload.decode("cp1252")
+
+            try:
+                dialect = csv.Sniffer().sniff(text[:4096], delimiters=";,\\t,")
+            except csv.Error:
+                dialect = csv.excel
+                dialect.delimiter = ";"
+
+            reader = csv.reader(io.StringIO(text), dialect)
+            rows = list(reader)
+            if not rows:
+                raise ShopError("Die CSV-Datei ist leer.")
+            return list(rows[0]), [list(row) for row in rows[1:]], {}
+
+        if suffix != ".xlsx":
+            raise ShopError("Erlaubt sind nur .xlsx und .csv.")
+
+        try:
+            from openpyxl import load_workbook
+        except Exception as exc:
+            raise ShopError(
+                "XLSX-Import ist auf dem Server noch nicht verfügbar. "
+                "Bitte requirements.txt mit openpyxl deployen."
+            ) from exc
+
+        try:
+            workbook = load_workbook(
+                io.BytesIO(payload),
+                data_only=True,
+                read_only=False,
+            )
+        except Exception as exc:
+            raise ShopError("Die XLSX-Datei konnte nicht gelesen werden.") from exc
+
+        sheet = workbook.active
+        raw_rows = list(sheet.iter_rows())
+        if not raw_rows:
+            raise ShopError("Die Excel-Datei ist leer.")
+
+        headers = [cell.value for cell in raw_rows[0]]
+        rows: list[list[Any]] = []
+        image_links: dict[int, str] = {}
+
+        header_map = self._canonical_import_headers(headers)
+        image_index = header_map.get("image_url")
+
+        for excel_row_number, cells in enumerate(raw_rows[1:], start=2):
+            values = [cell.value for cell in cells]
+            if not any(value not in (None, "") for value in values):
+                continue
+            rows.append(values)
+            if (
+                image_index is not None
+                and image_index < len(cells)
+                and getattr(cells[image_index], "hyperlink", None)
+            ):
+                target = str(cells[image_index].hyperlink.target or "").strip()
+                if target:
+                    image_links[excel_row_number] = target
+
+        return headers, rows, image_links
+
+    def _normalize_import_rows(
+        self,
+        headers: list[Any],
+        rows: list[list[Any]],
+        image_links: dict[int, str] | None = None,
+    ) -> tuple[list[Dict[str, Any]], list[str], list[str]]:
+        mapping = self._canonical_import_headers(headers)
+        image_links = image_links or {}
+        normalized: list[Dict[str, Any]] = []
+        errors: list[str] = []
+        warnings: list[str] = []
+        seen_ids: set[int] = set()
+
+        def value(row: list[Any], key: str, default: Any = "") -> Any:
+            index = mapping.get(key)
+            if index is None or index >= len(row):
+                return default
+            return row[index]
+
+        for offset, row in enumerate(rows, start=2):
+            if not any(cell not in (None, "") for cell in row):
+                continue
+            if len(normalized) >= 500:
+                errors.append("Es können maximal 500 Artikel pro Datei importiert werden.")
+                break
+
+            try:
+                raw_id = value(row, "id")
+                item_id = int(float(str(raw_id).replace(",", ".")))
+                if item_id <= 0:
+                    raise ShopError("ID muss größer als 0 sein.")
+                if item_id in seen_ids:
+                    raise ShopError(f"ID {item_id} kommt in der Datei mehrfach vor.")
+                seen_ids.add(item_id)
+
+                name = str(value(row, "name")).strip()
+                if not name or len(name) > 80:
+                    raise ShopError("Name fehlt oder ist länger als 80 Zeichen.")
+
+                combined = str(value(row, "description_stream")).strip()
+                description = str(value(row, "description")).strip() or combined
+                if not description:
+                    raise ShopError("Beschreibung fehlt.")
+                description = description[:320]
+
+                stream_text = str(value(row, "stream_text")).strip()
+                if not stream_text:
+                    stream_text = combined or description
+                stream_text = stream_text[:220]
+
+                price_cents = self._parse_money_to_cents(
+                    value(row, "price"),
+                    50,
+                    100000,
+                )
+
+                try:
+                    max_quantity = max(
+                        0,
+                        min(
+                            999,
+                            int(float(str(value(row, "max_quantity", 0) or 0).replace(",", "."))),
+                        ),
+                    )
+                    cooldown_minutes = max(
+                        0,
+                        min(
+                            1440,
+                            int(float(str(value(row, "cooldown", 0) or 0).replace(",", "."))),
+                        ),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ShopError("Anzahl oder CoolDown ist keine gültige Zahl.") from exc
+
+                active = self._parse_active(value(row, "active"), True)
+                target = self._parse_target(value(row, "target"))
+                action_type = self._parse_action_type(value(row, "action_type"))
+
+                try:
+                    raw_action_value = value(row, "action_value", 0)
+                    action_value = max(
+                        0,
+                        min(
+                            24 * 3600,
+                            int(float(str(raw_action_value or 0).replace(",", "."))),
+                        ),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ShopError("Aktionswert ist keine gültige Zahl.") from exc
+
+                if action_type == "pause_minus" and action_value <= 0:
+                    raise ShopError(
+                        "Aktionstyp pause_minus benötigt Aktionswert in Sekunden."
+                    )
+
+                try:
+                    raw_sort = value(row, "sort_order", item_id * 10)
+                    sort_order = int(float(str(raw_sort or item_id * 10).replace(",", ".")))
+                except (TypeError, ValueError) as exc:
+                    raise ShopError("Sortierung ist keine gültige Zahl.") from exc
+
+                image_url = str(
+                    image_links.get(offset)
+                    or value(row, "image_url")
+                    or ""
+                ).strip()[:600]
+                if image_url and not image_url.lower().startswith(("http://", "https://")):
+                    raise ShopError("Bild-Url muss mit http:// oder https:// beginnen.")
+
+                icon = str(value(row, "icon", "🎯") or "🎯").strip()[:12] or "🎯"
+
+                if (
+                    not action_type
+                    and name.casefold().startswith("pausendieb")
+                ):
+                    warnings.append(
+                        f"Zeile {offset}: '{name}' ist ein Pausendieb, "
+                        "hat aber keinen Aktionstyp. "
+                        "Für automatische Pausenwirkung: Aktionstyp=pause_minus "
+                        "und Aktionswert in Sekunden setzen."
+                    )
+
+                normalized.append({
+                    "id": item_id,
+                    "name": name,
+                    "description": description,
+                    "price_cents": price_cents,
+                    "max_quantity": max_quantity,
+                    "cooldown_seconds": cooldown_minutes * 60,
+                    "target": target,
+                    "stream_text": stream_text,
+                    "icon": icon,
+                    "image_url": image_url,
+                    "sort_order": sort_order,
+                    "action_type": action_type,
+                    "action_value": action_value,
+                    "active": active,
+                })
+
+            except ShopError as exc:
+                errors.append(f"Zeile {offset}: {exc}")
+            except Exception as exc:
+                errors.append(f"Zeile {offset}: Ungültige Daten ({exc}).")
+
+        return normalized, errors, warnings
+
+    def _import_preview_locked(
+        self,
+        normalized: list[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        existing = {
+            int(item["id"]): item
+            for item in self._state["items"]
+        }
+        new_count = 0
+        updated_count = 0
+        unchanged_count = 0
+        deactivated_count = 0
+        rows_preview: list[Dict[str, Any]] = []
+
+        compare_keys = (
+            "name",
+            "description",
+            "price_cents",
+            "max_quantity",
+            "cooldown_seconds",
+            "target",
+            "stream_text",
+            "icon",
+            "image_url",
+            "sort_order",
+            "action_type",
+            "action_value",
+            "active",
+        )
+
+        for incoming in normalized:
+            current = existing.get(int(incoming["id"]))
+            if current is None:
+                status = "neu"
+                new_count += 1
+            else:
+                changed = any(
+                    current.get(key) != incoming.get(key)
+                    for key in compare_keys
+                )
+                status = "aktualisiert" if changed else "unverändert"
+                if changed:
+                    updated_count += 1
+                else:
+                    unchanged_count += 1
+
+                if bool(current.get("active", True)) and not bool(incoming["active"]):
+                    deactivated_count += 1
+
+            if len(rows_preview) < 50:
+                rows_preview.append({
+                    "id": int(incoming["id"]),
+                    "name": incoming["name"],
+                    "status": status,
+                    "price_cents": int(incoming["price_cents"]),
+                    "active": bool(incoming["active"]),
+                    "action_type": incoming.get("action_type", ""),
+                    "action_value": int(incoming.get("action_value", 0) or 0),
+                })
+
+        return {
+            "total": len(normalized),
+            "new": new_count,
+            "updated": updated_count,
+            "unchanged": unchanged_count,
+            "deactivated": deactivated_count,
+            "rows": rows_preview,
+        }
+
+    async def import_items(self, request: web.Request) -> web.Response:
+        try:
+            reader = await request.multipart()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "errors": ["Ungültiger Datei-Upload."]},
+                status=400,
+            )
+
+        action = "preview"
+        filename = ""
+        file_bytes = b""
+
+        try:
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "action":
+                    action = (await part.text()).strip().lower() or "preview"
+                elif part.name == "file":
+                    filename = str(part.filename or "")
+                    chunks = []
+                    total = 0
+                    while True:
+                        chunk = await part.read_chunk(size=64 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > 5 * 1024 * 1024:
+                            raise ShopError("Importdatei darf maximal 5 MB groß sein.")
+                        chunks.append(chunk)
+                    file_bytes = b"".join(chunks)
+        except ShopError as exc:
+            return web.json_response(
+                {"ok": False, "errors": [str(exc)]},
+                status=400,
+            )
+
+        if action not in {"preview", "apply"}:
+            return web.json_response(
+                {"ok": False, "errors": ["Ungültige Importaktion."]},
+                status=400,
+            )
+        if not filename or not file_bytes:
+            return web.json_response(
+                {"ok": False, "errors": ["Keine Datei ausgewählt."]},
+                status=400,
+            )
+
+        try:
+            headers, rows, image_links = self._read_import_table(filename, file_bytes)
+            normalized, errors, warnings = self._normalize_import_rows(
+                headers,
+                rows,
+                image_links,
+            )
+        except ShopError as exc:
+            return web.json_response(
+                {"ok": False, "errors": [str(exc)], "warnings": []},
+                status=400,
+            )
+
+        if errors:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "errors": errors[:100],
+                    "warnings": warnings[:100],
+                },
+                status=400,
+            )
+
+        async with self._lock:
+            preview = self._import_preview_locked(normalized)
+
+            if action == "apply":
+                now = self._now_text()
+                by_id = {
+                    int(item["id"]): item
+                    for item in self._state["items"]
+                }
+
+                for incoming in normalized:
+                    item_id = int(incoming["id"])
+                    current = by_id.get(item_id)
+                    if current is None:
+                        current = {
+                            **incoming,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                        self._state["items"].append(current)
+                        by_id[item_id] = current
+                    else:
+                        created_at = current.get("created_at", "")
+                        current.clear()
+                        current.update({
+                            **incoming,
+                            "created_at": created_at or now,
+                            "updated_at": now,
+                        })
+
+                self._state["items"].sort(
+                    key=lambda item: (
+                        int(item.get("sort_order", item["id"] * 10)),
+                        int(item["id"]),
+                    )
+                )
+                max_id = max(
+                    (int(item["id"]) for item in self._state["items"]),
+                    default=0,
+                )
+                self._state["next_item_id"] = max(
+                    int(self._state.get("next_item_id", 1)),
+                    max_id + 1,
+                )
+                self._save_locked()
+
+        if action == "apply" and self._broadcast_state:
+            await self._broadcast_state()
+
+        return web.json_response({
+            "ok": True,
+            "action": action,
+            "filename": filename,
+            "preview": preview,
+            "warnings": warnings[:100],
+        })
 
     def register_routes(self, app: web.Application) -> None:
         app.router.add_get(f"{self.prefix}/shop", self.shop_page)
