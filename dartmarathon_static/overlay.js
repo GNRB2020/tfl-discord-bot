@@ -1,190 +1,104 @@
 (() => {
-  let ws;
-  let retry;
-  let initialized = false;
-  let lastWholeHour = 0;
-  let hourPopupTimer = null;
-  let adPopupTimer = null;
-
-  const $ = (id) =>
-    document.getElementById(id);
+  let ws = null;
+  let retry = null;
+  let popupTimer = null;
+  const $ = (id) => document.getElementById(id);
 
   function connect() {
-    const proto =
-      location.protocol === "https:"
-        ? "wss"
-        : "ws";
-
-    ws = new WebSocket(
-      `${proto}://${location.host}/dartmarathon/ws`
-    );
-
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/dartmarathon/ws`);
     ws.onmessage = (event) => {
-      const msg =
-        JSON.parse(event.data);
-
-      if (msg.type === "state") {
-        render(msg.data);
-      }
-      if (msg.type === "ad_popup") {
-        showAdPopup(msg);
-      }
+      let msg;
+      try { msg = JSON.parse(event.data); } catch (_) { return; }
+      if (msg.type === "state") render(msg.data);
+      if (msg.type === "ad_popup") showAd(msg);
+      if (msg.type === "recent_matches_popup") showRecent(msg);
+      if (msg.type === "specials_popup") showSpecials(msg);
+      if (msg.type === "stats_popup") showStats(msg);
     };
-
-    ws.onclose = () => {
-      clearTimeout(retry);
-
-      retry =
-        setTimeout(
-          connect,
-          1200
-        );
-    };
-
-    ws.onerror = () =>
-      ws.close();
+    ws.onclose = () => { clearTimeout(retry); retry = setTimeout(connect, 1200); };
+    ws.onerror = () => { try { ws.close(); } catch (_) {} };
   }
 
-  function setPauseColor(
-    element,
-    seconds
-  ) {
-    element.classList.remove(
-      "pause-red",
-      "pause-yellow",
-      "pause-green"
-    );
-
-    if (seconds <= 300) {
-      element.classList.add(
-        "pause-red"
-      );
-    } else if (seconds <= 600) {
-      element.classList.add(
-        "pause-yellow"
-      );
-    } else {
-      element.classList.add(
-        "pause-green"
-      );
-    }
+  function hideAllPopups() {
+    for (const id of ["adPopup","recentPopup","specialsPopup","statsPopup"]) $(id).classList.add("hidden");
+    clearTimeout(popupTimer);
   }
 
-  function checkHourPopup(s) {
-    const currentHour =
-      Math.floor(
-        s.stream_seconds / 3600
-      );
-
-    if (!initialized) {
-      lastWholeHour =
-        currentHour;
-
-      initialized =
-        true;
-
-      return;
-    }
-
-    if (
-      currentHour > lastWholeHour
-      && currentHour > 0
-    ) {
-      showHourPopup(
-        currentHour
-      );
-    }
-
-    lastWholeHour =
-      currentHour;
+  function displayPopup(id, duration) {
+    hideAllPopups();
+    $(id).classList.remove("hidden");
+    popupTimer = setTimeout(() => $(id).classList.add("hidden"), Number(duration) || 20000);
   }
 
-  function showHourPopup(hours) {
-    const popup = $("hourPopup");
-    const inner = $("hourPopupInner") || popup.querySelector(".hour-popup-inner");
-    const number = $("hourPopupNumber");
-    const text = $("hourPopupText");
-    const isMajor = [6, 12, 18, 24].includes(hours);
-
-    if (inner) inner.classList.toggle("major-milestone", isMajor);
-
-    if (isMajor) {
-      number.textContent = `${hours}-STUNDEN-MEILENSTEIN!`;
-      text.textContent = `SEIT ${hours} STUNDEN AM BOARD`;
-    } else if (hours === 1) {
-      number.textContent = "1 STUNDE!";
-      text.textContent = "WIR SPIELEN BEREITS SEIT 1 STUNDE";
-    } else {
-      number.textContent = `${hours} STUNDEN!`;
-      text.textContent = `WIR SPIELEN BEREITS SEIT ${hours} STUNDEN`;
-    }
-
-    popup.classList.remove("hidden");
-    clearTimeout(hourPopupTimer);
-    hourPopupTimer = setTimeout(() => popup.classList.add("hidden"), 15000);
-  }
-
-  function showAdPopup(msg) {
-    const popup = $("adPopup");
-    const inner = $("adPopupInner");
-    const image = $("adPopupImage");
-
-    inner.classList.remove("ad-position-right", "ad-position-center");
-    inner.classList.add(msg.position === "right" ? "ad-position-right" : "ad-position-center");
-    image.src = `${msg.image}?t=${Date.now()}`;
-    image.alt = msg.label || "Werbeeinblendung";
-
-    popup.classList.remove("hidden");
-    clearTimeout(adPopupTimer);
-    adPopupTimer = setTimeout(() => popup.classList.add("hidden"), Number(msg.duration_ms) || 20000);
+  function setPauseColor(el, seconds) {
+    el.classList.remove("pause-red","pause-yellow","pause-green");
+    if (seconds <= 300) el.classList.add("pause-red");
+    else if (seconds <= 600) el.classList.add("pause-yellow");
+    else el.classList.add("pause-green");
   }
 
   function render(s) {
-    $("ovTzmarty").textContent =
-      `${s.legs.tzmarty} / ${s.player_special_totals.tzmarty}`;
+    $("ovTzmarty").textContent = `${s.legs.tzmarty} / ${s.player_special_totals.tzmarty}`;
+    $("ovKorsar").textContent = `${s.legs.korsar} / ${s.player_special_totals.korsar}`;
+    $("ovTotalLegs").textContent = s.total_legs;
+    $("ovSpecials").textContent = s.total_specials;
+    $("ovPause").textContent = s.pause_display;
+    $("ovStream").textContent = s.stream_display;
+    $("pauseCenterTime").textContent = s.pause_display;
+    setPauseColor($("ovPause"), s.pause_seconds);
+    setPauseColor($("pauseCenterTime"), s.pause_seconds);
+    $("pauseCenter").classList.toggle("hidden", !s.pause_active || s.event_ended);
+    $("eventEnded").classList.toggle("hidden", !s.event_ended);
+  }
 
-    $("ovKorsar").textContent =
-      `${s.legs.korsar} / ${s.player_special_totals.korsar}`;
+  function showAd(msg) {
+    $("adPopupImage").src = `${msg.image}?t=${Date.now()}`;
+    $("adPopupImage").alt = msg.label || "Werbeeinblendung";
+    displayPopup("adPopup", msg.duration_ms);
+  }
 
-    $("ovTotalLegs").textContent =
-      s.total_legs;
+  function showRecent(msg) {
+    const list = msg.matches || [];
+    $("recentMatchesList").innerHTML = list.length ? list.map((m) => `<div class="recent-row"><strong>#${m.id} · ${escapeHtml(m.mode)}</strong><span>${escapeHtml(m.result)}</span></div>`).join("") : '<div class="popup-empty">Noch keine Matches.</div>';
+    displayPopup("recentPopup", msg.duration_ms);
+  }
 
-    $("ovSpecials").textContent =
-      s.total_specials;
+  function detailLines(detail) {
+    const lines = [];
+    if (detail.hf?.length) lines.push(["HF", detail.hf.join(", ")]);
+    if (detail.bf?.length) lines.push(["BF", detail.bf.join(", ")]);
+    for (const key of ["180","177","174","171"]) if (detail[key]) lines.push([key, `× ${detail[key]}`]);
+    if (detail.ld?.length) lines.push(["LD", detail.ld.join(", ")]);
+    if (detail.legacy) lines.push(["Altbestand", detail.legacy]);
+    return lines;
+  }
 
-    $("ovPause").textContent =
-      s.pause_display;
+  function renderSpecialCard(id, detail) {
+    const lines = detailLines(detail);
+    $(id).innerHTML = lines.length ? lines.map(([label,value]) => `<div class="special-popup-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("") : '<div class="popup-empty">Noch keine Specials.</div>';
+  }
 
-    $("ovStream").textContent =
-      s.stream_display;
+  function showSpecials(msg) {
+    renderSpecialCard("tzSpecialPopup", msg.players?.tzmarty || {});
+    renderSpecialCard("koSpecialPopup", msg.players?.korsar || {});
+    displayPopup("specialsPopup", msg.duration_ms);
+  }
 
-    $("pauseCenterTime").textContent =
-      s.pause_display;
+  function showStats(msg) {
+    const s = msg.stats || {};
+    $("statsPopupTitle").textContent = msg.title || "EVENT-KENNZAHLEN";
+    $("popLegs").textContent = s.total_legs ?? 0;
+    $("popSpecials").textContent = s.total_specials ?? 0;
+    $("popSpecialsPerLeg").textContent = Number(s.specials_per_leg || 0).toLocaleString("de-DE", {minimumFractionDigits:2,maximumFractionDigits:2});
+    $("popLegsPerHour").textContent = Number(s.legs_per_hour || 0).toLocaleString("de-DE", {minimumFractionDigits:1,maximumFractionDigits:1});
+    $("popSpecialsPerHour").textContent = Number(s.specials_per_hour || 0).toLocaleString("de-DE", {minimumFractionDigits:1,maximumFractionDigits:1});
+    $("popPauseUsed").textContent = s.pause_used_display || "00:00:00";
+    displayPopup("statsPopup", msg.duration_ms);
+  }
 
-    setPauseColor(
-      $("ovPause"),
-      s.pause_seconds
-    );
-
-    setPauseColor(
-      $("pauseCenterTime"),
-      s.pause_seconds
-    );
-
-    $("pauseCenter")
-      .classList.toggle(
-        "hidden",
-        !s.pause_active
-        || s.event_ended
-      );
-
-    $("eventEnded")
-      .classList.toggle(
-        "hidden",
-        !s.event_ended
-      );
-
-    checkHourPopup(s);
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   }
 
   connect();
