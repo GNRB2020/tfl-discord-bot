@@ -45,7 +45,13 @@
     $("shopEventTotal").textContent = euro(Number(shop.event_total_cents || 0) / 100);
 
     const paypal = $("paypalStatus");
-    if (shop.paypal_configured) {
+    const testMode = Boolean(shop.test_mode);
+    $("shopTestBanner").classList.toggle("hidden", !testMode);
+
+    if (testMode) {
+      paypal.textContent = "TESTMODUS · KEIN ECHTES GELD";
+      paypal.className = "status-pill test";
+    } else if (shop.paypal_configured) {
       paypal.textContent = shop.paypal_mode === "live" ? "PAYPAL LIVE" : "PAYPAL SANDBOX";
       paypal.className = "status-pill ok";
     } else {
@@ -79,8 +85,10 @@
           <div class="item-meta">${meta.map((x) => `<span class="meta-pill">${escapeHtml(x)}</span>`).join("")}</div>
           <div class="item-buy-row">
             <div class="item-price">${euro(Number(item.price_cents || 0) / 100)}</div>
-            <button type="button" class="buy-button" data-buy-item="${Number(item.id)}" ${item.available && shop.paypal_configured ? "" : "disabled"}>
-              ${item.available ? "MIT PAYPAL KAUFEN" : escapeHtml(item.availability_reason || "NICHT VERFÜGBAR")}
+            <button type="button" class="buy-button ${testMode ? "test-buy" : ""}" data-buy-item="${Number(item.id)}" ${item.available && (shop.paypal_configured || testMode) ? "" : "disabled"}>
+              ${item.available
+                ? (testMode ? "TESTKAUF AUSLÖSEN" : "MIT PAYPAL KAUFEN")
+                : escapeHtml(item.availability_reason || "NICHT VERFÜGBAR")}
             </button>
           </div>
         </article>`;
@@ -89,6 +97,21 @@
     all("[data-buy-item]").forEach((button) => {
       button.onclick = () => startPayment({kind:"item", item_id:Number(button.dataset.buyItem)});
     });
+
+    all("[data-donate]").forEach((button) => {
+      const amount = button.dataset.donate;
+      button.textContent = testMode
+        ? `${amount} € TEST`
+        : `${amount} €`;
+    });
+
+    $("customDonateButton").textContent = testMode
+      ? "TESTSPENDE AUSLÖSEN"
+      : "MIT PAYPAL SPENDEN";
+    $("customDonateButton").classList.toggle(
+      "test-buy",
+      testMode
+    );
   }
 
   function connect() {
@@ -108,7 +131,10 @@
 
   async function startPayment(payload) {
     if (paying) return;
-    if (!latestShop?.paypal_configured) return toast("PayPal ist aktuell noch nicht konfiguriert.");
+    const testMode = Boolean(latestShop?.test_mode);
+    if (!testMode && !latestShop?.paypal_configured) {
+      return toast("PayPal ist aktuell noch nicht konfiguriert.");
+    }
     paying = true;
     try {
       const body = {
@@ -122,9 +148,29 @@
         body: JSON.stringify(body),
       });
       const data = await response.json();
-      if (!response.ok || !data.ok || !data.approval_url) {
-        throw new Error(data.error || "PayPal-Zahlung konnte nicht gestartet werden.");
+      if (!response.ok || !data.ok) {
+        throw new Error(
+          data.error
+          || (testMode
+            ? "Testkauf konnte nicht ausgelöst werden."
+            : "PayPal-Zahlung konnte nicht gestartet werden.")
+        );
       }
+
+      if (data.test_completed) {
+        toast(
+          payload.kind === "item"
+            ? "Testkauf erfolgreich simuliert."
+            : "Testspende erfolgreich simuliert."
+        );
+        paying = false;
+        return;
+      }
+
+      if (!data.approval_url) {
+        throw new Error("PayPal-Zahlung konnte nicht gestartet werden.");
+      }
+
       location.href = data.approval_url;
     } catch (error) {
       toast(error.message || "Zahlung konnte nicht gestartet werden.");

@@ -133,7 +133,7 @@
       return `
         <div class="shop-payment-row">
           <div>
-            <strong>#${Number(order.id)} · ${escapeHtml(title)}</strong>
+            <strong>#${Number(order.id)} · ${escapeHtml(title)} ${order.is_test ? '<span class="test-order-badge">TEST</span>' : ""}</strong>
             <span>${escapeHtml(order.display_name || "Anonym")} · ${euroFromCents(order.amount_cents)} · ${escapeHtml(order.paid_at || "")}</span>
           </div>
           ${task}
@@ -161,8 +161,31 @@
     $("shopOwnDonations").textContent = euroFromCents(shop.own_donations_cents);
     $("shopEventTotal").textContent = euroFromCents(shop.event_total_cents);
 
+    const testMode = Boolean(shop.test_mode);
+    const testStatus = $("shopTestStatus");
+    testStatus.textContent = testMode
+      ? "TESTMODUS AKTIV"
+      : "TESTMODUS AUS";
+    testStatus.className = testMode
+      ? "shop-config-pill test"
+      : "shop-config-pill";
+
+    $("shopTestToggle").textContent = testMode
+      ? "TESTMODUS BEENDEN"
+      : "TESTMODUS STARTEN";
+    $("shopTestToggle").className = testMode
+      ? "mini-btn neutral"
+      : "mini-btn warning";
+    $("shopTestReset").classList.toggle(
+      "hidden",
+      !testMode
+    );
+
     const config = $("shopPaypalConfig");
-    if (shop.paypal_configured) {
+    if (testMode) {
+      config.textContent = "PAYPAL WIRD UMGANGEN";
+      config.className = "shop-config-pill test";
+    } else if (shop.paypal_configured) {
       config.textContent = shop.paypal_mode === "live" ? "PAYPAL LIVE" : "PAYPAL SANDBOX";
       config.className = "shop-config-pill ok";
     } else {
@@ -251,6 +274,27 @@
   $("shopNewItem").onclick = () => { clearEditor(); showEditor(); };
   $("shopCancelItem").onclick = () => { $("shopEditor").classList.add("hidden"); clearEditor(); };
   $("shopSaveItem").onclick = saveItem;
+
+  $("shopTestToggle").onclick = () => {
+    const enabled = !Boolean(shopState?.test_mode);
+    const text = enabled
+      ? "Testmodus starten? Käufe und Spenden werden dann OHNE PayPal sofort simuliert."
+      : "Testmodus beenden? Testkäufe zählen danach nicht mehr in Summen, Limits oder offene Aufgaben.";
+    if (confirm(text)) {
+      send({
+        type:"shop_test_mode",
+        enabled,
+      });
+    }
+  };
+
+  $("shopTestReset").onclick = () => {
+    if (confirm(
+      "Alle TESTKÄUFE und TESTSPENDEN löschen? Die Artikelkonfiguration bleibt vollständig erhalten."
+    )) {
+      send({type:"shop_test_reset"});
+    }
+  };
 
   clearEditor();
   connect();

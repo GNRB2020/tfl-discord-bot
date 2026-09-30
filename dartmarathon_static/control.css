@@ -339,3 +339,22 @@ button{touch-action:manipulation}
 .editor-box{grid-column:1/-1;grid-row:1/-1;z-index:3;background:#0a141f}.shop-item-form{display:grid;grid-template-columns:1.4fr .5fr .6fr .8fr .8fr .8fr;gap:5px}.shop-item-form input,.shop-item-form select{height:31px;min-width:0;border-radius:7px;border:1px solid #314760;background:#0d1824;color:#fff;padding:0 7px;font-size:9px;outline:none}.shop-item-form .wide{grid-column:span 3}.shop-check{display:flex;align-items:center;gap:6px;font-size:9px;font-weight:900}.shop-check input{width:15px;height:15px}.shop-empty{padding:16px;text-align:center;color:var(--muted);font-size:9px}
 @keyframes shopPulse{from{filter:brightness(1)}to{filter:brightness(1.45);box-shadow:0 0 16px rgba(255,75,50,.48)}}
 @media(max-width:1320px){.shop-admin-grid{grid-template-columns:1fr;height:auto}.shop-admin-box{min-height:180px}.shop-admin-summary{grid-template-columns:repeat(2,1fr)}.shop-item-form{grid-template-columns:1fr 1fr}.shop-item-form .wide{grid-column:span 2}.editor-box{grid-column:auto;grid-row:auto}}
+
+
+/* V6.1 – Foltershop Testmodus */
+.shop-config-pill.test{
+  border-color:#d78a22;
+  color:#ffd579;
+  background:rgba(120,70,5,.18);
+}
+.test-order-badge{
+  display:inline-block!important;
+  margin-left:4px!important;
+  padding:1px 4px!important;
+  border-radius:4px!important;
+  background:#7b4b08!important;
+  color:#ffd77d!important;
+  font-size:6px!important;
+  font-weight:950!important;
+  vertical-align:middle;
+}
