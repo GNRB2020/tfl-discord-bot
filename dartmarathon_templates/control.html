@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.1.0">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.2.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -351,6 +351,8 @@
               <span id="shopPaypalConfig" class="shop-config-pill">PAYPAL PRÜFEN…</span>
               <button id="shopTestToggle" class="mini-btn warning" type="button">TESTMODUS STARTEN</button>
               <button id="shopTestReset" class="mini-btn danger hidden" type="button">TESTDATEN LÖSCHEN</button>
+              <input id="shopImportFile" class="hidden" type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv">
+              <button id="shopImportButton" class="mini-btn ghost" type="button">EXCEL/CSV IMPORT</button>
               <a class="mini-btn ghost link-btn" href="/dartmarathon/shop" target="_blank">SHOP ÖFFNEN</a>
               <button id="shopNewItem" class="mini-btn positive" type="button">+ ARTIKEL</button>
             </div>
@@ -380,11 +382,33 @@
                   <option value="tzmarty">Tzmarty</option>
                   <option value="korsar">Korsar</option>
                   <option value="both">Beide</option>
+                  <option value="on_site">Vor Ort</option>
                 </select>
+                <input id="shopItemSort" type="number" step="1" placeholder="Sortierung">
+                <select id="shopItemActionType">
+                  <option value="">Keine Automatik</option>
+                  <option value="pause_minus">Pausendieb / Pause abziehen</option>
+                </select>
+                <input id="shopItemActionValue" type="number" min="0" max="86400" step="1" placeholder="Aktionswert Sek.">
+                <input id="shopItemImageUrl" class="wide" maxlength="600" placeholder="Bild-URL (optional)">
                 <input id="shopItemDescription" class="wide" maxlength="320" placeholder="Beschreibung im Shop">
                 <input id="shopItemStreamText" class="wide" maxlength="220" placeholder="Text für die Stream-Einblendung">
                 <label class="shop-check"><input id="shopItemActive" type="checkbox" checked> AKTIV</label>
                 <button id="shopSaveItem" class="btn positive" type="button">ARTIKEL SPEICHERN</button>
+              </div>
+            </section>
+
+            <section id="shopImportPanel" class="shop-admin-box import-box hidden">
+              <div class="shop-box-head">
+                <strong>ARTIKELIMPORT</strong>
+                <button id="shopImportClose" class="mini-btn ghost" type="button">SCHLIESSEN</button>
+              </div>
+              <div id="shopImportSummary" class="shop-import-summary"></div>
+              <div id="shopImportWarnings" class="shop-import-messages"></div>
+              <div id="shopImportErrors" class="shop-import-messages error"></div>
+              <div id="shopImportRows" class="shop-import-rows"></div>
+              <div class="shop-import-actions">
+                <button id="shopImportApply" class="btn positive hidden" type="button">IMPORT STARTEN</button>
               </div>
             </section>
 
@@ -417,7 +441,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/dartmarathon/static/control.js?v=6.1.0"></script>
-  <script src="/dartmarathon/static/shop-control.js?v=6.1.0"></script>
+  <script src="/dartmarathon/static/control.js?v=6.2.0"></script>
+  <script src="/dartmarathon/static/shop-control.js?v=6.2.0"></script>
 </body>
 </html>
