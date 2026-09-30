@@ -25,7 +25,7 @@ CONTROL_TOKEN = os.getenv("DARTMARATHON_CONTROL_TOKEN", "").strip()
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "5.1.0"
+ASSET_VERSION = "5.3.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -1019,23 +1019,53 @@ def _public_match(
 
 def _metrics_locked() -> Dict[str, Any]:
     legs = _aggregate_legs_locked()
+    specials = _aggregate_special_totals_locked()
 
-    specials = (
-        _aggregate_special_totals_locked()
-    )
-
-    total_legs = sum(
-        legs.values()
-    )
-
-    total_specials = sum(
-        specials.values()
-    )
+    total_legs = sum(legs.values())
+    total_specials = sum(specials.values())
 
     stream_hours = (
         _state["stream_elapsed"]
         / 3600.0
     )
+
+    match_count = len(_state["matches"])
+    match_wins = {
+        "tzmarty": 0,
+        "korsar": 0,
+    }
+    match_draws = 0
+    match_legs_total = 0
+    match_specials_total = 0
+
+    for match in _state["matches"]:
+        match_legs = _match_leg_totals(match)
+        match_specials = _match_special_totals(match)
+
+        match_legs_total += sum(match_legs.values())
+        match_specials_total += sum(match_specials.values())
+
+        result = match["result"]
+
+        if (
+            match["mode"] == "set"
+            and (
+                int(result.get("tzmarty_sets", 0))
+                + int(result.get("korsar_sets", 0))
+            ) > 0
+        ):
+            left = int(result.get("tzmarty_sets", 0))
+            right = int(result.get("korsar_sets", 0))
+        else:
+            left = match_legs["tzmarty"]
+            right = match_legs["korsar"]
+
+        if left > right:
+            match_wins["tzmarty"] += 1
+        elif right > left:
+            match_wins["korsar"] += 1
+        else:
+            match_draws += 1
 
     return {
         "legs": legs,
@@ -1043,30 +1073,31 @@ def _metrics_locked() -> Dict[str, Any]:
         "total_legs": total_legs,
         "total_specials": total_specials,
         "specials_per_leg": (
-            round(
-                total_specials
-                / total_legs,
-                2,
-            )
+            round(total_specials / total_legs, 2)
             if total_legs
             else 0.0
         ),
         "legs_per_hour": (
-            round(
-                total_legs
-                / stream_hours,
-                1,
-            )
+            round(total_legs / stream_hours, 1)
             if stream_hours > 0
             else 0.0
         ),
         "specials_per_hour": (
-            round(
-                total_specials
-                / stream_hours,
-                1,
-            )
+            round(total_specials / stream_hours, 1)
             if stream_hours > 0
+            else 0.0
+        ),
+        "match_count": match_count,
+        "match_wins": match_wins,
+        "match_draws": match_draws,
+        "avg_legs_per_match": (
+            round(match_legs_total / match_count, 1)
+            if match_count
+            else 0.0
+        ),
+        "avg_specials_per_match": (
+            round(match_specials_total / match_count, 1)
+            if match_count
             else 0.0
         ),
     }
@@ -1118,29 +1149,24 @@ def _public_state_locked() -> Dict[str, Any]:
 
         "legs": metrics["legs"],
         "player_special_totals": (
-            metrics[
-                "special_totals"
-            ]
+            metrics["special_totals"]
         ),
-        "total_legs": (
-            metrics["total_legs"]
-        ),
-        "total_specials": (
-            metrics["total_specials"]
-        ),
-        "specials_per_leg": (
-            metrics[
-                "specials_per_leg"
-            ]
-        ),
-        "legs_per_hour": (
-            metrics["legs_per_hour"]
-        ),
-        "specials_per_hour": (
-            metrics[
-                "specials_per_hour"
-            ]
-        ),
+        "total_legs": metrics["total_legs"],
+        "total_specials": metrics["total_specials"],
+        "specials_per_leg": metrics["specials_per_leg"],
+        "legs_per_hour": metrics["legs_per_hour"],
+        "specials_per_hour": metrics["specials_per_hour"],
+
+        "match_count": metrics["match_count"],
+        "match_wins": deepcopy(metrics["match_wins"]),
+        "match_draws": metrics["match_draws"],
+        "avg_legs_per_match": metrics["avg_legs_per_match"],
+        "avg_specials_per_match": metrics["avg_specials_per_match"],
+
+        "special_detail": {
+            player: _aggregate_special_detail_locked(player)
+            for player in PLAYERS
+        },
 
         "own_donations": round(
             _state["own_donations"],
@@ -1505,15 +1531,11 @@ def _popup_stats_locked(
         "stats": {
             **metrics,
             "pause_used_display": _clock(
-                _state[
-                    "pause_used_seconds"
-                ],
+                _state["pause_used_seconds"],
                 with_hours=True,
             ),
         },
-        "duration_ms": (
-            POPUP_DURATION_MS
-        ),
+        "duration_ms": POPUP_DURATION_MS,
     }
 
 
