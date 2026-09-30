@@ -166,6 +166,34 @@ class ShopManager:
             state["next_order_id"] = max_order + 1
         return state
 
+    @staticmethod
+    def _infer_action_from_name(
+        name: str,
+        action_type: str,
+        action_value: int,
+    ) -> tuple[str, int]:
+        clean_type = str(action_type or "").strip().lower()
+        clean_value = max(0, int(action_value or 0))
+
+        if clean_type:
+            return clean_type, clean_value
+
+        match = re.match(
+            r"^\s*pausendieb\s*([0-9]+)\s*$",
+            str(name or ""),
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return clean_type, clean_value
+
+        minutes = max(
+            1,
+            min(30, int(match.group(1))),
+        )
+
+        return "pause_minus", minutes * 60
+
     def _sanitize_item(self, raw: Any) -> Dict[str, Any] | None:
         if not isinstance(raw, dict):
             return None
@@ -190,6 +218,12 @@ class ShopManager:
             )
         except (TypeError, ValueError):
             action_value = 0
+
+        action_type, action_value = self._infer_action_from_name(
+            str(raw.get("name", "")),
+            action_type,
+            action_value,
+        )
 
         try:
             sort_order = int(raw.get("sort_order", item_id * 10) or item_id * 10)
@@ -235,7 +269,7 @@ class ShopManager:
         if status not in {"created", "paid", "cancelled", "expired", "failed"}:
             status = "failed"
         task_status = str(raw.get("task_status", "none"))
-        if task_status not in {"none", "open", "in_progress", "done", "cancelled"}:
+        if task_status not in {"none", "new", "open", "in_progress", "done", "cancelled"}:
             task_status = "none"
         try:
             item_id = int(raw.get("item_id", 0) or 0)
@@ -722,7 +756,7 @@ class ShopManager:
         open_tasks = [
             deepcopy(order)
             for order in public_orders
-            if order["kind"] == "item" and order["task_status"] in {"open", "in_progress"}
+            if order["kind"] == "item" and order["task_status"] in {"new", "open", "in_progress"}
         ]
         return {
             "test_mode": bool(self._state.get("test_mode", False)),
@@ -736,6 +770,11 @@ class ShopManager:
             "orders": public_orders,
             "open_tasks": open_tasks,
             "open_task_count": len(open_tasks),
+            "new_task_count": sum(
+                1
+                for task in open_tasks
+                if task.get("task_status") == "new"
+            ),
         }
 
     async def handle_control_message(self, message: Dict[str, Any]) -> tuple[bool, str]:
@@ -810,6 +849,12 @@ class ShopManager:
             action_value = max(0, min(24 * 3600, int(message.get("action_value", 0) or 0)))
         except (TypeError, ValueError) as exc:
             raise ShopError("Anzahl/Cooldown/Sortierung/Aktionswert ist ungültig.") from exc
+
+        action_type, action_value = self._infer_action_from_name(
+            name,
+            action_type,
+            action_value,
+        )
 
         if action_type == "pause_minus" and action_value <= 0:
             raise ShopError("Pausendieb benötigt einen Aktionswert in Sekunden.")
@@ -1128,7 +1173,7 @@ class ShopManager:
             order["paid_at"] = self._now_text()
             order["paid_ts"] = time.time()
             order["expires_at"] = 0.0
-            order["task_status"] = "open" if order["kind"] == "item" else "none"
+            order["task_status"] = "new" if order["kind"] == "item" else "none"
             if order["kind"] == "item" and order.get("action_type") == "pause_minus":
                 order["action_status"] = "pending"
             else:
@@ -1139,7 +1184,7 @@ class ShopManager:
             if order["kind"] == "item":
                 popup_payload = {
                     "type": "shop_purchase_popup",
-                    "duration_ms": 20000,
+                    "duration_ms": 15000,
                     "name": name,
                     "amount": self._money(order["amount_cents"]),
                     "item_name": order["item_name"],
@@ -1150,7 +1195,7 @@ class ShopManager:
             else:
                 popup_payload = {
                     "type": "shop_donation_popup",
-                    "duration_ms": 20000,
+                    "duration_ms": 10000,
                     "name": name,
                     "amount": self._money(order["amount_cents"]),
                     "message": order["message"],
@@ -1217,7 +1262,7 @@ class ShopManager:
 
             order["action_status"] = "applied"
             # Automatisch ausgeführte Pausendiebe gelten als erledigt.
-            if order.get("task_status") in {"open", "in_progress"}:
+            if order.get("task_status") in {"new", "open", "in_progress"}:
                 order["task_status"] = "done"
             self._save_locked()
 
@@ -1778,15 +1823,18 @@ class ShopManager:
 
                 icon = str(value(row, "icon", "🎯") or "🎯").strip()[:12] or "🎯"
 
-                if (
-                    not action_type
-                    and name.casefold().startswith("pausendieb")
-                ):
+                inferred_type, inferred_value = self._infer_action_from_name(
+                    name,
+                    action_type,
+                    action_value,
+                )
+
+                if inferred_type != action_type or inferred_value != action_value:
+                    action_type = inferred_type
+                    action_value = inferred_value
                     warnings.append(
-                        f"Zeile {offset}: '{name}' ist ein Pausendieb, "
-                        "hat aber keinen Aktionstyp. "
-                        "Für automatische Pausenwirkung: Aktionstyp=pause_minus "
-                        "und Aktionswert in Sekunden setzen."
+                        f"Zeile {offset}: '{name}' automatisch als Pausendieb erkannt "
+                        f"(-{action_value // 60} Min.)."
                     )
 
                 normalized.append({
