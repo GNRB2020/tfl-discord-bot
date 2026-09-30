@@ -227,3 +227,194 @@ button{cursor:pointer}
     flex-basis:145px;
   }
 }
+
+
+/* V6.4 – moderneres öffentliches Shop-Design */
+.shop-shell{
+  width:min(1320px,calc(100% - 30px));
+  padding:24px 0 40px;
+}
+
+.shop-hero{
+  padding:38px 40px;
+  border-color:rgba(79,107,139,.48);
+  border-radius:26px;
+  background:
+    radial-gradient(circle at 88% 15%,rgba(255,190,38,.12),transparent 30%),
+    radial-gradient(circle at 15% 0%,rgba(126,55,239,.14),transparent 34%),
+    linear-gradient(135deg,rgba(19,30,45,.99),rgba(7,12,20,.99));
+  box-shadow:
+    0 22px 60px rgba(0,0,0,.38),
+    inset 0 1px 0 rgba(255,255,255,.025);
+}
+
+.shop-hero h1{
+  font-size:clamp(38px,6vw,68px);
+  letter-spacing:-.02em;
+}
+
+.shop-total-box{
+  padding:12px 16px;
+  border:1px solid rgba(255,189,36,.26);
+  border-radius:14px;
+  background:rgba(5,10,17,.52);
+  backdrop-filter:blur(8px);
+}
+
+.buyer-card{
+  padding:16px;
+  border-color:rgba(70,98,130,.48);
+  border-radius:18px;
+  background:
+    linear-gradient(180deg,rgba(14,25,38,.96),rgba(8,15,24,.96));
+  box-shadow:0 10px 30px rgba(0,0,0,.18);
+}
+
+.buyer-card input,
+.custom-donation input{
+  height:46px;
+  border-radius:11px;
+  background:#07111a;
+}
+
+.item-grid{
+  gap:14px;
+}
+
+.item-card{
+  min-height:445px;
+  border-color:rgba(61,88,118,.62);
+  border-radius:20px;
+  background:
+    linear-gradient(180deg,rgba(17,29,43,.985),rgba(7,14,22,.985));
+  box-shadow:
+    0 14px 34px rgba(0,0,0,.25),
+    inset 0 1px 0 rgba(255,255,255,.02);
+  transition:
+    transform .16s ease,
+    border-color .16s ease,
+    box-shadow .16s ease;
+}
+
+.item-card:hover{
+  transform:translateY(-2px);
+  border-color:#486785;
+  box-shadow:
+    0 18px 42px rgba(0,0,0,.32),
+    0 0 0 1px rgba(255,189,36,.04);
+}
+
+.item-card.unavailable:hover{
+  transform:none;
+}
+
+.item-media{
+  height:138px;
+  flex-basis:138px;
+  border-bottom-color:#2b425b;
+}
+
+.item-media:after{
+  content:"";
+  position:absolute;
+  inset:auto 0 0;
+  z-index:3;
+  height:55px;
+  background:linear-gradient(transparent,rgba(5,10,17,.45));
+  pointer-events:none;
+}
+
+.item-media-target{
+  right:13px;
+  top:13px;
+  padding:6px 9px;
+  border-color:rgba(91,127,163,.58);
+  background:rgba(8,18,28,.88);
+  backdrop-filter:blur(6px);
+}
+
+.item-card-body{
+  padding:17px 18px 10px;
+}
+
+.item-card-body h3{
+  font-size:22px;
+  letter-spacing:-.015em;
+}
+
+.item-card .item-description{
+  min-height:68px;
+  color:#b7c3d1;
+  font-size:13px;
+}
+
+.meta-pill{
+  border-color:#2b435c;
+  border-radius:999px;
+  background:#091521;
+  color:#b7c4d2;
+}
+
+.item-card .item-buy-row{
+  margin:0 18px 18px;
+  padding-top:14px;
+}
+
+.item-price{
+  font-size:27px;
+  letter-spacing:-.02em;
+}
+
+.buy-button,
+.quick-donations button,
+.custom-donation button{
+  min-height:44px;
+  border-radius:11px;
+  background:
+    linear-gradient(180deg,#ffd65d,#e89a08);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.35),
+    0 6px 16px rgba(213,139,8,.18);
+  transition:transform .12s ease,filter .12s ease;
+}
+
+.buy-button:hover,
+.quick-donations button:hover,
+.custom-donation button:hover{
+  transform:translateY(-1px);
+  filter:brightness(1.06);
+}
+
+.buy-button:disabled{
+  box-shadow:none;
+  transform:none;
+}
+
+.donation-section{
+  padding:26px;
+  border-color:rgba(255,189,36,.32);
+  border-radius:22px;
+  background:
+    radial-gradient(circle at 10% 20%,rgba(255,189,36,.08),transparent 35%),
+    linear-gradient(135deg,rgba(69,50,14,.18),rgba(12,21,31,.98));
+  box-shadow:0 14px 36px rgba(0,0,0,.20);
+}
+
+.status-pill{
+  backdrop-filter:blur(6px);
+}
+
+@media(max-width:620px){
+  .shop-hero{
+    padding:27px 21px;
+  }
+
+  .item-card{
+    min-height:420px;
+  }
+
+  .item-media{
+    height:130px;
+    flex-basis:130px;
+  }
+}

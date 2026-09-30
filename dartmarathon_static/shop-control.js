@@ -5,6 +5,7 @@
   let editingItemId = null;
   let lastOpenCount = null;
   let importFile = null;
+  let bannerTaskId = null;
 
   const $ = (id) => document.getElementById(id);
   const all = (selector) => [...document.querySelectorAll(selector)];
@@ -52,33 +53,123 @@
   function renderTasks(tasks) {
     const container = $("shopOpenTasks");
     const safe = Array.isArray(tasks) ? tasks : [];
-    $("shopOpenHint").textContent = `${safe.length} offen`;
+
+    const newCount = safe.filter(
+      (task) => task.task_status === "new"
+    ).length;
+
+    $("shopOpenHint").textContent = newCount > 0
+      ? `${safe.length} offen · ${newCount} neu`
+      : `${safe.length} offen`;
+
     if (!safe.length) {
-      container.innerHTML = '<div class="shop-empty">Keine offenen Foltershop-Aufgaben.</div>';
+      container.innerHTML =
+        '<div class="shop-empty">Keine offenen Foltershop-Aufgaben.</div>';
       return;
     }
-    container.innerHTML = safe.map((task) => `
-      <div class="shop-task-row ${task.task_status === "in_progress" ? "running" : ""}">
-        <div class="shop-task-main">
-          <strong>#${Number(task.id)} · ${escapeHtml(task.item_name)}</strong>
-          <span>${escapeHtml(targetLabel(task.target))} · ${escapeHtml(task.display_name || "Anonym")} · ${euroFromCents(task.amount_cents)}</span>
-          ${task.message ? `<em>${escapeHtml(task.message)}</em>` : ""}
-        </div>
-        <div class="shop-task-actions">
-          ${task.task_status === "in_progress"
-            ? '<span class="task-live">LÄUFT</span>'
-            : `<button type="button" class="mini-btn warning" data-task-start="${Number(task.id)}">STARTEN</button>`}
-          <button type="button" class="mini-btn positive" data-task-done="${Number(task.id)}">ERLEDIGT</button>
-        </div>
-      </div>`).join("");
+
+    container.innerHTML = safe.map((task) => {
+      const status = String(task.task_status || "open");
+
+      const statusBadge = status === "new"
+        ? '<span class="task-status task-new">NEU</span>'
+        : status === "in_progress"
+          ? '<span class="task-status task-live">LÄUFT</span>'
+          : '<span class="task-status task-open">OFFEN</span>';
+
+      const seenButton = status === "new"
+        ? `<button type="button" class="mini-btn ghost" data-task-seen="${Number(task.id)}">GESEHEN</button>`
+        : "";
+
+      const startButton = status === "in_progress"
+        ? ""
+        : `<button type="button" class="mini-btn warning" data-task-start="${Number(task.id)}">STARTEN</button>`;
+
+      return `
+        <div class="shop-task-row ${status === "new" ? "new-task" : ""} ${status === "in_progress" ? "running" : ""}">
+          <div class="shop-task-main">
+            <div class="shop-task-title-line">
+              ${statusBadge}
+              <strong>#${Number(task.id)} · ${escapeHtml(task.item_name)}</strong>
+            </div>
+            <span>${escapeHtml(targetLabel(task.target))} · ${escapeHtml(task.display_name || "Anonym")} · ${euroFromCents(task.amount_cents)}</span>
+            ${task.message ? `<em>${escapeHtml(task.message)}</em>` : ""}
+          </div>
+
+          <div class="shop-task-actions">
+            ${seenButton}
+            ${startButton}
+            <button type="button" class="mini-btn positive" data-task-done="${Number(task.id)}">ERLEDIGT</button>
+          </div>
+        </div>`;
+    }).join("");
+
+    all("[data-task-seen]").forEach((button) => {
+      button.onclick = () => send({
+        type:"shop_task_status",
+        order_id:Number(button.dataset.taskSeen),
+        status:"open",
+      });
+    });
 
     all("[data-task-start]").forEach((button) => {
-      button.onclick = () => send({type:"shop_task_status", order_id:Number(button.dataset.taskStart), status:"in_progress"});
+      button.onclick = () => send({
+        type:"shop_task_status",
+        order_id:Number(button.dataset.taskStart),
+        status:"in_progress",
+      });
     });
+
     all("[data-task-done]").forEach((button) => {
-      button.onclick = () => send({type:"shop_task_status", order_id:Number(button.dataset.taskDone), status:"done"});
+      button.onclick = () => send({
+        type:"shop_task_status",
+        order_id:Number(button.dataset.taskDone),
+        status:"done",
+      });
     });
   }
+
+  function renderNewTaskBanner(tasks) {
+    const safe = Array.isArray(tasks) ? tasks : [];
+    const newTasks = safe.filter(
+      (task) => task.task_status === "new"
+    );
+
+    const banner = $("shopNewTaskBanner");
+
+    if (!newTasks.length) {
+      bannerTaskId = null;
+      banner.classList.add("hidden");
+      return;
+    }
+
+    // open_tasks kommt neueste zuerst; wir zeigen bewusst die älteste
+    // noch ungesehene Aufgabe, damit nichts liegen bleibt.
+    const task = newTasks[newTasks.length - 1];
+    bannerTaskId = Number(task.id);
+
+    $("shopNewTaskCount").textContent = newTasks.length === 1
+      ? "1 NEU"
+      : `${newTasks.length} NEU`;
+
+    $("shopNewTaskTitle").textContent =
+      task.item_name || "Neue Foltershop-Aufgabe";
+
+    $("shopNewTaskMeta").textContent =
+      `${targetLabel(task.target)} · ${task.display_name || "Anonym"} · ${euroFromCents(task.amount_cents)}`;
+
+    const message = $("shopNewTaskMessage");
+    if (task.message) {
+      message.textContent = `„${task.message}“`;
+      message.classList.remove("hidden");
+    } else {
+      message.textContent = "";
+      message.classList.add("hidden");
+    }
+
+    banner.classList.remove("hidden");
+  }
+
 
   function renderItems(items) {
     const container = $("shopItemList");
@@ -131,8 +222,16 @@
     }
     container.innerHTML = safe.map((order) => {
       const title = order.kind === "item" ? order.item_name : "Spende";
+      const taskLabel = order.task_status === "done"
+        ? "ERLEDIGT"
+        : order.task_status === "in_progress"
+          ? "LÄUFT"
+          : order.task_status === "new"
+            ? "NEU"
+            : "OFFEN";
+
       const task = order.kind === "item"
-        ? `<span class="payment-task ${escapeHtml(order.task_status)}">${escapeHtml(order.task_status === "done" ? "ERLEDIGT" : order.task_status === "in_progress" ? "LÄUFT" : "OFFEN")}</span>`
+        ? `<span class="payment-task ${escapeHtml(order.task_status)}">${escapeHtml(taskLabel)}</span>`
         : "";
       return `
         <div class="shop-payment-row">
@@ -149,9 +248,35 @@
     if (!shop) return;
     shopState = shop;
     const openCount = Number(shop.open_task_count || 0);
-    $("shopTaskBadge").textContent = openCount;
-    $("shopAlertButton").textContent = `SHOP: ${openCount} OFFEN`;
-    $("shopAlertButton").classList.toggle("has-open", openCount > 0);
+    const newCount = Number(
+      shop.new_task_count
+      ?? (Array.isArray(shop.open_tasks)
+        ? shop.open_tasks.filter((task) => task.task_status === "new").length
+        : 0)
+    );
+
+    $("shopTaskBadge").textContent = newCount > 0
+      ? `${openCount}/${newCount}`
+      : openCount;
+
+    $("shopTaskBadge").classList.toggle(
+      "hot",
+      newCount > 0
+    );
+
+    $("shopAlertButton").textContent = newCount > 0
+      ? `SHOP: ${openCount} OFFEN · ${newCount} NEU`
+      : `SHOP: ${openCount} OFFEN`;
+
+    $("shopAlertButton").classList.toggle(
+      "has-open",
+      openCount > 0
+    );
+
+    $("shopAlertButton").classList.toggle(
+      "has-new",
+      newCount > 0
+    );
 
     if (lastOpenCount !== null && openCount > lastOpenCount) {
       $("shopAlertButton").classList.add("shop-pulse");
@@ -197,6 +322,7 @@
       config.className = "shop-config-pill bad";
     }
 
+    renderNewTaskBanner(shop.open_tasks);
     renderTasks(shop.open_tasks);
     renderItems(shop.items_admin);
     renderPayments(shop.orders);
@@ -382,6 +508,25 @@
     ws.onclose = () => { reconnectTimer = setTimeout(connect, 1500); };
     ws.onerror = () => { try { ws.close(); } catch (_) {} };
   }
+
+  $("shopNewSeen").onclick = () => {
+    if (!bannerTaskId) return;
+    send({
+      type:"shop_task_status",
+      order_id:bannerTaskId,
+      status:"open",
+    });
+  };
+
+  $("shopNewStart").onclick = () => {
+    if (!bannerTaskId) return;
+    send({
+      type:"shop_task_status",
+      order_id:bannerTaskId,
+      status:"in_progress",
+    });
+    openShopTab();
+  };
 
   $("shopAlertButton").onclick = openShopTab;
   $("shopNewItem").onclick = () => { clearEditor(); showEditor(); };

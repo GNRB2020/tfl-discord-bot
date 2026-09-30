@@ -663,3 +663,165 @@ body{
   from{opacity:0;transform:translateX(-50%) translateY(-16px) scale(.96)}
   to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}
 }
+
+
+/* V6.4 – Shop/Spenden als schmaler Stream-Banner statt Dartboard-Popup */
+.shop-action-popup{
+  position:absolute;
+  left:0;
+  right:0;
+  top:72px;
+  height:94px;
+  z-index:115;
+  display:flex;
+  justify-content:center;
+  align-items:flex-start;
+  pointer-events:none;
+}
+
+.shop-action-card{
+  position:relative;
+  top:auto;
+  left:auto;
+  transform:none;
+  width:1240px;
+  min-height:0;
+  height:88px;
+  padding:12px 20px;
+  display:grid;
+  grid-template-columns:180px minmax(0,1fr) 245px;
+  grid-template-rows:30px 30px;
+  grid-template-areas:
+    "kicker title person"
+    "amount text message";
+  column-gap:18px;
+  row-gap:3px;
+  align-items:center;
+  overflow:hidden;
+  border:1px solid rgba(255,189,36,.72);
+  border-left:5px solid #ffbd24;
+  border-radius:16px;
+  background:
+    linear-gradient(90deg,rgba(16,23,34,.985),rgba(8,13,21,.97)),
+    rgba(8,13,21,.98);
+  box-shadow:
+    0 15px 45px rgba(0,0,0,.48),
+    0 0 30px rgba(255,189,36,.12);
+  text-align:left;
+  animation:shopBannerIn .38s cubic-bezier(.2,.8,.2,1);
+}
+
+.shop-action-popup.donation .shop-action-card{
+  border-color:rgba(53,220,124,.72);
+  border-left-color:#35dc7c;
+  box-shadow:
+    0 15px 45px rgba(0,0,0,.48),
+    0 0 30px rgba(53,220,124,.12);
+}
+
+.shop-action-popup.leaving .shop-action-card{
+  animation:shopBannerOut .34s ease-in forwards;
+}
+
+.shop-action-kicker{
+  grid-area:kicker;
+  margin:0;
+  color:#aeb9c8;
+  font-size:13px;
+  font-weight:950;
+  letter-spacing:.16em;
+  white-space:nowrap;
+}
+
+.shop-action-popup.purchase .shop-action-kicker{
+  color:#ffbd24;
+}
+
+.shop-action-popup.donation .shop-action-kicker{
+  color:#71e9a2;
+}
+
+.shop-action-amount{
+  grid-area:amount;
+  margin:0;
+  color:#fff;
+  font-size:28px;
+  line-height:1;
+  font-weight:950;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+
+.shop-action-title{
+  grid-area:title;
+  margin:0;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:#fff;
+  font-size:23px;
+  line-height:1.05;
+  font-weight:950;
+}
+
+.shop-action-text{
+  grid-area:text;
+  margin:0;
+  max-width:none;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:#cbd5e1;
+  font-size:17px;
+  line-height:1.1;
+  font-weight:750;
+}
+
+.shop-action-buyer{
+  grid-area:person;
+  margin:0;
+  text-align:right;
+  color:#fff;
+  font-size:17px;
+  font-weight:900;
+  white-space:nowrap;
+}
+
+.shop-action-message{
+  grid-area:message;
+  margin:0;
+  max-width:none;
+  padding:0;
+  border:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  text-align:right;
+  color:#aeb9c8;
+  font-size:14px;
+  font-style:italic;
+}
+
+@keyframes shopBannerIn{
+  from{
+    opacity:0;
+    transform:translateY(-24px) scale(.985);
+  }
+  to{
+    opacity:1;
+    transform:translateY(0) scale(1);
+  }
+}
+
+@keyframes shopBannerOut{
+  from{
+    opacity:1;
+    transform:translateY(0);
+  }
+  to{
+    opacity:0;
+    transform:translateY(-18px);
+  }
+}
