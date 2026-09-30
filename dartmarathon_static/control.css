@@ -213,3 +213,102 @@ button{touch-action:manipulation}
 .event-card .metric strong{
   font-size:15px;
 }
+
+
+/* V5.4 – einfacher Kennwort-Login */
+.login-body{
+  min-height:100vh;
+  margin:0;
+  display:grid;
+  place-items:center;
+  padding:24px;
+  background:
+    radial-gradient(circle at 18% 10%,rgba(180,25,12,.18),transparent 30%),
+    radial-gradient(circle at 82% 12%,rgba(0,95,255,.18),transparent 32%),
+    #06090e;
+}
+.login-wrap{
+  width:min(460px,100%);
+}
+.login-card{
+  width:100%;
+  padding:30px;
+  border:1px solid #31445c;
+  border-radius:20px;
+  background:linear-gradient(180deg,rgba(18,27,40,.99),rgba(8,13,20,.99));
+  box-shadow:0 24px 70px rgba(0,0,0,.55);
+}
+.login-lock{
+  width:62px;
+  height:62px;
+  display:grid;
+  place-items:center;
+  margin:0 auto 15px;
+  border-radius:16px;
+  background:#101b28;
+  border:1px solid #38506b;
+  color:#ffbd24;
+  font-size:11px;
+  font-weight:950;
+  letter-spacing:.08em;
+}
+.login-card .eyebrow{
+  text-align:center;
+}
+.login-card h1{
+  margin:7px 0 0;
+  text-align:center;
+  font-size:30px;
+  letter-spacing:.035em;
+}
+.login-copy{
+  margin:12px auto 22px;
+  max-width:360px;
+  text-align:center;
+  color:#9eabbc;
+  font-size:13px;
+  line-height:1.45;
+}
+.login-field{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.login-field span{
+  color:#9eabbc;
+  font-size:10px;
+  font-weight:950;
+  letter-spacing:.11em;
+}
+.login-field input{
+  width:100%;
+  height:50px;
+  padding:0 14px;
+  border:1px solid #38506b;
+  border-radius:10px;
+  outline:none;
+  background:#09111b;
+  color:#fff;
+  font-size:18px;
+}
+.login-field input:focus{
+  border-color:#ffbd24;
+  box-shadow:0 0 0 3px rgba(255,189,36,.12);
+}
+.login-submit{
+  width:100%;
+  min-height:48px;
+  margin-top:12px;
+  font-size:13px;
+}
+.login-error{
+  margin:0 0 14px;
+  padding:10px 12px;
+  border:1px solid #ff5960;
+  border-radius:9px;
+  background:rgba(150,20,28,.24);
+  color:#ff9ca1;
+  text-align:center;
+  font-size:12px;
+  font-weight:900;
+}
