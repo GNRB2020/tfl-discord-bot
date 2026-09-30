@@ -13,14 +13,44 @@
       <span>Bitte keine Eingaben machen. Verbindung zum Server wird wiederhergestellt.</span>
     </div>
   </div>
+
   <main class="shell">
     <header class="topbar">
-      <div>
+      <div class="brand">
         <div class="eyebrow">TZMARTY VS. KORSAR · DAS REVIVAL</div>
         <h1>DARTMARATHON CONTROL</h1>
       </div>
+
+      <div class="timer-strip">
+        <div class="timer-box stream-box">
+          <span>STREAM</span>
+          <strong id="streamTime">00:00:00</strong>
+          <div class="mini-actions">
+            <button id="streamStart" class="mini positive">START</button>
+            <button id="streamStop" class="mini danger">STOP</button>
+            <button id="streamReset" class="mini neutral">RESET</button>
+          </div>
+        </div>
+
+        <div class="timer-box pause-box">
+          <span>PAUSE</span>
+          <strong id="pauseTime" class="pause-yellow">15:00</strong>
+          <div id="pauseStatus" class="tiny-status">PAUSE STEHT</div>
+          <div class="mini-actions pause-actions">
+            <button id="pauseStart" class="mini positive">START</button>
+            <button id="pauseStop" class="mini danger">STOP</button>
+            <button data-pause="-60" class="mini ghost">−1:00</button>
+            <button data-pause="-30" class="mini ghost">−0:30</button>
+            <button data-pause="30" class="mini ghost">+0:30</button>
+            <button data-pause="60" class="mini ghost">+1:00</button>
+            <button id="pauseReset" class="mini neutral">15:00</button>
+          </div>
+        </div>
+      </div>
+
       <div class="top-actions">
-        <button id="fullscreenButton" class="btn ghost fullscreen-button" type="button">VOLLBILD</button>
+        <button id="undoButton" class="btn warning">UNDO</button>
+        <button id="fullscreenButton" class="btn ghost">VOLLBILD</button>
         <div class="connection">
           <span id="connectionDot" class="dot"></span>
           <span id="connectionText">verbinde…</span>
@@ -30,281 +60,184 @@
 
     <section id="endedBanner" class="ended-banner hidden">
       <strong>EVENT BEENDET</strong>
-      <span>Die Pausenuhr ist abgelaufen. Neue Zeitgutschriften sind gesperrt.</span>
+      <span>Die Pausenuhr ist abgelaufen. Neue Match- und Spendeneingaben sind gesperrt.</span>
       <button id="unlockEvent" class="btn warning">EVENT FREIGEBEN</button>
     </section>
 
     <section id="pauseFullBanner" class="pause-full-banner hidden">
       <strong>PAUSENKONTO VOLL · 30:00</strong>
-      <span>Weitere Legs, Specials und Spenden werden gezählt, erhöhen die Pausenzeit aber nicht über 30 Minuten.</span>
+      <span>Neue Legs und Specials werden weiter gezählt, die Pausenzeit bleibt bei maximal 30 Minuten.</span>
     </section>
 
-    <section class="grid top-grid">
-      <article class="card accent-blue">
-        <div class="card-title">STREAM ONLINE</div>
-        <div id="streamTime" class="big-time">00:00:00</div>
-        <div class="button-row three">
-          <button id="streamStart" class="btn positive">START / FORTSETZEN</button>
-          <button id="streamStop" class="btn danger">STOP</button>
-          <button id="streamReset" class="btn neutral">RESET</button>
-        </div>
-      </article>
-
-      <article class="card accent-gold pause-card">
-        <div class="card-title">
-          PAUSENKONTO
-          <span class="small">START 15:00 · MAX. 30:00</span>
-        </div>
-        <div id="pauseTime" class="big-time pause-yellow">15:00</div>
-        <div id="pauseStatus" class="status-line">bereit</div>
-
-        <div class="button-row two">
-          <button id="pauseStart" class="btn positive xl">PAUSE STARTEN</button>
-          <button id="pauseStop" class="btn danger xl">PAUSE STOPPEN</button>
-        </div>
-
-        <div class="button-row five compact">
-          <button data-pause="-60" class="btn ghost">−1:00</button>
-          <button data-pause="-30" class="btn ghost">−0:30</button>
-          <button data-pause="30" class="btn ghost">+0:30</button>
-          <button data-pause="60" class="btn ghost">+1:00</button>
-          <button id="pauseReset" class="btn neutral">RESET AUF 15:00</button>
-        </div>
-      </article>
-    </section>
-
-    <section class="players-grid">
-      <article class="card player red">
-        <div class="player-name">TZMARTY</div>
-        <div class="player-stats-label">LEGS</div>
-        <div class="counter-row">
-          <button class="counter-btn minus" data-leg-player="tzmarty" data-delta="-1">−</button>
-          <div class="counter-value">
-            <span id="legsTzmarty">0</span>
-            <span class="counter-separator">/</span>
-            <span id="specialsTzmarty">0</span>
+    <section class="workspace">
+      <article class="card match-entry-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">MATCH EINTRAGEN</div>
+            <div id="editHint" class="subtle">Neues Match</div>
           </div>
-          <button class="counter-btn plus" data-leg-player="tzmarty" data-delta="1">+</button>
+          <label class="mode-select">
+            <span>Spielmodus</span>
+            <select id="matchMode">
+              <option value="sido" selected>SI/DO</option>
+              <option value="set">Setmodus</option>
+              <option value="bull_do">Bull In / DO</option>
+              <option value="dido">DI/DO</option>
+              <option value="cricket">Cricket</option>
+              <option value="bobs27">Bobs27</option>
+            </select>
+          </label>
         </div>
-        <div class="player-counter-caption">LEGS / SPECIALS</div>
-        <div class="hint">+1 Leg = +30 Sek. Pausenguthaben</div>
-      </article>
 
-      <article class="card total-card">
-        <div class="card-title">LEGS GESAMT</div>
-        <div id="totalLegs" class="mega-number">0</div>
-        <div class="total-specials-small">
-          Specials gesamt: <strong id="totalSpecialsTop">0</strong>
+        <div id="normalResult" class="result-row">
+          <span class="player-label red-text">TZMARTY</span>
+          <input id="resultTzmarty" class="score-input" type="number" min="0" step="1" value="0">
+          <span class="colon">:</span>
+          <input id="resultKorsar" class="score-input" type="number" min="0" step="1" value="0">
+          <span class="player-label blue-text">KORSAR</span>
         </div>
-      </article>
 
-      <article class="card player blue">
-        <div class="player-name">KORSAR</div>
-        <div class="player-stats-label">LEGS</div>
-        <div class="counter-row">
-          <button class="counter-btn minus" data-leg-player="korsar" data-delta="-1">−</button>
-          <div class="counter-value">
-            <span id="legsKorsar">0</span>
-            <span class="counter-separator">/</span>
-            <span id="specialsKorsar">0</span>
+        <div id="setResult" class="set-result hidden">
+          <div class="set-line">
+            <span>SETS</span>
+            <input id="setsTzmarty" class="score-input small-score" type="number" min="0" step="1" value="0">
+            <b>:</b>
+            <input id="setsKorsar" class="score-input small-score" type="number" min="0" step="1" value="0">
           </div>
-          <button class="counter-btn plus" data-leg-player="korsar" data-delta="1">+</button>
+          <div class="set-line">
+            <span>LEGS</span>
+            <input id="setLegsTzmarty" class="score-input small-score" type="number" min="0" step="1" value="0">
+            <b>:</b>
+            <input id="setLegsKorsar" class="score-input small-score" type="number" min="0" step="1" value="0">
+          </div>
         </div>
-        <div class="player-counter-caption">LEGS / SPECIALS</div>
-        <div class="hint">+1 Leg = +30 Sek. Pausenguthaben</div>
+
+        <div class="special-columns">
+          <section class="special-panel red-panel">
+            <h2>TZMARTY · SPECIALS</h2>
+            <div class="special-form-grid">
+              <label class="wide"><span>HF ≥100</span><input id="tzHF" type="text" placeholder="100, 114, 132"></label>
+              <label class="wide"><span>BF ≥50</span><input id="tzBF" type="text" placeholder="51, 65, 82"></label>
+              <label><span>180</span><input id="tz180" type="number" min="0" step="1" value="0"></label>
+              <label><span>177</span><input id="tz177" type="number" min="0" step="1" value="0"></label>
+              <label><span>174</span><input id="tz174" type="number" min="0" step="1" value="0"></label>
+              <label><span>171</span><input id="tz171" type="number" min="0" step="1" value="0"></label>
+              <label class="wide"><span>LD 9–18</span><input id="tzLD" type="text" placeholder="18, 18, 15"></label>
+            </div>
+          </section>
+
+          <section class="special-panel blue-panel">
+            <h2>KORSAR · SPECIALS</h2>
+            <div class="special-form-grid">
+              <label class="wide"><span>HF ≥100</span><input id="koHF" type="text" placeholder="100, 114, 132"></label>
+              <label class="wide"><span>BF ≥50</span><input id="koBF" type="text" placeholder="51, 65, 82"></label>
+              <label><span>180</span><input id="ko180" type="number" min="0" step="1" value="0"></label>
+              <label><span>177</span><input id="ko177" type="number" min="0" step="1" value="0"></label>
+              <label><span>174</span><input id="ko174" type="number" min="0" step="1" value="0"></label>
+              <label><span>171</span><input id="ko171" type="number" min="0" step="1" value="0"></label>
+              <label class="wide"><span>LD 9–18</span><input id="koLD" type="text" placeholder="18, 18, 15"></label>
+            </div>
+          </section>
+        </div>
+
+        <div class="save-row">
+          <button id="saveMatch" class="btn positive save-match">MATCH SPEICHERN</button>
+          <button id="cancelEdit" class="btn neutral hidden">BEARBEITUNG ABBRECHEN</button>
+          <span id="matchPreview" class="match-preview">0 Legs · 0 Specials · +00:00 Pause</span>
+        </div>
       </article>
+
+      <aside class="right-column">
+        <article class="card totals-card">
+          <div class="mini-total red-total"><span>TZMARTY</span><strong id="legsTzmarty">0</strong><small>Legs</small></div>
+          <div class="mini-total"><span>GESAMT</span><strong id="totalLegs">0</strong><small>Legs</small></div>
+          <div class="mini-total blue-total"><span>KORSAR</span><strong id="legsKorsar">0</strong><small>Legs</small></div>
+          <div class="mini-total red-total"><span>TZMARTY</span><strong id="specialsTzmarty">0</strong><small>Specials</small></div>
+          <div class="mini-total"><span>GESAMT</span><strong id="totalSpecials">0</strong><small>Specials</small></div>
+          <div class="mini-total blue-total"><span>KORSAR</span><strong id="specialsKorsar">0</strong><small>Specials</small></div>
+        </article>
+
+        <article class="card stats-card">
+          <div class="card-title">EVENT-KENNZAHLEN</div>
+          <div class="stats-grid">
+            <div class="stat"><span>Legs</span><strong id="statLegs">0</strong></div>
+            <div class="stat"><span>Specials</span><strong id="statSpecials">0</strong></div>
+            <div class="stat"><span>Specials / Leg</span><strong id="statSpecialsPerLeg">0,00</strong></div>
+            <div class="stat"><span>Legs / Std.</span><strong id="statLegsPerHour">0,0</strong></div>
+            <div class="stat"><span>Specials / Std.</span><strong id="statSpecialsPerHour">0,0</strong></div>
+            <div class="stat"><span>Pause genutzt</span><strong id="statPauseUsed">00:00:00</strong></div>
+          </div>
+        </article>
+      </aside>
     </section>
 
-    <section class="card stats-card">
-      <div class="card-title">EVENT-KENNZAHLEN</div>
-      <div class="stats-grid">
-        <div class="stat"><span>Specials / Leg</span><strong id="statSpecialsPerLeg">0,00</strong></div>
-        <div class="stat"><span>Legs</span><strong id="statLegs">0</strong></div>
-        <div class="stat"><span>Specials</span><strong id="statSpecials">0</strong></div>
-        <div class="stat"><span>Legs / Std.</span><strong id="statLegsPerHour">0,0</strong></div>
-        <div class="stat"><span>Specials / Std.</span><strong id="statSpecialsPerHour">0,0</strong></div>
-        <div class="stat"><span>Pause genutzt</span><strong id="statPauseUsed">00:00:00</strong></div>
+    <section class="card tab-card">
+      <nav class="tabs">
+        <button class="tab active" data-tab="matches">MATCHES</button>
+        <button class="tab" data-tab="specials">SPECIALS</button>
+        <button class="tab" data-tab="donations">SPENDEN</button>
+        <button class="tab" data-tab="stream">STREAM-REGIE</button>
+        <button class="tab" data-tab="admin">ADMIN</button>
+      </nav>
+
+      <div id="tab-matches" class="tab-panel active"><div id="matchHistory" class="scroll-panel"></div></div>
+      <div id="tab-specials" class="tab-panel"><div id="specialHistory" class="scroll-panel"></div></div>
+
+      <div id="tab-donations" class="tab-panel">
+        <div class="donation-panel">
+          <div class="donation-total">Eigene Spenden: <strong><span id="ownDonations">0,00</span> €</strong></div>
+          <div class="button-row three">
+            <button data-donation="1" class="btn bluebtn">+1 €</button>
+            <button data-donation="5" class="btn bluebtn">+5 €</button>
+            <button data-donation="10" class="btn bluebtn">+10 €</button>
+          </div>
+          <div class="amount-row">
+            <input id="donationAmount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Betrag">
+            <button id="donationAdd" class="btn positive">HINZUFÜGEN</button>
+            <button id="donationSubtract" class="btn danger">ABZIEHEN</button>
+          </div>
+          <div class="subtle">1 € eigene Spende = +1 Minute Pausenguthaben. Zuschauer-Spenden bleiben bei StreamElements.</div>
+        </div>
+      </div>
+
+      <div id="tab-stream" class="tab-panel">
+        <div class="stream-regie-grid">
+          <div>
+            <h3>WERBUNG · 20 SEKUNDEN</h3>
+            <div class="button-row three">
+              <button data-popup="foltershop" class="btn foltershop-btn">FOLTERSHOP</button>
+              <button data-popup="malteser" class="btn malteser-btn">MALTESER</button>
+              <button data-popup="koala" class="btn koala-btn">KOALADARTS</button>
+            </div>
+          </div>
+          <div>
+            <h3>STATISTIK · 20 SEKUNDEN</h3>
+            <div class="button-row three">
+              <button data-popup="recent_matches" class="btn ghost">LETZTE SPIELE ANZEIGEN</button>
+              <button data-popup="specials" class="btn ghost">SPECIALS ANZEIGEN</button>
+              <button data-popup="stats" class="btn ghost">EVENT-KENNZAHLEN ANZEIGEN</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-admin" class="tab-panel">
+        <div class="admin-grid">
+          <div>
+            <h3>LETZTE AKTIONEN</h3>
+            <div id="history" class="action-history"></div>
+          </div>
+          <div class="admin-actions">
+            <button id="fullReset" class="btn danger">GESAMTES EVENT RESETTEN</button>
+            <a class="btn ghost link-btn" href="/dartmarathon/preview" target="_blank">OVERLAY-VORSCHAU</a>
+            <form method="post" action="/dartmarathon/logout"><button class="btn neutral" type="submit">CONTROL ABMELDEN</button></form>
+          </div>
+        </div>
       </div>
     </section>
-
-    <section class="grid content-grid">
-      <article class="card specials-card">
-        <div class="card-title">SPECIALS PRO SPIELER</div>
-
-        <div class="special-player-block red-block">
-          <div class="special-player-title">TZMARTY</div>
-
-          <div class="special-grid">
-            <div class="special-item">
-              <div class="special-name">Highfinish 100+</div>
-              <div class="mini-counter">
-                <button data-special-player="tzmarty" data-special="highfinish" data-delta="-1">−</button>
-                <strong id="specialTzmartyHighfinish">0</strong>
-                <button data-special-player="tzmarty" data-special="highfinish" data-delta="1">+</button>
-              </div>
-            </div>
-
-            <div class="special-item">
-              <div class="special-name">Bullfinish</div>
-              <div class="mini-counter">
-                <button data-special-player="tzmarty" data-special="bullfinish" data-delta="-1">−</button>
-                <strong id="specialTzmartyBullfinish">0</strong>
-                <button data-special-player="tzmarty" data-special="bullfinish" data-delta="1">+</button>
-              </div>
-            </div>
-
-            <div class="special-item">
-              <div class="special-name">Low Darts &lt;18</div>
-              <div class="mini-counter">
-                <button data-special-player="tzmarty" data-special="lowdarts" data-delta="-1">−</button>
-                <strong id="specialTzmartyLowdarts">0</strong>
-                <button data-special-player="tzmarty" data-special="lowdarts" data-delta="1">+</button>
-              </div>
-            </div>
-
-            <div class="special-item">
-              <div class="special-name">Score 171+</div>
-              <div class="mini-counter">
-                <button data-special-player="tzmarty" data-special="score171" data-delta="-1">−</button>
-                <strong id="specialTzmartyScore171">0</strong>
-                <button data-special-player="tzmarty" data-special="score171" data-delta="1">+</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="special-player-block blue-block">
-          <div class="special-player-title">KORSAR</div>
-
-          <div class="special-grid">
-            <div class="special-item">
-              <div class="special-name">Highfinish 100+</div>
-              <div class="mini-counter">
-                <button data-special-player="korsar" data-special="highfinish" data-delta="-1">−</button>
-                <strong id="specialKorsarHighfinish">0</strong>
-                <button data-special-player="korsar" data-special="highfinish" data-delta="1">+</button>
-              </div>
-            </div>
-
-            <div class="special-item">
-              <div class="special-name">Bullfinish</div>
-              <div class="mini-counter">
-                <button data-special-player="korsar" data-special="bullfinish" data-delta="-1">−</button>
-                <strong id="specialKorsarBullfinish">0</strong>
-                <button data-special-player="korsar" data-special="bullfinish" data-delta="1">+</button>
-              </div>
-            </div>
-
-            <div class="special-item">
-              <div class="special-name">Low Darts &lt;18</div>
-              <div class="mini-counter">
-                <button data-special-player="korsar" data-special="lowdarts" data-delta="-1">−</button>
-                <strong id="specialKorsarLowdarts">0</strong>
-                <button data-special-player="korsar" data-special="lowdarts" data-delta="1">+</button>
-              </div>
-            </div>
-
-            <div class="special-item">
-              <div class="special-name">Score 171+</div>
-              <div class="mini-counter">
-                <button data-special-player="korsar" data-special="score171" data-delta="-1">−</button>
-                <strong id="specialKorsarScore171">0</strong>
-                <button data-special-player="korsar" data-special="score171" data-delta="1">+</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="summary-line">
-          <span>SPECIALS GESAMT</span>
-          <strong id="totalSpecials">0</strong>
-        </div>
-
-        <div class="hint">Jedes Special = +1 Minute Pausenguthaben</div>
-      </article>
-
-      <article class="card donation-card">
-        <div class="card-title">EIGENE SPENDEN</div>
-        <p class="muted">
-          Nur Tzmarty/Korsar. Zuschauer-Spenden bleiben vollständig bei StreamElements.
-        </p>
-
-        <div class="button-row three donation-quick">
-          <button data-donation="1" class="btn bluebtn">+1 €</button>
-          <button data-donation="5" class="btn bluebtn">+5 €</button>
-          <button data-donation="10" class="btn bluebtn">+10 €</button>
-        </div>
-
-        <div class="amount-row">
-          <input
-            id="donationAmount"
-            type="number"
-            min="0.01"
-            step="0.01"
-            inputmode="decimal"
-            placeholder="Betrag"
-          >
-          <button id="donationAdd" class="btn positive">HINZUFÜGEN</button>
-          <button id="donationSubtract" class="btn danger">ABZIEHEN</button>
-        </div>
-
-        <div class="summary-line">
-          <span>EIGENE SPENDEN GESAMT</span>
-          <strong><span id="ownDonations">0,00</span> €</strong>
-        </div>
-
-        <div class="hint">
-          1 € eigene Spende = +1 Minute Pausenguthaben
-        </div>
-      </article>
-
-      <article class="card action-card">
-        <div class="card-title">AKTIONEN</div>
-
-        <button id="undoButton" class="btn warning full">
-          LETZTE AKTION RÜCKGÄNGIG
-        </button>
-
-        <div class="history-title">LETZTE 10 AKTIONEN</div>
-        <div id="history" class="history"></div>
-
-        <button id="fullReset" class="btn danger full reset-all">
-          GESAMTES EVENT RESETTEN
-        </button>
-      </article>
-    </section>
-
-    <section class="card ads-card">
-      <div class="card-title">WERBEEINBLENDUNGEN · 20 SEKUNDEN</div>
-      <div class="button-row three ad-buttons">
-        <button data-ad="foltershop" class="btn ad-btn foltershop-btn">FOLTERSHOP</button>
-        <button data-ad="malteser" class="btn ad-btn malteser-btn">MALTESER</button>
-        <button data-ad="koala" class="btn ad-btn koala-btn">KOALADARTS</button>
-      </div>
-      <div class="hint ad-hint">Bilddateien: <code>dartmarathon_static/ads/foltershop.png</code>, <code>malteser.png</code>, <code>koala.png</code></div>
-    </section>
-
-    <footer>
-      <a href="/dartmarathon/preview" target="_blank">
-        Overlay-Vorschau öffnen
-      </a>
-
-      <span>
-        OBS:
-        <code>/dartmarathon/overlay</code>
-        · Zuschauer-Spenden: StreamElements
-      </span>
-
-      <form method="post" action="/dartmarathon/logout">
-        <button class="text-button">
-          Control abmelden
-        </button>
-      </form>
-    </footer>
   </main>
 
   <div id="toast" class="toast hidden"></div>
-
   <script src="/dartmarathon/static/control.js"></script>
 </body>
 </html>

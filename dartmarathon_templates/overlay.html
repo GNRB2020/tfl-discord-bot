@@ -8,73 +8,64 @@
 </head>
 <body class="overlay-body">
   <div id="overlayRoot" class="overlay-root">
-
-    <div id="ovTzmarty" class="value-box player-value tzmarty-value">
-      0 / 0
-    </div>
-
-    <div id="ovKorsar" class="value-box player-value korsar-value">
-      0 / 0
-    </div>
-
-    <div id="ovTotalLegs" class="value-box bottom-value total-legs-value">
-      0
-    </div>
-
-    <div id="ovSpecials" class="value-box bottom-value specials-value">
-      0
-    </div>
-
-    <div id="ovPause" class="value-box bottom-value pause-value">
-      15:00
-    </div>
-
-    <div id="ovStream" class="value-box bottom-value stream-value">
-      00:00:00
-    </div>
+    <div id="ovTzmarty" class="value-box player-value tzmarty-value">0 / 0</div>
+    <div id="ovKorsar" class="value-box player-value korsar-value">0 / 0</div>
+    <div id="ovTotalLegs" class="value-box bottom-value total-legs-value">0</div>
+    <div id="ovSpecials" class="value-box bottom-value specials-value">0</div>
+    <div id="ovPause" class="value-box bottom-value pause-value">15:00</div>
+    <div id="ovStream" class="value-box bottom-value stream-value">00:00:00</div>
 
     <div id="pauseCenter" class="pause-center hidden">
       <div class="pause-center-inner">
         <div class="pause-kicker">PAUSE</div>
-        <div id="pauseCenterTime" class="pause-center-time">
-          15:00
-        </div>
-        <div class="pause-caption">
-          VERBLEIBENDES PAUSENGUTHABEN
-        </div>
+        <div id="pauseCenterTime" class="pause-center-time">15:00</div>
+        <div class="pause-caption">VERBLEIBENDES PAUSENGUTHABEN</div>
       </div>
     </div>
 
-    <div id="hourPopup" class="hour-popup hidden">
-      <div id="hourPopupInner" class="hour-popup-inner">
-        <div id="hourPopupNumber" class="hour-popup-number">
-          1 STUNDE!
-        </div>
-        <div id="hourPopupText" class="hour-popup-text">
-          WIR SPIELEN BEREITS SEIT 1 STUNDE
-        </div>
+    <div id="adPopup" class="popup-layer hidden">
+      <div class="popup-card ad-card right-popup"><img id="adPopupImage" alt="Werbeeinblendung"></div>
+    </div>
+
+    <div id="recentPopup" class="popup-layer hidden">
+      <div class="popup-card right-popup list-popup">
+        <h2>LETZTE 5 SPIELE</h2>
+        <div id="recentMatchesList"></div>
       </div>
     </div>
 
-    <div id="adPopup" class="ad-popup hidden">
-      <div id="adPopupInner" class="ad-popup-inner">
-        <img id="adPopupImage" class="ad-popup-image" alt="Werbeeinblendung">
+    <div id="specialsPopup" class="popup-layer hidden">
+      <div class="popup-card player-popup left-player-popup">
+        <h2>TZMARTY · SPECIALS</h2>
+        <div id="tzSpecialPopup"></div>
+      </div>
+      <div class="popup-card player-popup right-player-popup">
+        <h2>KORSAR · SPECIALS</h2>
+        <div id="koSpecialPopup"></div>
+      </div>
+    </div>
+
+    <div id="statsPopup" class="popup-layer hidden">
+      <div class="popup-card right-popup stats-popup-card">
+        <h2 id="statsPopupTitle">EVENT-KENNZAHLEN</h2>
+        <div class="popup-stats">
+          <div><span>Legs</span><strong id="popLegs">0</strong></div>
+          <div><span>Specials</span><strong id="popSpecials">0</strong></div>
+          <div><span>Specials / Leg</span><strong id="popSpecialsPerLeg">0,00</strong></div>
+          <div><span>Legs / Std.</span><strong id="popLegsPerHour">0,0</strong></div>
+          <div><span>Specials / Std.</span><strong id="popSpecialsPerHour">0,0</strong></div>
+          <div><span>Pause genutzt</span><strong id="popPauseUsed">00:00:00</strong></div>
+        </div>
       </div>
     </div>
 
     <div id="eventEnded" class="event-ended hidden">
       <div class="event-ended-inner">
-        <div class="event-ended-kicker">
-          ZEIT ABGELAUFEN
-        </div>
-        <div class="event-ended-title">
-          DARTMARATHON<br>BEENDET
-        </div>
+        <div class="event-ended-kicker">ZEIT ABGELAUFEN</div>
+        <div class="event-ended-title">DARTMARATHON<br>BEENDET</div>
       </div>
     </div>
-
   </div>
-
   <script src="/dartmarathon/static/overlay.js"></script>
 </body>
 </html>
