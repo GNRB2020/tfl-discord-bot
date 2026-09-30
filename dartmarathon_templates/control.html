@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=5.4.0">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.0.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -50,6 +50,7 @@
       </div>
 
       <div class="top-actions">
+        <button id="shopAlertButton" class="btn shop-alert-button" type="button">SHOP: 0 OFFEN</button>
         <button id="undoButton" class="btn warning" type="button">UNDO</button>
         <button id="fullscreenButton" class="btn ghost" type="button">VOLLBILD</button>
         <div class="connection">
@@ -302,7 +303,7 @@
           </div>
         </div>
 
-        <div class="donation-hint">1 € = +1 Minute Pause · Zuschauer-Spenden laufen weiter über StreamElements.</div>
+        <div class="donation-hint">1 € = +1 Minute Pause · Online-Spenden laufen über den Foltershop.</div>
       </article>
     </section>
 
@@ -313,6 +314,9 @@
         </button>
         <button class="tab" data-tab="specials" type="button">
           SPECIALS <span id="specialEntryBadge" class="tab-badge">0</span>
+        </button>
+        <button class="tab shop-tab" data-tab="shop" type="button">
+          FOLTERSHOP <span id="shopTaskBadge" class="tab-badge hot">0</span>
         </button>
         <button class="tab" data-tab="admin" type="button">ADMIN</button>
       </nav>
@@ -332,6 +336,60 @@
             <span>Detaillierte Specials pro Match und Spieler.</span>
           </div>
           <div id="specialHistory" class="history-scroll"></div>
+        </section>
+
+        <section id="tab-shop" class="tab-panel shop-admin-panel">
+          <div class="shop-admin-toolbar">
+            <div class="shop-admin-summary">
+              <div><span>KÄUFE</span><strong id="shopPurchaseTotal">0,00 €</strong></div>
+              <div><span>ONLINE-SPENDEN</span><strong id="shopDonationTotal">0,00 €</strong></div>
+              <div><span>EIGENE SPENDEN</span><strong id="shopOwnDonations">0,00 €</strong></div>
+              <div class="grand"><span>EVENT GESAMT</span><strong id="shopEventTotal">0,00 €</strong></div>
+            </div>
+            <div class="shop-admin-links">
+              <span id="shopPaypalConfig" class="shop-config-pill">PAYPAL PRÜFEN…</span>
+              <a class="mini-btn ghost link-btn" href="/dartmarathon/shop" target="_blank">SHOP ÖFFNEN</a>
+              <button id="shopNewItem" class="mini-btn positive" type="button">+ ARTIKEL</button>
+            </div>
+          </div>
+
+          <div class="shop-admin-grid">
+            <section class="shop-admin-box tasks-box">
+              <div class="shop-box-head"><strong>OFFENE AUFGABEN</strong><span id="shopOpenHint">0 offen</span></div>
+              <div id="shopOpenTasks" class="shop-scroll"></div>
+            </section>
+
+            <section class="shop-admin-box items-box">
+              <div class="shop-box-head"><strong>ARTIKEL</strong><span>Preis · Limit · Cooldown</span></div>
+              <div id="shopItemList" class="shop-scroll"></div>
+            </section>
+
+            <section id="shopEditor" class="shop-admin-box editor-box hidden">
+              <div class="shop-box-head"><strong id="shopEditorTitle">NEUER ARTIKEL</strong><button id="shopCancelItem" class="mini-btn ghost" type="button">SCHLIESSEN</button></div>
+              <div class="shop-item-form">
+                <input id="shopItemName" maxlength="80" placeholder="Artikelname">
+                <input id="shopItemIcon" maxlength="12" placeholder="Icon, z. B. 🎯">
+                <input id="shopItemPrice" type="number" min="0.50" step="0.50" placeholder="Preis €">
+                <input id="shopItemMax" type="number" min="0" max="999" step="1" placeholder="Max. Anzahl (0 = ∞)">
+                <input id="shopItemCooldown" type="number" min="0" max="1440" step="1" placeholder="Cooldown Min.">
+                <select id="shopItemTarget">
+                  <option value="general">Allgemein</option>
+                  <option value="tzmarty">Tzmarty</option>
+                  <option value="korsar">Korsar</option>
+                  <option value="both">Beide</option>
+                </select>
+                <input id="shopItemDescription" class="wide" maxlength="320" placeholder="Beschreibung im Shop">
+                <input id="shopItemStreamText" class="wide" maxlength="220" placeholder="Text für die Stream-Einblendung">
+                <label class="shop-check"><input id="shopItemActive" type="checkbox" checked> AKTIV</label>
+                <button id="shopSaveItem" class="btn positive" type="button">ARTIKEL SPEICHERN</button>
+              </div>
+            </section>
+
+            <section class="shop-admin-box payments-box">
+              <div class="shop-box-head"><strong>LETZTE KÄUFE & SPENDEN</strong><span>Bezahlte Vorgänge</span></div>
+              <div id="shopPaymentHistory" class="shop-scroll"></div>
+            </section>
+          </div>
         </section>
 
         <section id="tab-admin" class="tab-panel">
@@ -356,6 +414,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/dartmarathon/static/control.js?v=5.4.0"></script>
+  <script src="/dartmarathon/static/control.js?v=6.0.0"></script>
+  <script src="/dartmarathon/static/shop-control.js?v=6.0.0"></script>
 </body>
 </html>

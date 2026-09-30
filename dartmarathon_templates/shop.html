@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta http-equiv="Cache-Control" content="no-store">
+  <title>Dartmarathon – Foltershop</title>
+  <link rel="stylesheet" href="/dartmarathon/static/shop.css?v=6.0.0">
+</head>
+<body>
+  <main class="shop-shell">
+    <header class="shop-hero">
+      <div class="shop-kicker">TZMARTY VS. KORSAR · DAS REVIVAL</div>
+      <h1>DER FOLTERSHOP</h1>
+      <p>Ihr bestimmt die nächste Gemeinheit – oder unterstützt den Spendentopf direkt.</p>
+      <div class="shop-total-box">
+        <span>AKTUELL GESAMMELT</span>
+        <strong id="shopEventTotal">0,00 €</strong>
+      </div>
+    </header>
+
+    <section id="paymentNotice" class="payment-notice hidden"></section>
+
+    <section class="buyer-card">
+      <div>
+        <label for="buyerName">NAME IM STREAM <em>optional</em></label>
+        <input id="buyerName" maxlength="50" placeholder="z. B. GNRB">
+      </div>
+      <div>
+        <label for="buyerMessage">NACHRICHT <em>optional</em></label>
+        <input id="buyerMessage" maxlength="180" placeholder="Kurze Nachricht für den Stream">
+      </div>
+    </section>
+
+    <section class="shop-section">
+      <div class="section-heading">
+        <div>
+          <span>FOLTER-AKTIONEN</span>
+          <h2>Was sollen wir ertragen?</h2>
+        </div>
+        <div id="paypalStatus" class="status-pill">PAYPAL PRÜFEN…</div>
+      </div>
+      <div id="shopItems" class="item-grid"></div>
+    </section>
+
+    <section class="donation-section">
+      <div class="donation-copy">
+        <span>SPENDENTOPF</span>
+        <h2>Einfach so unterstützen</h2>
+        <p>Ohne Aufgabe, ohne Folter – der Betrag landet direkt im gemeinsamen Event-Spendentopf.</p>
+      </div>
+      <div class="donation-actions">
+        <div class="quick-donations">
+          <button type="button" data-donate="5">5 €</button>
+          <button type="button" data-donate="10">10 €</button>
+          <button type="button" data-donate="20">20 €</button>
+          <button type="button" data-donate="50">50 €</button>
+        </div>
+        <div class="custom-donation">
+          <input id="customDonation" type="number" min="1" max="5000" step="1" inputmode="decimal" placeholder="Eigener Betrag in €">
+          <button id="customDonateButton" type="button">MIT PAYPAL SPENDEN</button>
+        </div>
+      </div>
+    </section>
+
+    <footer class="shop-footer">
+      <span>Nach erfolgreicher PayPal-Zahlung wird der Kauf automatisch im Stream und im Control Center erfasst.</span>
+    </footer>
+  </main>
+
+  <div id="shopToast" class="shop-toast hidden"></div>
+  <script src="/dartmarathon/static/shop.js?v=6.0.0"></script>
+</body>
+</html>
