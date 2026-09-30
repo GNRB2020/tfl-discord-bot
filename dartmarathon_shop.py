@@ -12,7 +12,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin, urlparse
 
 import aiohttp
 from aiohttp import web
@@ -79,6 +79,8 @@ class ShopManager:
             [str, int, int],
             Awaitable[Dict[str, Any]],
         ] | None = None
+        self._image_cache: dict[int, tuple[str, bytes, str, float]] = {}
+        self._image_cache_seconds = 30 * 60
 
     @property
     def paypal_api_base(self) -> str:
@@ -447,6 +449,7 @@ class ShopManager:
             "sort_order": int(item.get("sort_order", item["id"] * 10)),
             "action_type": item.get("action_type", ""),
             "action_value": int(item.get("action_value", 0) or 0),
+            "updated_at": item.get("updated_at", ""),
             "active": item["active"],
             "available": available,
             "availability_reason": reason,
@@ -505,6 +508,183 @@ class ShopManager:
         for supporter in supporters:
             supporter["amount"] = self._money(supporter["amount_cents"])
         return supporters[:150]
+
+    @staticmethod
+    def _looks_like_search_page(url: str) -> bool:
+        lowered = str(url or "").casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "/search/",
+                "/images/search/",
+                "/vectors/search/",
+                "/illustrations/search/",
+                "?search=",
+                "?q=",
+            )
+        )
+
+    @staticmethod
+    def _extract_meta_image(html: str, base_url: str) -> str:
+        if not html:
+            return ""
+
+        patterns = (
+            r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::secure_url)?["\']',
+            r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image(?::src)?["\']',
+        )
+
+        for pattern in patterns:
+            match = re.search(pattern, html, flags=re.IGNORECASE)
+            if match:
+                candidate = match.group(1).strip()
+                if candidate:
+                    return urljoin(base_url, candidate)
+        return ""
+
+    @staticmethod
+    def _valid_remote_url(url: str) -> bool:
+        try:
+            parsed = urlparse(str(url or "").strip())
+        except Exception:
+            return False
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+    async def _download_item_image(
+        self,
+        source_url: str,
+    ) -> tuple[bytes, str] | None:
+        if not self._valid_remote_url(source_url):
+            return None
+
+        timeout = aiohttp.ClientTimeout(total=12, connect=5)
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+        )
+
+        try:
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                headers={"User-Agent": user_agent},
+            ) as session:
+                async with session.get(
+                    source_url,
+                    allow_redirects=True,
+                    headers={
+                        "Accept": "image/avif,image/webp,image/apng,image/*,text/html;q=0.8,*/*;q=0.5",
+                    },
+                ) as response:
+                    if response.status != 200:
+                        return None
+
+                    content_type = (
+                        response.headers.get("Content-Type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .lower()
+                    )
+
+                    if content_type.startswith("image/"):
+                        data = await response.content.read(5 * 1024 * 1024 + 1)
+                        if len(data) > 5 * 1024 * 1024:
+                            return None
+                        return data, content_type
+
+                    if content_type not in {"", "text/html", "application/xhtml+xml"}:
+                        return None
+
+                    raw = await response.content.read(1024 * 1024 + 1)
+                    if len(raw) > 1024 * 1024:
+                        raw = raw[:1024 * 1024]
+                    charset = response.charset or "utf-8"
+                    try:
+                        html = raw.decode(charset, errors="replace")
+                    except LookupError:
+                        html = raw.decode("utf-8", errors="replace")
+                    page_url = str(response.url)
+
+                resolved = self._extract_meta_image(html, page_url)
+                if not resolved or not self._valid_remote_url(resolved):
+                    return None
+
+                async with session.get(
+                    resolved,
+                    allow_redirects=True,
+                    headers={
+                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.5",
+                        "Referer": page_url,
+                    },
+                ) as image_response:
+                    if image_response.status != 200:
+                        return None
+                    image_type = (
+                        image_response.headers.get("Content-Type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .lower()
+                    )
+                    if not image_type.startswith("image/"):
+                        return None
+                    data = await image_response.content.read(5 * 1024 * 1024 + 1)
+                    if len(data) > 5 * 1024 * 1024:
+                        return None
+                    return data, image_type
+
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return None
+
+    async def item_image(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        try:
+            item_id = int(request.match_info.get("item_id", "0"))
+        except (TypeError, ValueError):
+            raise web.HTTPNotFound()
+
+        async with self._lock:
+            item = self._item_by_id_locked(item_id)
+            if not item or not item.get("active", False):
+                raise web.HTTPNotFound()
+            source_url = str(item.get("image_url", "")).strip()
+
+        if not source_url:
+            raise web.HTTPNotFound()
+
+        now = time.time()
+        cached = self._image_cache.get(item_id)
+        if cached:
+            cached_source, data, content_type, cached_at = cached
+            if (
+                cached_source == source_url
+                and now - cached_at < self._image_cache_seconds
+            ):
+                return web.Response(
+                    body=data,
+                    content_type=content_type,
+                    headers={"Cache-Control": "public, max-age=1800"},
+                )
+
+        downloaded = await self._download_item_image(source_url)
+        if not downloaded:
+            raise web.HTTPNotFound()
+
+        data, content_type = downloaded
+        self._image_cache[item_id] = (
+            source_url,
+            data,
+            content_type,
+            now,
+        )
+
+        return web.Response(
+            body=data,
+            content_type=content_type,
+            headers={"Cache-Control": "public, max-age=1800"},
+        )
 
     def public_state(self) -> Dict[str, Any]:
         self._cleanup_expired_locked()
@@ -1588,6 +1768,14 @@ class ShopManager:
                 if image_url and not image_url.lower().startswith(("http://", "https://")):
                     raise ShopError("Bild-Url muss mit http:// oder https:// beginnen.")
 
+                if image_url and self._looks_like_search_page(image_url):
+                    warnings.append(
+                        f"Zeile {offset}: Bild-Url ist eine Such-/Übersichtsseite. "
+                        "Der Shop versucht deren Vorschaubild zu verwenden. "
+                        "Für ein bestimmtes Motiv bitte eine konkrete Bildseite "
+                        "oder direkte Bild-URL verwenden."
+                    )
+
                 icon = str(value(row, "icon", "🎯") or "🎯").strip()[:12] or "🎯"
 
                 if (
@@ -1812,6 +2000,7 @@ class ShopManager:
                     max_id + 1,
                 )
                 self._save_locked()
+                self._image_cache.clear()
 
         if action == "apply" and self._broadcast_state:
             await self._broadcast_state()
@@ -1826,6 +2015,10 @@ class ShopManager:
 
     def register_routes(self, app: web.Application) -> None:
         app.router.add_get(f"{self.prefix}/shop", self.shop_page)
+        app.router.add_get(
+            rf"{self.prefix}/shop/image/{{item_id:\d+}}",
+            self.item_image,
+        )
         app.router.add_post(f"{self.prefix}/shop/api/create-order", self.create_order)
         app.router.add_get(f"{self.prefix}/shop/paypal/return", self.paypal_return)
         app.router.add_get(f"{self.prefix}/shop/paypal/cancel", self.paypal_cancel)
