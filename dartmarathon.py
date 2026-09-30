@@ -13,6 +13,8 @@ from typing import Any, Dict
 
 from aiohttp import WSMsgType, web
 
+from dartmarathon_shop import ShopManager
+
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "dartmarathon_templates"
 STATIC_DIR = BASE_DIR / "dartmarathon_static"
@@ -31,7 +33,7 @@ CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "5.4.0"
+ASSET_VERSION = "6.0.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -74,6 +76,12 @@ _state_lock = asyncio.Lock()
 _clients: set[web.WebSocketResponse] = set()
 _ticker_task: asyncio.Task | None = None
 _auto_popup_cursor_seconds = 0
+
+SHOP = ShopManager(
+    prefix=PREFIX,
+    base_dir=BASE_DIR,
+    template_dir=TEMPLATE_DIR,
+)
 
 
 def _empty_special_detail() -> Dict[str, Any]:
@@ -1115,6 +1123,12 @@ def _public_state_locked() -> Dict[str, Any]:
     )
 
     metrics = _metrics_locked()
+    shop = SHOP.public_state()
+    own_donation_cents = int(round(float(_state["own_donations"]) * 100))
+    shop["own_donations_cents"] = own_donation_cents
+    shop["own_donations"] = f"{own_donation_cents / 100:.2f}"
+    shop["event_total_cents"] = int(shop["summary"]["paid_cents"]) + own_donation_cents
+    shop["event_total"] = f"{shop['event_total_cents'] / 100:.2f}"
 
     return {
         "stream_seconds": int(
@@ -1178,6 +1192,8 @@ def _public_state_locked() -> Dict[str, Any]:
             _state["own_donations"],
             2,
         ),
+
+        "shop": shop,
 
         "matches": [
             _public_match(match)
@@ -1785,6 +1801,14 @@ async def _process_message(
     global _auto_popup_cursor_seconds
 
     msg_type = message.get("type")
+
+    if isinstance(msg_type, str) and msg_type.startswith("shop_"):
+        handled, error = await SHOP.handle_control_message(message)
+        if handled:
+            await _broadcast_state()
+        else:
+            await _send_error(ws, error or "Shop-Aktion fehlgeschlagen.")
+        return
 
     if msg_type == "stream_action":
         action = message.get("action")
@@ -2977,6 +3001,11 @@ async def _cleanup_ctx(
 def register_dartmarathon(
     app: web.Application,
 ) -> None:
+    SHOP.set_callbacks(
+        _broadcast_state,
+        _broadcast_payload,
+    )
+
     app.router.add_get(
         f"{PREFIX}",
         _root,
@@ -3011,6 +3040,8 @@ def register_dartmarathon(
         f"{PREFIX}/ws",
         _ws,
     )
+
+    SHOP.register_routes(app)
 
     app.router.add_static(
         f"{PREFIX}/static/",
