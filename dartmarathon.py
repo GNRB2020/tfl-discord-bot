@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -21,11 +22,16 @@ STATE_FILE = Path(
         str(BASE_DIR / "dartmarathon_state.json"),
     )
 )
-CONTROL_TOKEN = os.getenv("DARTMARATHON_CONTROL_TOKEN", "").strip()
+CONTROL_PASSWORD = os.getenv(
+    "DARTMARATHON_CONTROL_PASSWORD",
+    "",
+).strip()
+CONTROL_COOKIE_NAME = "dart_control"
+CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "5.3.0"
+ASSET_VERSION = "5.4.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -1618,27 +1624,51 @@ def _collect_auto_popups_locked(
     return payloads[-1:]
 
 
-def _token_matches(
+def _session_cookie_value() -> str:
+    if not CONTROL_PASSWORD:
+        return ""
+
+    return hashlib.sha256(
+        (
+            "dartmarathon-control-session:"
+            + CONTROL_PASSWORD
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _password_matches(
     value: str | None,
 ) -> bool:
-    if not CONTROL_TOKEN:
-        return True
+    if not CONTROL_PASSWORD:
+        return False
 
     if not value:
         return False
 
     return secrets.compare_digest(
         value,
-        CONTROL_TOKEN,
+        CONTROL_PASSWORD,
     )
 
 
 def _request_can_control(
     request: web.Request,
 ) -> bool:
-    return _token_matches(
-        request.cookies.get(
-            "dart_control"
+    expected = _session_cookie_value()
+
+    if not expected:
+        return False
+
+    current = request.cookies.get(
+        CONTROL_COOKIE_NAME,
+        "",
+    )
+
+    return bool(
+        current
+        and secrets.compare_digest(
+            current,
+            expected,
         )
     )
 
@@ -2622,38 +2652,23 @@ async def _serve_template(
 async def _control(
     request: web.Request,
 ) -> web.StreamResponse:
-    if (
-        not CONTROL_TOKEN
-        or _request_can_control(
-            request
+    if not CONTROL_PASSWORD:
+        return web.Response(
+            text=(
+                "Dartmarathon-Control ist nicht konfiguriert. "
+                "Bitte DARTMARATHON_CONTROL_PASSWORD in Render setzen."
+            ),
+            status=503,
+            content_type="text/plain",
+            headers={
+                "Cache-Control": "no-store",
+            },
         )
-    ):
+
+    if _request_can_control(request):
         return await _serve_template(
             "control.html"
         )
-
-    token = request.query.get(
-        "token",
-        "",
-    )
-
-    if _token_matches(token):
-        response = web.HTTPFound(
-            f"{PREFIX}/control"
-        )
-
-        response.set_cookie(
-            "dart_control",
-            token,
-            httponly=True,
-            samesite="Lax",
-            secure=request.secure,
-            max_age=(
-                60 * 60 * 24 * 30
-            ),
-        )
-
-        return response
 
     return await _serve_template(
         "login.html"
@@ -2663,16 +2678,29 @@ async def _control(
 async def _login(
     request: web.Request,
 ) -> web.StreamResponse:
+    if not CONTROL_PASSWORD:
+        return web.Response(
+            text=(
+                "Dartmarathon-Control ist nicht konfiguriert. "
+                "Bitte DARTMARATHON_CONTROL_PASSWORD in Render setzen."
+            ),
+            status=503,
+            content_type="text/plain",
+            headers={
+                "Cache-Control": "no-store",
+            },
+        )
+
     data = await request.post()
 
-    token = str(
+    password = str(
         data.get(
-            "token",
+            "password",
             "",
         )
     )
 
-    if not _token_matches(token):
+    if not _password_matches(password):
         html = (
             TEMPLATE_DIR
             / "login.html"
@@ -2684,7 +2712,7 @@ async def _login(
             "<!--LOGIN_ERROR-->",
             (
                 '<div class="login-error">'
-                "Token nicht korrekt."
+                "Kennwort nicht korrekt."
                 "</div>"
             ),
         )
@@ -2706,14 +2734,13 @@ async def _login(
     )
 
     response.set_cookie(
-        "dart_control",
-        token,
+        CONTROL_COOKIE_NAME,
+        _session_cookie_value(),
         httponly=True,
-        samesite="Lax",
+        samesite="Strict",
         secure=request.secure,
-        max_age=(
-            60 * 60 * 24 * 30
-        ),
+        max_age=CONTROL_COOKIE_MAX_AGE,
+        path=f"{PREFIX}/",
     )
 
     return response
@@ -2727,7 +2754,8 @@ async def _logout(
     )
 
     response.del_cookie(
-        "dart_control"
+        CONTROL_COOKIE_NAME,
+        path=f"{PREFIX}/",
     )
 
     return response
