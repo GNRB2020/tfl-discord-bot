@@ -5,6 +5,74 @@
 
   const $ = (id) => document.getElementById(id);
 
+  const LAYOUT_TARGETS = {
+    tzmarty_score:"ovTzmarty",
+    korsar_score:"ovKorsar",
+    total_legs:"ovTotalLegs",
+    total_specials:"ovSpecials",
+    pause:"ovPause",
+    event_money:"ovEventMoney",
+    stream_time:"ovStream",
+    support_ticker:"supportTicker",
+    shop_banner:"shopActionPopup",
+  };
+
+  function applyOverlayLayout(layout) {
+    if (!layout || typeof layout !== "object") return;
+
+    for (const [key, targetId] of Object.entries(LAYOUT_TARGETS)) {
+      const element = $(targetId);
+      const cfg = layout[key];
+
+      if (!element || !cfg) continue;
+
+      element.style.left = `${Number(cfg.x || 0)}px`;
+      element.style.top = `${Number(cfg.y || 0)}px`;
+      element.style.width = `${Number(cfg.w || 0)}px`;
+      element.style.height = `${Number(cfg.h || 0)}px`;
+      element.style.right = "auto";
+      element.style.bottom = "auto";
+      element.style.fontSize = `${Number(cfg.font || 16)}px`;
+      element.style.visibility = cfg.visible === false
+        ? "hidden"
+        : "visible";
+
+      const align = String(cfg.align || "center");
+      const valign = String(cfg.valign || "center");
+
+      element.style.textAlign = align;
+      element.style.justifyContent = ({
+        left:"flex-start",
+        center:"center",
+        right:"flex-end",
+      })[align] || "center";
+
+      element.style.alignItems = ({
+        top:"flex-start",
+        center:"center",
+        bottom:"flex-end",
+      })[valign] || "center";
+
+      if (key === "support_ticker") {
+        element.style.display = "flex";
+      }
+
+      if (key === "shop_banner") {
+        element.style.justifyContent = "center";
+        element.style.alignItems = "flex-start";
+
+        const card = element.querySelector(
+          ".shop-action-card"
+        );
+
+        if (card) {
+          card.style.width = "100%";
+          card.style.height = "100%";
+        }
+      }
+    }
+  }
+
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
 
@@ -228,6 +296,10 @@
 
   function render(state) {
     if (!state) return;
+
+    applyOverlayLayout(
+      state.overlay_layout
+    );
 
     $("ovTzmarty").textContent = (
       `${Number(state.legs?.tzmarty || 0)}`

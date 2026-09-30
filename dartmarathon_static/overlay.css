@@ -825,3 +825,19 @@ body{
     transform:translateY(-18px);
   }
 }
+
+
+/* V6.5 – dynamisches Overlay-Layout */
+.support-ticker{
+  font-size:17px;
+}
+.support-entry,
+.support-empty{
+  font-size:inherit;
+}
+.shop-action-popup{
+  right:auto;
+}
+.shop-action-popup .shop-action-card{
+  max-width:none;
+}
