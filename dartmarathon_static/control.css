@@ -358,3 +358,68 @@ button{touch-action:manipulation}
   font-weight:950!important;
   vertical-align:middle;
 }
+
+
+/* V6.2 – Excel/CSV Import */
+.import-box{
+  grid-column:1/-1;
+  grid-row:1/-1;
+  z-index:5;
+  overflow:auto;
+  background:#09131e;
+}
+.shop-import-summary{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  padding:8px 10px;
+  border:1px solid #314760;
+  border-radius:8px;
+  background:#0b1824;
+  font-size:9px;
+}
+.shop-import-summary span{
+  color:var(--muted);
+}
+.shop-import-messages{
+  margin-top:6px;
+  padding:7px 9px;
+  border-radius:8px;
+  background:rgba(151,105,18,.12);
+  color:#ffd47a;
+  font-size:8px;
+  line-height:1.5;
+}
+.shop-import-messages:empty{
+  display:none;
+}
+.shop-import-messages.error{
+  background:rgba(150,28,35,.15);
+  color:#ff9da3;
+}
+.shop-import-rows{
+  max-height:210px;
+  overflow:auto;
+  margin-top:6px;
+  border:1px solid #23374d;
+  border-radius:8px;
+}
+.shop-import-row{
+  display:grid;
+  grid-template-columns:1fr auto;
+  gap:10px;
+  padding:6px 8px;
+  border-bottom:1px solid #203146;
+  font-size:8px;
+}
+.shop-import-row:last-child{
+  border-bottom:0;
+}
+.shop-import-row span{
+  color:var(--muted);
+}
+.shop-import-actions{
+  display:flex;
+  justify-content:flex-end;
+  margin-top:7px;
+}

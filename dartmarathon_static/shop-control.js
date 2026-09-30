@@ -4,6 +4,7 @@
   let shopState = null;
   let editingItemId = null;
   let lastOpenCount = null;
+  let importFile = null;
 
   const $ = (id) => document.getElementById(id);
   const all = (selector) => [...document.querySelectorAll(selector)];
@@ -22,7 +23,7 @@
   }
 
   function targetLabel(target) {
-    return ({tzmarty:"Tzmarty", korsar:"Korsar", both:"Beide", general:"Allgemein"})[target] || "Allgemein";
+    return ({tzmarty:"Tzmarty", korsar:"Korsar", both:"Beide", general:"Allgemein", on_site:"Vor Ort"})[target] || "Allgemein";
   }
 
   function toast(text) {
@@ -93,12 +94,15 @@
       const cooldown = Number(item.cooldown_seconds || 0) > 0
         ? `${Math.round(Number(item.cooldown_seconds) / 60)} Min.`
         : "kein Cooldown";
+      const action = item.action_type === "pause_minus"
+        ? ` · Pausendieb -${Number(item.action_value || 0)}s`
+        : "";
       return `
         <div class="shop-item-row ${item.active ? "" : "inactive"}">
           <div class="shop-item-icon">${escapeHtml(item.icon || "🎯")}</div>
           <div class="shop-item-main">
             <strong>${escapeHtml(item.name)}</strong>
-            <span>${euroFromCents(item.price_cents)} · ${escapeHtml(targetLabel(item.target))} · ${limit} · ${cooldown}</span>
+            <span>${euroFromCents(item.price_cents)} · ${escapeHtml(targetLabel(item.target))} · ${limit} · ${cooldown}${escapeHtml(action)}</span>
           </div>
           <div class="shop-item-actions">
             <button type="button" class="mini-btn ghost" data-shop-edit="${Number(item.id)}">BEARBEITEN</button>
@@ -207,6 +211,10 @@
     $("shopItemMax").value = 0;
     $("shopItemCooldown").value = 0;
     $("shopItemTarget").value = "general";
+    $("shopItemSort").value = "";
+    $("shopItemActionType").value = "";
+    $("shopItemActionValue").value = 0;
+    $("shopItemImageUrl").value = "";
     $("shopItemDescription").value = "";
     $("shopItemStreamText").value = "";
     $("shopItemActive").checked = true;
@@ -228,6 +236,10 @@
     $("shopItemMax").value = Number(item.max_quantity || 0);
     $("shopItemCooldown").value = Math.round(Number(item.cooldown_seconds || 0) / 60);
     $("shopItemTarget").value = item.target || "general";
+    $("shopItemSort").value = Number(item.sort_order || id * 10);
+    $("shopItemActionType").value = item.action_type || "";
+    $("shopItemActionValue").value = Number(item.action_value || 0);
+    $("shopItemImageUrl").value = item.image_url || "";
     $("shopItemDescription").value = item.description || "";
     $("shopItemStreamText").value = item.stream_text || "";
     $("shopItemActive").checked = Boolean(item.active);
@@ -244,6 +256,10 @@
       max_quantity:Number($("shopItemMax").value || 0),
       cooldown_minutes:Number($("shopItemCooldown").value || 0),
       target:$("shopItemTarget").value,
+      sort_order:Number($("shopItemSort").value || 0),
+      action_type:$("shopItemActionType").value,
+      action_value:Number($("shopItemActionValue").value || 0),
+      image_url:$("shopItemImageUrl").value.trim(),
       description:$("shopItemDescription").value.trim(),
       stream_text:$("shopItemStreamText").value.trim(),
       active:$("shopItemActive").checked,
@@ -253,6 +269,103 @@
     if (send(payload)) {
       $("shopEditor").classList.add("hidden");
       clearEditor();
+    }
+  }
+
+  function showImportPanel() {
+    $("shopImportPanel").classList.remove("hidden");
+    $("shopEditor").classList.add("hidden");
+    openShopTab();
+  }
+
+  function clearImportPanel() {
+    $("shopImportSummary").innerHTML = "";
+    $("shopImportWarnings").innerHTML = "";
+    $("shopImportErrors").innerHTML = "";
+    $("shopImportRows").innerHTML = "";
+    $("shopImportApply").classList.add("hidden");
+  }
+
+  function renderImportResult(data) {
+    showImportPanel();
+    clearImportPanel();
+
+    if (!data?.ok) {
+      const errors = Array.isArray(data?.errors) ? data.errors : ["Import konnte nicht geprüft werden."];
+      $("shopImportErrors").innerHTML = errors
+        .map((entry) => `<div>${escapeHtml(entry)}</div>`)
+        .join("");
+      return;
+    }
+
+    const preview = data.preview || {};
+    $("shopImportSummary").innerHTML = `
+      <strong>${escapeHtml(data.filename || "Datei")}</strong>
+      <span>${Number(preview.total || 0)} Zeilen · ${Number(preview.new || 0)} neu · ${Number(preview.updated || 0)} aktualisiert · ${Number(preview.unchanged || 0)} unverändert · ${Number(preview.deactivated || 0)} deaktiviert</span>
+    `;
+
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    if (warnings.length) {
+      $("shopImportWarnings").innerHTML = warnings
+        .map((entry) => `<div>${escapeHtml(entry)}</div>`)
+        .join("");
+    }
+
+    const rows = Array.isArray(preview.rows) ? preview.rows : [];
+    $("shopImportRows").innerHTML = rows.map((row) => {
+      const action = row.action_type === "pause_minus"
+        ? ` · Pausendieb -${Number(row.action_value || 0)}s`
+        : "";
+      return `
+        <div class="shop-import-row">
+          <strong>#${Number(row.id)} · ${escapeHtml(row.name)}</strong>
+          <span>${escapeHtml(row.status)} · ${euroFromCents(row.price_cents)} · ${row.active ? "AKTIV" : "INAKTIV"}${escapeHtml(action)}</span>
+        </div>`;
+    }).join("");
+
+    if (data.action === "preview" && importFile) {
+      $("shopImportApply").classList.remove("hidden");
+    }
+
+    if (data.action === "apply") {
+      $("shopImportApply").classList.add("hidden");
+      toast("Artikelimport erfolgreich übernommen.");
+    }
+  }
+
+  async function uploadImport(action) {
+    if (!importFile) {
+      return toast("Bitte zuerst eine Excel- oder CSV-Datei auswählen.");
+    }
+
+    const formData = new FormData();
+    formData.append("action", action);
+    formData.append("file", importFile, importFile.name);
+
+    try {
+      const response = await fetch(
+        "/dartmarathon/shop/api/import-items",
+        {
+          method:"POST",
+          body:formData,
+          credentials:"same-origin",
+        }
+      );
+      let data;
+      try {
+        data = await response.json();
+      } catch (_) {
+        data = {
+          ok:false,
+          errors:[`Serverfehler (${response.status}).`],
+        };
+      }
+      renderImportResult(data);
+    } catch (error) {
+      renderImportResult({
+        ok:false,
+        errors:[error.message || "Import konnte nicht hochgeladen werden."],
+      });
     }
   }
 
@@ -274,6 +387,33 @@
   $("shopNewItem").onclick = () => { clearEditor(); showEditor(); };
   $("shopCancelItem").onclick = () => { $("shopEditor").classList.add("hidden"); clearEditor(); };
   $("shopSaveItem").onclick = saveItem;
+
+  $("shopImportButton").onclick = () => {
+    $("shopImportFile").click();
+  };
+
+  $("shopImportFile").onchange = () => {
+    const file = $("shopImportFile").files?.[0] || null;
+    if (!file) return;
+    importFile = file;
+    uploadImport("preview");
+  };
+
+  $("shopImportApply").onclick = () => {
+    if (!importFile) return;
+    if (confirm(
+      "Import übernehmen? Gleiche IDs werden aktualisiert. Fehlende IDs werden NICHT gelöscht."
+    )) {
+      uploadImport("apply");
+    }
+  };
+
+  $("shopImportClose").onclick = () => {
+    $("shopImportPanel").classList.add("hidden");
+    clearImportPanel();
+    importFile = null;
+    $("shopImportFile").value = "";
+  };
 
   $("shopTestToggle").onclick = () => {
     const enabled = !Boolean(shopState?.test_mode);

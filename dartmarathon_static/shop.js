@@ -28,7 +28,12 @@
   }
 
   function targetLabel(target) {
-    return ({tzmarty:"Tzmarty", korsar:"Korsar", both:"Beide", general:"Allgemein"})[target] || "Allgemein";
+    return ({tzmarty:"Tzmarty", korsar:"Korsar", both:"Beide", general:"Allgemein", on_site:"Vor Ort"})[target] || "Allgemein";
+  }
+
+  function isLikelyDirectImage(url) {
+    return /^https?:\/\//i.test(String(url || ""))
+      && /\.(png|jpe?g|webp|gif|avif)(?:[?#].*)?$/i.test(String(url || ""));
   }
 
   function toast(text) {
@@ -72,10 +77,19 @@
       else meta.push("Unbegrenzt");
       if (item.cooldown_seconds > 0) meta.push(`Cooldown ${Math.round(item.cooldown_seconds / 60)} Min.`);
       if (item.cooldown_remaining > 0) meta.push(`Wieder in ${duration(item.cooldown_remaining)}`);
+      if (item.action_type === "pause_minus") {
+        meta.push(`Pausendieb −${Math.round(Number(item.action_value || 0) / 60)} Min.`);
+        meta.push("Nur kaufbar, wenn keine Pause läuft");
+      }
       if (item.availability_reason && !item.available) meta.push(item.availability_reason);
+
+      const image = isLikelyDirectImage(item.image_url)
+        ? `<img class="item-image" src="${escapeHtml(item.image_url)}" alt="">`
+        : "";
 
       return `
         <article class="item-card ${item.available ? "" : "unavailable"}">
+          ${image}
           <div class="item-head">
             <div class="item-icon">${escapeHtml(item.icon || "🎯")}</div>
             <span class="target-badge">${escapeHtml(targetLabel(item.target))}</span>
