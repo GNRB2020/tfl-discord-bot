@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.3.2">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.4.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -69,6 +69,23 @@
     <section id="pauseFullBanner" class="status-banner pause-full-banner hidden">
       <strong>PAUSENKONTO VOLL · 30:00</strong>
       <span>Legs und Specials werden weiter gezählt. Das Pausenkonto bleibt bei maximal 30 Minuten.</span>
+    </section>
+
+    <section id="shopNewTaskBanner" class="shop-new-task-banner hidden">
+      <div class="shop-new-task-icon">!</div>
+      <div class="shop-new-task-copy">
+        <div class="shop-new-task-topline">
+          <span>NEUE FOLTERSHOP-AUFGABE</span>
+          <strong id="shopNewTaskCount">1 NEU</strong>
+        </div>
+        <div id="shopNewTaskTitle" class="shop-new-task-title">Neue Aufgabe</div>
+        <div id="shopNewTaskMeta" class="shop-new-task-meta"></div>
+        <div id="shopNewTaskMessage" class="shop-new-task-message hidden"></div>
+      </div>
+      <div class="shop-new-task-actions">
+        <button id="shopNewSeen" class="btn ghost" type="button">GESEHEN</button>
+        <button id="shopNewStart" class="btn warning" type="button">STARTEN</button>
+      </div>
     </section>
 
     <section class="dashboard">
@@ -441,7 +458,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/dartmarathon/static/control.js?v=6.3.2"></script>
-  <script src="/dartmarathon/static/shop-control.js?v=6.3.2"></script>
+  <script src="/dartmarathon/static/control.js?v=6.4.0"></script>
+  <script src="/dartmarathon/static/shop-control.js?v=6.4.0"></script>
 </body>
 </html>
