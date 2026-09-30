@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.0.0">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.1.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -347,7 +347,10 @@
               <div class="grand"><span>EVENT GESAMT</span><strong id="shopEventTotal">0,00 €</strong></div>
             </div>
             <div class="shop-admin-links">
+              <span id="shopTestStatus" class="shop-config-pill">TESTMODUS AUS</span>
               <span id="shopPaypalConfig" class="shop-config-pill">PAYPAL PRÜFEN…</span>
+              <button id="shopTestToggle" class="mini-btn warning" type="button">TESTMODUS STARTEN</button>
+              <button id="shopTestReset" class="mini-btn danger hidden" type="button">TESTDATEN LÖSCHEN</button>
               <a class="mini-btn ghost link-btn" href="/dartmarathon/shop" target="_blank">SHOP ÖFFNEN</a>
               <button id="shopNewItem" class="mini-btn positive" type="button">+ ARTIKEL</button>
             </div>
@@ -414,7 +417,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/dartmarathon/static/control.js?v=6.0.0"></script>
-  <script src="/dartmarathon/static/shop-control.js?v=6.0.0"></script>
+  <script src="/dartmarathon/static/control.js?v=6.1.0"></script>
+  <script src="/dartmarathon/static/shop-control.js?v=6.1.0"></script>
 </body>
 </html>
