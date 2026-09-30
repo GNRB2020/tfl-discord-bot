@@ -1,104 +1,391 @@
 (() => {
   let ws = null;
-  let retry = null;
+  let retryTimer = null;
   let popupTimer = null;
+
   const $ = (id) => document.getElementById(id);
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/dartmarathon/ws`);
+
+    ws = new WebSocket(
+      `${proto}://${location.host}/dartmarathon/ws`
+    );
+
     ws.onmessage = (event) => {
-      let msg;
-      try { msg = JSON.parse(event.data); } catch (_) { return; }
-      if (msg.type === "state") render(msg.data);
-      if (msg.type === "ad_popup") showAd(msg);
-      if (msg.type === "recent_matches_popup") showRecent(msg);
-      if (msg.type === "specials_popup") showSpecials(msg);
-      if (msg.type === "stats_popup") showStats(msg);
+      let message;
+
+      try {
+        message = JSON.parse(event.data);
+      } catch (_) {
+        return;
+      }
+
+      if (message.type === "state") {
+        render(message.data);
+        return;
+      }
+
+      if (message.type === "ad_popup") {
+        showAd(message);
+        return;
+      }
+
+      if (message.type === "recent_matches_popup") {
+        showRecentMatches(message);
+        return;
+      }
+
+      if (message.type === "specials_popup") {
+        showSpecials(message);
+        return;
+      }
+
+      if (message.type === "stats_popup") {
+        showStats(message);
+      }
     };
-    ws.onclose = () => { clearTimeout(retry); retry = setTimeout(connect, 1200); };
-    ws.onerror = () => { try { ws.close(); } catch (_) {} };
+
+    ws.onclose = () => {
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(connect, 1200);
+    };
+
+    ws.onerror = () => {
+      try {
+        ws.close();
+      } catch (_) {
+        // nichts zu tun
+      }
+    };
   }
 
   function hideAllPopups() {
-    for (const id of ["adPopup","recentPopup","specialsPopup","statsPopup"]) $(id).classList.add("hidden");
+    for (const id of [
+      "adPopup",
+      "recentPopup",
+      "specialsPopup",
+      "statsPopup",
+    ]) {
+      $(id).classList.add("hidden");
+    }
+
     clearTimeout(popupTimer);
+    popupTimer = null;
   }
 
-  function displayPopup(id, duration) {
+  function displayPopup(id, durationMs) {
     hideAllPopups();
+
     $(id).classList.remove("hidden");
-    popupTimer = setTimeout(() => $(id).classList.add("hidden"), Number(duration) || 20000);
+
+    popupTimer = setTimeout(
+      () => {
+        $(id).classList.add("hidden");
+      },
+      Number(durationMs) || 20000
+    );
   }
 
-  function setPauseColor(el, seconds) {
-    el.classList.remove("pause-red","pause-yellow","pause-green");
-    if (seconds <= 300) el.classList.add("pause-red");
-    else if (seconds <= 600) el.classList.add("pause-yellow");
-    else el.classList.add("pause-green");
+  function setPauseColor(element, seconds) {
+    element.classList.remove(
+      "pause-red",
+      "pause-yellow",
+      "pause-green"
+    );
+
+    if (seconds <= 300) {
+      element.classList.add("pause-red");
+    } else if (seconds <= 600) {
+      element.classList.add("pause-yellow");
+    } else {
+      element.classList.add("pause-green");
+    }
   }
 
-  function render(s) {
-    $("ovTzmarty").textContent = `${s.legs.tzmarty} / ${s.player_special_totals.tzmarty}`;
-    $("ovKorsar").textContent = `${s.legs.korsar} / ${s.player_special_totals.korsar}`;
-    $("ovTotalLegs").textContent = s.total_legs;
-    $("ovSpecials").textContent = s.total_specials;
-    $("ovPause").textContent = s.pause_display;
-    $("ovStream").textContent = s.stream_display;
-    $("pauseCenterTime").textContent = s.pause_display;
-    setPauseColor($("ovPause"), s.pause_seconds);
-    setPauseColor($("pauseCenterTime"), s.pause_seconds);
-    $("pauseCenter").classList.toggle("hidden", !s.pause_active || s.event_ended);
-    $("eventEnded").classList.toggle("hidden", !s.event_ended);
+  function render(state) {
+    if (!state) return;
+
+    $("ovTzmarty").textContent = (
+      `${Number(state.legs?.tzmarty || 0)}`
+      + " / "
+      + `${Number(state.player_special_totals?.tzmarty || 0)}`
+    );
+
+    $("ovKorsar").textContent = (
+      `${Number(state.legs?.korsar || 0)}`
+      + " / "
+      + `${Number(state.player_special_totals?.korsar || 0)}`
+    );
+
+    $("ovTotalLegs").textContent = Number(
+      state.total_legs || 0
+    );
+
+    $("ovSpecials").textContent = Number(
+      state.total_specials || 0
+    );
+
+    $("ovPause").textContent = (
+      state.pause_display || "15:00"
+    );
+
+    $("ovStream").textContent = (
+      state.stream_display || "00:00:00"
+    );
+
+    $("pauseCenterTime").textContent = (
+      state.pause_display || "15:00"
+    );
+
+    setPauseColor(
+      $("ovPause"),
+      Number(state.pause_seconds || 0)
+    );
+
+    setPauseColor(
+      $("pauseCenterTime"),
+      Number(state.pause_seconds || 0)
+    );
+
+    $("pauseCenter").classList.toggle(
+      "hidden",
+      !state.pause_active
+      || state.event_ended
+    );
+
+    $("eventEnded").classList.toggle(
+      "hidden",
+      !state.event_ended
+    );
   }
 
-  function showAd(msg) {
-    $("adPopupImage").src = `${msg.image}?t=${Date.now()}`;
-    $("adPopupImage").alt = msg.label || "Werbeeinblendung";
-    displayPopup("adPopup", msg.duration_ms);
+  function showAd(message) {
+    const image = $("adPopupImage");
+
+    image.src = (
+      `${message.image}?v=5.1.0&t=${Date.now()}`
+    );
+
+    image.alt = (
+      message.label
+      || "Werbeeinblendung"
+    );
+
+    displayPopup(
+      "adPopup",
+      message.duration_ms
+    );
   }
 
-  function showRecent(msg) {
-    const list = msg.matches || [];
-    $("recentMatchesList").innerHTML = list.length ? list.map((m) => `<div class="recent-row"><strong>#${m.id} · ${escapeHtml(m.mode)}</strong><span>${escapeHtml(m.result)}</span></div>`).join("") : '<div class="popup-empty">Noch keine Matches.</div>';
-    displayPopup("recentPopup", msg.duration_ms);
+  function escapeHtml(value) {
+    return String(
+      value ?? ""
+    ).replace(
+      /[&<>'"]/g,
+      (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "'": "&#39;",
+        '"': "&quot;",
+      }[char])
+    );
+  }
+
+  function showRecentMatches(message) {
+    const matches = Array.isArray(
+      message.matches
+    )
+      ? message.matches
+      : [];
+
+    const container = $("recentMatchesList");
+
+    if (!matches.length) {
+      container.innerHTML = (
+        '<div class="popup-empty">'
+        + "Noch keine Matches gespeichert."
+        + "</div>"
+      );
+    } else {
+      container.innerHTML = matches.map(
+        (match) => (
+          '<div class="recent-row">'
+          + `<span class="id">#${Number(match.id)}</span>`
+          + `<span class="mode">${escapeHtml(match.mode)}</span>`
+          + `<span class="result">${escapeHtml(match.result)}</span>`
+          + "</div>"
+        )
+      ).join("");
+    }
+
+    displayPopup(
+      "recentPopup",
+      message.duration_ms
+    );
   }
 
   function detailLines(detail) {
+    const safe = detail || {};
     const lines = [];
-    if (detail.hf?.length) lines.push(["HF", detail.hf.join(", ")]);
-    if (detail.bf?.length) lines.push(["BF", detail.bf.join(", ")]);
-    for (const key of ["180","177","174","171"]) if (detail[key]) lines.push([key, `× ${detail[key]}`]);
-    if (detail.ld?.length) lines.push(["LD", detail.ld.join(", ")]);
-    if (detail.legacy) lines.push(["Altbestand", detail.legacy]);
+
+    if (safe.hf?.length) {
+      lines.push([
+        "HF",
+        safe.hf.join(", "),
+      ]);
+    }
+
+    if (safe.bf?.length) {
+      lines.push([
+        "BF",
+        safe.bf.join(", "),
+      ]);
+    }
+
+    for (const key of [
+      "180",
+      "177",
+      "174",
+      "171",
+    ]) {
+      if (Number(safe[key] || 0) > 0) {
+        lines.push([
+          key,
+          `× ${Number(safe[key])}`,
+        ]);
+      }
+    }
+
+    if (safe.ld?.length) {
+      lines.push([
+        "LD",
+        safe.ld.join(", "),
+      ]);
+    }
+
+    if (Number(safe.legacy || 0) > 0) {
+      lines.push([
+        "ALT",
+        Number(safe.legacy),
+      ]);
+    }
+
     return lines;
   }
 
   function renderSpecialCard(id, detail) {
     const lines = detailLines(detail);
-    $(id).innerHTML = lines.length ? lines.map(([label,value]) => `<div class="special-popup-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("") : '<div class="popup-empty">Noch keine Specials.</div>';
+
+    $(id).innerHTML = lines.length
+      ? lines.map(
+          ([label, value]) => (
+            '<div class="special-popup-row">'
+            + `<span>${escapeHtml(label)}</span>`
+            + `<strong>${escapeHtml(value)}</strong>`
+            + "</div>"
+          )
+        ).join("")
+      : (
+          '<div class="popup-empty">'
+          + "Noch keine Specials."
+          + "</div>"
+        );
   }
 
-  function showSpecials(msg) {
-    renderSpecialCard("tzSpecialPopup", msg.players?.tzmarty || {});
-    renderSpecialCard("koSpecialPopup", msg.players?.korsar || {});
-    displayPopup("specialsPopup", msg.duration_ms);
+  function showSpecials(message) {
+    const tzmarty = (
+      message.players?.tzmarty
+      || {}
+    );
+
+    const korsar = (
+      message.players?.korsar
+      || {}
+    );
+
+    $("tzSpecialTitle").textContent = (
+      `TZMARTY · ${Number(tzmarty.total || 0)}`
+    );
+
+    $("koSpecialTitle").textContent = (
+      `KORSAR · ${Number(korsar.total || 0)}`
+    );
+
+    renderSpecialCard(
+      "tzSpecialPopup",
+      tzmarty
+    );
+
+    renderSpecialCard(
+      "koSpecialPopup",
+      korsar
+    );
+
+    displayPopup(
+      "specialsPopup",
+      message.duration_ms
+    );
   }
 
-  function showStats(msg) {
-    const s = msg.stats || {};
-    $("statsPopupTitle").textContent = msg.title || "EVENT-KENNZAHLEN";
-    $("popLegs").textContent = s.total_legs ?? 0;
-    $("popSpecials").textContent = s.total_specials ?? 0;
-    $("popSpecialsPerLeg").textContent = Number(s.specials_per_leg || 0).toLocaleString("de-DE", {minimumFractionDigits:2,maximumFractionDigits:2});
-    $("popLegsPerHour").textContent = Number(s.legs_per_hour || 0).toLocaleString("de-DE", {minimumFractionDigits:1,maximumFractionDigits:1});
-    $("popSpecialsPerHour").textContent = Number(s.specials_per_hour || 0).toLocaleString("de-DE", {minimumFractionDigits:1,maximumFractionDigits:1});
-    $("popPauseUsed").textContent = s.pause_used_display || "00:00:00";
-    displayPopup("statsPopup", msg.duration_ms);
-  }
+  function showStats(message) {
+    const stats = (
+      message.stats || {}
+    );
 
-  function escapeHtml(value) {
-    return String(value).replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
+    $("statsPopupTitle").textContent = (
+      message.title
+      || "EVENT-KENNZAHLEN"
+    );
+
+    $("popLegs").textContent = Number(
+      stats.total_legs || 0
+    );
+
+    $("popSpecials").textContent = Number(
+      stats.total_specials || 0
+    );
+
+    $("popSpecialsPerLeg").textContent = Number(
+      stats.specials_per_leg || 0
+    ).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }
+    );
+
+    $("popLegsPerHour").textContent = Number(
+      stats.legs_per_hour || 0
+    ).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }
+    );
+
+    $("popSpecialsPerHour").textContent = Number(
+      stats.specials_per_hour || 0
+    ).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }
+    );
+
+    $("popPauseUsed").textContent = (
+      stats.pause_used_display
+      || "00:00:00"
+    );
+
+    displayPopup(
+      "statsPopup",
+      message.duration_ms
+    );
   }
 
   connect();
