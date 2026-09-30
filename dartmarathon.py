@@ -24,6 +24,12 @@ STATE_FILE = Path(
         str(BASE_DIR / "dartmarathon_state.json"),
     )
 )
+OVERLAY_LAYOUT_FILE = Path(
+    os.getenv(
+        "DARTMARATHON_OVERLAY_LAYOUT_FILE",
+        str(STATE_FILE.with_name("dartmarathon_overlay_layout.json")),
+    )
+)
 CONTROL_PASSWORD = os.getenv(
     "DARTMARATHON_CONTROL_PASSWORD",
     "",
@@ -33,7 +39,7 @@ CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "6.4.0"
+ASSET_VERSION = "6.5.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -41,6 +47,45 @@ MAX_HISTORY = 30
 MAX_UNDO = 50
 SAVE_INTERVAL_SECONDS = 3.0
 POPUP_DURATION_MS = 20_000
+
+OVERLAY_LAYOUT_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "tzmarty_score": {
+        "x": 52, "y": 380, "w": 239, "h": 94, "font": 48,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "korsar_score": {
+        "x": 1624, "y": 380, "w": 244, "h": 94, "font": 48,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "total_legs": {
+        "x": 51, "y": 968, "w": 228, "h": 72, "font": 44,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "total_specials": {
+        "x": 290, "y": 968, "w": 236, "h": 72, "font": 44,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "pause": {
+        "x": 1053, "y": 968, "w": 257, "h": 72, "font": 42,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "event_money": {
+        "x": 1322, "y": 968, "w": 282, "h": 72, "font": 34,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "stream_time": {
+        "x": 1627, "y": 968, "w": 248, "h": 72, "font": 38,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "support_ticker": {
+        "x": 52, "y": 918, "w": 474, "h": 38, "font": 17,
+        "align": "left", "valign": "center", "visible": True,
+    },
+    "shop_banner": {
+        "x": 340, "y": 72, "w": 1240, "h": 88, "font": 23,
+        "align": "left", "valign": "center", "visible": True,
+    },
+}
 
 PLAYERS = ("tzmarty", "korsar")
 PLAYER_NAMES = {
@@ -488,6 +533,128 @@ def _sanitize_state(data: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     return clean
+
+
+def _overlay_layout_defaults() -> Dict[str, Dict[str, Any]]:
+    return deepcopy(OVERLAY_LAYOUT_DEFAULTS)
+
+
+def _sanitize_overlay_element(
+    key: str,
+    raw: Any,
+) -> Dict[str, Any]:
+    default = deepcopy(OVERLAY_LAYOUT_DEFAULTS[key])
+
+    if not isinstance(raw, dict):
+        return default
+
+    def number(
+        name: str,
+        fallback: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            value = int(round(float(raw.get(name, fallback))))
+        except (TypeError, ValueError):
+            value = fallback
+
+        return max(minimum, min(maximum, value))
+
+    width = number("w", default["w"], 40, 1920)
+    height = number("h", default["h"], 20, 1080)
+    x = number("x", default["x"], 0, max(0, 1920 - width))
+    y = number("y", default["y"], 0, max(0, 1080 - height))
+    font = number("font", default["font"], 8, 160)
+
+    align = str(raw.get("align", default["align"])).strip().lower()
+    if align not in {"left", "center", "right"}:
+        align = default["align"]
+
+    valign = str(raw.get("valign", default["valign"])).strip().lower()
+    if valign not in {"top", "center", "bottom"}:
+        valign = default["valign"]
+
+    return {
+        "x": x,
+        "y": y,
+        "w": width,
+        "h": height,
+        "font": font,
+        "align": align,
+        "valign": valign,
+        "visible": bool(raw.get("visible", default["visible"])),
+    }
+
+
+def _sanitize_overlay_layout(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if isinstance(raw, dict) and isinstance(raw.get("elements"), dict):
+        raw = raw["elements"]
+
+    if not isinstance(raw, dict):
+        raw = {}
+
+    return {
+        key: _sanitize_overlay_element(
+            key,
+            raw.get(key, {}),
+        )
+        for key in OVERLAY_LAYOUT_DEFAULTS
+    }
+
+
+def _load_overlay_layout() -> Dict[str, Dict[str, Any]]:
+    if not OVERLAY_LAYOUT_FILE.exists():
+        return _overlay_layout_defaults()
+
+    try:
+        raw = json.loads(
+            OVERLAY_LAYOUT_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+        return _sanitize_overlay_layout(raw)
+    except Exception as exc:
+        print(
+            "[DART] Overlay-Layout konnte nicht "
+            f"geladen werden: {exc}"
+        )
+        return _overlay_layout_defaults()
+
+
+def _save_overlay_layout() -> None:
+    try:
+        OVERLAY_LAYOUT_FILE.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temp_file = OVERLAY_LAYOUT_FILE.with_suffix(
+            OVERLAY_LAYOUT_FILE.suffix + ".tmp"
+        )
+
+        temp_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "elements": _overlay_layout,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        os.replace(
+            temp_file,
+            OVERLAY_LAYOUT_FILE,
+        )
+
+    except Exception as exc:
+        print(
+            "[DART] Overlay-Layout konnte nicht "
+            f"gespeichert werden: {exc}"
+        )
 
 
 def _load_state() -> Dict[str, Any]:
@@ -1195,6 +1362,13 @@ def _public_state_locked() -> Dict[str, Any]:
 
         "shop": shop,
 
+        "overlay_layout": deepcopy(
+            _overlay_layout
+        ),
+        "overlay_layout_defaults": (
+            _overlay_layout_defaults()
+        ),
+
         "matches": [
             _public_match(match)
             for match in reversed(
@@ -1690,6 +1864,7 @@ def _request_can_control(
 
 
 _state = _load_state()
+_overlay_layout = _load_overlay_layout()
 _reconcile_running_timers_locked(
     save=True
 )
@@ -1799,6 +1974,7 @@ async def _process_message(
 ) -> None:
     global _state
     global _auto_popup_cursor_seconds
+    global _overlay_layout
 
     msg_type = message.get("type")
 
@@ -1808,6 +1984,67 @@ async def _process_message(
             await _broadcast_state()
         else:
             await _send_error(ws, error or "Shop-Aktion fehlgeschlagen.")
+        return
+
+    if msg_type == "overlay_layout_save":
+        requested = message.get("layout")
+
+        if not isinstance(requested, dict):
+            await _send_error(
+                ws,
+                "Ungültiges Overlay-Layout.",
+            )
+            return
+
+        _overlay_layout = _sanitize_overlay_layout(
+            requested
+        )
+        _save_overlay_layout()
+
+        await _broadcast_state()
+        await _send_ack(
+            ws,
+            {
+                "type": "overlay_layout_saved",
+                "message": "Overlay-Layout live übernommen.",
+            },
+        )
+        return
+
+    if msg_type == "overlay_layout_reset":
+        key = str(
+            message.get("key", "")
+        ).strip()
+
+        if key:
+            if key not in OVERLAY_LAYOUT_DEFAULTS:
+                await _send_error(
+                    ws,
+                    "Unbekanntes Overlay-Element.",
+                )
+                return
+
+            updated = deepcopy(
+                _overlay_layout
+            )
+            updated[key] = deepcopy(
+                OVERLAY_LAYOUT_DEFAULTS[key]
+            )
+            _overlay_layout = updated
+        else:
+            _overlay_layout = (
+                _overlay_layout_defaults()
+            )
+
+        _save_overlay_layout()
+        await _broadcast_state()
+        await _send_ack(
+            ws,
+            {
+                "type": "overlay_layout_saved",
+                "message": "Overlay-Layout zurückgesetzt.",
+            },
+        )
         return
 
     if msg_type == "stream_action":
