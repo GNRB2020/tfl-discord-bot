@@ -96,7 +96,8 @@ class ShopManager:
 
     def _default_state(self) -> Dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
+            "test_mode": False,
             "items": [],
             "orders": [],
             "next_item_id": 1,
@@ -117,6 +118,8 @@ class ShopManager:
         state = self._default_state()
         if not isinstance(raw, dict):
             return state
+
+        state["test_mode"] = bool(raw.get("test_mode", False))
 
         items: list[Dict[str, Any]] = []
         for item in raw.get("items", []):
@@ -214,6 +217,7 @@ class ShopManager:
             "paid_ts": float(raw.get("paid_ts", 0.0) or 0.0),
             "paypal_order_id": str(raw.get("paypal_order_id", ""))[:100],
             "capture_id": str(raw.get("capture_id", ""))[:120],
+            "is_test": bool(raw.get("is_test", False)),
         }
 
     def _save_locked(self) -> None:
@@ -275,12 +279,19 @@ class ShopManager:
             None,
         )
 
+    def _order_counts_locked(self, order: Dict[str, Any]) -> bool:
+        if order.get("is_test", False):
+            return bool(self._state.get("test_mode", False))
+        return True
+
     def _item_sales_locked(self, item_id: int) -> tuple[int, int, float]:
         now = time.time()
         paid = 0
         pending = 0
         last_paid_ts = 0.0
         for order in self._state["orders"]:
+            if not self._order_counts_locked(order):
+                continue
             if order["kind"] != "item" or order.get("item_id") != item_id:
                 continue
             if order["status"] == "paid":
@@ -341,6 +352,8 @@ class ShopManager:
         purchase_cents = 0
         donation_cents = 0
         for order in self._state["orders"]:
+            if not self._order_counts_locked(order):
+                continue
             if order["status"] != "paid":
                 continue
             if order["kind"] == "item":
@@ -359,6 +372,8 @@ class ShopManager:
     def _supporters_locked(self) -> list[Dict[str, Any]]:
         grouped: dict[str, Dict[str, Any]] = {}
         for order in self._state["orders"]:
+            if not self._order_counts_locked(order):
+                continue
             if order["status"] != "paid":
                 continue
             display_name = (order.get("display_name") or "").strip()
@@ -394,6 +409,8 @@ class ShopManager:
 
         public_orders: list[Dict[str, Any]] = []
         for order in reversed(self._state["orders"]):
+            if not self._order_counts_locked(order):
+                continue
             if order["status"] != "paid":
                 continue
             public_orders.append({
@@ -409,6 +426,7 @@ class ShopManager:
                 "paid_at": order["paid_at"],
                 "paid_ts": order["paid_ts"],
                 "task_status": order["task_status"],
+                "is_test": bool(order.get("is_test", False)),
             })
             if len(public_orders) >= 100:
                 break
@@ -419,6 +437,7 @@ class ShopManager:
             if order["kind"] == "item" and order["task_status"] in {"open", "in_progress"}
         ]
         return {
+            "test_mode": bool(self._state.get("test_mode", False)),
             "paypal_configured": self.paypal_configured,
             "webhook_configured": self.webhook_configured,
             "paypal_mode": self.paypal_mode,
@@ -446,9 +465,35 @@ class ShopManager:
             if msg_type == "shop_task_status":
                 await self._set_task_status(message)
                 return True, ""
+            if msg_type == "shop_test_mode":
+                await self._set_test_mode(message)
+                return True, ""
+            if msg_type == "shop_test_reset":
+                await self._reset_test_data()
+                return True, ""
         except ShopError as exc:
             return False, str(exc)
         return False, "Unbekannte Shop-Aktion."
+
+    async def _set_test_mode(self, message: Dict[str, Any]) -> None:
+        enabled = bool(message.get("enabled", False))
+        async with self._lock:
+            self._state["test_mode"] = enabled
+            self._save_locked()
+
+    async def _reset_test_data(self) -> None:
+        async with self._lock:
+            self._state["orders"] = [
+                order
+                for order in self._state["orders"]
+                if not order.get("is_test", False)
+            ]
+            max_order = max(
+                (int(order["id"]) for order in self._state["orders"]),
+                default=0,
+            )
+            self._state["next_order_id"] = max_order + 1
+            self._save_locked()
 
     async def _save_item(self, message: Dict[str, Any]) -> None:
         name = str(message.get("name", "")).strip()
@@ -720,6 +765,7 @@ class ShopManager:
                 "paid_ts": 0.0,
                 "paypal_order_id": "",
                 "capture_id": "",
+                "is_test": False,
             }
             self._state["orders"].append(order)
             self._save_locked()
@@ -802,9 +848,51 @@ class ShopManager:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    async def _complete_test_order(
+        self,
+        local_order_id: int,
+    ) -> Dict[str, Any] | None:
+        synthetic_order_id = (
+            f"TEST-ORDER-{local_order_id}-"
+            f"{secrets.token_hex(4).upper()}"
+        )
+        synthetic_capture_id = (
+            f"TEST-CAPTURE-{local_order_id}-"
+            f"{secrets.token_hex(4).upper()}"
+        )
+
+        async with self._lock:
+            order = next(
+                (
+                    entry
+                    for entry in self._state["orders"]
+                    if entry["id"] == local_order_id
+                ),
+                None,
+            )
+            if not order:
+                return None
+            if order["status"] != "created":
+                return deepcopy(order)
+            order["paypal_order_id"] = synthetic_order_id
+            order["is_test"] = True
+            self._save_locked()
+
+        return await self._mark_paid(
+            synthetic_order_id,
+            synthetic_capture_id,
+        )
+
     async def create_order(self, request: web.Request) -> web.Response:
-        if not self.paypal_configured:
-            return web.json_response({"ok": False, "error": "PayPal ist noch nicht konfiguriert."}, status=503)
+        test_mode = bool(self._state.get("test_mode", False))
+        if not test_mode and not self.paypal_configured:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "PayPal ist noch nicht konfiguriert.",
+                },
+                status=503,
+            )
         try:
             data = await request.json()
         except Exception:
@@ -830,6 +918,23 @@ class ShopManager:
                 display_name,
                 message,
             )
+
+            if test_mode:
+                completed = await self._complete_test_order(
+                    int(order["id"])
+                )
+                if not completed:
+                    raise ShopError(
+                        "Testkauf konnte nicht abgeschlossen werden."
+                    )
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "test_completed": True,
+                        "order_id": int(order["id"]),
+                    }
+                )
+
             try:
                 approval_url = await self._create_paypal_order(request, order)
             except Exception:
