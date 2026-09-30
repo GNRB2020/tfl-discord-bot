@@ -1,0 +1,40 @@
+:root{
+  color-scheme:dark;
+  --bg:#05080d;
+  --panel:#0d151f;
+  --panel2:#121e2b;
+  --line:#2c4159;
+  --text:#f7f9fc;
+  --muted:#93a0b2;
+  --gold:#ffbd24;
+  --red:#ff514b;
+  --blue:#4da5ff;
+  --green:#38d982;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:radial-gradient(circle at 12% 8%,rgba(192,32,18,.17),transparent 30%),radial-gradient(circle at 88% 8%,rgba(20,100,240,.16),transparent 31%),var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+button,input{font:inherit}
+button{cursor:pointer}
+.shop-shell{width:min(1280px,calc(100% - 28px));margin:0 auto;padding:22px 0 34px}
+.shop-hero{position:relative;overflow:hidden;padding:34px 36px;border:1px solid var(--line);border-radius:24px;background:linear-gradient(135deg,rgba(24,36,52,.98),rgba(7,12,19,.98));box-shadow:0 18px 52px rgba(0,0,0,.35)}
+.shop-hero:after{content:"";position:absolute;right:-80px;top:-130px;width:360px;height:360px;border-radius:50%;background:radial-gradient(circle,rgba(255,189,36,.18),transparent 66%);pointer-events:none}
+.shop-kicker,.section-heading span,.donation-copy>span{font-size:11px;font-weight:950;letter-spacing:.15em;color:var(--gold)}
+.shop-hero h1{margin:5px 0 7px;font-size:clamp(34px,6vw,66px);line-height:.95;letter-spacing:.025em}
+.shop-hero p{margin:0;max-width:720px;color:#bec7d4;font-size:16px}
+.shop-total-box{position:absolute;right:34px;bottom:28px;text-align:right;z-index:2}
+.shop-total-box span{display:block;color:var(--muted);font-size:11px;font-weight:900;letter-spacing:.1em}
+.shop-total-box strong{display:block;margin-top:4px;color:#fff;font-size:38px;font-variant-numeric:tabular-nums;text-shadow:0 0 22px rgba(255,189,36,.18)}
+.payment-notice{margin-top:14px;padding:13px 16px;border-radius:12px;border:1px solid #36506b;background:#0d1a27;font-weight:800}
+.payment-notice.success{border-color:#2f9c61;color:#8af0b4}.payment-notice.error{border-color:#a52e36;color:#ff9ea3}.payment-notice.warning{border-color:#a27520;color:#ffd46e}
+.hidden{display:none!important}
+.buyer-card{display:grid;grid-template-columns:.7fr 1.3fr;gap:12px;margin-top:14px;padding:14px;border:1px solid var(--line);border-radius:16px;background:rgba(12,20,30,.94)}
+.buyer-card label{display:block;margin-bottom:5px;color:var(--muted);font-size:10px;font-weight:950;letter-spacing:.09em}.buyer-card label em{font-style:normal;font-weight:600;text-transform:none;letter-spacing:0}
+.buyer-card input,.custom-donation input{width:100%;height:44px;border:1px solid #344b65;border-radius:10px;background:#08111a;color:#fff;padding:0 12px;outline:none}.buyer-card input:focus,.custom-donation input:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(255,189,36,.10)}
+.shop-section{margin-top:24px}.section-heading{display:flex;justify-content:space-between;gap:20px;align-items:flex-end;margin-bottom:12px}.section-heading h2,.donation-copy h2{margin:2px 0 0;font-size:27px}
+.status-pill{padding:7px 10px;border-radius:999px;background:#13202d;border:1px solid #31465e;color:#c5cfda;font-size:10px;font-weight:900}.status-pill.ok{border-color:#278651;color:#6ee9a0}.status-pill.bad{border-color:#9c3138;color:#ff8d94}
+.item-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.item-card{display:flex;flex-direction:column;min-height:285px;padding:17px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,rgba(19,30,43,.98),rgba(8,14,21,.98));box-shadow:0 10px 30px rgba(0,0,0,.22)}
+.item-card.unavailable{opacity:.7}.item-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.item-icon{display:grid;place-items:center;width:46px;height:46px;border-radius:13px;background:#0a121c;border:1px solid #324860;font-size:25px}.target-badge{padding:6px 8px;border-radius:999px;background:#172637;border:1px solid #314961;color:#d7e0eb;font-size:9px;font-weight:950;text-transform:uppercase}.item-card h3{margin:12px 0 5px;font-size:21px}.item-description{margin:0;color:#aeb9c8;line-height:1.42;font-size:13px;min-height:58px}.item-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.meta-pill{padding:5px 7px;border-radius:7px;background:#09131d;border:1px solid #263a50;color:#aeb9c8;font-size:9px;font-weight:850}.item-buy-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:auto;padding-top:15px;border-top:1px solid rgba(255,255,255,.07)}.item-price{font-size:24px;font-weight:950;color:#fff}.buy-button,.quick-donations button,.custom-donation button{border:0;border-radius:10px;color:#171006;background:linear-gradient(#ffd04f,#e99a05);font-weight:950;min-height:42px;padding:0 14px}.buy-button:disabled{cursor:not-allowed;background:#293746;color:#7f8a98}.empty-shop{grid-column:1/-1;padding:36px;border:1px dashed #344a63;border-radius:16px;text-align:center;color:var(--muted)}
+.donation-section{display:grid;grid-template-columns:.8fr 1.2fr;gap:24px;align-items:center;margin-top:24px;padding:24px;border:1px solid #5e4820;border-radius:20px;background:linear-gradient(135deg,rgba(91,62,12,.15),rgba(14,20,29,.98))}.donation-copy p{margin:8px 0 0;color:#aeb9c8;line-height:1.4}.quick-donations{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.quick-donations button{font-size:16px}.custom-donation{display:grid;grid-template-columns:1fr auto;gap:7px;margin-top:8px}.custom-donation button{min-width:190px}.shop-footer{padding:20px 6px 0;color:#77869a;text-align:center;font-size:11px}.shop-toast{position:fixed;right:20px;bottom:20px;max-width:480px;padding:13px 16px;border:1px solid #40556e;border-radius:12px;background:#0f1a27;color:#fff;box-shadow:0 15px 44px rgba(0,0,0,.45);z-index:1000}
+@media(max-width:900px){.shop-total-box{position:static;text-align:left;margin-top:20px}.buyer-card,.donation-section{grid-template-columns:1fr}.item-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:620px){.shop-shell{width:min(100% - 18px,1280px);padding-top:10px}.shop-hero{padding:24px 20px}.item-grid{grid-template-columns:1fr}.buyer-card{grid-template-columns:1fr}.section-heading{align-items:flex-start;flex-direction:column}.quick-donations{grid-template-columns:1fr 1fr}.custom-donation{grid-template-columns:1fr}.custom-donation button{min-width:0}.donation-section{padding:18px}}

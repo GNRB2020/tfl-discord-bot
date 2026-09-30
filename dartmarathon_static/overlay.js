@@ -171,7 +171,7 @@
     );
 
     $("endDonations").textContent = (
-      `${Number(state.own_donations || 0).toLocaleString(
+      `${(Number(state.shop?.event_total_cents || 0) / 100).toLocaleString(
         "de-DE",
         {
           minimumFractionDigits: 2,
@@ -289,7 +289,7 @@
     const image = $("adPopupImage");
 
     image.src = (
-      `${message.image}?v=5.3.0&t=${Date.now()}`
+      `${message.image}?v=6.0.0&t=${Date.now()}`
     );
 
     image.alt = (

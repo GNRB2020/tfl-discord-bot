@@ -312,3 +312,30 @@ button{touch-action:manipulation}
   font-size:12px;
   font-weight:900;
 }
+
+/* V6.0 – Foltershop im Control Center */
+.tabs{grid-template-columns:1fr 1fr 1.15fr .7fr}
+.shop-alert-button{background:linear-gradient(#5a2ca8,#35166d);border:1px solid #7348bd;font-size:10px;white-space:nowrap}
+.shop-alert-button.has-open{background:linear-gradient(#ff5d3c,#b92620);border-color:#ff7d61}
+.shop-pulse{animation:shopPulse .75s ease-in-out infinite alternate}
+.tab-badge.hot{background:#6d2930;color:#ffced1}
+.shop-admin-panel{overflow:auto}
+.shop-admin-toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:7px}
+.shop-admin-summary{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:5px;flex:1}
+.shop-admin-summary>div{padding:6px 8px;border:1px solid #293d54;border-radius:8px;background:#08121c;text-align:center}
+.shop-admin-summary>div.grand{border-color:#8f6a16;background:rgba(110,75,10,.14)}
+.shop-admin-summary span{display:block;color:var(--muted);font-size:7px;font-weight:950;letter-spacing:.06em}
+.shop-admin-summary strong{display:block;margin-top:2px;font-size:15px;font-variant-numeric:tabular-nums}
+.shop-admin-links{display:flex;align-items:center;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+.shop-config-pill{padding:5px 7px;border-radius:999px;border:1px solid #40546d;color:#bcc8d7;font-size:8px;font-weight:950}.shop-config-pill.ok{border-color:#2d8856;color:#75e9a4}.shop-config-pill.bad{border-color:#97343b;color:#ff8f96}
+.shop-admin-grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:minmax(120px,1fr) minmax(100px,.9fr);gap:7px;height:calc(100% - 48px);min-height:250px}
+.shop-admin-box{min-height:0;border:1px solid var(--line-soft);border-radius:9px;background:#071019;padding:7px;overflow:hidden}
+.shop-box-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px}.shop-box-head strong{font-size:9px;letter-spacing:.08em}.shop-box-head span{color:var(--muted);font-size:7px}
+.shop-scroll{height:calc(100% - 20px);overflow:auto}
+.shop-task-row,.shop-item-row,.shop-payment-row{display:grid;gap:6px;align-items:center;padding:6px;border-bottom:1px solid #203146;font-size:9px}
+.shop-task-row{grid-template-columns:1fr auto}.shop-task-row.running{background:rgba(255,189,36,.05)}.shop-task-main strong,.shop-task-main span,.shop-task-main em{display:block}.shop-task-main span{color:var(--muted);margin-top:2px}.shop-task-main em{color:#d5dde8;font-style:normal;margin-top:2px}.shop-task-actions{display:flex;gap:4px;align-items:center}.task-live{padding:4px 6px;border-radius:6px;background:#775a13;color:#ffd66e;font-weight:950}
+.shop-item-row{grid-template-columns:26px 1fr auto}.shop-item-row.inactive{opacity:.55}.shop-item-icon{font-size:18px;text-align:center}.shop-item-main strong,.shop-item-main span{display:block}.shop-item-main span{color:var(--muted);margin-top:2px}.shop-item-actions{display:flex;gap:3px}
+.shop-payment-row{grid-template-columns:1fr auto}.shop-payment-row strong,.shop-payment-row span{display:block}.shop-payment-row span{color:var(--muted);margin-top:2px}.payment-task{padding:4px 6px!important;border-radius:6px;background:#25384d!important;color:#d8e3ef!important;font-size:7px!important;font-weight:950}.payment-task.done{background:#17482d!important;color:#7ee6a6!important}.payment-task.in_progress{background:#6a5016!important;color:#ffd677!important}.payment-task.open{background:#702b30!important;color:#ffadb1!important}
+.editor-box{grid-column:1/-1;grid-row:1/-1;z-index:3;background:#0a141f}.shop-item-form{display:grid;grid-template-columns:1.4fr .5fr .6fr .8fr .8fr .8fr;gap:5px}.shop-item-form input,.shop-item-form select{height:31px;min-width:0;border-radius:7px;border:1px solid #314760;background:#0d1824;color:#fff;padding:0 7px;font-size:9px;outline:none}.shop-item-form .wide{grid-column:span 3}.shop-check{display:flex;align-items:center;gap:6px;font-size:9px;font-weight:900}.shop-check input{width:15px;height:15px}.shop-empty{padding:16px;text-align:center;color:var(--muted);font-size:9px}
+@keyframes shopPulse{from{filter:brightness(1)}to{filter:brightness(1.45);box-shadow:0 0 16px rgba(255,75,50,.48)}}
+@media(max-width:1320px){.shop-admin-grid{grid-template-columns:1fr;height:auto}.shop-admin-box{min-height:180px}.shop-admin-summary{grid-template-columns:repeat(2,1fr)}.shop-item-form{grid-template-columns:1fr 1fr}.shop-item-form .wide{grid-column:span 2}.editor-box{grid-column:auto;grid-row:auto}}

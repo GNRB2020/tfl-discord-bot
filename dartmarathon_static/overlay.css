@@ -525,3 +525,141 @@ body{
   color:#aeb9c8;
   font-size:18px;
 }
+
+/* V6.0 – Foltershop-Spendentopf, Unterstützer-Laufband und Kauf-Popups */
+.event-money-value{
+  left:1322px;
+  width:282px;
+  font-size:34px;
+  font-weight:750;
+  white-space:nowrap;
+}
+.support-ticker{
+  position:absolute;
+  left:52px;
+  top:918px;
+  width:474px;
+  height:38px;
+  overflow:hidden;
+  display:flex;
+  align-items:center;
+  z-index:95;
+  border-radius:8px;
+  background:rgba(5,9,14,.82);
+  border:1px solid rgba(255,189,36,.42);
+  box-shadow:0 5px 18px rgba(0,0,0,.32);
+}
+.support-track{
+  display:flex;
+  width:max-content;
+  min-width:max-content;
+  animation:supportTickerMove 34s linear infinite;
+  will-change:transform;
+}
+.support-set{
+  display:flex;
+  align-items:center;
+  gap:0;
+  white-space:nowrap;
+  padding-right:50px;
+}
+.support-entry{
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  padding:0 15px;
+  color:#f6f8fb;
+  font-size:17px;
+  font-weight:850;
+  text-shadow:0 2px 5px rgba(0,0,0,.85);
+}
+.support-entry b{
+  color:#ffbd24;
+  font-variant-numeric:tabular-nums;
+}
+.support-entry:after{
+  content:"•";
+  margin-left:15px;
+  color:#68798c;
+}
+.support-empty{
+  padding:0 20px;
+  color:#c8d0da;
+  font-size:15px;
+  font-weight:850;
+  letter-spacing:.05em;
+}
+.shop-action-popup{
+  position:absolute;
+  inset:0;
+  z-index:110;
+  pointer-events:none;
+}
+.shop-action-card{
+  position:absolute;
+  top:85px;
+  left:50%;
+  transform:translateX(-50%);
+  width:760px;
+  min-height:300px;
+  padding:24px 30px;
+  border-radius:24px;
+  border:4px solid #ffbd24;
+  background:
+    radial-gradient(circle at 50% 0%,rgba(136,68,250,.25),transparent 48%),
+    linear-gradient(180deg,rgba(18,20,31,.985),rgba(4,7,12,.985));
+  box-shadow:0 0 75px rgba(255,144,0,.45),0 18px 60px rgba(0,0,0,.5);
+  text-align:center;
+  animation:shopPopupIn .38s ease-out;
+}
+.shop-action-kicker{
+  color:#c9d2de;
+  font-size:15px;
+  font-weight:950;
+  letter-spacing:.2em;
+}
+.shop-action-amount{
+  margin-top:8px;
+  color:#ffbd24;
+  font-size:48px;
+  font-weight:950;
+  font-variant-numeric:tabular-nums;
+}
+.shop-action-title{
+  margin-top:4px;
+  color:#fff;
+  font-size:35px;
+  font-weight:950;
+  line-height:1.05;
+}
+.shop-action-text{
+  margin:13px auto 0;
+  max-width:680px;
+  color:#f2f5f9;
+  font-size:25px;
+  line-height:1.22;
+  font-weight:850;
+}
+.shop-action-buyer{
+  margin-top:16px;
+  color:#aebac9;
+  font-size:18px;
+  font-weight:800;
+}
+.shop-action-message{
+  margin:12px auto 0;
+  max-width:650px;
+  padding-top:12px;
+  border-top:1px solid rgba(255,255,255,.14);
+  color:#e3e9f0;
+  font-size:18px;
+  font-style:italic;
+}
+@keyframes supportTickerMove{
+  from{transform:translateX(0)}
+  to{transform:translateX(-50%)}
+}
+@keyframes shopPopupIn{
+  from{opacity:0;transform:translateX(-50%) translateY(-16px) scale(.96)}
+  to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}
+}
