@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Overlay Vorschau</title>
-  <link rel="stylesheet" href="/dartmarathon/static/overlay.css?v=6.6.0">
+  <link rel="stylesheet" href="/dartmarathon/static/overlay.css?v=6.7.0">
 </head>
 <body class="preview-body">
   <div class="preview-stage">
@@ -28,7 +28,7 @@
     </div>
 
     <div id="pauseCenter" class="pause-center hidden">
-      <div class="pause-center-inner">
+      <div id="pauseCenterCard" class="pause-center-inner">
         <div class="pause-kicker">PAUSE</div>
         <div id="pauseCenterTime" class="pause-center-time">15:00</div>
         <div class="pause-caption">VERBLEIBENDES PAUSENGUTHABEN</div>
@@ -38,7 +38,7 @@
 
     <div id="pauseExtras" class="pause-extras hidden">
       <section id="pauseResultsSpecials" class="pause-extra-view hidden">
-        <div class="pause-side-card pause-side-left">
+        <div id="pauseResultsCard" class="pause-side-card pause-side-left">
           <div class="pause-extra-kicker">PAUSENRÜCKBLICK</div>
           <h2>ALLE ERGEBNISSE</h2>
           <div id="pauseResultsViewport" class="pause-scroll-viewport">
@@ -46,7 +46,7 @@
           </div>
         </div>
 
-        <div class="pause-side-card pause-side-right">
+        <div id="pauseSpecialsCard" class="pause-side-card pause-side-right">
           <div class="pause-extra-kicker">EVENTÜBERSICHT</div>
           <h2>ALLE SPECIALS</h2>
 
@@ -69,7 +69,7 @@
       </section>
 
       <section id="pauseSupporters" class="pause-extra-view hidden">
-        <div class="pause-side-card pause-side-right pause-supporter-card">
+        <div id="pauseSupportersCard" class="pause-side-card pause-side-right pause-supporter-card">
           <div class="pause-extra-kicker">FOLTERSHOP &amp; SPENDENTOPF</div>
           <h2>KÄUFER &amp; SPENDER</h2>
           <div id="pauseSupportersViewport" class="pause-credits-viewport">
@@ -79,7 +79,7 @@
       </section>
 
       <section id="pauseAd" class="pause-extra-view hidden">
-        <div class="pause-side-card pause-side-right pause-ad-card">
+        <div id="pauseAdCard" class="pause-side-card pause-side-right pause-ad-card">
           <div id="pauseAdKicker" class="pause-extra-kicker">UNTERSTÜTZER</div>
           <div class="pause-ad-image-wrap">
             <img id="pauseAdImage" alt="Werbeeinblendung">
@@ -89,13 +89,13 @@
     </div>
 
     <div id="adPopup" class="popup-layer hidden">
-      <div class="popup-card right-popup ad-card">
+      <div id="adPopupCard" class="popup-card right-popup ad-card">
         <img id="adPopupImage" alt="Werbeeinblendung">
       </div>
     </div>
 
     <div id="recentPopup" class="popup-layer hidden">
-      <div class="popup-card right-popup recent-card">
+      <div id="recentPopupCard" class="popup-card right-popup recent-card">
         <div class="popup-kicker">MATCHHISTORIE</div>
         <h2>LETZTE 5 SPIELE</h2>
         <div id="recentMatchesList" class="recent-list"></div>
@@ -103,13 +103,13 @@
     </div>
 
     <div id="specialsPopup" class="popup-layer hidden">
-      <div class="popup-card player-popup left-player-popup">
+      <div id="tzSpecialCard" class="popup-card player-popup left-player-popup">
         <div class="popup-kicker">EVENT-SPECIALS</div>
         <h2 id="tzSpecialTitle">TZMARTY</h2>
         <div id="tzSpecialPopup"></div>
       </div>
 
-      <div class="popup-card player-popup right-player-popup">
+      <div id="koSpecialCard" class="popup-card player-popup right-player-popup">
         <div class="popup-kicker">EVENT-SPECIALS</div>
         <h2 id="koSpecialTitle">KORSAR</h2>
         <div id="koSpecialPopup"></div>
@@ -117,7 +117,7 @@
     </div>
 
     <div id="statsPopup" class="popup-layer hidden">
-      <div class="popup-card right-popup stats-popup-card">
+      <div id="statsPopupCard" class="popup-card right-popup stats-popup-card">
         <div class="popup-kicker">DARTMARATHON</div>
         <h2 id="statsPopupTitle">EVENT-KENNZAHLEN</h2>
 
@@ -148,7 +148,7 @@
     </div>
 
     <div id="eventEnded" class="event-ended hidden">
-      <div class="event-final">
+      <div id="eventFinalCard" class="event-final">
         <div class="final-header">
           <div>
             <div class="event-ended-kicker">ZEIT ABGELAUFEN · DARTMARATHON BEENDET</div>
@@ -203,7 +203,7 @@
     </div>
   </div>
 
-  <script src="/dartmarathon/static/overlay.js?v=6.6.0"></script>
-  <script src="/dartmarathon/static/shop-overlay.js?v=6.6.0"></script>
+  <script src="/dartmarathon/static/overlay.js?v=6.7.0"></script>
+  <script src="/dartmarathon/static/shop-overlay.js?v=6.7.0"></script>
 </body>
 </html>
