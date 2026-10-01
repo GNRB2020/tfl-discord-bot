@@ -1171,3 +1171,54 @@ body{
     );
   }
 }
+
+
+/* V6.7 – alle Popups/Werbeeinblendungen layoutfähig */
+#pauseCenterCard,
+#adPopupCard,
+#recentPopupCard,
+#tzSpecialCard,
+#koSpecialCard,
+#statsPopupCard,
+#pauseResultsCard,
+#pauseSpecialsCard,
+#pauseSupportersCard,
+#pauseAdCard,
+#eventFinalCard{
+  box-sizing:border-box;
+}
+
+#pauseCenterCard,
+#eventFinalCard{
+  position:absolute;
+}
+
+/* Breite/Höhe werden bei diesen Karten nun durch das Overlay-Layout bestimmt. */
+#adPopupCard,
+#recentPopupCard,
+#tzSpecialCard,
+#koSpecialCard,
+#statsPopupCard,
+#pauseResultsCard,
+#pauseSpecialsCard,
+#pauseSupportersCard,
+#pauseAdCard{
+  right:auto;
+  bottom:auto;
+}
+
+/* Ticker V6.7: beliebige Breite, nahtlose Wiederholung ohne Neustart in der Mitte. */
+.support-track{
+  animation:none!important;
+  transform:translateX(0);
+}
+.support-track.ticker-running{
+  animation:supportTickerSeamless var(--support-duration,20s) linear infinite!important;
+}
+.support-set{
+  flex:0 0 auto;
+}
+@keyframes supportTickerSeamless{
+  from{transform:translateX(0)}
+  to{transform:translateX(calc(-1 * var(--support-shift,600px)))}
+}

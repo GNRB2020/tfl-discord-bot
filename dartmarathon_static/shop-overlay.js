@@ -2,6 +2,9 @@
   let ws = null;
   let retryTimer = null;
   let supporterSignature = "";
+  let supporterHtml = "";
+  let tickerLayoutSignature = "";
+  let tickerRebuildTimer = null;
   let bannerTimer = null;
   let bannerBusy = false;
   const bannerQueue = [];
@@ -25,7 +28,82 @@
     }) + " €";
   }
 
-  function renderSupporters(shop) {
+  function buildSupportTicker() {
+    const ticker = $("supportTicker");
+    const track = $("supportTrack");
+
+    if (!ticker || !track || !supporterHtml) return;
+
+    clearTimeout(tickerRebuildTimer);
+
+    track.classList.remove("ticker-running");
+    track.style.animation = "none";
+    track.innerHTML = (
+      `<div class="support-set support-master">${supporterHtml}</div>`
+    );
+
+    requestAnimationFrame(() => {
+      const master = track.querySelector(".support-master");
+      if (!master) return;
+
+      const viewportWidth = Math.max(
+        1,
+        ticker.getBoundingClientRect().width
+      );
+
+      const masterWidth = Math.max(
+        1,
+        master.getBoundingClientRect().width
+      );
+
+      // Immer genug Kopien hintereinander, sodass auch bei 1920px Breite
+      // niemals eine Lücke bzw. ein sichtbarer Neustart in der Mitte entsteht.
+      const copies = Math.max(
+        3,
+        Math.ceil(viewportWidth / masterWidth) + 3
+      );
+
+      track.innerHTML = Array.from(
+        {length:copies},
+        (_, index) => (
+          `<div class="support-set" ${index ? 'aria-hidden="true"' : ''}>${supporterHtml}</div>`
+        )
+      ).join("");
+
+      // Exakt um die Breite EINER Kopie verschieben. Da alle Kopien gleich
+      // sind, ist der Sprung am Animationsende optisch unsichtbar.
+      track.style.setProperty(
+        "--support-shift",
+        `${masterWidth}px`
+      );
+
+      // Konstante Lesegeschwindigkeit statt fixer Laufzeit.
+      const pixelsPerSecond = 62;
+      const duration = Math.max(
+        8,
+        masterWidth / pixelsPerSecond
+      );
+
+      track.style.setProperty(
+        "--support-duration",
+        `${duration.toFixed(2)}s`
+      );
+
+      track.style.animation = "";
+      void track.offsetWidth;
+      track.classList.add("ticker-running");
+    });
+  }
+
+  function scheduleTickerRebuild() {
+    clearTimeout(tickerRebuildTimer);
+    tickerRebuildTimer = setTimeout(
+      buildSupportTicker,
+      80
+    );
+  }
+
+  function renderSupporters(shop, tickerLayout) {
     $("ovEventMoney").textContent = euro(
       shop?.event_total_cents || 0
     );
@@ -38,24 +116,30 @@
       .map((supporter) => `${supporter.name}:${supporter.amount_cents}`)
       .join("|");
 
-    if (signature === supporterSignature) return;
-    supporterSignature = signature;
+    const layoutSignature = JSON.stringify(
+      tickerLayout || {}
+    );
 
-    const setHtml = supporters.length
+    if (
+      signature === supporterSignature
+      && layoutSignature === tickerLayoutSignature
+    ) {
+      return;
+    }
+
+    supporterSignature = signature;
+    tickerLayoutSignature = layoutSignature;
+
+    supporterHtml = supporters.length
       ? supporters.map(
           (supporter) =>
             `<span class="support-entry">${escapeHtml(supporter.name)} <b>${euro(supporter.amount_cents)}</b></span>`
         ).join("")
       : '<span class="support-empty">FOLTERSHOP &amp; SPENDENTOPF · NOCH KEINE UNTERSTÜTZER</span>';
 
-    $("supportTrack").innerHTML =
-      `<div class="support-set">${setHtml}</div>`
-      + `<div class="support-set" aria-hidden="true">${setHtml}</div>`;
-
-    $("supportTrack").style.animation = "none";
-    void $("supportTrack").offsetWidth;
-    $("supportTrack").style.animation = "";
+    scheduleTickerRebuild();
   }
+
 
   function enqueueShopBanner(message) {
     bannerQueue.push(message);
@@ -165,7 +249,8 @@
         const state = message.data || {};
 
         renderSupporters(
-          state.shop || {}
+          state.shop || {},
+          state.overlay_layout?.support_ticker || {}
         );
 
         const ticker = $("supportTicker");
@@ -197,6 +282,19 @@
         ws.close();
       } catch (_) {}
     };
+  }
+
+  if (typeof ResizeObserver !== "undefined") {
+    const tickerObserver = new ResizeObserver(() => {
+      if (supporterHtml) {
+        scheduleTickerRebuild();
+      }
+    });
+
+    const ticker = $("supportTicker");
+    if (ticker) {
+      tickerObserver.observe(ticker);
+    }
   }
 
   connect();

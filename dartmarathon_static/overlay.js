@@ -35,6 +35,17 @@
     stream_time:"ovStream",
     support_ticker:"supportTicker",
     shop_banner:"shopActionPopup",
+    pause_center_popup:"pauseCenterCard",
+    ad_popup:"adPopupCard",
+    recent_matches_popup:"recentPopupCard",
+    specials_tzmarty_popup:"tzSpecialCard",
+    specials_korsar_popup:"koSpecialCard",
+    stats_popup:"statsPopupCard",
+    pause_results_popup:"pauseResultsCard",
+    pause_specials_popup:"pauseSpecialsCard",
+    pause_supporters_popup:"pauseSupportersCard",
+    pause_ad_popup:"pauseAdCard",
+    event_final:"eventFinalCard",
   };
 
   function applyOverlayLayout(layout) {
@@ -89,6 +100,20 @@
           card.style.width = "100%";
           card.style.height = "100%";
         }
+      }
+
+      if (
+        key.endsWith("_popup")
+        || key === "event_final"
+      ) {
+        element.style.position = "absolute";
+        element.style.minWidth = "0";
+        element.style.maxWidth = "none";
+        element.style.minHeight = "0";
+        element.style.maxHeight = "none";
+        element.style.boxSizing = "border-box";
+        element.style.transform = "none";
+        element.style.margin = "0";
       }
     }
   }

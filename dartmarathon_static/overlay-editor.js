@@ -13,6 +13,17 @@
     stream_time:{label:"Streamlaufzeit",sample:"12:34:56",tone:"blue"},
     support_ticker:{label:"Unterstützer-Laufband",sample:"GNRB 25,00 € • RobG92 10,00 €",tone:"gold"},
     shop_banner:{label:"Shop-/Spendenbanner",sample:"FOLTERSHOP · Darts tauschen · 5,00 €",tone:"purple"},
+    pause_center_popup:{label:"Pause – Hauptfenster",sample:"PAUSE · 15:00",tone:"green"},
+    ad_popup:{label:"Werbung – normale Einblendung",sample:"WERBUNG · KOALA / MALTESER / FOLTERSHOP",tone:"purple"},
+    recent_matches_popup:{label:"Popup – letzte 5 Spiele",sample:"LETZTE 5 SPIELE",tone:"gold"},
+    specials_tzmarty_popup:{label:"Popup – Specials Tzmarty",sample:"TZMARTY · SPECIALS",tone:"red"},
+    specials_korsar_popup:{label:"Popup – Specials Korsar",sample:"KORSAR · SPECIALS",tone:"blue"},
+    stats_popup:{label:"Popup – Event-Kennzahlen",sample:"EVENT-KENNZAHLEN",tone:"gold"},
+    pause_results_popup:{label:"Pause – alle Ergebnisse",sample:"ALLE ERGEBNISSE",tone:"gold"},
+    pause_specials_popup:{label:"Pause – alle Specials",sample:"ALLE SPECIALS",tone:"purple"},
+    pause_supporters_popup:{label:"Pause – Käufer & Spender",sample:"KÄUFER & SPENDER",tone:"green"},
+    pause_ad_popup:{label:"Pause – Werbung",sample:"PAUSEN-WERBUNG",tone:"purple"},
+    event_final:{label:"Eventende – Abschlussstatistik",sample:"DIE EVENT-STATISTIK",tone:"red"},
   };
 
   let ws = null;
