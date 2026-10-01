@@ -2,6 +2,26 @@
   let ws = null;
   let retryTimer = null;
   let popupTimer = null;
+  let latestState = null;
+  let pauseCycleTimer = null;
+  let pauseCycleIndex = 0;
+  let pauseAdIndex = 0;
+  let pauseWasActive = false;
+
+  const PAUSE_ADS = [
+    {
+      label:"KOALA DARTS",
+      image:"/dartmarathon/static/ads/koala.png",
+    },
+    {
+      label:"MALTESER",
+      image:"/dartmarathon/static/ads/malteser.png",
+    },
+    {
+      label:"FOLTERSHOP",
+      image:"/dartmarathon/static/ads/foltershop.png",
+    },
+  ];
 
   const $ = (id) => document.getElementById(id);
 
@@ -294,6 +314,382 @@
     );
   }
 
+  function pauseMatchRow(match) {
+    const mode = String(
+      match?.mode_label
+      || match?.mode
+      || "Match"
+    );
+
+    const result = String(
+      match?.result_text
+      || ""
+    );
+
+    const specialTotal = Number(
+      match?.special_total || 0
+    );
+
+    return (
+      '<div class="pause-result-row">'
+      + `<span class="pause-result-id">#${Number(match?.id || 0)}</span>`
+      + `<span class="pause-result-mode">${escapeHtml(mode)}</span>`
+      + `<strong class="pause-result-score">${escapeHtml(result)}</strong>`
+      + `<span class="pause-result-specials">${specialTotal} Sp.</span>`
+      + "</div>"
+    );
+  }
+
+  function pauseSpecialRows(detail) {
+    const lines = detailLines(detail);
+
+    if (!lines.length) {
+      return (
+        '<div class="pause-extra-empty">'
+        + "Noch keine Specials."
+        + "</div>"
+      );
+    }
+
+    return lines.map(
+      ([label, value]) => (
+        '<div class="pause-special-row">'
+        + `<span>${escapeHtml(label)}</span>`
+        + `<strong>${escapeHtml(value)}</strong>`
+        + "</div>"
+      )
+    ).join("");
+  }
+
+  function renderPauseResultsAndSpecials(state) {
+    const matches = Array.isArray(state?.matches)
+      ? [...state.matches].reverse()
+      : [];
+
+    $("pauseResultsTrack").innerHTML = matches.length
+      ? matches.map(pauseMatchRow).join("")
+      : (
+          '<div class="pause-extra-empty">'
+          + "Noch keine Matches gespeichert."
+          + "</div>"
+        );
+
+    $("pauseTzSpecialTotal").textContent = Number(
+      state?.player_special_totals?.tzmarty || 0
+    );
+
+    $("pauseKoSpecialTotal").textContent = Number(
+      state?.player_special_totals?.korsar || 0
+    );
+
+    $("pauseTzSpecials").innerHTML = pauseSpecialRows(
+      state?.special_detail?.tzmarty || {}
+    );
+
+    $("pauseKoSpecials").innerHTML = pauseSpecialRows(
+      state?.special_detail?.korsar || {}
+    );
+
+    requestAnimationFrame(() => {
+      const viewport = $("pauseResultsViewport");
+      const track = $("pauseResultsTrack");
+
+      track.classList.remove("scrolling");
+      track.style.animationDuration = "";
+
+      const overflow = Math.max(
+        0,
+        track.scrollHeight - viewport.clientHeight
+      );
+
+      if (overflow > 8) {
+        const duration = Math.max(
+          10,
+          Math.min(
+            34,
+            7 + matches.length * 1.05
+          )
+        );
+
+        track.style.setProperty(
+          "--pause-result-distance",
+          `${overflow}px`
+        );
+
+        track.style.animationDuration =
+          `${duration}s`;
+
+        void track.offsetWidth;
+        track.classList.add("scrolling");
+      }
+    });
+  }
+
+  function pauseOrderRows(state) {
+    const shop = state?.shop || {};
+    const orders = Array.isArray(shop.orders)
+      ? [...shop.orders].reverse()
+      : [];
+
+    const paid = orders.filter(
+      (order) => Number(order?.amount_cents || 0) > 0
+    );
+
+    const rows = paid.map((order) => {
+      const name = String(
+        order?.display_name || "Anonym"
+      );
+
+      const amount = (
+        Number(order?.amount_cents || 0) / 100
+      ).toLocaleString(
+        "de-DE",
+        {
+          minimumFractionDigits:2,
+          maximumFractionDigits:2,
+        }
+      ) + " €";
+
+      const action = order?.kind === "item"
+        ? String(order?.item_name || "Foltershop")
+        : "Spende";
+
+      return {
+        name,
+        action,
+        amount,
+      };
+    });
+
+    const own = Number(
+      state?.own_donations || 0
+    );
+
+    if (own > 0) {
+      rows.push({
+        name:"Tzmarty & Korsar",
+        action:"Eigene Spenden",
+        amount:own.toLocaleString(
+          "de-DE",
+          {
+            minimumFractionDigits:2,
+            maximumFractionDigits:2,
+          }
+        ) + " €",
+      });
+    }
+
+    return rows;
+  }
+
+  function renderPauseSupporters(state) {
+    const rows = pauseOrderRows(state);
+    const track = $("pauseSupportersTrack");
+
+    track.innerHTML = rows.length
+      ? rows.map(
+          (row) => (
+            '<div class="pause-credit-row">'
+            + `<strong>${escapeHtml(row.name)}</strong>`
+            + `<span>${escapeHtml(row.action)}</span>`
+            + `<b>${escapeHtml(row.amount)}</b>`
+            + "</div>"
+          )
+        ).join("")
+      : (
+          '<div class="pause-extra-empty pause-credit-empty">'
+          + "Noch keine Käufer oder Spender."
+          + "</div>"
+        );
+
+    requestAnimationFrame(() => {
+      const viewport = $("pauseSupportersViewport");
+
+      track.classList.remove("scrolling");
+
+      const trackHeight = Math.max(
+        track.scrollHeight,
+        80
+      );
+
+      const duration = Math.max(
+        12,
+        Math.min(
+          38,
+          8 + rows.length * 1.8
+        )
+      );
+
+      track.style.setProperty(
+        "--pause-credit-start",
+        `${viewport.clientHeight}px`
+      );
+
+      track.style.setProperty(
+        "--pause-credit-end",
+        `${trackHeight}px`
+      );
+
+      track.style.animationDuration =
+        `${duration}s`;
+
+      void track.offsetWidth;
+      track.classList.add("scrolling");
+    });
+
+    return Math.max(
+      12000,
+      Math.min(
+        38000,
+        (8 + rows.length * 1.8) * 1000
+      )
+    );
+  }
+
+  function hidePauseViews() {
+    for (const id of [
+      "pauseResultsSpecials",
+      "pauseSupporters",
+      "pauseAd",
+    ]) {
+      $(id).classList.add("hidden");
+    }
+  }
+
+  function showPauseAd() {
+    const ad = PAUSE_ADS[
+      pauseAdIndex % PAUSE_ADS.length
+    ];
+
+    pauseAdIndex = (
+      pauseAdIndex + 1
+    ) % PAUSE_ADS.length;
+
+    $("pauseAdKicker").textContent =
+      ad.label;
+
+    $("pauseAdImage").src =
+      `${ad.image}?v=6.6.0`;
+
+    $("pauseAdImage").alt =
+      ad.label;
+
+    $("pauseAd").classList.remove(
+      "hidden"
+    );
+  }
+
+  function scheduleNextPauseView(
+    delayMs
+  ) {
+    clearTimeout(pauseCycleTimer);
+
+    pauseCycleTimer = setTimeout(
+      () => {
+        if (
+          latestState?.pause_active
+          && !latestState?.event_ended
+        ) {
+          showNextPauseView();
+        }
+      },
+      delayMs
+    );
+  }
+
+  function showNextPauseView() {
+    if (
+      !latestState?.pause_active
+      || latestState?.event_ended
+    ) {
+      return;
+    }
+
+    hidePauseViews();
+
+    const mode = pauseCycleIndex % 3;
+    pauseCycleIndex += 1;
+
+    if (mode === 0) {
+      renderPauseResultsAndSpecials(
+        latestState
+      );
+
+      $("pauseResultsSpecials").classList.remove(
+        "hidden"
+      );
+
+      const matchCount = Array.isArray(
+        latestState?.matches
+      )
+        ? latestState.matches.length
+        : 0;
+
+      scheduleNextPauseView(
+        Math.max(
+          15000,
+          Math.min(
+            36000,
+            (9 + matchCount * 1.05) * 1000
+          )
+        )
+      );
+
+      return;
+    }
+
+    if (mode === 1) {
+      const duration = renderPauseSupporters(
+        latestState
+      );
+
+      $("pauseSupporters").classList.remove(
+        "hidden"
+      );
+
+      scheduleNextPauseView(
+        duration
+      );
+
+      return;
+    }
+
+    showPauseAd();
+
+    scheduleNextPauseView(
+      14000
+    );
+  }
+
+  function updatePauseExtras(state) {
+    latestState = state;
+
+    const active = Boolean(
+      state?.pause_active
+      && !state?.event_ended
+    );
+
+    $("pauseExtras").classList.toggle(
+      "hidden",
+      !active
+    );
+
+    if (!active) {
+      clearTimeout(pauseCycleTimer);
+      pauseCycleTimer = null;
+      pauseWasActive = false;
+      pauseCycleIndex = 0;
+      hidePauseViews();
+      return;
+    }
+
+    if (!pauseWasActive) {
+      pauseWasActive = true;
+      pauseCycleIndex = 0;
+      showNextPauseView();
+    }
+  }
+
   function render(state) {
     if (!state) return;
 
@@ -348,6 +744,16 @@
       !state.pause_active
       || state.event_ended
     );
+
+    updatePauseExtras(state);
+
+    const supportTicker = $("supportTicker");
+    if (supportTicker) {
+      supportTicker.classList.toggle(
+        "hidden",
+        Boolean(state.event_ended)
+      );
+    }
 
     renderFinalStats(state);
 

@@ -162,9 +162,19 @@
       }
 
       if (message.type === "state") {
+        const state = message.data || {};
+
         renderSupporters(
-          message.data?.shop || {}
+          state.shop || {}
         );
+
+        const ticker = $("supportTicker");
+        if (ticker) {
+          ticker.classList.toggle(
+            "hidden",
+            Boolean(state.event_ended)
+          );
+        }
       }
 
       if (
