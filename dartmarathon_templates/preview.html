@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Overlay Vorschau</title>
-  <link rel="stylesheet" href="/dartmarathon/static/overlay.css?v=6.5.0">
+  <link rel="stylesheet" href="/dartmarathon/static/overlay.css?v=6.6.0">
 </head>
 <body class="preview-body">
   <div class="preview-stage">
@@ -33,6 +33,59 @@
         <div id="pauseCenterTime" class="pause-center-time">15:00</div>
         <div class="pause-caption">VERBLEIBENDES PAUSENGUTHABEN</div>
       </div>
+    </div>
+
+
+    <div id="pauseExtras" class="pause-extras hidden">
+      <section id="pauseResultsSpecials" class="pause-extra-view hidden">
+        <div class="pause-side-card pause-side-left">
+          <div class="pause-extra-kicker">PAUSENRÜCKBLICK</div>
+          <h2>ALLE ERGEBNISSE</h2>
+          <div id="pauseResultsViewport" class="pause-scroll-viewport">
+            <div id="pauseResultsTrack" class="pause-scroll-track"></div>
+          </div>
+        </div>
+
+        <div class="pause-side-card pause-side-right">
+          <div class="pause-extra-kicker">EVENTÜBERSICHT</div>
+          <h2>ALLE SPECIALS</h2>
+
+          <div class="pause-special-player pause-special-tzmarty">
+            <div class="pause-special-player-head">
+              <span>TZMARTY</span>
+              <strong id="pauseTzSpecialTotal">0</strong>
+            </div>
+            <div id="pauseTzSpecials" class="pause-special-list"></div>
+          </div>
+
+          <div class="pause-special-player pause-special-korsar">
+            <div class="pause-special-player-head">
+              <span>KORSAR</span>
+              <strong id="pauseKoSpecialTotal">0</strong>
+            </div>
+            <div id="pauseKoSpecials" class="pause-special-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="pauseSupporters" class="pause-extra-view hidden">
+        <div class="pause-side-card pause-side-right pause-supporter-card">
+          <div class="pause-extra-kicker">FOLTERSHOP &amp; SPENDENTOPF</div>
+          <h2>KÄUFER &amp; SPENDER</h2>
+          <div id="pauseSupportersViewport" class="pause-credits-viewport">
+            <div id="pauseSupportersTrack" class="pause-credits-track"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="pauseAd" class="pause-extra-view hidden">
+        <div class="pause-side-card pause-side-right pause-ad-card">
+          <div id="pauseAdKicker" class="pause-extra-kicker">UNTERSTÜTZER</div>
+          <div class="pause-ad-image-wrap">
+            <img id="pauseAdImage" alt="Werbeeinblendung">
+          </div>
+        </div>
+      </section>
     </div>
 
     <div id="adPopup" class="popup-layer hidden">
@@ -150,7 +203,7 @@
     </div>
   </div>
 
-  <script src="/dartmarathon/static/overlay.js?v=6.5.0"></script>
-  <script src="/dartmarathon/static/shop-overlay.js?v=6.5.0"></script>
+  <script src="/dartmarathon/static/overlay.js?v=6.6.0"></script>
+  <script src="/dartmarathon/static/shop-overlay.js?v=6.6.0"></script>
 </body>
 </html>
