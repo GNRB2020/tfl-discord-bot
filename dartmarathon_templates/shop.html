@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon – Foltershop</title>
-  <link rel="stylesheet" href="/dartmarathon/static/shop.css?v=6.7.0">
+  <link rel="stylesheet" href="/dartmarathon/static/shop.css?v=6.8.0">
 </head>
 <body>
   <main class="shop-shell">
@@ -25,33 +25,50 @@
 
     <section id="paymentNotice" class="payment-notice hidden"></section>
 
-    <section class="buyer-card">
-      <div>
+    <section class="buyer-card compact-buyer-card">
+      <div class="buyer-field">
         <label for="buyerName">NAME IM STREAM <em>optional</em></label>
         <input id="buyerName" maxlength="50" placeholder="z. B. GNRB">
       </div>
-      <div>
+      <div class="buyer-field buyer-message-field">
         <label for="buyerMessage">NACHRICHT <em>optional</em></label>
         <input id="buyerMessage" maxlength="180" placeholder="Kurze Nachricht für den Stream">
       </div>
     </section>
 
-    <section class="shop-section">
-      <div class="section-heading">
+    <section class="shop-section compact-shop-section">
+      <div class="section-heading compact-section-heading">
         <div>
           <span>FOLTER-AKTIONEN</span>
           <h2>Was sollen wir ertragen?</h2>
         </div>
-        <div id="paypalStatus" class="status-pill">PAYPAL PRÜFEN…</div>
+        <div class="shop-section-status">
+          <span id="shopResultCount" class="result-count">0 Artikel</span>
+          <div id="paypalStatus" class="status-pill">PAYPAL PRÜFEN…</div>
+        </div>
       </div>
-      <div id="shopItems" class="item-grid"></div>
+
+      <div class="shop-toolbar">
+        <div class="shop-search-wrap">
+          <span class="shop-search-icon">⌕</span>
+          <input id="shopSearch" type="search" autocomplete="off" placeholder="Artikel suchen…">
+        </div>
+
+        <div class="shop-filters" role="group" aria-label="Foltershop filtern">
+          <button type="button" class="shop-filter active" data-shop-filter="all">ALLE</button>
+          <button type="button" class="shop-filter" data-shop-filter="available">VERFÜGBAR</button>
+          <button type="button" class="shop-filter" data-shop-filter="pause">PAUSENDIEBE</button>
+        </div>
+      </div>
+
+      <div id="shopItems" class="item-grid compact-item-grid"></div>
     </section>
 
-    <section class="donation-section">
+    <section class="donation-section compact-donation-section">
       <div class="donation-copy">
         <span>SPENDENTOPF</span>
-        <h2>Einfach so unterstützen</h2>
-        <p>Ohne Aufgabe, ohne Folter – der Betrag landet direkt im gemeinsamen Event-Spendentopf.</p>
+        <h2>Direkt unterstützen</h2>
+        <p>Ohne Aufgabe – direkt in den Event-Spendentopf.</p>
       </div>
       <div class="donation-actions">
         <div class="quick-donations">
@@ -73,6 +90,6 @@
   </main>
 
   <div id="shopToast" class="shop-toast hidden"></div>
-  <script src="/dartmarathon/static/shop.js?v=6.7.0"></script>
+  <script src="/dartmarathon/static/shop.js?v=6.8.0"></script>
 </body>
 </html>
