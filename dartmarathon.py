@@ -39,7 +39,7 @@ CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "6.6.0"
+ASSET_VERSION = "6.7.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -84,6 +84,50 @@ OVERLAY_LAYOUT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "shop_banner": {
         "x": 340, "y": 72, "w": 1240, "h": 88, "font": 23,
         "align": "left", "valign": "center", "visible": True,
+    },
+    "pause_center_popup": {
+        "x": 650, "y": 375, "w": 620, "h": 330, "font": 42,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "ad_popup": {
+        "x": 1380, "y": 80, "w": 500, "h": 270, "font": 18,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "recent_matches_popup": {
+        "x": 1380, "y": 80, "w": 500, "h": 330, "font": 18,
+        "align": "center", "valign": "top", "visible": True,
+    },
+    "specials_tzmarty_popup": {
+        "x": 38, "y": 65, "w": 470, "h": 310, "font": 18,
+        "align": "left", "valign": "top", "visible": True,
+    },
+    "specials_korsar_popup": {
+        "x": 1412, "y": 65, "w": 470, "h": 310, "font": 18,
+        "align": "left", "valign": "top", "visible": True,
+    },
+    "stats_popup": {
+        "x": 1320, "y": 80, "w": 560, "h": 430, "font": 18,
+        "align": "center", "valign": "top", "visible": True,
+    },
+    "pause_results_popup": {
+        "x": 38, "y": 150, "w": 520, "h": 720, "font": 18,
+        "align": "left", "valign": "top", "visible": True,
+    },
+    "pause_specials_popup": {
+        "x": 1362, "y": 150, "w": 520, "h": 720, "font": 18,
+        "align": "left", "valign": "top", "visible": True,
+    },
+    "pause_supporters_popup": {
+        "x": 1362, "y": 150, "w": 520, "h": 720, "font": 18,
+        "align": "left", "valign": "top", "visible": True,
+    },
+    "pause_ad_popup": {
+        "x": 1362, "y": 245, "w": 520, "h": 420, "font": 18,
+        "align": "center", "valign": "center", "visible": True,
+    },
+    "event_final": {
+        "x": 130, "y": 60, "w": 1660, "h": 960, "font": 18,
+        "align": "left", "valign": "top", "visible": True,
     },
 }
 
