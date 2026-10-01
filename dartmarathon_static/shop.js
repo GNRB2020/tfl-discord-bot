@@ -4,6 +4,8 @@
   let latestShop = null;
   let paying = false;
   let lastItemsSignature = "";
+  let shopFilter = "all";
+  let shopSearch = "";
   const failedImages = new Set();
 
   const $ = (id) => document.getElementById(id);
@@ -126,24 +128,77 @@
     }
   }
 
+  function visibleItems(items) {
+    const term = shopSearch.trim().toLocaleLowerCase("de-DE");
+
+    return (Array.isArray(items) ? items : []).filter((item) => {
+      if (shopFilter === "available" && !item.available) {
+        return false;
+      }
+
+      if (
+        shopFilter === "pause"
+        && item.action_type !== "pause_minus"
+      ) {
+        return false;
+      }
+
+      if (!term) {
+        return true;
+      }
+
+      const haystack = [
+        item.name,
+        item.description,
+        targetLabel(item.target),
+        item.action_type === "pause_minus" ? "Pausendieb" : "",
+      ]
+        .join(" ")
+        .toLocaleLowerCase("de-DE");
+
+      return haystack.includes(term);
+    });
+  }
+
+  function updateResultCount(visible, total) {
+    const el = $("shopResultCount");
+    if (!el) return;
+
+    el.textContent = visible === total
+      ? `${total} Artikel`
+      : `${visible} von ${total}`;
+  }
+
   function renderItems(shop, testMode) {
-    const items = Array.isArray(shop.items) ? shop.items : [];
+    const allItems = Array.isArray(shop.items) ? shop.items : [];
+    const items = visibleItems(allItems);
     const container = $("shopItems");
 
+    updateResultCount(items.length, allItems.length);
+
     if (!items.length) {
-      if (lastItemsSignature !== "EMPTY") {
-        container.innerHTML =
-          '<div class="empty-shop">Aktuell sind keine Foltershop-Artikel freigeschaltet. Spenden sind trotzdem möglich.</div>';
-        lastItemsSignature = "EMPTY";
+      const emptySignature = `EMPTY:${shopFilter}:${shopSearch}:${allItems.length}`;
+
+      if (lastItemsSignature !== emptySignature) {
+        container.innerHTML = allItems.length
+          ? '<div class="empty-shop compact-empty-shop">Keine Artikel passen zum aktuellen Filter.</div>'
+          : '<div class="empty-shop compact-empty-shop">Aktuell sind keine Foltershop-Artikel freigeschaltet. Spenden sind trotzdem möglich.</div>';
+
+        lastItemsSignature = emptySignature;
       }
+
       return;
     }
 
-    const signature = structuralItemsSignature(
-      items,
-      testMode,
-      shop.paypal_configured
-    );
+    const signature = [
+      structuralItemsSignature(
+        items,
+        testMode,
+        shop.paypal_configured
+      ),
+      shopFilter,
+      shopSearch,
+    ].join("|");
 
     if (signature === lastItemsSignature) {
       updateDynamicItemValues(items);
@@ -171,9 +226,8 @@
 
       if (item.action_type === "pause_minus") {
         meta.push(
-          `Pausendieb −${Math.round(Number(item.action_value || 0) / 60)} Min.`
+          `−${Math.round(Number(item.action_value || 0) / 60)} Min. Pause`
         );
-        meta.push("Nur kaufbar, wenn keine Pause läuft");
       }
 
       if (item.availability_reason && !item.available) {
@@ -227,7 +281,7 @@
               ${item.available && (shop.paypal_configured || testMode) ? "" : "disabled"}
             >${
               item.available
-                ? (testMode ? "TESTKAUF AUSLÖSEN" : "MIT PAYPAL KAUFEN")
+                ? (testMode ? "TESTKAUF" : "KAUFEN")
                 : escapeHtml(item.availability_reason || "NICHT VERFÜGBAR")
             }</button>
           </div>
@@ -436,6 +490,43 @@
       amount,
     });
   };
+
+  const searchInput = $("shopSearch");
+
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      shopSearch = searchInput.value || "";
+      lastItemsSignature = "";
+      if (latestShop) {
+        renderItems(
+          latestShop,
+          Boolean(latestShop.test_mode)
+        );
+      }
+    });
+  }
+
+  all("[data-shop-filter]").forEach((button) => {
+    button.onclick = () => {
+      shopFilter = button.dataset.shopFilter || "all";
+
+      all("[data-shop-filter]").forEach((entry) => {
+        entry.classList.toggle(
+          "active",
+          entry === button
+        );
+      });
+
+      lastItemsSignature = "";
+
+      if (latestShop) {
+        renderItems(
+          latestShop,
+          Boolean(latestShop.test_mode)
+        );
+      }
+    };
+  });
 
   const params = new URLSearchParams(
     location.search
