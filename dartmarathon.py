@@ -39,7 +39,7 @@ CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "6.8.0"
+ASSET_VERSION = "6.9.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -3251,15 +3251,20 @@ async def _ticker() -> None:
     global _auto_popup_cursor_seconds
 
     last_save = 0.0
+    last_terminal_signature: tuple[bool, bool] | None = None
 
     try:
         while True:
+            # 4x pro Sekunde intern weiterrechnen, damit Popups und das
+            # Eventende präzise bleiben. Der komplette State wird aber
+            # NICHT mehr permanent an alle Browser gesendet.
             await asyncio.sleep(0.25)
 
             try:
                 auto_payloads: list[
                     Dict[str, Any]
                 ] = []
+                terminal_changed = False
 
                 async with _state_lock:
                     _reconcile_running_timers_locked(
@@ -3294,6 +3299,20 @@ async def _ticker() -> None:
                             current
                         )
 
+                    signature = (
+                        bool(_state["event_ended"]),
+                        bool(_state["pause_active"]),
+                    )
+                    if last_terminal_signature is None:
+                        # Ein einmaliger Start-Sync ist billig und deckt auch
+                        # den Sonderfall ab, dass eine restaurierte Pause direkt
+                        # beim Prozessstart ausläuft.
+                        last_terminal_signature = signature
+                        terminal_changed = True
+                    elif signature != last_terminal_signature:
+                        terminal_changed = True
+                        last_terminal_signature = signature
+
                     now = _now()
 
                     if (
@@ -3312,7 +3331,11 @@ async def _ticker() -> None:
                         payload
                     )
 
-                await _broadcast_state()
+                # Nur echte Zustandswechsel (z. B. Pause auf 0 -> Eventende)
+                # benötigen einen vollen State. Laufende Uhren werden im
+                # Browser lokal aus dem letzten State hoch/runtergezählt.
+                if terminal_changed:
+                    await _broadcast_state()
 
             except Exception as exc:
                 # Der Ticker darf bei einem einzelnen Fehler nicht sterben.
@@ -3358,6 +3381,28 @@ async def _cleanup_ctx(
         _ticker_task = None
 
 
+async def _bandwidth_cache_headers(
+    request: web.Request,
+    response: web.StreamResponse,
+) -> None:
+    # Versionierte CSS/JS/Bilder dürfen praktisch dauerhaft im Browser-/OBS-
+    # Cache bleiben. Bei einem Deploy ändert sich die ?v=-Version in den HTML-
+    # Dateien, sodass neue Assets trotzdem sofort geladen werden.
+    if request.path.startswith(f"{PREFIX}/static/"):
+        # CSS/JS werden in den Templates versioniert (?v=...), daher können
+        # sie sehr lange gecacht werden. Bilder ohne Versionsparameter bleiben
+        # nur einen Tag fest gecacht, damit ein später ausgetauschtes Motiv
+        # nicht monatelang in OBS hängen bleibt.
+        if request.query.get("v"):
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable"
+            )
+        else:
+            response.headers["Cache-Control"] = (
+                "public, max-age=86400"
+            )
+
+
 def register_dartmarathon(
     app: web.Application,
 ) -> None:
@@ -3367,6 +3412,9 @@ def register_dartmarathon(
         _shop_event_state,
         _apply_shop_event_action,
     )
+
+    if _bandwidth_cache_headers not in app.on_response_prepare:
+        app.on_response_prepare.append(_bandwidth_cache_headers)
 
     app.router.add_get(
         f"{PREFIX}",
