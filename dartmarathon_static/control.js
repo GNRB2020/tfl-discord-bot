@@ -6,6 +6,8 @@
   let editingMatchId = null;
   let matchSavePending = false;
   let activeTab = "matches";
+  let clockBaseState = null;
+  let clockBaseMs = 0;
 
   const $ = (id) => document.getElementById(id);
   const all = (selector) => [...document.querySelectorAll(selector)];
@@ -857,23 +859,38 @@
         );
   }
 
+  function formatClock(seconds, withHours = false) {
+    const value = Math.max(0, Math.floor(Number(seconds || 0)));
+    const hours = Math.floor(value / 3600);
+    const minutes = Math.floor((value % 3600) / 60);
+    const secs = value % 60;
+    if (withHours) {
+      return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
+    const totalMinutes = Math.floor(value / 60);
+    return `${String(totalMinutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function renderLocalClocks() {
+    if (!clockBaseState) return;
+    const elapsed = Math.max(0, (Date.now() - clockBaseMs) / 1000);
+    const streamSeconds = Number(clockBaseState.stream_seconds || 0)
+      + (clockBaseState.stream_running ? elapsed : 0);
+    const pauseSeconds = Math.max(0, Number(clockBaseState.pause_seconds || 0)
+      - (clockBaseState.pause_active ? elapsed : 0));
+
+    $("streamTime").textContent = formatClock(streamSeconds, true);
+    $("pauseTime").textContent = formatClock(pauseSeconds, false);
+    setPauseColor($("pauseTime"), pauseSeconds);
+  }
+
   function render(state) {
     if (!state) return;
 
     lastState = state;
-
-    $("streamTime").textContent = (
-      state.stream_display || "00:00:00"
-    );
-
-    $("pauseTime").textContent = (
-      state.pause_display || "15:00"
-    );
-
-    setPauseColor(
-      $("pauseTime"),
-      Number(state.pause_seconds || 0)
-    );
+    clockBaseState = state;
+    clockBaseMs = Date.now();
+    renderLocalClocks();
 
     if (state.event_ended) {
       $("pauseStatus").textContent = (
@@ -1411,5 +1428,6 @@
   updateFullscreenButton();
   activateTab(activeTab);
   clearMatchForm();
+  setInterval(renderLocalClocks, 250);
   connect();
 })();

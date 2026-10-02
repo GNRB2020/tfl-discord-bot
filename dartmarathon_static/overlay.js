@@ -7,6 +7,9 @@
   let pauseCycleIndex = 0;
   let pauseAdIndex = 0;
   let pauseWasActive = false;
+  let clockBaseState = null;
+  let clockBaseMs = 0;
+  let clockTimer = null;
 
   const PAUSE_ADS = [
     {
@@ -715,8 +718,38 @@
     }
   }
 
+  function formatClock(seconds, withHours = false) {
+    const value = Math.max(0, Math.floor(Number(seconds || 0)));
+    const hours = Math.floor(value / 3600);
+    const minutes = Math.floor((value % 3600) / 60);
+    const secs = value % 60;
+    if (withHours) {
+      return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
+    const totalMinutes = Math.floor(value / 60);
+    return `${String(totalMinutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function renderLocalClocks() {
+    if (!clockBaseState) return;
+    const elapsed = Math.max(0, (Date.now() - clockBaseMs) / 1000);
+    const streamSeconds = Number(clockBaseState.stream_seconds || 0)
+      + (clockBaseState.stream_running ? elapsed : 0);
+    const pauseSeconds = Math.max(0, Number(clockBaseState.pause_seconds || 0)
+      - (clockBaseState.pause_active ? elapsed : 0));
+
+    $("ovStream").textContent = formatClock(streamSeconds, true);
+    $("ovPause").textContent = formatClock(pauseSeconds, false);
+    $("pauseCenterTime").textContent = formatClock(pauseSeconds, false);
+    setPauseColor($("ovPause"), pauseSeconds);
+    setPauseColor($("pauseCenterTime"), pauseSeconds);
+  }
+
   function render(state) {
     if (!state) return;
+
+    clockBaseState = state;
+    clockBaseMs = Date.now();
 
     applyOverlayLayout(
       state.overlay_layout
@@ -742,27 +775,7 @@
       state.total_specials || 0
     );
 
-    $("ovPause").textContent = (
-      state.pause_display || "15:00"
-    );
-
-    $("ovStream").textContent = (
-      state.stream_display || "00:00:00"
-    );
-
-    $("pauseCenterTime").textContent = (
-      state.pause_display || "15:00"
-    );
-
-    setPauseColor(
-      $("ovPause"),
-      Number(state.pause_seconds || 0)
-    );
-
-    setPauseColor(
-      $("pauseCenterTime"),
-      Number(state.pause_seconds || 0)
-    );
+    renderLocalClocks();
 
     $("pauseCenter").classList.toggle(
       "hidden",
@@ -792,7 +805,7 @@
     const image = $("adPopupImage");
 
     image.src = (
-      `${message.image}?v=6.0.0&t=${Date.now()}`
+      `${message.image}?v=6.9.0`
     );
 
     image.alt = (
@@ -1085,5 +1098,6 @@
     );
   }
 
+  clockTimer = setInterval(renderLocalClocks, 250);
   connect();
 })();
