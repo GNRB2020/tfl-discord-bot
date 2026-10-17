@@ -603,17 +603,64 @@ def _install_achievement_hooks() -> None:
     matchcenter._tfl_season_achievement_hooks_installed = True
 
 
+# Gruppenspiele werden ausschließlich aus den neuen Coop-Tabellen gelesen.
+COOP_GROUP_SHEETS = ("Coop_A", "Coop_B")
+COOP_KO_SHEET = "Coop_KO"
+_COOP_SHEET_WRITE_LOCK = threading.RLock()
+
+
+def _get_coop_group_ws(group: str):
+    if group not in COOP_GROUP_SHEETS:
+        raise ValueError("Unbekannte Coop-Gruppe.")
+    if group not in _PLAYER_WORKSHEET_CACHE_BY_NAME:
+        # Absichtlich nicht automatisch anlegen: ein Tippfehler darf kein
+        # leeres Ersatz-Sheet erzeugen und echte Daten verstecken.
+        _PLAYER_WORKSHEET_CACHE_BY_NAME[group] = get_season_spreadsheet().worksheet(group)
+    return _PLAYER_WORKSHEET_CACHE_BY_NAME[group]
+
+
+def _coop_group_rows(group: str, force_refresh: bool = False):
+    ws = _get_coop_group_ws(group)
+    return get_all_values_cached(
+        lambda: ws,
+        sheet_name=player_sheet_name(ws, group),
+        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+    )
+
+
+def _coop_group_roster(rows):
+    # L = Racer 1, M = Racer 2, N = Teamname, O = Streichmodus.
+    teams = {}
+    for row in rows[1:]:
+        team = _safe_row_cell(row, 13)
+        if team and normalize_name(team) not in {"team", "teamname"}:
+            teams[normalize_name(team)] = team
+    return teams
+
+
+def _coop_group_matches(group: str, rows):
+    # Spielplan: B Datum, C Modus, D Heim, E Ergebnis, F Gast,
+    # G Link, H Von. Erste Begegnungen ab Zeile 5.
+    for row_index, row in enumerate(rows[4:], start=5):
+        home, result, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5)
+        if not home or not away:
+            continue
+        # Doppelüberschriften oder leere Rasterbereiche überspringen.
+        if normalize_name(home) in {"heim", "heimteam", "coop-gruppe a", "coop-gruppe b"}:
+            continue
+        yield {
+            "group": group, "row": row_index, "home": home, "away": away,
+            "result": result, "date_text": _safe_row_cell(row, 1),
+            "mode": _safe_row_cell(row, 2), "link": _safe_row_cell(row, 6),
+            "reporter": _safe_row_cell(row, 7),
+        }
+
+
 def _get_or_create_coop_league_ws():
-    if COOP_LEAGUE_SHEET in _PLAYER_WORKSHEET_CACHE_BY_NAME:
-        return _PLAYER_WORKSHEET_CACHE_BY_NAME[COOP_LEAGUE_SHEET]
-    wb = get_season_spreadsheet()
-    try:
-        ws = wb.worksheet(COOP_LEAGUE_SHEET)
-    except WorksheetNotFound:
-        ws = wb.add_worksheet(title=COOP_LEAGUE_SHEET, rows=500, cols=10)
-        ws.update("A1:H1", [["Nr", "Datum", "Modus", "Heimteam", "Ergebnis", "Gastteam", "Link", "Reporter"]])
-    _PLAYER_WORKSHEET_CACHE_BY_NAME[COOP_LEAGUE_SHEET] = ws
-    return ws
+    # Rückwärtskompatibilität für fremde Imports. Der Dashboard- und
+    # Ergebnisweg verwendet ausdrücklich _get_coop_group_ws().
+    return _get_coop_group_ws(COOP_GROUP_SHEETS[0])
 
 
 def _coop_league_invalidation(ws) -> list[str]:
@@ -630,7 +677,7 @@ def _build_coop_table(rows: list[list[str]], team_names: list[str], own_team: st
                 "name": clean, "wins": 0, "draws": 0, "losses": 0,
                 "played": 0, "score_for": 0, "score_against": 0, "diff": 0, "points": 0,
             }
-    for row in rows[1:]:
+    for row in rows[4:]:
         home, result, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5)
         if not home or not away or _is_open_result_value(result):
             continue
@@ -676,55 +723,95 @@ def load_coop_dashboard_data(member_id: int, name_candidates: list[str], force_r
         ids = {_safe_row_cell(row, 9), _safe_row_cell(row, 10)}
         names = {normalize_name(_safe_row_cell(row, 1)), normalize_name(_safe_row_cell(row, 2))}
         if str(member_id) in ids or (targets & names):
-            team_row = row; break
+            team_row = row
+            break
     if team_row is None:
         return {"found": False, "team_name": "", "partner": "", "status": "nicht angemeldet", "next_matches": [], "today_matches": [], "coop_table": []}
     team_name = _safe_row_cell(team_row, 0)
     p1, p2 = _safe_row_cell(team_row, 1), _safe_row_cell(team_row, 2)
     status = _safe_row_cell(team_row, 5).lower() or "offen"
-    p1_id = _safe_row_cell(team_row, 9)
-    partner = p2 if str(member_id) == p1_id or normalize_name(p1) in targets else p1
-    confirmed_teams = [_safe_row_cell(row, 0) for row in signup_rows[1:] if _safe_row_cell(row, 5).lower() == "bestätigt" and _safe_row_cell(row, 0)]
+    partner = p2 if str(member_id) == _safe_row_cell(team_row, 9) or normalize_name(p1) in targets else p1
+    empty = {"found": True, "team_name": team_name, "partner": partner, "status": status, "group": "", "played": 0, "open": 0, "scheduled_open": 0, "total": 0, "next_matches": [], "today_matches": [], "coop_table": []}
     if status != "bestätigt":
-        return {"found": True, "team_name": team_name, "partner": partner, "status": status, "played": 0, "open": 0, "scheduled_open": 0, "total": 0, "next_matches": [], "today_matches": [], "coop_table": []}
-    ws = _get_or_create_coop_league_ws()
-    rows = get_all_values_cached(lambda: ws, sheet_name=player_sheet_name(ws, COOP_LEAGUE_SHEET), ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS, force_refresh=force_refresh)
-    target_team = normalize_name(team_name); now = dt.now(BERLIN_TZ)
-    total = played = open_games = scheduled_open = 0; upcoming = []
-    for row_index, row in enumerate(rows[1:], start=2):
-        home, result, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5)
-        if not home or not away: continue
-        home_match, away_match = normalize_name(home) == target_team, normalize_name(away) == target_team
-        if not home_match and not away_match: continue
+        return empty
+
+    team_key = normalize_name(team_name)
+    groups = []
+    for group in COOP_GROUP_SHEETS:
+        rows = _coop_group_rows(group, force_refresh=force_refresh)
+        roster = _coop_group_roster(rows)
+        if team_key in roster:
+            groups.append((group, rows, list(roster.values())))
+    if not groups:
+        # Keine Spiele außerhalb der eigenen Gruppe anzeigen: erst nach
+        # gültiger Einteilung aus L/M/N wird das Dashboard freigeschaltet.
+        empty["error"] = f"Team {team_name} ist in Coop_A/Coop_B (Spalte N) nicht eingetragen."
+        return empty
+    if len(groups) != 1:
+        empty["error"] = "Team ist in beiden Coop-Gruppen eingetragen; bitte Einteilung korrigieren."
+        return empty
+    group, rows, team_names = groups[0]
+    now = dt.now(BERLIN_TZ)
+    total = played = open_games = scheduled_open = 0
+    upcoming = []
+    for match in _coop_group_matches(group, rows):
+        home_match = normalize_name(match["home"]) == team_key
+        away_match = normalize_name(match["away"]) == team_key
+        if not home_match and not away_match:
+            continue
         total += 1
-        if not _is_open_result_value(result): played += 1; continue
+        if not _is_open_result_value(match["result"]):
+            played += 1
+            continue
         open_games += 1
-        date_text = _safe_row_cell(row, 1)
+        date_text = match["date_text"]
         if date_text:
             scheduled_open += 1
             parsed = parse_sheet_datetime(date_text)
-            if parsed is not None and (parsed >= now - timedelta(minutes=5) or parsed.astimezone(BERLIN_TZ).date() == now.date()):
-                upcoming.append({"datetime": parsed, "date_text": date_text, "mode": _safe_row_cell(row, 2), "home": home, "away": away, "opponent": away if home_match else home, "row": row_index, "link": _safe_row_cell(row, 6)})
+            if parsed is not None and (parsed >= now - timedelta(minutes=5) or parsed.date() == now.date()):
+                upcoming.append({**match, "datetime": parsed, "opponent": match["away"] if home_match else match["home"]})
     upcoming.sort(key=lambda item: item["datetime"])
-    today = [item for item in upcoming if item["datetime"].astimezone(BERLIN_TZ).date() == now.date()]
-    return {"found": True, "team_name": team_name, "partner": partner, "status": status, "played": played, "open": open_games, "scheduled_open": scheduled_open, "total": total, "next_matches": upcoming[:25], "today_matches": today, "coop_table": _build_coop_table(rows, confirmed_teams, team_name)}
+    today = [item for item in upcoming if item["datetime"].date() == now.date()]
+    # Tabelle aus exakt dem eigenen Gruppenblatt berechnen.
+    result = {**empty, "group": group, "played": played, "open": open_games, "scheduled_open": scheduled_open,
+              "total": total, "next_matches": upcoming[:25], "today_matches": today,
+              "coop_table": _build_coop_table(rows, team_names, team_name)}
+    return result
 
 
-def _load_live_coop_result_match(row_index: int, expected_home: str, expected_away: str, team_name: str) -> dict:
-    ws = _get_or_create_coop_league_ws()
-    rows = get_all_values_cached(lambda: ws, sheet_name=player_sheet_name(ws, COOP_LEAGUE_SHEET), ttl_seconds=0, force_refresh=True)
-    if row_index < 2 or row_index > len(rows): raise RuntimeError("Das Coop-Spiel wurde nicht mehr gefunden.")
+def _load_live_coop_result_match(row_index: int, expected_home: str, expected_away: str, team_name: str, group: str) -> dict:
+    if group not in COOP_GROUP_SHEETS:
+        raise ValueError("Ungültiges Coop-Gruppenblatt.")
+    rows = _coop_group_rows(group, force_refresh=True)
+    if row_index < 5 or row_index > len(rows):
+        raise RuntimeError("Das Coop-Spiel wurde nicht mehr gefunden.")
     row = rows[row_index - 1]
     home, result, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5)
-    if normalize_name(home) != normalize_name(expected_home) or normalize_name(away) != normalize_name(expected_away): raise RuntimeError("Die Begegnung hat sich im Coop-Sheet geändert.")
-    if normalize_name(team_name) not in {normalize_name(home), normalize_name(away)}: raise PermissionError("Dein Team ist an diesem Spiel nicht beteiligt.")
-    return {"home": home, "away": away, "result": result, "open": _is_open_result_value(result), "mode": _safe_row_cell(row, 2) or "Coop", "timestamp": _safe_row_cell(row, 1), "link": _safe_row_cell(row, 6)}
+    if normalize_name(home) != normalize_name(expected_home) or normalize_name(away) != normalize_name(expected_away):
+        raise RuntimeError("Die Begegnung im Coop-Gruppenblatt wurde geändert.")
+    if normalize_name(team_name) not in {normalize_name(home), normalize_name(away)}:
+        raise PermissionError("Dein Team ist an diesem Spiel nicht beteiligt.")
+    return {"home": home, "away": away, "result": result, "open": _is_open_result_value(result),
+            "group": group, "mode": _safe_row_cell(row, 2) or "Coop", "timestamp": _safe_row_cell(row, 1),
+            "link": _safe_row_cell(row, 6)}
 
 
-def _write_coop_result(row_index: int, result: str, link: str, reporter: str) -> None:
-    ws = _get_or_create_coop_league_ws(); timestamp = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
-    reqs = [{"range": f"B{row_index}:B{row_index}", "values": [[timestamp]]}, {"range": f"E{row_index}:E{row_index}", "values": [[result]]}, {"range": f"G{row_index}:G{row_index}", "values": [[link]]}, {"range": f"H{row_index}:H{row_index}", "values": [[reporter]]}]
-    sheet_write_call(lambda: ws.batch_update(reqs), invalidate_prefixes=_coop_league_invalidation(ws))
+def _write_coop_result(row_index: int, result: str, link: str, reporter: str, *, group: str, expected_home: str, expected_away: str, team_name: str) -> None:
+    if group not in COOP_GROUP_SHEETS:
+        raise ValueError("Ungültiges Coop-Gruppenblatt.")
+    with _COOP_SHEET_WRITE_LOCK:
+        live = _load_live_coop_result_match(row_index, expected_home, expected_away, team_name, group)
+        if not live["open"]:
+            raise RuntimeError("Dieses Spiel wurde inzwischen bereits gewertet.")
+        ws = _get_coop_group_ws(group)
+        timestamp = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+        # Nur E/G/H ändern; B ist das Datum des angesetzten Matches!
+        reqs = [
+            {"range": f"E{row_index}", "values": [[result]]},
+            {"range": f"G{row_index}", "values": [[link]]},
+            {"range": f"H{row_index}", "values": [[f"{reporter} · {timestamp}"]]},
+        ]
+        sheet_write_call(lambda: ws.batch_update(reqs), invalidate_prefixes=_coop_league_invalidation(ws))
 
 
 def _format_simple_table(table: list[dict], name_key: str = "name") -> str:
@@ -1974,43 +2061,28 @@ async def _open_direct_dashboard_result(
     )
 
 
-def _coop_restprogramm_text(team_name: str) -> str:
-    """Liest alle offenen Teambegegnungen aus dem Coop-Liga-Sheet."""
-    ws = _get_or_create_coop_league_ws()
-    rows = get_all_values_cached(
-        lambda: ws,
-        sheet_name=player_sheet_name(ws, COOP_LEAGUE_SHEET),
-        ttl_seconds=PLAYER_SHEET_CACHE_TTL_SECONDS,
-        force_refresh=True,
-    )
+def _coop_restprogramm_text(team_name: str, group: str) -> str:
+    """Alle offenen Spiele des Teams im zugeordneten Gruppenblatt."""
+    if group not in COOP_GROUP_SHEETS:
+        return "Noch keine Coop-Gruppe zugewiesen."
+    rows = _coop_group_rows(group, force_refresh=True)
     target = normalize_name(team_name)
     entries = []
-    for row in rows[1:]:
-        home = _safe_row_cell(row, 3)
-        result = _safe_row_cell(row, 4)
-        away = _safe_row_cell(row, 5)
-        if not home or not away or not _is_open_result_value(result):
+    for match in _coop_group_matches(group, rows):
+        if not _is_open_result_value(match["result"]):
             continue
-        if target not in {normalize_name(home), normalize_name(away)}:
+        if target not in {normalize_name(match["home"]), normalize_name(match["away"])}:
             continue
-        opponent = away if normalize_name(home) == target else home
-        date_text = _safe_row_cell(row, 1)
-        mode = _safe_row_cell(row, 2)
+        opponent = match["away"] if normalize_name(match["home"]) == target else match["home"]
+        date_text, mode = match["date_text"], match["mode"]
         parsed = parse_sheet_datetime(date_text) if date_text else None
         entries.append((parsed, opponent, date_text, mode))
-
-    entries.sort(key=lambda item: (
-        item[0] is None,
-        item[0].isoformat() if item[0] is not None else "",
-        item[1].casefold(),
-    ))
+    entries.sort(key=lambda item: (item[0] is None, item[0].isoformat() if item[0] else "", item[1].casefold()))
     if not entries:
-        return f"**{team_name}**\nKeine offenen Coop-Spiele vorhanden."
-    lines = [f"**{team_name}** – {len(entries)} offene Coop-Spiele", ""]
+        return f"**{team_name} · {group}**\nKeine offenen Coop-Spiele vorhanden."
+    lines = [f"**{team_name} · {group}** – {len(entries)} offene Coop-Spiele", ""]
     for _, opponent, date_text, mode in entries:
-        when = date_text or "Noch kein Termin"
-        mode_suffix = f" · {mode}" if mode else ""
-        lines.append(f"• **{opponent}** – {when}{mode_suffix}")
+        lines.append(f"• **{opponent}** – {date_text or 'Noch kein Termin'}" + (f" · {mode}" if mode else ""))
     return "\n".join(lines)
 
 
@@ -2024,7 +2096,7 @@ async def open_coop_restprogramm(interaction: discord.Interaction) -> None:
             )
             return
         result = await asyncio.to_thread(
-            _coop_restprogramm_text, str(data.get("team_name") or "")
+            _coop_restprogramm_text, str(data.get("team_name") or ""), str(data.get("group") or "")
         )
         # Pro Nachricht maximal 2000 Discord-Zeichen; Zeilenweise aufteilen.
         chunk = ""
@@ -2071,11 +2143,11 @@ class CoopDirectResultView(discord.ui.View):
         if not self.result_value or not self.racetime_link: await interaction.response.send_message("Bitte Ergebnis und Racetime-Link vollständig angeben.", ephemeral=True); return
         await interaction.response.defer()
         try:
-            live = await asyncio.to_thread(_load_live_coop_result_match, int(self.match["row"]), self.match["home"], self.match["away"], self.team_name)
+            live = await asyncio.to_thread(_load_live_coop_result_match, int(self.match["row"]), self.match["home"], self.match["away"], self.team_name, self.match["group"])
             if not live.get("open"): await interaction.edit_original_response(content=f"Dieses Coop-Spiel wurde bereits gewertet: **{live.get('result') or '-'}**", view=None); return
-            await asyncio.to_thread(_write_coop_result, int(self.match["row"]), self.result_value, self.racetime_link, interaction.user.display_name)
+            await asyncio.to_thread(_write_coop_result, int(self.match["row"]), self.result_value, self.racetime_link, interaction.user.display_name, group=self.match["group"], expected_home=self.match["home"], expected_away=self.match["away"], team_name=self.team_name)
             timestamp = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
-            post_text = f"👥 **Coop League – Ergebnis**\n**{live['home']} {self.result_value} {live['away']}**\n🎮 {live.get('mode') or 'Coop'}\n🕒 {timestamp}\n🔗 {self.racetime_link}"
+            post_text = f"👥 **Coop League – Ergebnis ({live['group']})**\n**{live['home']} {self.result_value} {live['away']}**\n🎮 {live.get('mode') or 'Coop'}\n🕒 {timestamp}\n🔗 {self.racetime_link}"
             if interaction.guild: await send_result_post(interaction.guild, post_text)
             await interaction.edit_original_response(content=f"✅ Coop-Ergebnis gespeichert:\n{post_text}", view=None)
         except Exception as exc:
@@ -2087,7 +2159,7 @@ class CoopDirectResultView(discord.ui.View):
 async def _open_direct_coop_result(interaction: discord.Interaction, *, owner_id: int, team_name: str, match: dict):
     if interaction.user.id != owner_id: await interaction.response.send_message("Dieses Dashboard gehört nicht dir.", ephemeral=True); return
     await interaction.response.defer()
-    try: live = await asyncio.to_thread(_load_live_coop_result_match, int(match.get("row") or 0), str(match.get("home") or ""), str(match.get("away") or ""), team_name)
+    try: live = await asyncio.to_thread(_load_live_coop_result_match, int(match.get("row") or 0), str(match.get("home") or ""), str(match.get("away") or ""), team_name, str(match.get("group") or ""))
     except PermissionError as exc: await interaction.followup.send(f"⛔ {exc}", ephemeral=True); return
     except Exception as exc: await interaction.followup.send(f"❌ {exc}", ephemeral=True); return
     if not live.get("open"): await interaction.followup.send(f"Dieses Coop-Spiel wurde bereits gewertet: **{live.get('result') or '-'}**", ephemeral=True); return
@@ -3171,7 +3243,7 @@ if HAS_COMPONENTS_V2:
             status = str(data.get("status") or "nicht angemeldet")
             self._add_header(
                 f"👥 {team}",
-                "**Coop League** · gemeinsames Team-Dashboard",
+                f"**Coop League {data.get('group') or ''}** · gemeinsames Team-Dashboard",
                 note,
             )
 
