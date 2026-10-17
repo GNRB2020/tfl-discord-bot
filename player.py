@@ -807,6 +807,10 @@ def _load_live_coop_result_match(row_index: int, expected_home: str, expected_aw
 
 
 def _write_coop_result(row_index: int, result: str, link: str, reporter: str, *, group: str, expected_home: str, expected_away: str, team_name: str) -> None:
+    # Gruppenphase folgt der Liga-Wertung: 2:0, 1:1 oder 0:2.
+    # K.-o.-Wertungen sind separat in coop_competition.py geregelt.
+    if result not in {"2:0", "1:1", "0:2"}:
+        raise ValueError("Coop-Gruppenspiele erlauben nur 2:0, 1:1 oder 0:2.")
     if group not in COOP_GROUP_SHEETS:
         raise ValueError("Ungültiges Coop-Gruppenblatt.")
     with _COOP_SHEET_WRITE_LOCK:
@@ -2765,7 +2769,7 @@ async def open_coop_game_menu(interaction: discord.Interaction):
 
 class CoopResultSelect(discord.ui.Select):
     def __init__(self, home: str, away: str):
-        super().__init__(placeholder="Ergebnis auswählen …", options=[discord.SelectOption(label=f"{home} gewinnt"[:100], value="1:0"), discord.SelectOption(label="Remis", value="1:1"), discord.SelectOption(label=f"{away} gewinnt"[:100], value="0:1")], row=0)
+        super().__init__(placeholder="Ergebnis auswählen …", options=[discord.SelectOption(label=f"{home} gewinnt (2:0)"[:100], value="2:0"), discord.SelectOption(label="Remis (1:1)", value="1:1"), discord.SelectOption(label=f"{away} gewinnt (0:2)"[:100], value="0:2")], row=0)
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if isinstance(view, CoopDirectResultView): view.result_value = self.values[0]; await interaction.response.edit_message(content=view.render_text(), view=view)
@@ -2797,7 +2801,12 @@ class CoopDirectResultView(discord.ui.View):
             if not live.get("open"): await interaction.edit_original_response(content=f"Dieses Coop-Spiel wurde bereits gewertet: **{live.get('result') or '-'}**", view=None); return
             await asyncio.to_thread(_write_coop_result, int(self.match["row"]), self.result_value, self.racetime_link, interaction.user.display_name, group=self.match["group"], expected_home=self.match["home"], expected_away=self.match["away"], team_name=self.team_name)
             timestamp = dt.now(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
-            post_text = f"👥 **Coop League – Ergebnis ({live['group']})**\n**{live['home']} {self.result_value} {live['away']}**\n🎮 {live.get('mode') or 'Coop'}\n🕒 {timestamp}\n🔗 {self.racetime_link}"
+            post_text = (
+                f"[{live['group']}] {timestamp}\n"
+                f"{live['home']} vs {live['away']} → {self.result_value}\n"
+                f"Modus: {live.get('mode') or 'Coop'}\n"
+                f"Raceroom: {self.racetime_link}"
+            )
             if interaction.guild: await send_result_post(interaction.guild, post_text)
             await interaction.edit_original_response(content=f"✅ Coop-Ergebnis gespeichert:\n{post_text}", view=None)
         except Exception as exc:
