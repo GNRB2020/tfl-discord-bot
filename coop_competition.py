@@ -408,7 +408,13 @@ class KOResultLinkModal(discord.ui.Modal,title='Coop KO-Ergebnis'):
             match,winner=await asyncio.to_thread(submit_ko_result,interaction.user,self.match['row'],self.match['home'],self.match['away'],self.score,str(self.link.value).strip())
             await interaction.followup.send(f'KO-Ergebnis gespeichert: **{match["home"]} {self.score} {match["away"]}**. Sieger: **{winner}**.',ephemeral=True)
             if interaction.guild:
-                await player().send_result_post(interaction.guild,f'**Coop-KO · {match["round"]}**\n{match["home"]} {self.score} {match["away"]}\n{self.link.value}')
+                await player().send_result_post(
+                    interaction.guild,
+                    f'[Coop_KO {match["round"]}] {datetime.now(TZ).strftime("%d.%m.%Y %H:%M")}\n'
+                    f'{match["home"]} vs {match["away"]} → {self.score}\n'
+                    f'Modus: Coop KO\n'
+                    f'Raceroom: {self.link.value}'
+                )
         except Exception as exc:
             await interaction.followup.send(f'KO-Ergebnismeldung fehlgeschlagen: {exc}',ephemeral=True)
 
