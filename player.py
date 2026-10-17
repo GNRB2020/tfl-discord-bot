@@ -2156,6 +2156,8 @@ class CoopGameSelectView(PlayerBaseView):
 
 # Coop-only: independent offers and team strike mode; no League term-offer changes.
 COOP_OFFERS_SHEET = "CoopTerminangebote"
+COOP_OFFER_CHANNEL_ID = int(os.getenv("TFL_COOP_TERMINBOERSE_CHANNEL_ID", "0") or 0)
+COOP_EVENT_LENGTH_MINUTES = int(os.getenv("TFL_COOP_EVENT_LENGTH_MINUTES", "180") or 180)
 COOP_MODE_CHOICES = ("AD Boots", "Crosskeys", "Duality", "Logical Enemizer", "Influkeys", "Pilot Spoiler")
 _COOP_OFFERS_LOCK = threading.RLock()
 
@@ -2178,16 +2180,46 @@ def _coop_team_members(group, team):
 def _coop_offers_ws():
     wb = get_season_spreadsheet()
     try:
-        return wb.worksheet(COOP_OFFERS_SHEET)
+        ws = wb.worksheet(COOP_OFFERS_SHEET)
+        if ws.col_count < 12:
+            ws.resize(cols=12)
+        return ws
     except WorksheetNotFound:
-        ws = wb.add_worksheet(title=COOP_OFFERS_SHEET, rows=500, cols=10)
-        ws.update("A1:J1", [["ID", "Gruppe", "Match-Zeile", "Heimteam", "Gastteam", "Anbieterteam", "Datum", "Modus", "Status", "Von"]])
+        ws = wb.add_worksheet(title=COOP_OFFERS_SHEET, rows=500, cols=12)
+        ws.update("A1:L1", [["ID", "Gruppe", "Match-Zeile", "Heimteam", "Gastteam", "Anbieterteam", "Datum", "Modus", "Status", "Von", "Discord Kanal", "Discord Nachricht"]])
         return ws
 
 
 def _coop_offer_records():
     ws = _coop_offers_ws()
     return ws, ws.get_all_values()
+
+
+def _coop_offer_record(offer_id):
+    _ws, rows = _coop_offer_records()
+    for row_index, row in enumerate(rows[1:], 2):
+        if _safe_row_cell(row, 0) == offer_id:
+            return row_index, row
+    raise ValueError("Das Terminangebot wurde nicht gefunden.")
+
+
+def _coop_ids_for_team(group, team):
+    """Resolve IDs from confirmed signup sheet, falling back to roster names in Discord."""
+    names = []
+    _, p1, p2, strike = _coop_team_members(group, team)
+    names.extend((p1, p2))
+    ids = []
+    try:
+        _, records = coop.get_coop_rows()
+        for row in records[1:]:
+            if normalize_name(_safe_row_cell(row, 0)) != normalize_name(team):
+                continue
+            for raw in (_safe_row_cell(row, 9), _safe_row_cell(row, 10)):
+                if raw.isdigit() and int(raw) not in ids:
+                    ids.append(int(raw))
+    except Exception as exc:
+        print(f"[COOP OFFER] Anmeldungskontakte nicht verfügbar: {exc}")
+    return ids, names, strike
 
 
 def _coop_create_offer(group, match, team, date_text, mode, reporter):
@@ -2201,7 +2233,7 @@ def _coop_create_offer(group, match, team, date_text, mode, reporter):
         index = int(match['row'])
         if index < 2 or index > len(live):
             raise ValueError("Spiel nicht gefunden.")
-        row = live[index-1]
+        row = live[index - 1]
         home, result, away = (_safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5))
         if (normalize_name(home), normalize_name(away)) != (normalize_name(match['home']), normalize_name(match['away'])):
             raise ValueError("Begegnung hat sich geändert.")
@@ -2209,44 +2241,259 @@ def _coop_create_offer(group, match, team, date_text, mode, reporter):
             raise ValueError("Dein Team ist nicht beteiligt oder das Spiel ist bereits beendet.")
         if _safe_row_cell(row, 1):
             raise ValueError("Für dieses Spiel ist bereits ein Termin eingetragen.")
+        _, _, home_strike = _coop_ids_for_team(group, home)
+        _, _, away_strike = _coop_ids_for_team(group, away)
+        if normalize_name(mode) in {normalize_name(home_strike), normalize_name(away_strike)}:
+            raise ValueError("Der Modus ist von einem der beiden Teams gestrichen.")
         ws, records = _coop_offer_records()
-        if any(_safe_row_cell(r,1)==group and _safe_row_cell(r,2)==str(index) and _safe_row_cell(r,8)=="offen" for r in records[1:]):
+        if any(_safe_row_cell(r, 1) == group and _safe_row_cell(r, 2) == str(index) and _safe_row_cell(r, 8) == "offen" for r in records[1:]):
             raise ValueError("Für dieses Match liegt bereits ein offenes Terminangebot vor.")
         offer_id = uuid.uuid4().hex[:12]
         normalized_date = parsed.strftime("%d.%m.%Y %H:%M")
-        ws.append_row([offer_id,group,index,home,away,team,normalized_date,mode,"offen",reporter],value_input_option="RAW")
+        ws.append_row([offer_id, group, index, home, away, team, normalized_date, mode, "offen", reporter], value_input_option="RAW")
         return offer_id
+
+
+def _coop_offer_post_info(offer_id, channel_id, message_id):
+    with _COOP_OFFERS_LOCK:
+        ws, row = _coop_offer_record(offer_id)
+        _offers_ws, _records = _coop_offer_records()
+        _offers_ws.update(f"K{ws}:L{ws}", [[str(channel_id), str(message_id)]])
+
+
+def _coop_offer_cancel(offer_id, acting_team):
+    with _COOP_OFFERS_LOCK:
+        row_index, row = _coop_offer_record(offer_id)
+        if _safe_row_cell(row, 8) != "offen":
+            raise ValueError("Dieses Angebot ist nicht mehr offen.")
+        if normalize_name(_safe_row_cell(row, 5)) != normalize_name(acting_team):
+            raise PermissionError("Nur das anbietende Team darf das Angebot zurückziehen.")
+        ws = _coop_offers_ws()
+        ws.update_cell(row_index, 9, "zurückgezogen")
+        return row
 
 
 def _coop_respond_offer(offer_id, accepting_team, accept):
     with _COOP_OFFERS_LOCK:
-        ws, rows = _coop_offer_records()
-        found = next(((i,r) for i,r in enumerate(rows[1:],2) if _safe_row_cell(r,0)==offer_id),None)
-        if found is None:
-            raise ValueError("Angebot nicht gefunden.")
-        offer_row, offer = found
-        group, match_index = _safe_row_cell(offer,1), int(_safe_row_cell(offer,2))
-        home, away, proposer = _safe_row_cell(offer,3), _safe_row_cell(offer,4), _safe_row_cell(offer,5)
-        if _safe_row_cell(offer,8) != "offen":
-            raise ValueError("Dieses Angebot ist bereits bearbeitet.")
-        if normalize_name(accepting_team) not in {normalize_name(home),normalize_name(away)} or normalize_name(accepting_team)==normalize_name(proposer):
+        offer_row, offer = _coop_offer_record(offer_id)
+        group, match_index = _safe_row_cell(offer, 1), int(_safe_row_cell(offer, 2))
+        home, away, proposer = _safe_row_cell(offer, 3), _safe_row_cell(offer, 4), _safe_row_cell(offer, 5)
+        if _safe_row_cell(offer, 8) != "offen":
+            raise ValueError("Dieses Angebot wurde bereits bearbeitet.")
+        if normalize_name(accepting_team) not in {normalize_name(home), normalize_name(away)} or normalize_name(accepting_team) == normalize_name(proposer):
             raise PermissionError("Nur das gegnerische Team darf dieses Angebot beantworten.")
         live = _coop_group_rows(group, True)
         if match_index < 2 or match_index > len(live):
             raise ValueError("Spiel existiert nicht mehr.")
-        match_row = live[match_index-1]
-        if normalize_name(_safe_row_cell(match_row,3))!=normalize_name(home) or normalize_name(_safe_row_cell(match_row,5))!=normalize_name(away) or not _is_open_result_value(_safe_row_cell(match_row,4)):
+        match_row = live[match_index - 1]
+        if normalize_name(_safe_row_cell(match_row, 3)) != normalize_name(home) or normalize_name(_safe_row_cell(match_row, 5)) != normalize_name(away) or not _is_open_result_value(_safe_row_cell(match_row, 4)):
             raise ValueError("Begegnung stimmt nicht mehr überein oder ist abgeschlossen.")
         if accept:
-            if _safe_row_cell(match_row,1):
+            if _safe_row_cell(match_row, 1):
                 raise ValueError("Begegnung hat bereits einen Termin.")
+            _, _, home_strike = _coop_ids_for_team(group, home)
+            _, _, away_strike = _coop_ids_for_team(group, away)
+            mode = _safe_row_cell(offer, 7)
+            if normalize_name(mode) in {normalize_name(home_strike), normalize_name(away_strike)}:
+                raise ValueError("Dieser Modus ist inzwischen von einem Team gestrichen.")
             group_ws = _get_coop_group_ws(group)
-            sheet_write_call(lambda:group_ws.batch_update([
-                {"range":f"B{match_index}:C{match_index}","values":[[_safe_row_cell(offer,6),_safe_row_cell(offer,7)]]},
-                {"range":f"H{match_index}","values":[[f"Coop-Angebot {offer_id}"]]},
-            ]),invalidate_prefixes=_coop_league_invalidation(group_ws))
-        ws.update_cell(offer_row,9,"angenommen" if accept else "abgelehnt")
-        return group, home, away, _safe_row_cell(offer,6),_safe_row_cell(offer,7)
+            sheet_write_call(lambda: group_ws.batch_update([
+                {"range": f"B{match_index}:C{match_index}", "values": [[_safe_row_cell(offer, 6), mode]]},
+                {"range": f"H{match_index}", "values": [[f"Coop-Angebot {offer_id}"]]},
+            ]), invalidate_prefixes=_coop_league_invalidation(group_ws))
+        ws = _coop_offers_ws()
+        ws.update_cell(offer_row, 9, "angenommen" if accept else "abgelehnt")
+        return group, home, away, _safe_row_cell(offer, 6), _safe_row_cell(offer, 7)
+
+
+async def _coop_offer_members(guild, group, team):
+    ids, names, _strike = await asyncio.to_thread(_coop_ids_for_team, group, team)
+    found = []
+    for user_id in ids:
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+        if member and member.id not in [m.id for m in found]:
+            found.append(member)
+    for member in guild.members:
+        if member.id in [m.id for m in found]:
+            continue
+        candidates = {normalize_name(n) for n in get_name_candidates(member)}
+        if candidates & {normalize_name(n) for n in names if n}:
+            found.append(member)
+    return found
+
+
+async def _coop_offer_notify_members(guild, group, team, text):
+    if not guild:
+        return 0
+    members = await _coop_offer_members(guild, group, team)
+    delivered = 0
+    for member in members:
+        try:
+            await member.send(text)
+            delivered += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    return delivered
+
+
+def _coop_offer_text(offer_id, row, status=None):
+    home, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4)
+    text = (f"**Coop-Terminbörse · {_safe_row_cell(row, 1)}**\n"
+            f"**{home} vs. {away}**\n"
+            f"📅 **{_safe_row_cell(row, 6)} Uhr** · 🎮 **{_safe_row_cell(row, 7)}**\n"
+            f"Vorgeschlagen von **{_safe_row_cell(row, 5)}** · Angebot `{offer_id}`")
+    if status:
+        text += f"\n**Status: {status}**"
+    else:
+        text += "\nDas gegnerische Team kann mit den Buttons antworten."
+    return text.replace("\\n", "\n")
+
+
+async def _coop_offer_update_post(client, offer_id, status):
+    try:
+        _, row = await asyncio.to_thread(_coop_offer_record, offer_id)
+        channel_id, message_id = _safe_row_cell(row, 10), _safe_row_cell(row, 11)
+        if not channel_id.isdigit() or not message_id.isdigit():
+            return
+        channel = client.get_channel(int(channel_id)) or await client.fetch_channel(int(channel_id))
+        message = await channel.fetch_message(int(message_id))
+        await message.edit(content=_coop_offer_text(offer_id, row, status), view=None)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        print(f"[COOP OFFER] Beitrag konnte nicht aktualisiert werden: {exc}")
+
+
+async def _coop_offer_create_event(interaction, group, home, away, date_text, mode, offer_id):
+    if not interaction.guild:
+        return None
+    when = parse_sheet_datetime(date_text)
+    if when is None:
+        return None
+    try:
+        event = await matchcenter.create_scheduled_event(
+            interaction.guild,
+            f"Coop {home} vs. {away}",
+            "TFL Discord / Racetime",
+            when,
+            when + timedelta(minutes=COOP_EVENT_LENGTH_MINUTES),
+            f"{group} · Modus: {mode} · Terminangebot {offer_id}",
+        )
+        return str(event.url)
+    except (discord.Forbidden, discord.HTTPException, ValueError) as exc:
+        print(f"[COOP OFFER] Discord-Event konnte nicht erstellt werden: {exc}")
+        return None
+
+
+async def _coop_offer_complete(interaction, offer_id, accept, offer_row=None):
+    _, original = (None, offer_row) if offer_row is not None else await asyncio.to_thread(_coop_offer_record, offer_id)
+    identity = await asyncio.to_thread(_coop_team_identity, interaction.user)
+    if identity["group"] != _safe_row_cell(original, 1):
+        raise PermissionError("Das Angebot gehört nicht zu deiner Coop-Gruppe.")
+    group, home, away, date_text, mode = await asyncio.to_thread(
+        _coop_respond_offer, offer_id, identity["team_name"], accept
+    )
+    status = "angenommen" if accept else "abgelehnt"
+    await _coop_offer_update_post(interaction.client, offer_id, status)
+    proposer = _safe_row_cell(original, 5)
+    dm_count = await _coop_offer_notify_members(
+        interaction.guild, group, proposer,
+        f"Coop-Terminangebot {offer_id} für **{home} vs. {away}** wurde **{status}**. "
+        + (f"Termin: {date_text} Uhr · {mode}." if accept else "")
+    )
+    event_url = None
+    if accept:
+        event_url = await _coop_offer_create_event(interaction, group, home, away, date_text, mode, offer_id)
+        if event_url:
+            index = int(_safe_row_cell(original, 2))
+            group_ws = _get_coop_group_ws(group)
+            try:
+                await asyncio.to_thread(sheet_write_call, lambda: group_ws.update_acell(f"G{index}", event_url), invalidate_prefixes=_coop_league_invalidation(group_ws))
+            except Exception as exc:
+                print(f"[COOP OFFER] Event-Link konnte nicht in Sheet gespeichert werden: {exc}")
+        other_team = home if normalize_name(proposer) == normalize_name(away) else away
+        await _coop_offer_notify_members(interaction.guild, group, other_team,
+            f"Coop-Termin bestätigt: **{home} vs. {away}**, {date_text} Uhr, {mode}." + (f" Discord-Event: {event_url}" if event_url else ""))
+    return group, home, away, date_text, mode, status, dm_count, event_url
+
+
+class CoopPublicOfferDecision(discord.ui.View):
+    def __init__(self, offer_id):
+        super().__init__(timeout=None)
+        self.offer_id = offer_id
+        accept_button = discord.ui.Button(label="Annehmen", style=discord.ButtonStyle.success, custom_id=f"tfl:coop:offer:accept:{offer_id}")
+        deny_button = discord.ui.Button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id=f"tfl:coop:offer:deny:{offer_id}")
+        accept_button.callback = self._on_accept
+        deny_button.callback = self._on_deny
+        self.add_item(accept_button)
+        self.add_item(deny_button)
+
+    async def _on_accept(self, interaction):
+        await self._respond(interaction, True)
+
+    async def _on_deny(self, interaction):
+        await self._respond(interaction, False)
+
+    async def _respond(self, interaction, accept):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            group,home,away,date_text,mode,status,dms,event_url = await _coop_offer_complete(interaction, self.offer_id, accept)
+            await interaction.followup.send(
+                f"Angebot **{status}**: {home} vs. {away} · {date_text} · {mode}." + (f" Event: {event_url}" if event_url else ""), ephemeral=True
+            )
+        except Exception as exc:
+            await interaction.followup.send(f"Coop-Angebot konnte nicht bearbeitet werden: {exc}", ephemeral=True)
+
+
+async def restore_coop_public_offer_views(bot):
+    try:
+        _ws, rows = await asyncio.to_thread(_coop_offer_records)
+        restored = 0
+        for row in rows[1:]:
+            offer_id = _safe_row_cell(row, 0)
+            if _safe_row_cell(row, 8) == "offen" and offer_id and _safe_row_cell(row, 11).isdigit():
+                bot.add_view(CoopPublicOfferDecision(offer_id), message_id=int(_safe_row_cell(row, 11)))
+                restored += 1
+        print(f"[COOP OFFER] {restored} öffentliche Angebotsbuttons wiederhergestellt.")
+    except Exception as exc:
+        print(f"[COOP OFFER] Wiederherstellung fehlgeschlagen: {exc}")
+
+
+async def _coop_offer_publish(interaction, offer_id, group, home, away, opponent):
+    _, row = await asyncio.to_thread(_coop_offer_record, offer_id)
+    guild = interaction.guild
+    if not guild:
+        return (False, 0, "")
+    channel = None
+    if COOP_OFFER_CHANNEL_ID:
+        channel = guild.get_channel(COOP_OFFER_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await interaction.client.fetch_channel(COOP_OFFER_CHANNEL_ID)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                channel = None
+    if channel is None:
+        channel = interaction.channel
+    posted = False
+    jump_url = ""
+    if channel and hasattr(channel, "send"):
+        try:
+            message = await channel.send(_coop_offer_text(offer_id, row), view=CoopPublicOfferDecision(offer_id))
+            posted = True
+            jump_url = message.jump_url
+            await asyncio.to_thread(_coop_offer_post_info, offer_id, message.channel.id, message.id)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"[COOP OFFER] Öffentlicher Beitrag nicht möglich: {exc}")
+    count = await _coop_offer_notify_members(
+        guild, group, opponent,
+        f"**Neues Coop-Terminangebot!** {home} vs. {away} · {_safe_row_cell(row, 6)} Uhr · {_safe_row_cell(row, 7)}. "
+        + (f"Direkt beantworten: {jump_url}" if jump_url else "Öffne /player → Coop → Angebote prüfen.")
+    )
+    return posted, count, jump_url
+
 
 
 def _coop_save_strike(group, team, mode):
@@ -2295,7 +2542,14 @@ class CoopOfferModal(discord.ui.Modal,title="Coop-Termin anbieten"):
             if latest['group']!=self.group or normalize_name(latest['team_name'])!=normalize_name(self.team):
                 raise PermissionError("Teamzuordnung hat sich geändert.")
             identifier=await asyncio.to_thread(_coop_create_offer,self.group,self.match,self.team,str(self.date_input.value).strip(),self.mode,interaction.user.display_name)
-            await interaction.followup.send(f"Terminangebot **{identifier}** gespeichert. Das gegnerische Team kann es über **Coop-Menü → Angebote prüfen** beantworten.",ephemeral=True)
+            opponent = self.match["away"] if normalize_name(self.match["home"]) == normalize_name(self.team) else self.match["home"]
+            posted, delivered, url = await _coop_offer_publish(interaction, identifier, self.group, self.match["home"], self.match["away"], opponent)
+            await interaction.followup.send(
+                f"Terminangebot **{identifier}** gespeichert.\n"
+                f"Öffentlicher Beitrag: **{'erstellt' if posted else 'nicht möglich'}**. "
+                f"DMs an Gegner: **{delivered}**."
+                + (f"\n{url}" if url else "\nDer Gegner kann weiterhin im Coop-Menü unter Angebote prüfen antworten."), ephemeral=True
+            )
         except Exception as exc:
             await interaction.followup.send(f"Terminangebot fehlgeschlagen: {exc}",ephemeral=True)
 
@@ -2303,7 +2557,12 @@ class CoopOfferModal(discord.ui.Modal,title="Coop-Termin anbieten"):
 class CoopOfferModeSelect(discord.ui.Select):
     def __init__(self,owner_id,group,team,match):
         self.owner_id=owner_id;self.group=group;self.team=team;self.match=match
-        super().__init__(placeholder="Coop-Modus wählen",options=[discord.SelectOption(label=m,value=m) for m in COOP_MODE_CHOICES])
+        _home = _coop_team_members(group, match["home"])[3]
+        _away = _coop_team_members(group, match["away"])[3]
+        available = [m for m in COOP_MODE_CHOICES if normalize_name(m) not in {normalize_name(_home), normalize_name(_away)}]
+        if not available:
+            available = list(COOP_MODE_CHOICES)  # write-validation blocks forbidden selections
+        super().__init__(placeholder="Coop-Modus wählen",options=[discord.SelectOption(label=m,value=m) for m in available])
     async def callback(self,interaction):
         await interaction.response.send_modal(CoopOfferModal(self.owner_id,self.group,self.team,self.match,self.values[0]))
 
@@ -2338,8 +2597,8 @@ class CoopAnswerButton(discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         try:
             data=await asyncio.to_thread(_coop_team_identity,interaction.user)
-            group,home,away,date_text,mode=await asyncio.to_thread(_coop_respond_offer,self.offer_id,data['team_name'],self.accept)
-            await interaction.followup.send(f"Angebot {'angenommen' if self.accept else 'abgelehnt'}: **{home} vs. {away}**, {date_text}, {mode} ({group}).",ephemeral=True)
+            group,home,away,date_text,mode,status,dms,event_url=await _coop_offer_complete(interaction,self.offer_id,self.accept)
+            await interaction.followup.send(f"Angebot {status}: **{home} vs. {away}**, {date_text}, {mode} ({group})." + (f" Event: {event_url}" if event_url else ""),ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"Angebot konnte nicht bearbeitet werden: {exc}",ephemeral=True)
 
@@ -7026,6 +7285,7 @@ async def setup(bot: commands.Bot):
 
     # Persistente Buttons offener Anfragen nach Neustart wieder registrieren.
     await restore_exit_request_views(bot)
+    await restore_coop_public_offer_views(bot)
 
     # Offene Terminangebote ebenfalls persistent registrieren. Alte Posts aus
     # Versionen ohne Persistenz werden nach on_ready automatisch migriert.
