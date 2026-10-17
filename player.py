@@ -30,6 +30,7 @@ import asnyc
 import restinfo
 import coop
 import term_offers
+import coop_term_offers
 
 from plan import PlanMenuView
 from asyncplan import open_async_request_from_player
@@ -2664,11 +2665,15 @@ async def open_coop_strike(interaction):
 class CoopGameMenuView(PlayerBaseView):
     @discord.ui.button(label="Termin anbieten", style=discord.ButtonStyle.success, row=3)
     async def coop_offer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_coop_offer(interaction)
+        await coop_term_offers.offer(interaction)
 
-    @discord.ui.button(label="Angebote prüfen", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="Offene Moduswahl", style=discord.ButtonStyle.primary, row=3)
     async def coop_incoming_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_coop_incoming(interaction)
+        await coop_term_offers.incoming(interaction)
+
+    @discord.ui.button(label="Eigene Angebote", style=discord.ButtonStyle.secondary, row=2)
+    async def coop_offer_manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop_term_offers.manage(interaction)
 
     @discord.ui.button(label="Streichmodus setzen", style=discord.ButtonStyle.secondary, row=3)
     async def coop_strike_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7285,7 +7290,7 @@ async def setup(bot: commands.Bot):
 
     # Persistente Buttons offener Anfragen nach Neustart wieder registrieren.
     await restore_exit_request_views(bot)
-    await restore_coop_public_offer_views(bot)
+    await coop_term_offers.restore(bot)
 
     # Offene Terminangebote ebenfalls persistent registrieren. Alte Posts aus
     # Versionen ohne Persistenz werden nach on_ready automatisch migriert.
