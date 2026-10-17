@@ -31,6 +31,7 @@ import restinfo
 import coop
 import term_offers
 import coop_term_offers
+import coop_competition
 
 from plan import PlanMenuView
 from asyncplan import open_async_request_from_player
@@ -2675,9 +2676,29 @@ class CoopGameMenuView(PlayerBaseView):
     async def coop_offer_manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await coop_term_offers.manage(interaction)
 
+    @discord.ui.button(label="Spiel direkt eintragen", style=discord.ButtonStyle.primary, row=2)
+    async def coop_direct_plan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop_term_offers.direct_plan(interaction)
+
     @discord.ui.button(label="Streichmodus setzen", style=discord.ButtonStyle.secondary, row=3)
     async def coop_strike_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await open_coop_strike(interaction)
+
+    @discord.ui.button(label="Termine verwalten", style=discord.ButtonStyle.primary, row=4)
+    async def coop_schedule_manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop_competition.manage_schedule(interaction)
+
+    @discord.ui.button(label="Terminanfragen prüfen", style=discord.ButtonStyle.secondary, row=4)
+    async def coop_change_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop_competition.review_changes(interaction)
+
+    @discord.ui.button(label="KO-Bracket", style=discord.ButtonStyle.primary, row=4)
+    async def coop_ko_overview_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop_competition.ko_overview(interaction)
+
+    @discord.ui.button(label="KO-Ergebnis melden", style=discord.ButtonStyle.success, row=4)
+    async def coop_ko_result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop_competition.ko_report(interaction)
 
     @discord.ui.button(label="Restprogramm", style=discord.ButtonStyle.primary, row=0)
     async def rest_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3332,6 +3353,18 @@ if HAS_COMPONENTS_V2:
                 return
 
             a = self.action
+            if a == "coop_schedule_manage":
+                await coop_competition.manage_schedule(interaction)
+                return
+            if a == "coop_ko_overview":
+                await coop_competition.ko_overview(interaction)
+                return
+            if a == "coop_change_review":
+                await coop_competition.review_changes(interaction)
+                return
+            if a == "coop_ko_report":
+                await coop_competition.ko_report(interaction)
+                return
             if a == "coop_rest":
                 await open_coop_restprogramm(interaction)
                 return
@@ -3966,8 +3999,36 @@ if HAS_COMPONENTS_V2:
                     ),
                     DashboardV2ActionButton(
                         owner_id=self.owner_id,
+                        action="coop_schedule_manage",
+                        label="📅 Termine verwalten",
+                        dashboard_mode="coop",
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="coop_ko_overview",
+                        label="🏆 KO-Bracket",
+                        dashboard_mode="coop",
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
                         action="refresh",
                         label="🔄 Aktualisieren",
+                        dashboard_mode="coop",
+                    ),
+                )
+            )
+            actions.add_item(
+                discord.ui.ActionRow(
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="coop_change_review",
+                        label="✉️ Terminanfragen",
+                        dashboard_mode="coop",
+                    ),
+                    DashboardV2ActionButton(
+                        owner_id=self.owner_id,
+                        action="coop_ko_report",
+                        label="✅ KO-Ergebnis",
                         dashboard_mode="coop",
                     ),
                 )
@@ -6216,6 +6277,10 @@ class AdminMenuView(AdminOnlyView):
             view=AdminCoopSpielplanView(owner_id=interaction.user.id),
             content=None,
         )
+
+    @discord.ui.button(label="Coop-KO / Qualifikation", style=discord.ButtonStyle.primary, row=3)
+    async def coop_ko_admin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop_competition.ko_admin(interaction)
 
     @discord.ui.button(
         label="Austritt Anfrage senden",
