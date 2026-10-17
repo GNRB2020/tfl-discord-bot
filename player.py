@@ -1,128 +1,128 @@
-import os
-import sys
-import asyncio
-import re
-import time
-import traceback
-import threading
-import unicodedata
-import uuid
-from datetime import datetime as dt, timedelta
+            await interaction.response.send_message("Nur auf dem Server verfügbar.", ephemeral=True)
+            return
 
-import discord
-import gspread
-from gspread.exceptions import WorksheetNotFound
-import pytz
-from discord import app_commands
-from discord.ext import commands
-from google.oauth2.service_account import Credentials
-from sheets_connection import get_season_spreadsheet, get_season_worksheet
+        await interaction.response.defer()
 
-from sheet_guard import (
-    col_values_cached,
-    get_all_values_cached,
-    row_values_cached,
-    sheet_write_call,
-)
+        try:
+            name_candidates = get_name_candidates(member)
 
-import signup
-import asnyc
-import restinfo
-import coop
-import term_offers
+            state = await asyncio.to_thread(
+                load_streichmodus_state_for_name_candidates,
+                name_candidates,
+            )
 
-from plan import PlanMenuView
-from asyncplan import open_async_request_from_player
-import matchcenter
-from matchcenter import (
-    LeagueResultViewStep1,
-    LeagueResultViewStep2,
-    CupResultView,
-    MatchCenterState,
-    get_runner_modes,
-    write_league_result,
-    league_result_post_text,
-    send_result_post,
-    now_berlin_str,
-    result_league_from_value,
-)
+            if not state["found"]:
+                raise RuntimeError("Du wurdest in keiner Division in Spalte L gefunden.")
 
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+            div_number = state["div_number"]
 
-CURRENT_SEASON_LABEL = os.getenv("TFL_SEASON_LABEL", "Saison #6")
-TFL_SEASON_START = os.getenv("TFL_SEASON_START", "2026-10-05").strip()
-TFL_SEASON_END = os.getenv("TFL_SEASON_END", "2027-01-31").strip()
-TFL_COLOR = 0x1F6FEB
-TFL_SUCCESS_COLOR = 0x2ECC71
-TFL_DANGER_COLOR = 0xE74C3C
+            modes = await asyncio.to_thread(
+                get_division_modes_for_streichmodus,
+                div_number,
+            )
 
-COOP_LEAGUE_SHEET = os.getenv("TFL_COOP_LEAGUE_SHEET", "Coop Liga").strip() or "Coop Liga"
-ACHIEVEMENT_SHEET = os.getenv("TFL_ACHIEVEMENT_SHEET", "Achievements").strip() or "Achievements"
+            if not modes:
+                raise RuntimeError(
+                    f"Für Division {div_number} wurden keine erlaubten Streichmodi im Sheet gefunden."
+                )
 
-DASHBOARD_BANNER_FILENAME = "tfl_dashboard_banner.png"
-TFL_DASHBOARD_BANNER_URL = os.getenv("TFL_DASHBOARD_BANNER_URL", "").strip()
-TFL_DASHBOARD_BANNER_PATH = os.getenv(
-    "TFL_DASHBOARD_BANNER_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), DASHBOARD_BANNER_FILENAME),
-).strip()
+            view = StreichmodusSettingView(
+                owner_id=interaction.user.id,
+                modes=modes,
+                mode_1=state["mode_1"],
+                mode_2=state["mode_2"],
+                div_number=div_number,
+                change_used=state["change_used"],
+            )
 
-# Discord Components V2 (discord.py >= 2.6) ermöglicht Container, Trenner,
-# Textblöcke und Buttons direkt zwischen Dashboard-Abschnitten.
-HAS_COMPONENTS_V2 = all(
-    hasattr(discord.ui, name)
-    for name in (
-        "LayoutView",
-        "Container",
-        "TextDisplay",
-        "Separator",
-        "Section",
-        "ActionRow",
-        "MediaGallery",
-    )
-)
-COMPONENTS_V2_FLAG = 1 << 15
+            await interaction.edit_original_response(
+                embed=view.build_embed(),
+                view=view,
+                content=None,
+            )
+
+        except Exception as e:
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "⚙️ Einstellungen → Streichmodis setzen",
+                    f"Fehler beim Laden: {e}",
+                ),
+                view=PlaceholderView(
+                    owner_id=interaction.user.id,
+                    back_view=SettingsMenuView(owner_id=interaction.user.id),
+                    back_embed=menu_embed("⚙️ Einstellungen", "Wähle einen Bereich."),
+                ),
+                content=None,
+            )
+
+    @discord.ui.button(label="◀ Zurück", style=discord.ButtonStyle.secondary, row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await show_player_dashboard(interaction)
+
 
 # =========================================================
-# STREICHMODUS CONFIG
+# COG
 # =========================================================
 
-DIVISION_CHANNELS = {
-    1: 1344118033920168047,
-    2: 1344118383859204146,
-    3: 1344118470102614036,
-    4: 1344118574943572100,
-    5: 1389541046874148924,
-    6: 1438136009085817023,
-}
+class PlayerCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
 
-# Spalte O in den Divisionstabellen 1.DIV bis 6.DIV
-# leer = Änderung noch möglich
-# "1" = einmalige Änderung bereits genutzt
-STREICH_CHANGE_USED_COL = 15
+    @app_commands.command(name="player", description="Öffnet das Spielermenü")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    async def player(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await show_player_dashboard(
+                interaction,
+                already_deferred=True,
+            )
+        except Exception as exc:
+            print(f"❌ [PLAYER] /player konnte nicht aufgebaut werden: {exc}")
+            traceback.print_exc()
+            try:
+                await interaction.edit_original_response(
+                    content=(
+                        "❌ Das Spieler-Dashboard konnte gerade nicht aufgebaut werden. "
+                        "Bitte versuche /player erneut."
+                    ),
+                    embed=None,
+                    view=None,
+                    attachments=[],
+                )
+            except Exception:
+                try:
+                    await interaction.followup.send(
+                        "❌ Das Spieler-Dashboard konnte gerade nicht aufgebaut werden. Bitte versuche /player erneut.",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
 
-# Config-Sheet:
-# K = Division 1
-# L = Division 2
-# M = Division 3
-# N = Division 4
-# O = Division 5
-# P = Division 6
-STREICHMODUS_CONFIG_WORKSHEET_GID = 463142264
-STREICHMODUS_MODE_COLUMNS = {
-    1: 11,  # K
-    2: 12,  # L
-    3: 13,  # M
-    4: 14,  # N
-    5: 15,  # O
-    6: 16,  # P
-}
 
-PLAYER_PERFORMANCE_VERSION = "player-performance-v14-dashboard-ux"
-print(f"[PLAYER] geladen: {PLAYER_PERFORMANCE_VERSION}")
+async def setup(bot: commands.Bot):
+    # /player ist die Kernfunktion. Zusatzfunktionen wie Achievements dürfen
+    # das Laden des Cogs niemals verhindern.
+    try:
+        _install_achievement_hooks()
+    except Exception as exc:
+        print(f"⚠️ [PLAYER] Achievement-Hooks konnten nicht installiert werden: {exc}")
+        traceback.print_exc()
 
-PLAYER_SHEET_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_SHEET_CACHE_TTL_SECONDS", "120"))
-PLAYER_MODE_CACHE_TTL_SECONDS = int(os.getenv("PLAYER_MODE_CACHE_TTL_SECONDS", "300"))
-PLAYER_DASHBOARD_IO_TIMEOUT_SECONDS = int(os.getenv("PLAYER_DASHBOARD_IO_TIMEOUT_SECONDS", "15"))
+    await bot.add_cog(PlayerCog(bot))
 
-BERLIN_TZ = pytz.timezone("Europe/Berlin")
-EXIT_REQUEST_ADMIN_CHANNEL_ID = 1277927528706736162
+    # Persistente Buttons offener Anfragen nach Neustart wieder registrieren.
+    await restore_exit_request_views(bot)
+
+    # Offene Terminangebote ebenfalls persistent registrieren. Alte Posts aus
+    # Versionen ohne Persistenz werden nach on_ready automatisch migriert.
+    try:
+        await term_offers.restore_persistent_offer_views(bot)
+    except Exception as exc:
+        print(f"⚠️ [PLAYER] Terminangebote konnten nicht wiederhergestellt werden: {exc}")
+
+    # Fristen liegen im Google Sheet und überstehen dadurch Bot-Neustarts.
+    if not hasattr(bot, "_exit_request_monitor_task"):
+        bot._exit_request_monitor_task = asyncio.create_task(
+            exit_request_monitor_loop(bot)
+        )
