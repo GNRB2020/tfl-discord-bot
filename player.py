@@ -641,8 +641,8 @@ def _coop_group_roster(rows):
 
 def _coop_group_matches(group: str, rows):
     # Spielplan: B Datum, C Modus, D Heim, E Ergebnis, F Gast,
-    # G Link, H Von. Erste Begegnungen ab Zeile 5.
-    for row_index, row in enumerate(rows[4:], start=5):
+    # G Link, H Von. Erste Begegnungen ab Zeile 2.
+    for row_index, row in enumerate(rows[1:], start=2):
         home, result, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5)
         if not home or not away:
             continue
@@ -677,7 +677,7 @@ def _build_coop_table(rows: list[list[str]], team_names: list[str], own_team: st
                 "name": clean, "wins": 0, "draws": 0, "losses": 0,
                 "played": 0, "score_for": 0, "score_against": 0, "diff": 0, "points": 0,
             }
-    for row in rows[4:]:
+    for row in rows[1:]:
         home, result, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5)
         if not home or not away or _is_open_result_value(result):
             continue
@@ -791,7 +791,7 @@ def _load_live_coop_result_match(row_index: int, expected_home: str, expected_aw
     if group not in COOP_GROUP_SHEETS:
         raise ValueError("Ungültiges Coop-Gruppenblatt.")
     rows = _coop_group_rows(group, force_refresh=True)
-    if row_index < 5 or row_index > len(rows):
+    if row_index < 2 or row_index > len(rows):
         raise RuntimeError("Das Coop-Spiel wurde nicht mehr gefunden.")
     row = rows[row_index - 1]
     home, result, away = _safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5)
@@ -2121,6 +2121,363 @@ async def open_coop_restprogramm(interaction: discord.Interaction) -> None:
         )
 
 
+class CoopGameSelect(discord.ui.Select):
+    def __init__(self, matches: list[dict], team_name: str, owner_id: int):
+        self.matches = {str(i): game for i, game in enumerate(matches[:25])}
+        self.team_name = team_name
+        self.owner_id = owner_id
+        options = []
+        for key, match in self.matches.items():
+            opponent = match["away"] if normalize_name(match["home"]) == normalize_name(team_name) else match["home"]
+            date = match.get("date_text") or "ohne Termin"
+            options.append(discord.SelectOption(label=f"{opponent} · {date}"[:100], value=key))
+        super().__init__(placeholder="Coop-Begegnung wählen", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Diese Auswahl gehört nicht dir.", ephemeral=True)
+            return
+        match = self.matches.get(self.values[0])
+        if match is None:
+            await interaction.response.send_message("Spiel nicht gefunden.", ephemeral=True)
+            return
+        await _open_direct_coop_result(interaction, owner_id=self.owner_id, team_name=self.team_name, match=match)
+
+
+class CoopGameSelectView(PlayerBaseView):
+    def __init__(self, owner_id: int, team_name: str, matches: list[dict]):
+        super().__init__(owner_id)
+        self.add_item(CoopGameSelect(matches, team_name, owner_id))
+
+    @discord.ui.button(label="Zurück zum Coop-Menü", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_coop_game_menu(interaction)
+
+
+# Coop-only: independent offers and team strike mode; no League term-offer changes.
+COOP_OFFERS_SHEET = "CoopTerminangebote"
+COOP_MODE_CHOICES = ("AD Boots", "Crosskeys", "Duality", "Logical Enemizer", "Influkeys", "Pilot Spoiler")
+_COOP_OFFERS_LOCK = threading.RLock()
+
+
+def _coop_team_identity(member):
+    data = load_coop_dashboard_data(member.id, get_name_candidates(member), True)
+    if not data.get("found") or data.get("group") not in COOP_GROUP_SHEETS:
+        raise PermissionError("Dein Team steht nicht im Kader von Coop_A oder Coop_B.")
+    return data
+
+
+def _coop_team_members(group, team):
+    rows = _coop_group_rows(group, True)
+    for index, row in enumerate(rows[1:], 2):
+        if normalize_name(_safe_row_cell(row, 13)) == normalize_name(team):
+            return index, _safe_row_cell(row, 11), _safe_row_cell(row, 12), _safe_row_cell(row, 14)
+    raise ValueError("Team wurde im Gruppenkader nicht gefunden.")
+
+
+def _coop_offers_ws():
+    wb = get_season_spreadsheet()
+    try:
+        return wb.worksheet(COOP_OFFERS_SHEET)
+    except WorksheetNotFound:
+        ws = wb.add_worksheet(title=COOP_OFFERS_SHEET, rows=500, cols=10)
+        ws.update("A1:J1", [["ID", "Gruppe", "Match-Zeile", "Heimteam", "Gastteam", "Anbieterteam", "Datum", "Modus", "Status", "Von"]])
+        return ws
+
+
+def _coop_offer_records():
+    ws = _coop_offers_ws()
+    return ws, ws.get_all_values()
+
+
+def _coop_create_offer(group, match, team, date_text, mode, reporter):
+    parsed = parse_sheet_datetime(date_text)
+    if parsed is None or parsed <= dt.now(BERLIN_TZ):
+        raise ValueError("Bitte einen zukünftigen Termin als TT.MM.JJJJ HH:MM eingeben.")
+    if mode not in COOP_MODE_CHOICES:
+        raise ValueError("Ungültiger Coop-Modus.")
+    with _COOP_OFFERS_LOCK:
+        live = _coop_group_rows(group, True)
+        index = int(match['row'])
+        if index < 2 or index > len(live):
+            raise ValueError("Spiel nicht gefunden.")
+        row = live[index-1]
+        home, result, away = (_safe_row_cell(row, 3), _safe_row_cell(row, 4), _safe_row_cell(row, 5))
+        if (normalize_name(home), normalize_name(away)) != (normalize_name(match['home']), normalize_name(match['away'])):
+            raise ValueError("Begegnung hat sich geändert.")
+        if normalize_name(team) not in {normalize_name(home), normalize_name(away)} or not _is_open_result_value(result):
+            raise ValueError("Dein Team ist nicht beteiligt oder das Spiel ist bereits beendet.")
+        if _safe_row_cell(row, 1):
+            raise ValueError("Für dieses Spiel ist bereits ein Termin eingetragen.")
+        ws, records = _coop_offer_records()
+        if any(_safe_row_cell(r,1)==group and _safe_row_cell(r,2)==str(index) and _safe_row_cell(r,8)=="offen" for r in records[1:]):
+            raise ValueError("Für dieses Match liegt bereits ein offenes Terminangebot vor.")
+        offer_id = uuid.uuid4().hex[:12]
+        normalized_date = parsed.strftime("%d.%m.%Y %H:%M")
+        ws.append_row([offer_id,group,index,home,away,team,normalized_date,mode,"offen",reporter],value_input_option="RAW")
+        return offer_id
+
+
+def _coop_respond_offer(offer_id, accepting_team, accept):
+    with _COOP_OFFERS_LOCK:
+        ws, rows = _coop_offer_records()
+        found = next(((i,r) for i,r in enumerate(rows[1:],2) if _safe_row_cell(r,0)==offer_id),None)
+        if found is None:
+            raise ValueError("Angebot nicht gefunden.")
+        offer_row, offer = found
+        group, match_index = _safe_row_cell(offer,1), int(_safe_row_cell(offer,2))
+        home, away, proposer = _safe_row_cell(offer,3), _safe_row_cell(offer,4), _safe_row_cell(offer,5)
+        if _safe_row_cell(offer,8) != "offen":
+            raise ValueError("Dieses Angebot ist bereits bearbeitet.")
+        if normalize_name(accepting_team) not in {normalize_name(home),normalize_name(away)} or normalize_name(accepting_team)==normalize_name(proposer):
+            raise PermissionError("Nur das gegnerische Team darf dieses Angebot beantworten.")
+        live = _coop_group_rows(group, True)
+        if match_index < 2 or match_index > len(live):
+            raise ValueError("Spiel existiert nicht mehr.")
+        match_row = live[match_index-1]
+        if normalize_name(_safe_row_cell(match_row,3))!=normalize_name(home) or normalize_name(_safe_row_cell(match_row,5))!=normalize_name(away) or not _is_open_result_value(_safe_row_cell(match_row,4)):
+            raise ValueError("Begegnung stimmt nicht mehr überein oder ist abgeschlossen.")
+        if accept:
+            if _safe_row_cell(match_row,1):
+                raise ValueError("Begegnung hat bereits einen Termin.")
+            group_ws = _get_coop_group_ws(group)
+            sheet_write_call(lambda:group_ws.batch_update([
+                {"range":f"B{match_index}:C{match_index}","values":[[_safe_row_cell(offer,6),_safe_row_cell(offer,7)]]},
+                {"range":f"H{match_index}","values":[[f"Coop-Angebot {offer_id}"]]},
+            ]),invalidate_prefixes=_coop_league_invalidation(group_ws))
+        ws.update_cell(offer_row,9,"angenommen" if accept else "abgelehnt")
+        return group, home, away, _safe_row_cell(offer,6),_safe_row_cell(offer,7)
+
+
+def _coop_save_strike(group, team, mode):
+    if mode not in COOP_MODE_CHOICES:
+        raise ValueError("Unbekannter Modus.")
+    with _COOP_SHEET_WRITE_LOCK:
+        row, _, _, _ = _coop_team_members(group,team)
+        ws = _get_coop_group_ws(group)
+        sheet_write_call(lambda: ws.update_acell(f"O{row}",mode),invalidate_prefixes=_coop_league_invalidation(ws))
+
+
+class CoopStrikeSelect(discord.ui.Select):
+    def __init__(self, owner_id, group, team, current):
+        self.owner_id=owner_id;self.group=group;self.team=team
+        super().__init__(placeholder="Team-Streichmodus wählen",options=[discord.SelectOption(label=m,value=m,default=m==current) for m in COOP_MODE_CHOICES])
+    async def callback(self,interaction):
+        if interaction.user.id!=self.owner_id:
+            await interaction.response.send_message("Nicht dein Menü.",ephemeral=True);return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            latest=await asyncio.to_thread(_coop_team_identity,interaction.user)
+            if latest['group']!=self.group or normalize_name(latest['team_name'])!=normalize_name(self.team):
+                raise PermissionError("Teamzuordnung hat sich geändert.")
+            await asyncio.to_thread(_coop_save_strike,self.group,self.team,self.values[0])
+            await interaction.followup.send(f"Streichmodus für **{self.team}** gespeichert: **{self.values[0]}**",ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Speichern fehlgeschlagen: {exc}",ephemeral=True)
+
+
+class CoopStrikeView(PlayerBaseView):
+    def __init__(self,owner_id,group,team,current):
+        super().__init__(owner_id)
+        self.add_item(CoopStrikeSelect(owner_id,group,team,current))
+
+
+class CoopOfferModal(discord.ui.Modal,title="Coop-Termin anbieten"):
+    date_input=discord.ui.TextInput(label="Datum und Uhrzeit",placeholder="TT.MM.JJJJ HH:MM",max_length=20)
+    def __init__(self,owner_id,group,team,match,mode):
+        super().__init__();self.owner_id=owner_id;self.group=group;self.team=team;self.match=match;self.mode=mode
+    async def on_submit(self,interaction):
+        if interaction.user.id!=self.owner_id:
+            await interaction.response.send_message("Nicht dein Angebot.",ephemeral=True);return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            latest=await asyncio.to_thread(_coop_team_identity,interaction.user)
+            if latest['group']!=self.group or normalize_name(latest['team_name'])!=normalize_name(self.team):
+                raise PermissionError("Teamzuordnung hat sich geändert.")
+            identifier=await asyncio.to_thread(_coop_create_offer,self.group,self.match,self.team,str(self.date_input.value).strip(),self.mode,interaction.user.display_name)
+            await interaction.followup.send(f"Terminangebot **{identifier}** gespeichert. Das gegnerische Team kann es über **Coop-Menü → Angebote prüfen** beantworten.",ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Terminangebot fehlgeschlagen: {exc}",ephemeral=True)
+
+
+class CoopOfferModeSelect(discord.ui.Select):
+    def __init__(self,owner_id,group,team,match):
+        self.owner_id=owner_id;self.group=group;self.team=team;self.match=match
+        super().__init__(placeholder="Coop-Modus wählen",options=[discord.SelectOption(label=m,value=m) for m in COOP_MODE_CHOICES])
+    async def callback(self,interaction):
+        await interaction.response.send_modal(CoopOfferModal(self.owner_id,self.group,self.team,self.match,self.values[0]))
+
+
+class CoopOfferModeView(PlayerBaseView):
+    def __init__(self,owner_id,group,team,match):
+        super().__init__(owner_id);self.add_item(CoopOfferModeSelect(owner_id,group,team,match))
+
+
+class CoopOfferMatchSelect(discord.ui.Select):
+    def __init__(self,owner_id,group,team,matches):
+        self.owner_id=owner_id;self.group=group;self.team=team
+        self.matches={str(i):match for i,match in enumerate(matches[:25])}
+        options=[discord.SelectOption(label=(m['away'] if normalize_name(m['home'])==normalize_name(team) else m['home'])[:100],value=k) for k,m in self.matches.items()]
+        super().__init__(placeholder="Gegner für Terminangebot wählen",options=options)
+    async def callback(self,interaction):
+        await interaction.response.send_message("Wähle den Modus für das Terminangebot:",view=CoopOfferModeView(self.owner_id,self.group,self.team,self.matches[self.values[0]]),ephemeral=True)
+
+
+class CoopOfferMatchView(PlayerBaseView):
+    def __init__(self,owner_id,group,team,matches):
+        super().__init__(owner_id);self.add_item(CoopOfferMatchSelect(owner_id,group,team,matches))
+
+
+class CoopAnswerButton(discord.ui.Button):
+    def __init__(self,owner_id,offer_id,accept):
+        self.owner_id=owner_id;self.offer_id=offer_id;self.accept=accept
+        super().__init__(label="Annehmen" if accept else "Ablehnen",style=discord.ButtonStyle.success if accept else discord.ButtonStyle.danger)
+    async def callback(self,interaction):
+        if interaction.user.id!=self.owner_id:
+            await interaction.response.send_message("Nicht dein Menü.",ephemeral=True);return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            data=await asyncio.to_thread(_coop_team_identity,interaction.user)
+            group,home,away,date_text,mode=await asyncio.to_thread(_coop_respond_offer,self.offer_id,data['team_name'],self.accept)
+            await interaction.followup.send(f"Angebot {'angenommen' if self.accept else 'abgelehnt'}: **{home} vs. {away}**, {date_text}, {mode} ({group}).",ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Angebot konnte nicht bearbeitet werden: {exc}",ephemeral=True)
+
+
+class CoopAnswerView(PlayerBaseView):
+    def __init__(self,owner_id,offer_id):
+        super().__init__(owner_id)
+        self.add_item(CoopAnswerButton(owner_id,offer_id,True));self.add_item(CoopAnswerButton(owner_id,offer_id,False))
+
+
+class CoopIncomingOfferSelect(discord.ui.Select):
+    def __init__(self,owner_id,offers):
+        self.owner_id=owner_id;self.offers={str(i):r for i,r in enumerate(offers[:25])}
+        super().__init__(placeholder="Offenes Terminangebot wählen",options=[discord.SelectOption(label=f"{_safe_row_cell(r,3)} vs {_safe_row_cell(r,4)} · {_safe_row_cell(r,6)}"[:100],value=k) for k,r in self.offers.items()])
+    async def callback(self,interaction):
+        r=self.offers[self.values[0]]
+        await interaction.response.send_message(f"**{_safe_row_cell(r,3)} vs {_safe_row_cell(r,4)}**\n{_safe_row_cell(r,6)} · {_safe_row_cell(r,7)}",view=CoopAnswerView(self.owner_id,_safe_row_cell(r,0)),ephemeral=True)
+
+
+class CoopIncomingOffersView(PlayerBaseView):
+    def __init__(self,owner_id,offers):
+        super().__init__(owner_id);self.add_item(CoopIncomingOfferSelect(owner_id,offers))
+
+
+async def open_coop_offer(interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data=await asyncio.to_thread(_coop_team_identity,interaction.user)
+        group,team=data['group'],data['team_name']
+        rows=await asyncio.to_thread(_coop_group_rows,group,True)
+        games=[m for m in _coop_group_matches(group,rows) if _is_open_result_value(m['result']) and not m['date_text'] and normalize_name(team) in {normalize_name(m['home']),normalize_name(m['away'])}]
+        if not games:
+            await interaction.followup.send("Keine unterminierten Coop-Spiele vorhanden.",ephemeral=True);return
+        await interaction.followup.send("Wähle eine Begegnung:",view=CoopOfferMatchView(interaction.user.id,group,team,games),ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Terminbörse konnte nicht geöffnet werden: {exc}",ephemeral=True)
+
+
+async def open_coop_incoming(interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data=await asyncio.to_thread(_coop_team_identity,interaction.user)
+        _ws,rows=await asyncio.to_thread(_coop_offer_records)
+        team=normalize_name(data['team_name'])
+        offers=[r for r in rows[1:] if _safe_row_cell(r,1)==data['group'] and _safe_row_cell(r,8)=="offen" and team in {normalize_name(_safe_row_cell(r,3)),normalize_name(_safe_row_cell(r,4))} and team!=normalize_name(_safe_row_cell(r,5))]
+        if not offers:
+            await interaction.followup.send("Keine eingegangenen offenen Terminangebote.",ephemeral=True);return
+        await interaction.followup.send("Eingegangene Coop-Terminangebote:",view=CoopIncomingOffersView(interaction.user.id,offers),ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Angebote konnten nicht geladen werden: {exc}",ephemeral=True)
+
+
+async def open_coop_strike(interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data=await asyncio.to_thread(_coop_team_identity,interaction.user)
+        _row,_r1,_r2,current=await asyncio.to_thread(_coop_team_members,data['group'],data['team_name'])
+        await interaction.followup.send(f"**{data['team_name']} · Streichmodus**\nAktuell: **{current or 'nicht gesetzt'}**\nDie Auswahl gilt für das gesamte Team.",view=CoopStrikeView(interaction.user.id,data['group'],data['team_name'],current),ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Streichmodus konnte nicht geladen werden: {exc}",ephemeral=True)
+
+
+class CoopGameMenuView(PlayerBaseView):
+    @discord.ui.button(label="Termin anbieten", style=discord.ButtonStyle.success, row=3)
+    async def coop_offer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_coop_offer(interaction)
+
+    @discord.ui.button(label="Angebote prüfen", style=discord.ButtonStyle.primary, row=3)
+    async def coop_incoming_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_coop_incoming(interaction)
+
+    @discord.ui.button(label="Streichmodus setzen", style=discord.ButtonStyle.secondary, row=3)
+    async def coop_strike_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_coop_strike(interaction)
+
+    @discord.ui.button(label="Restprogramm", style=discord.ButtonStyle.primary, row=0)
+    async def rest_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_coop_restprogramm(interaction)
+
+    @discord.ui.button(label="Gruppentabelle", style=discord.ButtonStyle.primary, row=0)
+    async def table_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        data = await get_coop_dashboard_data(interaction.user, force_refresh=True)
+        if not data.get("found"):
+            await interaction.followup.send("Du bist derzeit keinem Coop-Team zugeordnet.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"**{data.get('group') or 'Coop'} · Gruppentabelle**\n{_format_simple_table(data.get('coop_table') or [])}",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Ergebnis melden", style=discord.ButtonStyle.success, row=1)
+    async def result_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        data = await get_coop_dashboard_data(interaction.user, force_refresh=True)
+        group = str(data.get("group") or "")
+        team_name = str(data.get("team_name") or "")
+        if not data.get("found") or group not in COOP_GROUP_SHEETS:
+            await interaction.followup.send("Dein Coop-Team ist keiner gültigen Gruppe zugeordnet.", ephemeral=True)
+            return
+        try:
+            rows = await asyncio.to_thread(_coop_group_rows, group, True)
+            matches = [
+                match for match in _coop_group_matches(group, rows)
+                if _is_open_result_value(match["result"])
+                and normalize_name(team_name) in {normalize_name(match["home"]), normalize_name(match["away"])}
+            ]
+        except Exception as exc:
+            await interaction.followup.send(f"Coop-Spiele konnten nicht geladen werden: {exc}", ephemeral=True)
+            return
+        if not matches:
+            await interaction.followup.send("Dein Team hat keine offenen Coop-Spiele.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            "Wähle das Coop-Spiel, dessen Ergebnis du melden möchtest:",
+            view=CoopGameSelectView(interaction.user.id, team_name, matches), ephemeral=True,
+        )
+
+    @discord.ui.button(label="Coop-Anmeldung verwalten", style=discord.ButtonStyle.secondary, row=1)
+    async def signup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await coop.open_coop_menu_from_player(interaction)
+
+    @discord.ui.button(label="Coop-Dashboard", style=discord.ButtonStyle.secondary, row=2)
+    async def dashboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await show_player_dashboard(interaction, dashboard_mode="coop")
+
+
+async def open_coop_game_menu(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=menu_embed(
+            "Coop League · Spielbetrieb",
+            "Restprogramm, Tabelle und Ergebnisse. Die Teamanmeldung ist separat erreichbar. "
+            "Terminangebote, Bestätigungen und Team-Streichmodus sind verfügbar.",
+        ),
+        view=CoopGameMenuView(owner_id=interaction.user.id), ephemeral=True,
+    )
+
+
 class CoopResultSelect(discord.ui.Select):
     def __init__(self, home: str, away: str):
         super().__init__(placeholder="Ergebnis auswählen …", options=[discord.SelectOption(label=f"{home} gewinnt"[:100], value="1:0"), discord.SelectOption(label="Remis", value="1:1"), discord.SelectOption(label=f"{away} gewinnt"[:100], value="0:1")], row=0)
@@ -2181,7 +2538,7 @@ class CoopFallbackDashboardView(PlayerBaseView):
     @discord.ui.button(label="⚔️ League", style=discord.ButtonStyle.primary, row=0)
     async def league_button(self, interaction: discord.Interaction, button: discord.ui.Button): await show_player_dashboard(interaction, dashboard_mode="league")
     @discord.ui.button(label="👥 Coop-Menü", style=discord.ButtonStyle.success, row=0)
-    async def coop_button(self, interaction: discord.Interaction, button: discord.ui.Button): await coop.open_coop_menu_from_player(interaction)
+    async def coop_button(self, interaction: discord.Interaction, button: discord.ui.Button): await open_coop_game_menu(interaction)
     @discord.ui.button(label="🔄 Aktualisieren", style=discord.ButtonStyle.secondary, row=0)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button): await show_player_dashboard(interaction, dashboard_mode="coop", force_refresh=True)
     @discord.ui.button(label="📋 Restprogramm", style=discord.ButtonStyle.secondary, row=1)
@@ -2660,11 +3017,7 @@ if HAS_COMPONENTS_V2:
                 return
             match = self._selected_match()
             if self.action == "menu":
-                await interaction.response.send_message(
-                    embed=coop.menu_embed("🤝 Coop League", "Wähle einen Bereich."),
-                    view=coop.CoopMenuView(owner_id=interaction.user.id),
-                    ephemeral=True,
-                )
+                await open_coop_game_menu(interaction)
                 return
             if not match:
                 await interaction.response.send_message("Das ausgewählte Match ist nicht mehr verfügbar.", ephemeral=True)
@@ -2821,11 +3174,7 @@ if HAS_COMPONENTS_V2:
                 )
                 return
             if a == "coop_menu":
-                await interaction.response.send_message(
-                    embed=coop.menu_embed("🤝 Coop League", "Wähle einen Bereich."),
-                    view=coop.CoopMenuView(owner_id=interaction.user.id),
-                    ephemeral=True,
-                )
+                await open_coop_game_menu(interaction)
                 return
             if a == "exit":
                 await self._send_panel(
@@ -5434,7 +5783,7 @@ class AdminCoopSpielplanOptionButton(discord.ui.Button):
             embed=menu_embed(
                 "Coop-Spielplan bestätigen",
                 f"**Gruppe:** {self.group}\n**Paarungen:** Jeder gegen jeden {count_label}.\n\n"
-                "Nur möglich, wenn D/E/F ab Zeile 5 vollständig leer sind. "
+                "Nur möglich, wenn D/E/F ab Zeile 2 vollständig leer sind. "
                 "**Der Vorgang schreibt neue Begegnungen in Google Sheets.**",
             ),
             view=AdminCoopSpielplanConfirmView(owner_id=interaction.user.id, group=self.group, rounds=self.rounds),
@@ -6588,19 +6937,19 @@ def _generate_coop_group_fixtures(group: str, legs: int) -> int:
             raise ValueError(f"{group}: Mindestens zwei Teams in Spalte N erforderlich.")
         if len({normalize_name(team) for team in teams}) != len(teams):
             raise ValueError("Teamnamen in Spalte N müssen eindeutig sein.")
-        if any(_safe_row_cell(row, c) for row in rows[4:] for c in (3, 4, 5)):
-            raise ValueError(f"{group}: D/E/F ab Zeile 5 sind nicht leer. Bestehender Spielplan bleibt unverändert.")
+        if any(_safe_row_cell(row, c) for row in rows[1:] for c in (3, 4, 5)):
+            raise ValueError(f"{group}: D/E/F ab Zeile 2 sind nicht leer. Bestehender Spielplan bleibt unverändert.")
         fixtures = []
         for i, home in enumerate(teams):
             for away in teams[i + 1:]:
                 fixtures.append([home, "vs", away])
         if legs == 2:
             fixtures += [[away, "vs", home] for home, _result, away in fixtures[:]]
-        last_row = 4 + len(fixtures)
+        last_row = 1 + len(fixtures)
         if last_row > ws.row_count:
             ws.add_rows(last_row - ws.row_count)
         sheet_write_call(
-            lambda: ws.update(range_name=f"D5:F{last_row}", values=fixtures),
+            lambda: ws.update(range_name=f"D2:F{last_row}", values=fixtures),
             invalidate_prefixes=_coop_league_invalidation(ws),
         )
         return len(fixtures)
