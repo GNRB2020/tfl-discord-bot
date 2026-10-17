@@ -119,6 +119,56 @@ def _team_members(group, team):
     return p._coop_ids_for_team(group, team)
 
 
+def _interaction_guild(interaction):
+    """Resolve the TFL guild also for modal/select interactions answered via DM.
+
+    DM interactions have _interaction_guild(interaction) == None, even if they originate
+    from a guild-based scheduling flow. Guild ID takes precedence.
+    """
+    if interaction.guild is not None:
+        return interaction.guild
+    client = interaction.client
+    raw_id = os.getenv("DISCORD_GUILD_ID", "").strip()
+    if raw_id.isdigit():
+        guild = client.get_guild(int(raw_id))
+        if guild is not None:
+            return guild
+    channel = client.get_channel(CHANNEL_ID)
+    guild = getattr(channel, "guild", None)
+    if guild is not None:
+        return guild
+    if len(client.guilds) == 1:
+        return client.guilds[0]
+    return None
+
+
+def _coop_multistream(group, home, away):
+    """Build the four-channel multistre.am link from team roster and Runner mapping."""
+    from urllib.parse import quote
+    import coop
+
+    mapping = coop.get_runner_mapping()
+    channels = []
+    missing = []
+    for team in (home, away):
+        _row, first, second, _ban = _player()._coop_team_members(group, team)
+        for racer in (first, second):
+            if not racer:
+                missing.append(f"{team}: Racer nicht eingetragen")
+                continue
+            twitch = (mapping.get(_norm(racer)) or "").strip().lstrip("@").strip("/")
+            if twitch.lower().startswith(("http://", "https://")):
+                from urllib.parse import urlparse
+                twitch = urlparse(twitch).path.strip("/").split("/")[0]
+            if not twitch or not __import__("re").fullmatch(r"[A-Za-z0-9_]{4,25}", twitch):
+                missing.append(f"{team}: {racer}")
+            else:
+                channels.append(quote(twitch, safe=""))
+    if missing:
+        return "", missing
+    return "https://multistre.am/" + "/".join(channels) + "/layout12/", []
+
+
 async def _notify(guild, group, teams, content):
     """Jeden Spieler höchstens einmal informieren; DM-Fehler sind nicht fatal."""
     if guild is None:
@@ -305,6 +355,207 @@ def _offer_content(rows):
               "Vor der Buchung werden freie Begegnungen, Teamtermine und Streichmodi geprüft.")
 
 
+# =========================================================
+# DIREKTE COOP-SPIELPLANUNG (ohne öffentliche Terminbörse)
+# =========================================================
+
+def _direct_matches(group, team):
+    p = _player()
+    return [m for m in _matches(group, team)
+            if p._is_open_result_value(m["result"]) and not m["date_text"]]
+
+
+def _direct_propose(group, team, member_id, match, when):
+    p = _player()
+    if _norm(team) not in {_norm(match["home"]), _norm(match["away"])}:
+        raise PermissionError("Dein Team ist nicht beteiligt.")
+    if _busy(group, match["home"], when) or _busy(group, match["away"], when):
+        raise ValueError("Ein Team hat zu diesem Zeitpunkt bereits ein Spiel.")
+    with _LOCK:
+        live = _match_candidates(group, match["home"], match["away"], when)
+        if not any(x["row"] == match["row"] for x in live):
+            raise ValueError("Diese Begegnung ist nicht mehr frei.")
+        for row in _all()[1:]:
+            if (_cell(row, 1) == group and _cell(row, 10) == str(match["row"])
+                    and _cell(row, 5) in {"direkt", "moduswahl"}):
+                raise ValueError("Für diese Begegnung existiert bereits eine offene Terminanfrage.")
+        identifier = uuid.uuid4().hex[:12]
+        values = [identifier, group, team, str(member_id), when.strftime("%d.%m.%Y %H:%M"),
+                  "direkt", "", "", match["home"], match["away"], str(match["row"]),
+                  "", "", "", "", _now().strftime("%d.%m.%Y %H:%M:%S")]
+        ws = _ws()
+        existing = ws.get("A:P")
+        rowno = max(2, len(existing) + 1)
+        _update(rowno, values)
+        return identifier
+
+
+def _direct_decide(identifier, group, team, accept):
+    with _LOCK:
+        rowno, original = _load(identifier)
+        if _cell(original, 5) != "direkt":
+            raise ValueError("Diese Terminanfrage ist nicht mehr offen.")
+        proposer = _cell(original, 2)
+        if group != _cell(original, 1) or _norm(team) == _norm(proposer):
+            raise PermissionError("Nur das gegnerische Team darf diese Anfrage beantworten.")
+        if _norm(team) not in {_norm(_cell(original, 8)), _norm(_cell(original, 9))}:
+            raise PermissionError("Dein Team ist an dieser Begegnung nicht beteiligt.")
+        if not accept:
+            values = list(original) + [""] * (16 - len(original))
+            values[5] = "zurückgezogen"
+            _save(rowno, values)
+            return None
+        when = _parse(_cell(original, 4))
+        matches = _match_candidates(group, proposer, team, when)
+        match = next((x for x in matches if x["row"] == int(_cell(original, 10))), None)
+        if match is None:
+            raise ValueError("Die Begegnung ist nicht mehr frei oder der Termin kollidiert.")
+        values = list(original) + [""] * (16 - len(original))
+        values[5] = "offen"
+        _save(rowno, values)
+        try:
+            # Dieselbe atomare Reservierung wie bei der öffentlichen Coop-Terminbörse.
+            _take(identifier, group, team, 0, match["row"], match["home"], match["away"])
+        except Exception:
+            _save(rowno, original)
+            raise
+        return match
+
+
+class DirectDecisionView(discord.ui.View):
+    def __init__(self, identifier):
+        super().__init__(timeout=None)
+        self.identifier = identifier
+        yes = discord.ui.Button(label="Termin annehmen", style=discord.ButtonStyle.success,
+                                custom_id=f"tfl:coop:direct:yes:{identifier}")
+        no = discord.ui.Button(label="Termin ablehnen", style=discord.ButtonStyle.danger,
+                               custom_id=f"tfl:coop:direct:no:{identifier}")
+        yes.callback = self.accept
+        no.callback = self.reject
+        self.add_item(yes)
+        self.add_item(no)
+
+    async def accept(self, interaction):
+        await self._decide(interaction, True)
+
+    async def reject(self, interaction):
+        await self._decide(interaction, False)
+
+    async def _decide(self, interaction, yes):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            group, team = await asyncio.to_thread(_identity, interaction.user)
+            result = await asyncio.to_thread(_direct_decide, self.identifier, group, team, yes)
+            _, row = await asyncio.to_thread(_load, self.identifier)
+            proposer = _cell(row, 2)
+            home, away = _cell(row, 8), _cell(row, 9)
+            if not yes:
+                await _notify(_interaction_guild(interaction), group, (proposer, team),
+                              f"Coop-Terminanfrage **{home} vs. {away}** am {_cell(row, 4)} Uhr wurde abgelehnt.")
+                await interaction.followup.send("Terminanfrage abgelehnt.", ephemeral=True)
+                return
+            modes = await asyncio.to_thread(_allowed_modes, group, home, away)
+            if not modes:
+                await asyncio.to_thread(_cancel_pending, self.identifier, group, team)
+                raise ValueError("Kein zulässiger Coop-Modus vorhanden.")
+            await _notify(_interaction_guild(interaction), group, (home, away),
+                          f"Coop-Termin **{home} vs. {away}** am {_cell(row, 4)} Uhr ist angefragt und angenommen. "
+                          "Das Heimteam muss innerhalb von 24 Stunden den Modus wählen. "
+                          "Bitte `/player` → Coop-Menü → Offene Moduswahl öffnen.")
+            home_members = await _player()._coop_offer_members(_interaction_guild(interaction), group, home) if _interaction_guild(interaction) else []
+            for member in home_members:
+                try:
+                    await member.send(f"**Coop-Moduswahl:** {home} vs. {away} · {_cell(row, 4)} Uhr",
+                                      view=ModeView(member.id, group, home, self.identifier, modes))
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            await interaction.followup.send("Terminanfrage angenommen. Das Heimteam wurde zur Moduswahl aufgefordert.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Terminanfrage konnte nicht bearbeitet werden: {exc}", ephemeral=True)
+
+
+class DirectDateModal(discord.ui.Modal, title="Coop-Spiel direkt eintragen"):
+    when = discord.ui.TextInput(label="Termin (TT.MM.JJJJ HH:MM)", placeholder="25.10.2026 20:00",
+                                required=True, max_length=30)
+
+    def __init__(self, group, team, match):
+        super().__init__()
+        self.group, self.team, self.match = group, team, match
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            instant = _parse(str(self.when.value))
+            identifier = await asyncio.to_thread(_direct_propose, self.group, self.team,
+                                                 interaction.user.id, self.match, instant)
+            opponent = (self.match["away"] if _norm(self.match["home"]) == _norm(self.team)
+                        else self.match["home"])
+            message = (f"**Direkte Coop-Terminanfrage**\n"
+                       f"**{self.match['home']} vs. {self.match['away']}** · {self.group}\n"
+                       f"**{instant.strftime('%d.%m.%Y %H:%M')} Uhr**\n"
+                       "Ein Runner des gegnerischen Teams kann den Termin bestätigen oder ablehnen. "
+                       "Danach wählt das Heimteam den Modus.")
+            count = 0
+            members = await _player()._coop_offer_members(_interaction_guild(interaction), self.group, opponent) if _interaction_guild(interaction) else []
+            for member in members:
+                try:
+                    await member.send(message, view=DirectDecisionView(identifier))
+                    count += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            if not count:
+                # Ein Angebot ohne erreichbaren Gegner darf nicht als erfolgreich gelten.
+                with _LOCK:
+                    rowno, row = _load(identifier)
+                    vals = list(row) + [""] * (16 - len(row))
+                    vals[5] = "zurückgezogen"
+                    _save(rowno, vals)
+                raise ValueError("Kein Gegner konnte per DM erreicht werden. Anfrage verworfen.")
+            await _notify(_interaction_guild(interaction), self.group, (self.team,),
+                          f"Du hast **{self.match['home']} vs. {self.match['away']}** für "
+                          f"{instant.strftime('%d.%m.%Y %H:%M')} Uhr vorgeschlagen. "
+                          f"{count} gegnerische Runner haben eine DM erhalten.")
+            await interaction.followup.send(f"Terminanfrage versendet. **{count}** Gegner-DM(s). "
+                                            "Es wird noch nichts ins Spielplan-Sheet eingetragen.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Direkte Coop-Spielplanung fehlgeschlagen: {exc}", ephemeral=True)
+
+
+class DirectMatchSelect(discord.ui.Select):
+    def __init__(self, group, team, matches):
+        self.group, self.team = group, team
+        self.matches = {str(m["row"]): m for m in matches[:25]}
+        super().__init__(placeholder="Offene Begegnung wählen", options=[
+            discord.SelectOption(label=f"{m['home']} vs. {m['away']}"[:100], value=str(m["row"]))
+            for m in matches[:25]])
+
+    async def callback(self, interaction):
+        try:
+            group, team = await asyncio.to_thread(_identity, interaction.user)
+            if group != self.group or _norm(team) != _norm(self.team):
+                raise PermissionError("Nicht dein Team.")
+            match = self.matches[self.values[0]]
+            await interaction.response.send_modal(DirectDateModal(group, team, match))
+        except Exception as exc:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(str(exc), ephemeral=True)
+
+
+async def direct_plan(interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        group, team = await asyncio.to_thread(_identity, interaction.user)
+        matches = await asyncio.to_thread(_direct_matches, group, team)
+        if not matches:
+            await interaction.followup.send("Keine freie Coop-Begegnung ohne Termin vorhanden.", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=300)
+        view.add_item(DirectMatchSelect(group, team, matches))
+        await interaction.followup.send("Wähle die Begegnung, die du direkt terminieren möchtest:", view=view, ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Direkte Spielplanung nicht verfügbar: {exc}", ephemeral=True)
+
+
 class OfferSlotButton(discord.ui.Button):
     def __init__(self, row):
         self.offer_id = _cell(row, 0)
@@ -357,7 +608,7 @@ class MatchSelect(discord.ui.Select):
             _rowno, data = await asyncio.to_thread(_load, self.offer_id)
             await _refresh_post(interaction.client, data)
             modes = await asyncio.to_thread(_allowed_modes, group, match["home"], match["away"])
-            home_members = await _player()._coop_offer_members(interaction.guild, group, match["home"]) if interaction.guild else []
+            home_members = await _player()._coop_offer_members(_interaction_guild(interaction), group, match["home"]) if _interaction_guild(interaction) else []
             home_dms = 0
             for member in home_members:
                 try:
@@ -372,7 +623,7 @@ class MatchSelect(discord.ui.Select):
                 except (discord.Forbidden, discord.HTTPException):
                     pass
             away_team = match["away"]
-            away_dms = await _notify(interaction.guild, group, (away_team,),
+            away_dms = await _notify(_interaction_guild(interaction), group, (away_team,),
                                     f"**Coop-Terminbörse: {match['home']} vs. {match['away']}**\n"
                                     f"{instant.strftime('%d.%m.%Y %H:%M')} Uhr vorgemerkt. "
                                     f"Das Heimteam {match['home']} muss den Modus noch bestätigen.")
@@ -402,7 +653,7 @@ class OfferModal(discord.ui.Modal, title="Coop: Race-Termine anbieten"):
             instants = [_parse(v) for v in dates]
             created = await asyncio.to_thread(_create, group, team, interaction.user.id, instants)
             try:
-                channel = interaction.guild.get_channel(CHANNEL_ID) if interaction.guild else None
+                channel = _interaction_guild(interaction).get_channel(CHANNEL_ID) if _interaction_guild(interaction) else None
                 if channel is None:
                     channel = await interaction.client.fetch_channel(CHANNEL_ID)
                 if not hasattr(channel, "send"):
@@ -464,20 +715,60 @@ class ModeSelect(discord.ui.Select):
             row = await asyncio.to_thread(_book, self.offer_id, group, team, self.values[0])
             await _refresh_post(interaction.client, row)
             event_url = ""
+            multistream_url = ""
+            event_error = ""
+            try:
+                multistream_url, missing = await asyncio.to_thread(
+                    _coop_multistream, group, _cell(row, 8), _cell(row, 9)
+                )
+                if missing:
+                    LOG.warning("Coop-Multistream unvollständig: %s", ", ".join(missing))
+            except Exception as exc:
+                LOG.exception("Coop-Multistream konnte nicht erzeugt werden: %s", exc)
+                missing = ["Runner-Zuordnung konnte nicht gelesen werden"]
             try:
                 import matchcenter
                 when = TZ.localize(datetime.strptime(_cell(row, 4), "%d.%m.%Y %H:%M"))
-                event = await matchcenter.create_scheduled_event(interaction.guild, f"Coop {_cell(row, 8)} vs. {_cell(row, 9)}", "TFL / Racetime", when,
-                                                                when + timedelta(minutes=180), f"{group} · {_cell(row, 11)}")
+                guild = _interaction_guild(interaction)
+                if guild is None:
+                    raise RuntimeError("TFL-Server nicht gefunden: DISCORD_GUILD_ID und Bot-Serverzuordnung prüfen.")
+                # External events require a location; show the stream URL when available.
+                location = multistream_url or "TFL Discord / Racetime"
+                description = f"{group} · Modus: {_cell(row, 11)}"
+                if multistream_url:
+                    description += f"\nMultistream: {multistream_url}"
+                event = await matchcenter.create_scheduled_event(
+                    guild, f"Coop {_cell(row, 8)} vs. {_cell(row, 9)}",
+                    location, when, when + timedelta(minutes=180), description
+                )
                 event_url = str(event.url)
                 ws = _player()._get_coop_group_ws(group)
-                sheet_write_call(lambda: ws.update_acell(f"G{int(_cell(row, 10))}", event_url), invalidate_prefixes=_player()._coop_league_invalidation(ws))
+                sheet_write_call(
+                    lambda: ws.update_acell(f"G{int(_cell(row, 10))}", event_url),
+                    invalidate_prefixes=_player()._coop_league_invalidation(ws)
+                )
             except Exception as exc:
-                LOG.warning("Coop-Event nicht erstellt: %s", exc)
-            await _notify(interaction.guild, group, (_cell(row, 8), _cell(row, 9)),
-                          f"**Coop-Spiel terminiert!** {_cell(row, 8)} vs. {_cell(row, 9)}\n"
-                          f"{_cell(row, 4)} Uhr · **{self.values[0]}**\n" + (event_url or "Discord-Event konnte nicht angelegt werden."))
-            await interaction.followup.send(f"**Termin bestätigt:** {_cell(row, 8)} vs. {_cell(row, 9)} · {_cell(row, 4)} · {self.values[0]}" + (f"\n{event_url}" if event_url else ""), ephemeral=True)
+                event_error = str(exc)
+                LOG.exception("Coop-Event nicht erstellt: %s", exc)
+            notice = (f"**Coop-Spiel terminiert!** {_cell(row, 8)} vs. {_cell(row, 9)}\n"
+                      f"{_cell(row, 4)} Uhr · **{self.values[0]}**")
+            if multistream_url:
+                notice += f"\nMultistream: {multistream_url}"
+            elif missing:
+                notice += "\nMultistream fehlt: " + ", ".join(missing)
+            notice += f"\nDiscord-Event: {event_url}" if event_url else "\nDiscord-Event konnte nicht angelegt werden."
+            await _notify(_interaction_guild(interaction), group, (_cell(row, 8), _cell(row, 9)), notice)
+            result = (f"**Termin bestätigt:** {_cell(row, 8)} vs. {_cell(row, 9)} · "
+                      f"{_cell(row, 4)} · {self.values[0]}")
+            if multistream_url:
+                result += f"\nMultistream: {multistream_url}"
+            elif missing:
+                result += "\nFehlende Twitch-Zuordnung: " + ", ".join(missing)
+            if event_url:
+                result += f"\nDiscord-Event: {event_url}"
+            else:
+                result += f"\n⚠️ Discord-Event fehlgeschlagen: {event_error}"
+            await interaction.followup.send(result[:1900], ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"Modusbestätigung fehlgeschlagen: {exc}", ephemeral=True)
 
@@ -598,6 +889,9 @@ async def restore(bot):
     try:
         await asyncio.to_thread(_expire_old_pending)
         rows = await asyncio.to_thread(_all)
+        for row in rows[1:]:
+            if _cell(row, 5) == "direkt" and _cell(row, 0):
+                bot.add_view(DirectDecisionView(_cell(row, 0)))
         grouped = {}
         for row in rows[1:]:
             if _cell(row, 7).isdigit():
