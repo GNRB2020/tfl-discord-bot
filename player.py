@@ -664,7 +664,7 @@ def _get_or_create_coop_league_ws():
 
 
 def _coop_league_invalidation(ws) -> list[str]:
-    name = player_sheet_name(ws, COOP_LEAGUE_SHEET)
+    name = player_sheet_name(ws, getattr(ws, "title", COOP_LEAGUE_SHEET))
     return [f"records:{name}", f"values:{name}", f"row:{name}:", f"col:{name}:", f"cell:{name}:"]
 
 
@@ -710,54 +710,61 @@ def _build_coop_table(rows: list[list[str]], team_names: list[str], own_team: st
 
 
 def load_coop_dashboard_data(member_id: int, name_candidates: list[str], force_refresh: bool = False) -> dict:
+    """Gruppenkader L/M/N ist maßgeblich; Anmeldung bleibt nur Fallback."""
+    targets = {normalize_name(x) for x in name_candidates if x}
+    targets.discard("")
+    signup_team = None
+    signup_partner = ""
+    signup_status = ""
     try:
         _, signup_rows = coop.get_coop_rows()
+        for row in signup_rows[1:]:
+            status = _safe_row_cell(row, 5).lower()
+            if status not in {"offen", "bestätigt"}:
+                continue
+            ids = {_safe_row_cell(row, 9), _safe_row_cell(row, 10)}
+            names = {normalize_name(_safe_row_cell(row, 1)), normalize_name(_safe_row_cell(row, 2))}
+            if str(member_id) in ids or (targets & names):
+                signup_team = _safe_row_cell(row, 0)
+                p1, p2 = _safe_row_cell(row, 1), _safe_row_cell(row, 2)
+                signup_partner = p2 if str(member_id) == _safe_row_cell(row, 9) or normalize_name(p1) in targets else p1
+                signup_status = status
+                break
     except Exception as exc:
-        return {"found": False, "error": f"Coop-Anmeldungen konnten nicht geladen werden: {exc}", "next_matches": [], "today_matches": [], "coop_table": []}
-    targets = {normalize_name(x) for x in name_candidates if x}
-    team_row = None
-    for row in signup_rows[1:]:
-        status = _safe_row_cell(row, 5).lower()
-        if status not in {"offen", "bestätigt"}:
-            continue
-        ids = {_safe_row_cell(row, 9), _safe_row_cell(row, 10)}
-        names = {normalize_name(_safe_row_cell(row, 1)), normalize_name(_safe_row_cell(row, 2))}
-        if str(member_id) in ids or (targets & names):
-            team_row = row
-            break
-    if team_row is None:
-        return {"found": False, "team_name": "", "partner": "", "status": "nicht angemeldet", "next_matches": [], "today_matches": [], "coop_table": []}
-    team_name = _safe_row_cell(team_row, 0)
-    p1, p2 = _safe_row_cell(team_row, 1), _safe_row_cell(team_row, 2)
-    status = _safe_row_cell(team_row, 5).lower() or "offen"
-    partner = p2 if str(member_id) == _safe_row_cell(team_row, 9) or normalize_name(p1) in targets else p1
-    empty = {"found": True, "team_name": team_name, "partner": partner, "status": status, "group": "", "played": 0, "open": 0, "scheduled_open": 0, "total": 0, "next_matches": [], "today_matches": [], "coop_table": []}
-    if status != "bestätigt":
-        return empty
+        print(f"[COOP] Anmeldung nicht lesbar, prüfe Gruppenkader: {exc}")
 
-    team_key = normalize_name(team_name)
-    groups = []
+    selected = []
     for group in COOP_GROUP_SHEETS:
         rows = _coop_group_rows(group, force_refresh=force_refresh)
-        roster = _coop_group_roster(rows)
-        if team_key in roster:
-            groups.append((group, rows, list(roster.values())))
-    if not groups:
-        # Keine Spiele außerhalb der eigenen Gruppe anzeigen: erst nach
-        # gültiger Einteilung aus L/M/N wird das Dashboard freigeschaltet.
-        empty["error"] = f"Team {team_name} ist in Coop_A/Coop_B (Spalte N) nicht eingetragen."
+        for roster_row in rows[1:]:
+            racer1, racer2, team = (_safe_row_cell(roster_row, 11), _safe_row_cell(roster_row, 12), _safe_row_cell(roster_row, 13))
+            if not team or normalize_name(team) in {"team", "teamname"}:
+                continue
+            matched_name = targets & {normalize_name(racer1), normalize_name(racer2)}
+            matched_team = bool(signup_team and normalize_name(team) == normalize_name(signup_team))
+            if matched_name or matched_team:
+                partner = racer2 if normalize_name(racer1) in targets else racer1
+                selected.append((group, rows, team, partner))
+
+    empty = {"found": False, "team_name": signup_team or "", "partner": signup_partner,
+             "status": signup_status or "nicht angemeldet", "group": "", "played": 0,
+             "open": 0, "scheduled_open": 0, "total": 0,
+             "next_matches": [], "today_matches": [], "coop_table": []}
+    if not selected:
+        if signup_team:
+            empty.update(found=True, error=f"Team {signup_team} steht noch nicht in Coop_A/Coop_B (Spalte N).")
         return empty
-    if len(groups) != 1:
-        empty["error"] = "Team ist in beiden Coop-Gruppen eingetragen; bitte Einteilung korrigieren."
-        return empty
-    group, rows, team_names = groups[0]
+    if len(selected) != 1:
+        return {**empty, "found": True, "error": "Spieler/Team ist mehrfach in Coop_A/Coop_B eingetragen. Bitte Gruppenkader prüfen."}
+    group, rows, team_name, partner = selected[0]
+    team_key = normalize_name(team_name)
     now = dt.now(BERLIN_TZ)
     total = played = open_games = scheduled_open = 0
     upcoming = []
     for match in _coop_group_matches(group, rows):
         home_match = normalize_name(match["home"]) == team_key
         away_match = normalize_name(match["away"]) == team_key
-        if not home_match and not away_match:
+        if not (home_match or away_match):
             continue
         total += 1
         if not _is_open_result_value(match["result"]):
@@ -768,15 +775,16 @@ def load_coop_dashboard_data(member_id: int, name_candidates: list[str], force_r
         if date_text:
             scheduled_open += 1
             parsed = parse_sheet_datetime(date_text)
-            if parsed is not None and (parsed >= now - timedelta(minutes=5) or parsed.date() == now.date()):
+            if parsed and (parsed >= now - timedelta(minutes=5) or parsed.date() == now.date()):
                 upcoming.append({**match, "datetime": parsed, "opponent": match["away"] if home_match else match["home"]})
     upcoming.sort(key=lambda item: item["datetime"])
     today = [item for item in upcoming if item["datetime"].date() == now.date()]
-    # Tabelle aus exakt dem eigenen Gruppenblatt berechnen.
-    result = {**empty, "group": group, "played": played, "open": open_games, "scheduled_open": scheduled_open,
-              "total": total, "next_matches": upcoming[:25], "today_matches": today,
-              "coop_table": _build_coop_table(rows, team_names, team_name)}
-    return result
+    team_names = list(_coop_group_roster(rows).values())
+    return {**empty, "found": True, "team_name": team_name, "partner": partner,
+            "status": "bestätigt", "group": group, "played": played, "open": open_games,
+            "scheduled_open": scheduled_open, "total": total,
+            "next_matches": upcoming[:25], "today_matches": today,
+            "coop_table": _build_coop_table(rows, team_names, team_name)}
 
 
 def _load_live_coop_result_match(row_index: int, expected_home: str, expected_away: str, team_name: str, group: str) -> dict:
@@ -5373,6 +5381,83 @@ class PlayerTwitchModal(discord.ui.Modal, title="Twitchkanal setzen"):
             )
 
 
+class AdminCoopSpielplanConfirmView(AdminOnlyView):
+    def __init__(self, owner_id: int, group: str, rounds: int):
+        super().__init__(owner_id)
+        self.group = group
+        self.rounds = rounds
+
+    @discord.ui.button(label="Spielplan jetzt erstellen", style=discord.ButtonStyle.danger, row=0)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        button.disabled = True
+        await interaction.response.defer()
+        try:
+            count = await asyncio.to_thread(_generate_coop_group_fixtures, self.group, self.rounds)
+            await interaction.edit_original_response(
+                embed=menu_embed(
+                    "Coop-Spielplan erstellt",
+                    f"**{self.group}**: **{count} Begegnungen** angelegt. "
+                    "Bereits vorhandene Spielpläne werden grundsätzlich nicht überschrieben.",
+                ),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+        except Exception as exc:
+            await interaction.edit_original_response(
+                embed=menu_embed("Coop-Spielplan nicht erstellt", f"**{self.group}**: {exc}"),
+                view=AdminMenuView(owner_id=interaction.user.id),
+                content=None,
+            )
+
+    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("Coop-Spielplan", "Wähle eine Gruppe und den Spielmodus."),
+            view=AdminCoopSpielplanView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
+class AdminCoopSpielplanOptionButton(discord.ui.Button):
+    def __init__(self, group: str, rounds: int):
+        self.group = group
+        self.rounds = rounds
+        mode = "Einfach" if rounds == 1 else "Hin/Rück"
+        super().__init__(label=f"{group} · {mode}", style=discord.ButtonStyle.primary, row=0 if rounds == 1 else 1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, AdminCoopSpielplanView):
+            return
+        count_label = "einmal" if self.rounds == 1 else "zweimal (Hin- und Rückrunde)"
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "Coop-Spielplan bestätigen",
+                f"**Gruppe:** {self.group}\n**Paarungen:** Jeder gegen jeden {count_label}.\n\n"
+                "Nur möglich, wenn D/E/F ab Zeile 5 vollständig leer sind. "
+                "**Der Vorgang schreibt neue Begegnungen in Google Sheets.**",
+            ),
+            view=AdminCoopSpielplanConfirmView(owner_id=interaction.user.id, group=self.group, rounds=self.rounds),
+            content=None,
+        )
+
+
+class AdminCoopSpielplanView(AdminOnlyView):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        for group in ("Coop_A", "Coop_B"):
+            for rounds in (1, 2):
+                self.add_item(AdminCoopSpielplanOptionButton(group, rounds))
+
+    @discord.ui.button(label="Zurück zur Administration", style=discord.ButtonStyle.secondary, row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=menu_embed("Administration", "Wähle eine Adminfunktion."),
+            view=AdminMenuView(owner_id=interaction.user.id),
+            content=None,
+        )
+
+
 class AdminMenuView(AdminOnlyView):
     @discord.ui.button(
         label="Anmeldung zurücksetzen",
@@ -5499,6 +5584,25 @@ class AdminMenuView(AdminOnlyView):
         button: discord.ui.Button,
     ):
         await coop.open_coop_admin_from_player(interaction)
+
+    @discord.ui.button(
+        label="Coop-Spielplan erstellen",
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
+    async def coop_spielplan_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.edit_message(
+            embed=menu_embed(
+                "Administration → Coop-Spielplan",
+                "Wähle Gruppe A oder B und einfache Runde oder Hin-/Rückrunde.",
+            ),
+            view=AdminCoopSpielplanView(owner_id=interaction.user.id),
+            content=None,
+        )
 
     @discord.ui.button(
         label="Austritt Anfrage senden",
@@ -6468,6 +6572,40 @@ class SettingsMenuView(PlayerBaseView):
         await show_player_dashboard(interaction)
 
 
+
+_COOP_SCHEDULE_GENERATION_LOCK = threading.RLock()
+
+
+def _generate_coop_group_fixtures(group: str, legs: int) -> int:
+    """Neuen Gruppen-Spielplan nur in leere Begegnungsspalten schreiben."""
+    if group not in COOP_GROUP_SHEETS or legs not in (1, 2):
+        raise ValueError("Gruppe oder Anzahl Runden ungültig.")
+    with _COOP_SCHEDULE_GENERATION_LOCK:
+        ws = _get_coop_group_ws(group)
+        rows = _coop_group_rows(group, force_refresh=True)
+        teams = list(_coop_group_roster(rows).values())
+        if len(teams) < 2:
+            raise ValueError(f"{group}: Mindestens zwei Teams in Spalte N erforderlich.")
+        if len({normalize_name(team) for team in teams}) != len(teams):
+            raise ValueError("Teamnamen in Spalte N müssen eindeutig sein.")
+        if any(_safe_row_cell(row, c) for row in rows[4:] for c in (3, 4, 5)):
+            raise ValueError(f"{group}: D/E/F ab Zeile 5 sind nicht leer. Bestehender Spielplan bleibt unverändert.")
+        fixtures = []
+        for i, home in enumerate(teams):
+            for away in teams[i + 1:]:
+                fixtures.append([home, "vs", away])
+        if legs == 2:
+            fixtures += [[away, "vs", home] for home, _result, away in fixtures[:]]
+        last_row = 4 + len(fixtures)
+        if last_row > ws.row_count:
+            ws.add_rows(last_row - ws.row_count)
+        sheet_write_call(
+            lambda: ws.update(range_name=f"D5:F{last_row}", values=fixtures),
+            invalidate_prefixes=_coop_league_invalidation(ws),
+        )
+        return len(fixtures)
+
+
 # =========================================================
 # COG
 # =========================================================
@@ -6475,6 +6613,24 @@ class SettingsMenuView(PlayerBaseView):
 class PlayerCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @app_commands.command(name="coopspielplan", description="Admin: Spielplan für eine Coop-Gruppe erstellen")
+    @app_commands.guilds(discord.Object(id=GUILD_ID))
+    @app_commands.describe(gruppe="Coop-Gruppe", runden="Einfach oder Hin-/Rückrunde")
+    @app_commands.choices(
+        gruppe=[app_commands.Choice(name="Gruppe A", value="Coop_A"), app_commands.Choice(name="Gruppe B", value="Coop_B")],
+        runden=[app_commands.Choice(name="Jeder gegen jeden einmal", value=1), app_commands.Choice(name="Hin- und Rückrunde", value=2)],
+    )
+    async def coopspielplan(self, interaction: discord.Interaction, gruppe: app_commands.Choice[str], runden: app_commands.Choice[int]):
+        if not has_admin_role(interaction.user):
+            await interaction.response.send_message("Nur TFL-Admins können Spielpläne erstellen.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            count = await asyncio.to_thread(_generate_coop_group_fixtures, gruppe.value, int(runden.value))
+            await interaction.followup.send(f"✅ {count} Spiele in **{gruppe.value}** erstellt ({runden.name}). Bereits vorhandene Termine/Ergebnisse wurden nicht verändert.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"⛔ Spielplan nicht erstellt: {exc}", ephemeral=True)
 
     @app_commands.command(name="player", description="Öffnet das Spielermenü")
     @app_commands.guilds(discord.Object(id=GUILD_ID))
