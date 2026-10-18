@@ -1058,3 +1058,86 @@ body.overlay-editor-active .dock{
     justify-content:flex-start;
   }
 }
+
+
+/* V6.10 – Doppel gegen zwei Besucher */
+.visitor-double-shell{
+  width:100%;
+  max-width:700px;
+  margin:auto;
+  display:grid;
+  gap:8px;
+}
+.visitor-double-title{
+  text-align:center;
+  font-size:9px;
+  font-weight:950;
+  letter-spacing:.08em;
+  color:var(--muted);
+}
+.visitor-double-title span{
+  color:var(--gold);
+  padding:0 5px;
+}
+.visitor-double-score{
+  display:grid;
+  grid-template-columns:minmax(110px,1fr) 64px 18px 64px minmax(110px,1fr);
+  gap:6px;
+  align-items:center;
+}
+.visitor-double-team{
+  text-align:center;
+  font-size:10px;
+  font-weight:950;
+  color:#f3f6fa;
+}
+.visitor-name-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+.visitor-name-grid label{
+  display:grid;
+  gap:3px;
+}
+.visitor-name-grid span{
+  font-size:8px;
+  color:var(--muted);
+  font-weight:900;
+}
+.visitor-name-grid input{
+  height:31px;
+  min-width:0;
+  border-radius:6px;
+  border:1px solid #30455f;
+  background:#0d1722;
+  color:#fff;
+  padding:0 8px;
+  outline:none;
+  font-size:10px;
+}
+.visitor-name-grid input:focus{
+  border-color:var(--gold);
+  box-shadow:0 0 0 2px rgba(255,189,36,.13);
+}
+.double-special-hint{
+  margin:7px 0 0;
+  padding:7px 10px;
+  border:1px solid rgba(255,193,43,.24);
+  border-radius:8px;
+  background:rgba(255,193,43,.055);
+  color:#b7c1cf;
+  font-size:9px;
+  line-height:1.45;
+}
+@media (max-width:760px){
+  .visitor-double-score{
+    grid-template-columns:1fr 56px 16px 56px 1fr;
+  }
+  .visitor-name-grid{
+    grid-template-columns:1fr;
+  }
+  .visitor-double-team{
+    font-size:8px;
+  }
+}

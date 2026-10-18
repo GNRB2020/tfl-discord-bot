@@ -284,45 +284,88 @@
   function readMatchForm() {
     const mode = $("matchMode").value;
 
-    const result = mode === "set"
-      ? {
-          tzmarty_legs: readNonnegativeInt(
-            "setLegsTzmarty",
-            "Tzmarty Legs"
-          ),
-          korsar_legs: readNonnegativeInt(
-            "setLegsKorsar",
-            "Korsar Legs"
-          ),
-          tzmarty_sets: readNonnegativeInt(
-            "setsTzmarty",
-            "Tzmarty Sets"
-          ),
-          korsar_sets: readNonnegativeInt(
-            "setsKorsar",
-            "Korsar Sets"
-          ),
-        }
-      : {
-          tzmarty_legs: readNonnegativeInt(
-            "resultTzmarty",
-            "Tzmarty"
-          ),
-          korsar_legs: readNonnegativeInt(
-            "resultKorsar",
-            "Korsar"
-          ),
-          tzmarty_sets: 0,
-          korsar_sets: 0,
-        };
+    let result;
+    let visitors = ["", ""];
 
-    if (
-      result.tzmarty_legs
-      + result.korsar_legs
-      <= 0
-    ) {
+    if (mode === "set") {
+      result = {
+        tzmarty_legs: readNonnegativeInt(
+          "setLegsTzmarty",
+          "Tzmarty Legs"
+        ),
+        korsar_legs: readNonnegativeInt(
+          "setLegsKorsar",
+          "Korsar Legs"
+        ),
+        tzmarty_sets: readNonnegativeInt(
+          "setsTzmarty",
+          "Tzmarty Sets"
+        ),
+        korsar_sets: readNonnegativeInt(
+          "setsKorsar",
+          "Korsar Sets"
+        ),
+        team_legs: 0,
+        visitor_legs: 0,
+      };
+    } else if (mode === "doubles_visitors") {
+      result = {
+        tzmarty_legs: 0,
+        korsar_legs: 0,
+        tzmarty_sets: 0,
+        korsar_sets: 0,
+        team_legs: readNonnegativeInt(
+          "doubleTeamLegs",
+          "Tzmarty & Korsar"
+        ),
+        visitor_legs: readNonnegativeInt(
+          "doubleVisitorLegs",
+          "Besucher"
+        ),
+      };
+
+      visitors = [
+        String(
+          $("visitorOne").value || ""
+        ).trim().slice(0, 50),
+        String(
+          $("visitorTwo").value || ""
+        ).trim().slice(0, 50),
+      ];
+    } else {
+      result = {
+        tzmarty_legs: readNonnegativeInt(
+          "resultTzmarty",
+          "Tzmarty"
+        ),
+        korsar_legs: readNonnegativeInt(
+          "resultKorsar",
+          "Korsar"
+        ),
+        tzmarty_sets: 0,
+        korsar_sets: 0,
+        team_legs: 0,
+        visitor_legs: 0,
+      };
+    }
+
+    const playedLegs = (
+      mode === "doubles_visitors"
+        ? (
+            result.team_legs
+            + result.visitor_legs
+          )
+        : (
+            result.tzmarty_legs
+            + result.korsar_legs
+          )
+    );
+
+    if (playedLegs <= 0) {
       throw new Error(
-        "Bitte ein Spielergebnis mit mindestens einem Leg eintragen."
+        mode === "doubles_visitors"
+          ? "Bitte ein Doppel-Ergebnis mit mindestens einem Leg eintragen."
+          : "Bitte ein Spielergebnis mit mindestens einem Leg eintragen."
       );
     }
 
@@ -347,6 +390,7 @@
     return {
       mode,
       result,
+      visitors,
       specials,
     };
   }
@@ -395,8 +439,15 @@
       const data = readMatchForm();
 
       const legs = (
-        data.result.tzmarty_legs
-        + data.result.korsar_legs
+        data.mode === "doubles_visitors"
+          ? (
+              data.result.team_legs
+              + data.result.visitor_legs
+            )
+          : (
+              data.result.tzmarty_legs
+              + data.result.korsar_legs
+            )
       );
 
       const specials = (
@@ -433,19 +484,30 @@
     }
   }
 
-  function toggleSetMode() {
-    const isSet = (
-      $("matchMode").value === "set"
-    );
+  function toggleResultMode() {
+    const mode = $("matchMode").value;
+    const isSet = mode === "set";
+    const isDoubles =
+      mode === "doubles_visitors";
 
     $("normalResult").classList.toggle(
       "hidden",
-      isSet
+      isSet || isDoubles
     );
 
     $("setResult").classList.toggle(
       "hidden",
       !isSet
+    );
+
+    $("visitorDoubleResult").classList.toggle(
+      "hidden",
+      !isDoubles
+    );
+
+    $("doubleSpecialHint").classList.toggle(
+      "hidden",
+      !isDoubles
     );
 
     updateMatchPreview();
@@ -491,6 +553,8 @@
       "setsKorsar",
       "setLegsTzmarty",
       "setLegsKorsar",
+      "doubleTeamLegs",
+      "doubleVisitorLegs",
       "tz180",
       "tz177",
       "tz174",
@@ -510,6 +574,8 @@
       "koHF",
       "koBF",
       "koLD",
+      "visitorOne",
+      "visitorTwo",
     ]) {
       $(id).value = "";
     }
@@ -522,7 +588,7 @@
       "hidden"
     );
 
-    toggleSetMode();
+    toggleResultMode();
     syncSaveButton();
     updateMatchPreview();
   }
@@ -570,6 +636,22 @@
       match.result?.korsar_legs || 0
     );
 
+    $("doubleTeamLegs").value = Number(
+      match.result?.team_legs || 0
+    );
+
+    $("doubleVisitorLegs").value = Number(
+      match.result?.visitor_legs || 0
+    );
+
+    $("visitorOne").value = String(
+      match.visitors?.[0] || ""
+    );
+
+    $("visitorTwo").value = String(
+      match.visitors?.[1] || ""
+    );
+
     fillSpecials(
       "tz",
       match.specials?.tzmarty
@@ -588,7 +670,7 @@
       "hidden"
     );
 
-    toggleSetMode();
+    toggleResultMode();
     updateMatchPreview();
     syncSaveButton();
 
@@ -1227,7 +1309,7 @@
 
   $("matchMode").addEventListener(
     "change",
-    toggleSetMode
+    toggleResultMode
   );
 
   all(
