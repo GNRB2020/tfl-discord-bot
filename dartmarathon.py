@@ -39,7 +39,7 @@ CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
 SCHEMA_VERSION = 5
-ASSET_VERSION = "6.9.0"
+ASSET_VERSION = "6.10.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -144,6 +144,7 @@ MATCH_MODES = {
     "dido": "DI/DO",
     "cricket": "Cricket",
     "bobs27": "Bobs27",
+    "doubles_visitors": "Doppel vs. Besucher",
 }
 
 AD_POPUPS = {
@@ -307,7 +308,24 @@ def _sanitize_match(raw: Any) -> Dict[str, Any] | None:
         "korsar_legs": nonnegative("korsar_legs"),
         "tzmarty_sets": nonnegative("tzmarty_sets"),
         "korsar_sets": nonnegative("korsar_sets"),
+        "team_legs": nonnegative("team_legs"),
+        "visitor_legs": nonnegative("visitor_legs"),
     }
+
+    raw_visitors = raw.get("visitors", [])
+    if not isinstance(raw_visitors, list):
+        raw_visitors = []
+
+    clean_visitors = []
+    for index in range(2):
+        value = (
+            raw_visitors[index]
+            if index < len(raw_visitors)
+            else ""
+        )
+        clean_visitors.append(
+            str(value or "").strip()[:50]
+        )
 
     raw_specials = raw.get("specials", {})
     if not isinstance(raw_specials, dict):
@@ -356,6 +374,7 @@ def _sanitize_match(raw: Any) -> Dict[str, Any] | None:
         ),
         "mode": mode,
         "result": clean_result,
+        "visitors": clean_visitors,
         "specials": clean_specials,
         "pause_theoretical_seconds": theoretical,
         "pause_credit_applied_seconds": min(
@@ -1031,6 +1050,24 @@ def _match_leg_totals(
 ) -> Dict[str, int]:
     result = match["result"]
 
+    if match.get("mode") == "doubles_visitors":
+        team_legs = max(
+            0,
+            int(
+                result.get(
+                    "team_legs",
+                    0,
+                )
+            ),
+        )
+        # Ein gewonnenes Doppel-Leg zählt als persönlicher Leg-Erfolg
+        # für beide Dartmarathon-Spieler. Für die Event-Gesamtzahl wird
+        # es separat nur einmal gezählt.
+        return {
+            "tzmarty": team_legs,
+            "korsar": team_legs,
+        }
+
     return {
         "tzmarty": max(
             0,
@@ -1053,6 +1090,38 @@ def _match_leg_totals(
     }
 
 
+def _match_event_leg_count(
+    match: Dict[str, Any],
+) -> int:
+    result = match["result"]
+
+    if match.get("mode") == "doubles_visitors":
+        return (
+            max(
+                0,
+                int(
+                    result.get(
+                        "team_legs",
+                        0,
+                    )
+                ),
+            )
+            + max(
+                0,
+                int(
+                    result.get(
+                        "visitor_legs",
+                        0,
+                    )
+                ),
+            )
+        )
+
+    return sum(
+        _match_leg_totals(match).values()
+    )
+
+
 def _match_special_totals(
     match: Dict[str, Any],
 ) -> Dict[str, int]:
@@ -1067,13 +1136,15 @@ def _match_special_totals(
 def _match_theoretical_pause(
     match: Dict[str, Any],
 ) -> int:
-    legs = _match_leg_totals(match)
+    event_legs = (
+        _match_event_leg_count(match)
+    )
     specials = (
         _match_special_totals(match)
     )
 
     return (
-        30 * sum(legs.values())
+        30 * event_legs
         + 60 * sum(
             specials.values()
         )
@@ -1096,6 +1167,33 @@ def _aggregate_legs_locked() -> Dict[str, int]:
             )
 
     return totals
+
+
+def _aggregate_event_legs_locked() -> int:
+    # Legacy-Daten stammen ausschließlich aus 1-vs-1-Spielen und können
+    # daher wie bisher addiert werden. Bei Doppelspielen zählen wir jedes
+    # tatsächlich gespielte Leg nur einmal.
+    total = sum(
+        max(
+            0,
+            int(
+                _state["legacy_legs"].get(
+                    player,
+                    0,
+                )
+            ),
+        )
+        for player in PLAYERS
+    )
+
+    for match in _state["matches"]:
+        total += (
+            _match_event_leg_count(
+                match
+            )
+        )
+
+    return total
 
 
 def _aggregate_special_totals_locked() -> Dict[str, int]:
@@ -1179,6 +1277,30 @@ def _match_result_text(
             f"{result['korsar_legs']}"
         )
 
+    if match["mode"] == "doubles_visitors":
+        visitors = match.get(
+            "visitors",
+            [],
+        )
+        visitor_one = (
+            str(visitors[0]).strip()
+            if len(visitors) > 0
+            and str(visitors[0]).strip()
+            else "Besucher 1"
+        )
+        visitor_two = (
+            str(visitors[1]).strip()
+            if len(visitors) > 1
+            and str(visitors[1]).strip()
+            else "Besucher 2"
+        )
+        return (
+            "Tzmarty & Korsar "
+            f"{result.get('team_legs', 0)}:"
+            f"{result.get('visitor_legs', 0)} "
+            f"{visitor_one} & {visitor_two}"
+        )
+
     return (
         f"{result['tzmarty_legs']}:"
         f"{result['korsar_legs']}"
@@ -1215,6 +1337,12 @@ def _public_match(
         "result": deepcopy(
             match["result"]
         ),
+        "visitors": deepcopy(
+            match.get(
+                "visitors",
+                ["", ""],
+            )
+        ),
         "result_text": (
             _match_result_text(match)
         ),
@@ -1246,7 +1374,9 @@ def _metrics_locked() -> Dict[str, Any]:
     legs = _aggregate_legs_locked()
     specials = _aggregate_special_totals_locked()
 
-    total_legs = sum(legs.values())
+    total_legs = (
+        _aggregate_event_legs_locked()
+    )
     total_specials = sum(specials.values())
 
     stream_hours = (
@@ -1267,8 +1397,18 @@ def _metrics_locked() -> Dict[str, Any]:
         match_legs = _match_leg_totals(match)
         match_specials = _match_special_totals(match)
 
-        match_legs_total += sum(match_legs.values())
+        match_legs_total += (
+            _match_event_leg_count(
+                match
+            )
+        )
         match_specials_total += sum(match_specials.values())
+
+        # Die Matchbilanz Tzmarty : Korsar bleibt eine reine 1-vs-1-Bilanz.
+        # Doppel gegen Besucher erhöhen Match- und Leganzahl, aber nicht
+        # die direkte Bilanz der beiden gegeneinander.
+        if match["mode"] == "doubles_visitors":
+            continue
 
         result = match["result"]
 
@@ -1596,22 +1736,68 @@ def _parse_match_payload(
                 "korsar_sets"
             )
         ),
+        "team_legs": (
+            nonnegative_int(
+                "team_legs"
+            )
+        ),
+        "visitor_legs": (
+            nonnegative_int(
+                "visitor_legs"
+            )
+        ),
     }
 
-    if (
+    if mode == "doubles_visitors":
         clean_result[
             "tzmarty_legs"
-        ]
-        + clean_result[
+        ] = 0
+        clean_result[
             "korsar_legs"
-        ]
-        <= 0
-    ):
-        raise ValueError(
-            "Bitte ein Spielergebnis "
-            "mit mindestens einem Leg "
-            "eintragen."
-        )
+        ] = 0
+        clean_result[
+            "tzmarty_sets"
+        ] = 0
+        clean_result[
+            "korsar_sets"
+        ] = 0
+
+        if (
+            clean_result[
+                "team_legs"
+            ]
+            + clean_result[
+                "visitor_legs"
+            ]
+            <= 0
+        ):
+            raise ValueError(
+                "Bitte ein Doppel-Ergebnis "
+                "mit mindestens einem Leg "
+                "eintragen."
+            )
+    else:
+        clean_result[
+            "team_legs"
+        ] = 0
+        clean_result[
+            "visitor_legs"
+        ] = 0
+
+        if (
+            clean_result[
+                "tzmarty_legs"
+            ]
+            + clean_result[
+                "korsar_legs"
+            ]
+            <= 0
+        ):
+            raise ValueError(
+                "Bitte ein Spielergebnis "
+                "mit mindestens einem Leg "
+                "eintragen."
+            )
 
     if (
         mode == "set"
@@ -1629,6 +1815,30 @@ def _parse_match_payload(
             "Beim Setmodus bitte auch "
             "das Settergebnis eintragen."
         )
+
+    raw_visitors = message.get(
+        "visitors",
+        [],
+    )
+    if not isinstance(
+        raw_visitors,
+        list,
+    ):
+        raw_visitors = []
+
+    visitors = []
+    for index in range(2):
+        value = (
+            raw_visitors[index]
+            if index < len(raw_visitors)
+            else ""
+        )
+        visitors.append(
+            str(value or "").strip()[:50]
+        )
+
+    if mode != "doubles_visitors":
+        visitors = ["", ""]
 
     raw_specials = message.get(
         "specials",
@@ -1656,6 +1866,7 @@ def _parse_match_payload(
     parsed = {
         "mode": mode,
         "result": clean_result,
+        "visitors": visitors,
         "specials": specials,
     }
 
