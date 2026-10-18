@@ -56,8 +56,6 @@
         master.getBoundingClientRect().width
       );
 
-      // Immer genug Kopien hintereinander, sodass auch bei 1920px Breite
-      // niemals eine Lücke bzw. ein sichtbarer Neustart in der Mitte entsteht.
       const copies = Math.max(
         3,
         Math.ceil(viewportWidth / masterWidth) + 3
@@ -70,14 +68,11 @@
         )
       ).join("");
 
-      // Exakt um die Breite EINER Kopie verschieben. Da alle Kopien gleich
-      // sind, ist der Sprung am Animationsende optisch unsichtbar.
       track.style.setProperty(
         "--support-shift",
         `${masterWidth}px`
       );
 
-      // Konstante Lesegeschwindigkeit statt fixer Laufzeit.
       const pixelsPerSecond = 62;
       const duration = Math.max(
         8,
@@ -139,7 +134,6 @@
 
     scheduleTickerRebuild();
   }
-
 
   function enqueueShopBanner(message) {
     bannerQueue.push(message);
@@ -266,6 +260,11 @@
         message.type === "shop_purchase_popup"
         || message.type === "shop_donation_popup"
       ) {
+        window.DartShopAudio?.enqueue(
+          message,
+          {mode: "stream"}
+        );
+
         enqueueShopBanner(message);
       }
     };
