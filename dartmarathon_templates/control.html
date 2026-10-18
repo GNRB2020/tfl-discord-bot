@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.9.0">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.10.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -105,6 +105,7 @@
               <option value="dido">DI/DO</option>
               <option value="cricket">Cricket</option>
               <option value="bobs27">Bobs27</option>
+              <option value="doubles_visitors">Doppel vs. Besucher</option>
             </select>
           </label>
         </div>
@@ -141,6 +142,29 @@
                 <input id="setLegsKorsar" class="score-input small-score" type="number" min="0" step="1" value="0">
               </div>
             </div>
+
+            <div id="visitorDoubleResult" class="visitor-double-shell hidden">
+              <div class="visitor-double-title">TZMARTY &amp; KORSAR <span>VS.</span> BESUCHER</div>
+
+              <div class="visitor-double-score">
+                <div class="visitor-double-team">TZMARTY &amp; KORSAR</div>
+                <input id="doubleTeamLegs" class="score-input" type="number" min="0" step="1" value="0" aria-label="Legs Tzmarty und Korsar">
+                <div class="score-colon">:</div>
+                <input id="doubleVisitorLegs" class="score-input" type="number" min="0" step="1" value="0" aria-label="Legs Besucher">
+                <div class="visitor-double-team">BESUCHER</div>
+              </div>
+
+              <div class="visitor-name-grid">
+                <label>
+                  <span>BESUCHER 1</span>
+                  <input id="visitorOne" type="text" maxlength="50" placeholder="Name Besucher 1">
+                </label>
+                <label>
+                  <span>BESUCHER 2</span>
+                  <input id="visitorTwo" type="text" maxlength="50" placeholder="Name Besucher 2">
+                </label>
+              </div>
+            </div>
           </div>
 
           <div class="match-save-box">
@@ -153,6 +177,11 @@
               <button id="saveMatch" class="btn save-match-btn" type="button">MATCH SPEICHERN</button>
             </div>
           </div>
+        </div>
+
+        <div id="doubleSpecialHint" class="double-special-hint hidden">
+          Doppelspiel: Gewonnene Team-Legs zählen bei Tzmarty und Korsar jeweils als persönlicher Leg-Erfolg.
+          In „Legs gesamt“ wird jedes tatsächlich gespielte Leg nur einmal gezählt. Specials werden weiterhin nur für Tzmarty/Korsar erfasst.
         </div>
 
         <div class="specials-columns">
@@ -549,7 +578,7 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/dartmarathon/static/shop-audio.js?v=6.9.1"></script>
-  <script src="/dartmarathon/static/control.js?v=6.9.0"></script>
+  <script src="/dartmarathon/static/control.js?v=6.10.0"></script>
   <script src="/dartmarathon/static/shop-control.js?v=6.9.0"></script>
   <script src="/dartmarathon/static/overlay-editor.js?v=6.9.0"></script>
 </body>
