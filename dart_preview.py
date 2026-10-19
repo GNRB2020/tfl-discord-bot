@@ -1,7 +1,4 @@
-"""Local-only tablet preview with the existing dart_engine (phase 1).
-Run: python dart_preview.py; open http://127.0.0.1:8765/dart/
-Not production-ready: no login, persistence or multiplayer synchronization.
-"""
+"""Phase-2 test scorer routes. Matches remain process-local; no production persistence."""
 from __future__ import annotations
 import os
 from pathlib import Path
@@ -11,32 +8,32 @@ from dart_engine import Match, Rules, possible_checkout_darts
 ROOT = Path(__file__).resolve().parent
 MATCH = None
 
-
 def view():
     m = MATCH
+    stats = m.summary()
+    rest = m.remaining[m.current]
+    options = possible_checkout_darts(rest) if m.rules.double_out else list(range(1, 4))
     return {
-        'names': list(m.names), 'remaining': m.remaining, 'legs': m.legs,
-        'sets': m.sets, 'current': m.current, 'done': m.done,
+        'names': list(m.names), 'remaining': m.remaining[:], 'legs': m.legs[:],
+        'sets': m.sets[:], 'current': m.current, 'done': m.done,
         'leg_number': m.leg_number, 'rules': vars(m.rules),
-        'can_checkout': possible_checkout_darts(m.remaining[m.current]) if m.rules.double_out else list(range(1,4)),
+        'can_checkout': options if rest <= 170 and not m.done else [],
+        'current_stats': stats['players'],
         'last': [vars(v) for v in m.visits[-6:]],
-        'summary': m.summary() if m.done else None,
+        'summary': stats if m.done else None,
     }
 
-
 async def page(request):
-    return web.FileResponse(ROOT/'dart_ui'/'index.html',headers={'Cache-Control':'no-store'})
-
+    return web.FileResponse(ROOT/'dart_ui'/'index.html', headers={'Cache-Control':'no-store'})
 
 async def status(request):
     return web.json_response(view())
 
-
 async def reset(request):
     global MATCH
-    data=await request.json()
+    data = await request.json()
     if MATCH and MATCH.visits and not MATCH.done:
-        return web.json_response({'error':'Aktives Spiel kann nicht zurückgesetzt werden.'},status=409)
+        return web.json_response({'error':'Aktives Spiel kann nicht zurückgesetzt werden.'}, status=409)
     try:
         names=(str(data.get('a','Spieler A'))[:48],str(data.get('b','Spieler B'))[:48])
         rules=Rules(start_score=int(data.get('start_score',501)),mode=data.get('mode','legs'),
@@ -47,7 +44,6 @@ async def reset(request):
         return web.json_response(view())
     except (ValueError,TypeError,KeyError) as e:
         return web.json_response({'error':str(e)},status=400)
-
 
 async def throw(request):
     global MATCH
@@ -61,7 +57,6 @@ async def throw(request):
     except (ValueError,TypeError,KeyError) as e:
         return web.json_response({'error':str(e)},status=400)
 
-
 def create_app():
     global MATCH
     MATCH=Match(Rules(max_legs=6,allow_draw=True),('Spieler A','Spieler B'))
@@ -72,7 +67,5 @@ def create_app():
     app.router.add_post('/dart/api/throw',throw)
     return app
 
-
 if __name__=='__main__':
-    # Explicitly localhost only: no authentication in this preview.
     web.run_app(create_app(),host='127.0.0.1',port=int(os.getenv('DART_PREVIEW_PORT','8765')))
