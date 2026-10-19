@@ -13,7 +13,9 @@ import time
 from pathlib import Path
 from aiohttp import web
 from dart_engine import Match, Rules, possible_checkout_darts
-from dart_training_tournaments import register_training_tournaments, restore_from_sheet
+from dart_training_tournaments import register_training_tournaments, restore_from_sheet, TOURNAMENTS
+from dart_profiles_store import profiles as sheet_profiles, games as profile_games, save_game, aggregate_profile
+from dataclasses import asdict
 
 ROOT = Path(__file__).resolve().parent
 SESSIONS: dict[str, tuple[str, float]] = {}
@@ -100,7 +102,7 @@ def _state(r):
 async def home(request):
     # Preserve the existing phase-5 UI. The upgrade script patches only Sau UX.
     html = (ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
-    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script><script src="/dart/phase12.js" defer></script><script src="/dart/tournament_bridge.js" defer></script><script src="/dart/phase14.js" defer></script><script src="/dart/profiles.js" defer></script>'
+    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script><script src="/dart/phase12.js" defer></script><script src="/dart/tournament_bridge.js" defer></script><script src="/dart/phase14.js" defer></script><script src="/dart/profiles.js" defer></script><script src="/dart/statistics-menu.js" defer></script>'
     html = html.replace('</head>', '<link rel="stylesheet" href="/dart/stingrays-theme.css"></head>')
     html = html.replace('</body>', injection + '</body>')
     return web.Response(text=html, content_type='text/html', charset='utf-8',headers={'Cache-Control':'no-store'})
@@ -167,7 +169,7 @@ async def new_match(request):
                 rounds=int(data.get('rounds',10))
                 if rounds < 1 or rounds > 10000:
                     raise ValueError('Rundenzahl muss zwischen 1 und 10000 liegen')
-                r={'kind':'sau','owner':user,'game_id':game_id,
+                r={'kind':'sau','owner':user,'game_id':game_id,'profile_ids':data.get('profile_ids',[]),
                    'name':str(data.get('a') or 'Spieler 1')[:45],
                    'remaining':201,'visits':[],
                    'marks':{'sau':0,**{str(i):0 for i in range(4,13)}},
@@ -176,7 +178,7 @@ async def new_match(request):
             elif kind=='tug':
                 rounds=int(data.get('rounds',5))
                 if not 1<=rounds<=100:raise ValueError('Rundenzahl 1 bis 100')
-                r={'kind':'tug','owner':user,'game_id':game_id,
+                r={'kind':'tug','owner':user,'game_id':game_id,'profile_ids':data.get('profile_ids',[]),
                    'names':[str(data.get('a') or 'Spieler 1')[:45],str(data.get('b') or 'Spieler 2')[:45]],
                    'rounds':rounds,'round':1,'position':181,'current':0, 'visits':[],
                    'wins':[0,0],'done':False,'finished':False}
@@ -196,7 +198,7 @@ async def new_match(request):
                 if starter not in (0,1):raise ValueError('Ungültiger Anwurf')
                 match=Match(rules,names)
                 match.current=starter;match.first_throw=starter
-                r={'kind':'x01','owner':user,'game_id':game_id,'match':match,'starter':starter}
+                r={'kind':'x01','owner':user,'game_id':game_id,'match':match,'starter':starter,'profile_ids':data.get('profile_ids',[])}
             else:
                 raise ValueError('Trainingsmodus nicht verfügbar')
         except (ValueError,TypeError) as exc:
@@ -274,6 +276,14 @@ async def throw(request):
                         r['done']=False
         except (ValueError,TypeError,KeyError) as exc:
             return web.json_response({'error':str(exc)},status=400)
+        # Archive the confirmed state after every throw; do not acknowledge a lost write.
+        try:
+            payload=_archive_payload(r)
+            await save_game(r['game_id'],r['kind'],payload)
+        except Exception as exc:
+            GAMES[r['game_id']]=before
+            print(f'[DART PROFILES] Speicherung fehlgeschlagen: {exc}',flush=True)
+            return web.json_response({'error':'Google-Sheets-Speicherung fehlgeschlagen – Aufnahme nicht gebucht'},status=503)
         LAST_ACTION[r['game_id']]=before
         return web.json_response(_state(r))
 
@@ -288,6 +298,11 @@ async def undo(request):
         previous=LAST_ACTION.pop(gid,None)
         if previous is None:
             return web.json_response({'error':'Keine Aufnahme zum Rückgängigmachen vorhanden'},status=409)
+        try:
+            await save_game(gid,previous['kind'],_archive_payload(previous))
+        except Exception as exc:
+            LAST_ACTION[gid]=previous
+            return web.json_response({'error':'Rücknahme konnte nicht gespeichert werden: '+str(exc)},status=503)
         GAMES[gid]=previous
         return web.json_response(_state(previous))
 
@@ -305,6 +320,31 @@ async def next_sau(request):
         r['done']=False
         return web.json_response(_state(r))
 
+
+def _archive_payload(r):
+    if r['kind']=='x01':
+        m=r['match']
+        return {'kind':'x01','profile_ids':r.get('profile_ids',[]),'done':m.done,
+          'match':{'rules':asdict(m.rules),'names':list(m.names),'remaining':m.remaining,
+            'legs':m.legs,'sets':m.sets,'visits':[asdict(v) for v in m.visits],
+            'current':m.current,'first_throw':m.first_throw,'leg_number':m.leg_number,'done':m.done}}
+    return {k:v for k,v in r.items() if k!='owner'}
+
+async def profiles_endpoint(request):
+    _auth(request)
+    return web.json_response(await sheet_profiles())
+
+async def profile_stats_endpoint(request):
+    _auth(request)
+    items=await sheet_profiles()
+    pid=request.match_info['pid']
+    item=next((p for p in items if p['id']==pid),None)
+    if not item:raise web.HTTPNotFound(text='Profil nicht vorhanden oder inaktiv')
+    return web.json_response(aggregate_profile(item,await profile_games(),TOURNAMENTS.values()))
+
+async def statistics_page(request):
+    _auth(request)
+    return web.FileResponse(ROOT/'dart_ui'/'statistics.html',headers={'Cache-Control':'no-store'})
 
 async def tournaments_page(request):
     _auth(request)
@@ -342,9 +382,13 @@ async def profile_js(request):
     _auth(request)
     return web.FileResponse(ROOT/'dart_ui'/'profiles.js',headers={'Cache-Control':'no-store'})
 
+async def statistics_menu_js(request):
+    return web.FileResponse(ROOT/'dart_ui'/'statistics-menu.js',headers={'Cache-Control':'no-store'})
+
 async def profiles_json(request):
     _auth(request)
-    return web.FileResponse(ROOT/'dart_ui'/'profiles.json',headers={'Cache-Control':'no-store'})
+    _auth(request)
+    return web.json_response(await sheet_profiles())
 
 def register_dart_render_preview(app):
     if len(os.environ.get('DART_ADMIN_PIN',''))<10:
@@ -356,7 +400,11 @@ def register_dart_render_preview(app):
     app.router.add_get('/dart/stingrays-theme.css',stingrays_theme)
     app.router.add_get('/dart/phase14.js',phase14_js)
     app.router.add_get('/dart/profiles.js',profile_js)
+    app.router.add_get('/dart/statistics-menu.js',statistics_menu_js)
     app.router.add_get('/dart/profiles.json',profiles_json)
+    app.router.add_get('/dart/api/profiles',profiles_endpoint)
+    app.router.add_get('/dart/api/profiles/{pid}/statistics',profile_stats_endpoint)
+    app.router.add_get('/dart/statistics/',statistics_page)
     app.router.add_get('/dart/tournament_bridge.js',tournament_bridge_js)
     app.router.add_get('/dart/tournament_menu.js',menu_script)
     app.router.add_get('/dart/tournaments/',tournaments_page)

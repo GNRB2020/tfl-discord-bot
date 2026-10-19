@@ -171,6 +171,9 @@ async def create(request):
     names=[str(n).strip()[:40] for n in names]
     if any(not n for n in names) or len(set(n.casefold() for n in names))!=len(names):
         return web.json_response({'error':'Spielernamen müssen eindeutig und ausgefüllt sein'},status=400)
+    pids=data.get('profile_ids',[])
+    if pids and (not isinstance(pids,list) or len(pids)!=len(names) or any(p is not None and (not isinstance(p,str) or len(p)>60) for p in pids)):
+        return web.json_response({'error':'Ungültige Profil-Zuordnung'},status=400)
     mode=data.get('mode','round1')
     if mode not in ('round1','round2','ko'):
         return web.json_response({'error':'Unbekannter Modus'},status=400)
@@ -184,7 +187,7 @@ async def create(request):
         return web.json_response({'error':'Legs pro Set müssen ungerade sein'},status=400)
     t={'id':secrets.token_urlsafe(10),'title':str(data.get('title','Trainingsturnier')).strip()[:60] or 'Trainingsturnier',
        'mode':mode,'players':names,'best_of':n,'sets':sets,'legs_per_set':per_set,
-       'created':datetime.now(timezone.utc).isoformat(timespec='minutes'),'matches':[]}
+       'created':datetime.now(timezone.utc).isoformat(timespec='minutes'),'profile_ids':data.get('profile_ids',[]),'matches':[]}
     if mode!='ko':
         # Circle method: every participant plays at most once per round.
         slots=names[:]
