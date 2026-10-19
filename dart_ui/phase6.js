@@ -198,7 +198,7 @@
   function addUndoButton(parent,id){
     let b=document.getElementById(id);
     if(!b){b=document.createElement('button');b.id=id;b.type='button';b.textContent='↶ LETZTE AUFNAHME ZURÜCK';parent.appendChild(b)}
-    b.disabled=!S?.can_undo||busy;
+    b.disabled=!S?.can_undo;
     b.onclick=async()=>{
       if(busy || !S?.can_undo)return;
       if(!confirm('Letzte Aufnahme zurücknehmen? Auch Checkout, Legwechsel und Statistiken werden korrigiert.'))return;
