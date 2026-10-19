@@ -216,6 +216,12 @@ async def throw(request):
                 if r['done']:
                     r['completed_rounds']+=1
                     r['finished']=(r['completed_rounds']>=r['rounds_target'] and r['marks']['sau']>=SAU_TARGET)
+                    # Nach einem Sau-Strich sofort nächste Runde, sofern Training noch läuft.
+                    if not checkout and not r['finished']:
+                        r['round']+=1
+                        r['remaining']=201
+                        r['visits']=[]
+                        r['done']=False
         except (ValueError,TypeError,KeyError) as exc:
             return web.json_response({'error':str(exc)},status=400)
         return web.json_response(_state(r))
@@ -245,4 +251,4 @@ def register_dart_render_preview(app):
     app.router.add_post('/dart/api/new',new_match)
     app.router.add_post('/dart/api/throw',throw)
     app.router.add_post('/dart/api/next-sau',next_sau)
-    print('[STINGRAYS] Phase 6 registered at /dart/')
+    print('[STINGRAYS] Phase 7 registered at /dart/')
