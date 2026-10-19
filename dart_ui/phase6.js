@@ -7,7 +7,7 @@
   api = async function(path, data) {
     // All state and mutation requests carry a tab-specific game identifier.
     const gameId = sessionStorage.getItem(gameKey) || '';
-    const isGame = ['state','throw','next-sau','new'].includes(path);
+    const isGame = ['state','throw','next-sau','new','undo'].includes(path);
     if (!isGame) {
       const result = await oldApi(path,data);
       if (path === 'logout') sessionStorage.removeItem(gameKey);
@@ -115,12 +115,44 @@
     document.getElementById('confirmSauCheck').onclick=()=>{closeModal();send(rest,{checkout:true,darts:picked,checkout_attempts:1,bullfinish:false})};
   };
 
+
+  // A bull finish is possible only if final dart is double bull (50),
+  // with exactly the selected number of darts and legal prior hits.
+  const bullHits = [...new Set([
+    ...Array.from({length:20},(_,i)=>i+1),25,50,
+    ...Array.from({length:20},(_,i)=>2*(i+1)),
+    ...Array.from({length:20},(_,i)=>3*(i+1))
+  ])];
+  function canFinishOnBull(rest,darts) {
+    if(darts === 1) return rest === 50;
+    if(darts === 2) return bullHits.includes(rest-50);
+    if(darts === 3) return bullHits.some(n=>bullHits.includes(rest-50-n));
+    return false;
+  }
+  // Only ask for missed doubles when the entered visit leaves <=50 points.
+  // The server still decides whether the visit or a checkout is valid.
+  const previousBook = book;
+  book = function(isSau) {
+    if (isSau || !S || S.kind !== 'x01' || S.done) return previousBook(isSau);
+    const raw = entry;
+    if (raw === '') return;
+    const points = Number(raw);
+    if (!Number.isInteger(points) || points < 0 || points > 180) return previousBook(isSau);
+    const remaining = S.remaining[S.current];
+    if (points === remaining) return previousBook(isSau);
+    if (remaining - points > 50) {
+      void send(points);
+      return;
+    }
+    return previousBook(isSau);
+  };
+
   // X01: Ziffern 1, 2, 3 kurz antippen => Eingabe, lange halten => direkter Checkout.
   // Touch und Maus; nach Long-Press wird das nachfolgende click unterdrückt.
   const holdPanel=document.getElementById('hold');
   holdPanel.classList.add('hide');
   const cssHold=document.createElement('style');
-  cssHold.textContent='#hold{display:none!important} #pad button:nth-child(-n+3){touch-action:none}';
+  cssHold.textContent='#hold{display:none!important} #pad button:nth-child(-n+3){touch-action:none} #pad button.checkout-ready{background:#087e47!important;border:2px solid #6affae!important;color:#fff!important;box-shadow:inset 0 0 0 1px #14633c}';
   document.head.appendChild(cssHold);
   const padButtons=Array.from(document.querySelectorAll('#pad button'));
   [1,2,3].forEach((darts,index)=>{
@@ -135,7 +167,7 @@
         timer=null;longPressed=true;suppressClick=true;
         const rest=S.remaining[S.current];
         const finish=()=>send(rest,{checkout:true,darts,checkout_attempts:1,bullfinish:false});
-        if (rest>=50) {
+        if (canFinishOnBull(rest,darts)) {
           modal(`<h2>Bullfinish?</h2><p>Wurde das Checkout über Bullseye beendet?</p>
             <div class="actions"><button id="bullNo">NEIN</button><button class="green" id="bullYes">JA</button></div>
             <div class="actions"><button id="bullCancel">ABBRECHEN</button></div>`);
@@ -154,7 +186,40 @@
   });
   const prevShowMatch=showMatch;
   showMatch=function(){prevShowMatch();holdPanel.classList.add('hide');
-    if(S?.kind==='x01' && S.can_checkout?.length) document.getElementById('last').textContent='1 / 2 / 3 halten (0,7 Sek.) = Checkout';
+    [1,2,3].forEach((d,i)=>padButtons[i]?.classList.toggle('checkout-ready',
+      S?.kind==='x01' && !S.done && !!S.can_checkout?.includes(d)));
+    if(S?.kind==='x01' && S.can_checkout?.length) document.getElementById('last').textContent='Grüne 1 / 2 / 3 halten (0,7 Sek.) = Checkout';
+  };
+
+  // Revoke exactly the latest successful scoring action, independently for each game ID.
+  const undoStyle=document.createElement('style');
+  undoStyle.textContent='#undoX01,#undoSau,#undoFinished{background:#37495f;border:1px solid #c7a86a;color:#fff;font-weight:800;min-height:38px}';
+  document.head.appendChild(undoStyle);
+  function addUndoButton(parent,id){
+    let b=document.getElementById(id);
+    if(!b){b=document.createElement('button');b.id=id;b.type='button';b.textContent='↶ LETZTE AUFNAHME ZURÜCK';parent.appendChild(b)}
+    b.disabled=!S?.can_undo||busy;
+    b.onclick=async()=>{
+      if(busy || !S?.can_undo)return;
+      if(!confirm('Letzte Aufnahme zurücknehmen? Auch Checkout, Legwechsel und Statistiken werden korrigiert.'))return;
+      busy=true;
+      try{S=await api('undo',{});entry='';sauEntry='';closeModal();lastReportId='';if(S.kind==='sau')showSau();else showMatch()}
+      catch(e){err(e.message)}finally{busy=false}
+    };
+  }
+  const renderMatchWithUndo=showMatch;
+  showMatch=function(){
+    renderMatchWithUndo();
+    const panel=document.querySelector('#scorerView .columns .box');
+    if(panel) addUndoButton(panel,'undoX01');
+    if(S?.done){const footer=document.querySelector('#modalContent .actions');if(footer)addUndoButton(footer,'undoFinished')}
+  };
+  const renderSauWithUndo=showSau;
+  showSau=function(){
+    renderSauWithUndo();
+    const panel=document.querySelector('#sauView .sau .panel');
+    if(panel)addUndoButton(panel,'undoSau');
+    if(S?.finished){const footer=document.querySelector('#modalContent .actions');if(footer)addUndoButton(footer,'undoFinished')}
   };
 
   // Reload restores the current browser tab's match without affecting other devices.
