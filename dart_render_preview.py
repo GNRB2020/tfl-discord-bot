@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from aiohttp import web
 from dart_engine import Match, Rules, possible_checkout_darts
+from dart_training_tournaments import register_training_tournaments
 
 ROOT = Path(__file__).resolve().parent
 SESSIONS: dict[str, tuple[str, float]] = {}
@@ -92,7 +93,7 @@ def _state(r):
 async def home(request):
     # Preserve the existing phase-5 UI. The upgrade script patches only Sau UX.
     html = (ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
-    injection = '<script src="/dart/phase6.js" defer></script>'
+    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script>'
     html = html.replace('</body>', injection + '</body>')
     return web.Response(text=html, content_type='text/html', charset='utf-8',headers={'Cache-Control':'no-store'})
 
@@ -262,11 +263,26 @@ async def next_sau(request):
         return web.json_response(_state(r))
 
 
+async def tournaments_page(request):
+    _auth(request)
+    return web.FileResponse(ROOT / 'dart_ui' / 'tournaments.html', headers={'Cache-Control':'no-store'})
+
+async def tournament_script(request):
+    _auth(request)
+    return web.FileResponse(ROOT / 'dart_ui' / 'tournaments.js', headers={'Cache-Control':'no-store'})
+
+async def menu_script(request):
+    return web.FileResponse(ROOT / 'dart_ui' / 'tournament_menu.js', headers={'Cache-Control':'no-store'})
+
 def register_dart_render_preview(app):
     if len(os.environ.get('DART_ADMIN_PIN',''))<10:
         print('[STINGRAYS] Warning: DART_ADMIN_PIN is missing/too short')
     app.router.add_get('/dart/',home)
     app.router.add_get('/dart/phase6.js',phase6_js)
+    app.router.add_get('/dart/tournament_menu.js',menu_script)
+    app.router.add_get('/dart/tournaments/',tournaments_page)
+    app.router.add_get('/dart/tournaments.js',tournament_script)
+    register_training_tournaments(app,_auth)
     app.router.add_post('/dart/api/login',login)
     app.router.add_post('/dart/api/logout',logout)
     app.router.add_get('/dart/api/state',state)
