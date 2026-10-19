@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import secrets
+import hmac
+import os
 from dataclasses import asdict
 from dart_engine import Visit
 from dart_sheet_store import save as sheet_save, load_all as sheet_load
@@ -70,7 +72,7 @@ def _json(t):
           'score':([game.sets[:] if t['sets'] else game.legs[:]][0] if game else None),
           'status':'finished' if game and game.done else 'running' if game and game.visits else 'open' if game else 'pending',
           'winner':m.get('winner')})
-    return {'id':t['id'],'title':t['title'],'mode':t['mode'],'players':t['players'],
+    return {'id':t['id'],'title':t['title'],'archived':bool(t.get('archived')),'mode':t['mode'],'players':t['players'],
             'best_of':t['best_of'],'sets':t['sets'],'legs_per_set':t['legs_per_set'],
             'created':t['created'],'matches':matches,'standings':_table(t),
             'complete':_is_complete(t),'statistics':_statistics(t)}
@@ -152,7 +154,7 @@ def _advance(t):
 def _get(request):
     tid=request.match_info.get('tid')
     t=TOURNAMENTS.get(tid)
-    if not t:raise web.HTTPNotFound(text='Turnier nicht gefunden')
+    if not t or t.get('deleted'):raise web.HTTPNotFound(text='Turnier nicht gefunden')
     return t
 
 def _match(t,mid):
@@ -161,7 +163,7 @@ def _match(t,mid):
     return item
 
 async def all_tournaments(request):
-    return web.json_response({'items':[{'id':t['id'],'title':t['title'],'mode':t['mode'],'created':t['created']} for t in reversed(list(TOURNAMENTS.values()))]})
+    return web.json_response({'items':[{'id':t['id'],'title':t['title'],'mode':t['mode'],'created':t['created'],'archived':bool(t.get('archived'))} for t in reversed(list(TOURNAMENTS.values())) if not t.get('deleted')]})
 
 async def create(request):
     data=await request.json()
@@ -174,6 +176,9 @@ async def create(request):
     pids=data.get('profile_ids',[])
     if pids and (not isinstance(pids,list) or len(pids)!=len(names) or any(p is not None and (not isinstance(p,str) or len(p)>60) for p in pids)):
         return web.json_response({'error':'Ungültige Profil-Zuordnung'},status=400)
+    valid_ids=[p for p in pids if p]
+    if len(valid_ids)!=len(set(valid_ids)):
+        return web.json_response({'error':'Jedes Spielerprofil darf pro Turnier nur einmal gewählt werden'},status=400)
     mode=data.get('mode','round1')
     if mode not in ('round1','round2','ko'):
         return web.json_response({'error':'Unbekannter Modus'},status=400)
@@ -187,7 +192,7 @@ async def create(request):
         return web.json_response({'error':'Legs pro Set müssen ungerade sein'},status=400)
     t={'id':secrets.token_urlsafe(10),'title':str(data.get('title','Trainingsturnier')).strip()[:60] or 'Trainingsturnier',
        'mode':mode,'players':names,'best_of':n,'sets':sets,'legs_per_set':per_set,
-       'created':datetime.now(timezone.utc).isoformat(timespec='minutes'),'profile_ids':data.get('profile_ids',[]),'matches':[]}
+       'created':datetime.now(timezone.utc).isoformat(timespec='minutes'),'profile_ids':data.get('profile_ids',[]),'archived':False,'deleted':False,'matches':[]}
     if mode!='ko':
         # Circle method: every participant plays at most once per round.
         slots=names[:]
@@ -308,6 +313,37 @@ async def start_match(request):
             return web.json_response({'error':'Anwurf nicht gespeichert'},status=503)
     return await game_state(request)
 
+async def set_archive(request):
+    t=_get(request)
+    data=await request.json()
+    archived=data.get('archived')
+    if not isinstance(archived,bool):
+        return web.json_response({'error':'archived muss true oder false sein'},status=400)
+    async with LOCK:
+        before=t.get('archived',False)
+        t['archived']=archived
+        try:await _persist(t)
+        except Exception:
+            t['archived']=before
+            return web.json_response({'error':'Archivstatus nicht gespeichert'},status=503)
+    return web.json_response({'ok':True,'archived':archived})
+
+async def delete_tournament(request):
+    t=_get(request)
+    data=await request.json()
+    expected=os.environ.get('DART_ADMIN_PIN','')
+    given=str(data.get('pin',''))
+    if len(expected)<10 or not hmac.compare_digest(expected,given):
+        return web.json_response({'error':'Admin-PIN ungültig'},status=403)
+    async with LOCK:
+        before=t.get('deleted',False)
+        t['deleted']=True  # Tombstone in Sheets prevents resurrection after restart.
+        try:await _persist(t)
+        except Exception:
+            t['deleted']=before
+            return web.json_response({'error':'Löschen nicht gespeichert'},status=503)
+    return web.json_response({'ok':True})
+
 async def storage_status(request):
     try:
         data=await sheet_load()
@@ -328,6 +364,8 @@ def register_training_tournaments(app,auth):
     app.router.add_get('/dart/api/tournaments',protect(all_tournaments))
     app.router.add_post('/dart/api/tournaments',protect(create))
     app.router.add_get('/dart/api/tournaments/{tid}',protect(tournament))
+    app.router.add_post('/dart/api/tournaments/{tid}/archive',protect(set_archive))
+    app.router.add_post('/dart/api/tournaments/{tid}/delete',protect(delete_tournament))
     app.router.add_get('/dart/api/tournaments/{tid}/matches/{mid}',protect(game_state))
     app.router.add_post('/dart/api/tournaments/{tid}/matches/{mid}/start',protect(start_match))
     app.router.add_post('/dart/api/tournaments/{tid}/matches/{mid}/throw',protect(game_throw))

@@ -164,6 +164,12 @@ async def new_match(request):
     async with LOCK:
         try:
             kind=data.get('kind','x01')
+            ids=data.get('profile_ids',[])
+            if not isinstance(ids,list) or any(x is not None and not isinstance(x,str) for x in ids):
+                raise ValueError('Ungültige Profilzuordnung')
+            chosen=[x for x in ids if x]
+            if len(chosen)!=len(set(chosen)):
+                raise ValueError('Dasselbe Profil darf nur einmal pro Spiel verwendet werden')
             game_id=secrets.token_urlsafe(18)
             if kind=='sau':
                 rounds=int(data.get('rounds',10))
@@ -330,6 +336,10 @@ def _archive_payload(r):
             'current':m.current,'first_throw':m.first_throw,'leg_number':m.leg_number,'done':m.done}}
     return {k:v for k,v in r.items() if k!='owner'}
 
+async def tournaments18_script(request):
+    _auth(request)
+    return web.FileResponse(ROOT/'dart_ui'/'tournaments18.js',headers={'Cache-Control':'no-store'})
+
 async def profiles_endpoint(request):
     _auth(request)
     return web.json_response(await sheet_profiles())
@@ -340,7 +350,17 @@ async def profile_stats_endpoint(request):
     pid=request.match_info['pid']
     item=next((p for p in items if p['id']==pid),None)
     if not item:raise web.HTTPNotFound(text='Profil nicht vorhanden oder inaktiv')
-    return web.json_response(aggregate_profile(item,await profile_games(),TOURNAMENTS.values()))
+    return web.json_response(aggregate_profile(item,await profile_games(),[t for t in TOURNAMENTS.values() if not t.get('deleted')]))
+
+async def profile_h2h_endpoint(request):
+    _auth(request)
+    items=await sheet_profiles()
+    pid=request.match_info['pid']
+    profile=next((p for p in items if p['id']==pid),None)
+    if not profile:raise web.HTTPNotFound(text='Profil nicht gefunden')
+    from dart_profiles_store import head_to_head
+    data=head_to_head(profile,items,await profile_games(),[t for t in TOURNAMENTS.values() if not t.get('deleted')])
+    return web.json_response(data)
 
 async def statistics_page(request):
     _auth(request)
@@ -350,7 +370,7 @@ async def tournaments_page(request):
     _auth(request)
     html=(ROOT / 'dart_ui' / 'tournaments.html').read_text(encoding='utf-8')
     html=html.replace('</head>','<link rel="stylesheet" href="/dart/stingrays-theme.css"></head>')
-    html=html.replace('</body>','<script src="/dart/tournaments13.js"></script><script src="/dart/tournaments15.js"></script><script src="/dart/profiles.js"></script></body>')
+    html=html.replace('</body>','<script src="/dart/tournaments13.js"></script><script src="/dart/tournaments15.js"></script><script src="/dart/profiles.js"></script><script src="/dart/tournaments18.js"></script></body>')
     return web.Response(text=html,content_type='text/html',headers={'Cache-Control':'no-store'})
 
 async def tournament_script(request):
@@ -400,10 +420,12 @@ def register_dart_render_preview(app):
     app.router.add_get('/dart/stingrays-theme.css',stingrays_theme)
     app.router.add_get('/dart/phase14.js',phase14_js)
     app.router.add_get('/dart/profiles.js',profile_js)
+    app.router.add_get('/dart/tournaments18.js',tournaments18_script)
     app.router.add_get('/dart/statistics-menu.js',statistics_menu_js)
     app.router.add_get('/dart/profiles.json',profiles_json)
     app.router.add_get('/dart/api/profiles',profiles_endpoint)
     app.router.add_get('/dart/api/profiles/{pid}/statistics',profile_stats_endpoint)
+    app.router.add_get('/dart/api/profiles/{pid}/head-to-head',profile_h2h_endpoint)
     app.router.add_get('/dart/statistics/',statistics_page)
     app.router.add_get('/dart/tournament_bridge.js',tournament_bridge_js)
     app.router.add_get('/dart/tournament_menu.js',menu_script)

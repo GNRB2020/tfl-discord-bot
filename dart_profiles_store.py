@@ -153,3 +153,42 @@ def aggregate_profile(profile, archived, tournaments):
     out['first9']=round(out['first_points']*3/out['first_darts'],2) if out['first_darts'] else 0
     out['specials']=len(out['bf'])+len(out['hf'])+len(out['ld'])+len(out['highscores'])
     return out
+
+
+def head_to_head(profile, profiles_list, archived, tournaments):
+    """Completed X01 head-to-head, including archived tournaments; never deleted ones."""
+    from dart_engine import Match, Rules, Visit
+    people={p['id']:p['display_name'] for p in profiles_list}
+    pid=profile['id']; name=profile['display_name']
+    rows={}
+
+    def add_match(names,ids,legs,sets,mode,source):
+        selected=[]
+        for i,n in enumerate(names):
+            identifier=ids[i] if i<len(ids) else None
+            if not identifier:
+                identifier=next((key for key,value in people.items() if value==n),None)
+            selected.append(identifier)
+        if selected.count(pid)!=1:return
+        i=selected.index(pid);other=1-i
+        otherid=selected[other] or 'name:'+str(names[other])
+        if otherid==pid:return
+        label=people.get(otherid,names[other])
+        z=rows.setdefault(otherid,{'profile_id':otherid,'name':label,'matches':0,'wins':0,'draws':0,'losses':0,'legs_for':0,'legs_against':0,'sets_for':0,'sets_against':0,'results':[]})
+        mine,theirs=(sets[i],sets[other]) if mode=='sets' else (legs[i],legs[other])
+        z['matches']+=1;z['wins']+=int(mine>theirs);z['draws']+=int(mine==theirs);z['losses']+=int(mine<theirs)
+        z['legs_for']+=legs[i];z['legs_against']+=legs[other]
+        z['sets_for']+=sets[i];z['sets_against']+=sets[other]
+        z['results'].append({'source':source,'score':f'{mine}:{theirs}','legs':f'{legs[i]}:{legs[other]}','mode':mode})
+
+    for game in archived:
+        if game['kind']!='x01' or not game['data'].get('done'):continue
+        raw=game['data']['match'];add_match(raw['names'],game['data'].get('profile_ids') or [],raw['legs'],raw['sets'],raw['rules'].get('mode','legs'),'X01 Training')
+    for t in tournaments:
+        if t.get('deleted'):continue
+        mapping=dict(zip(t['players'],t.get('profile_ids') or []))
+        for m in t['matches']:
+            g=m['game']
+            if not g or not g.done:continue
+            add_match(g.names,[mapping.get(n) for n in g.names],g.legs,g.sets,g.rules.mode,'Trainingsturnier: '+t['title'])
+    return {'profile_id':pid,'name':name,'opponents':sorted(rows.values(),key=lambda r:(-r['matches'],r['name'].casefold()))}
