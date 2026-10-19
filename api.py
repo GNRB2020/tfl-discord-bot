@@ -4,6 +4,7 @@ import asyncio
 from aiohttp import web
 from dartmarathon import register_dartmarathon
 import json
+from dart_render_preview import register_dart_render_preview
 
 # =========================================================
 # GLOBAL CACHE
@@ -493,6 +494,8 @@ async def start():
     app.router.add_post("/api/update/tfnl-overall-ranking", update_tfnl_overall_ranking)
     app.router.add_post("/api/update/tfnl-results", update_tfnl_results)
 
+    register_dartmarathon(app)
+    register_dart_render_preview(app)
     register_dartmarathon(app)
 
     port = int(os.getenv("PORT", "10000"))
