@@ -92,6 +92,71 @@
     };
   };
 
+  // Phase 7: In der Sau keine Bull-Abfrage; Wahl der Dartzahl bleibt erhalten.
+  const originalCheckoutDialog = checkoutDialog;
+  checkoutDialog = function(isSau, selected) {
+    if (!isSau) return originalCheckoutDialog(isSau, selected);
+    const rest = S.remaining;
+    const choices = possible(rest);
+    if (!choices.length) return err('Kein Checkout möglich');
+    let picked = choices.includes(selected) ? selected : choices[0];
+    modal(`<h2>Checkout · ${rest} Rest</h2><p>Mit wie vielen Darts gecheckt?</p>
+      <div class="actions" id="sauDartChoices"></div>
+      <div class="actions"><button id="cancelSauCheck">ABBRECHEN</button>
+      <button id="confirmSauCheck" class="green">CHECK BUCHEN</button></div>`);
+    const container=document.getElementById('sauDartChoices');
+    function draw() {
+      container.replaceChildren();
+      choices.forEach(n=>{const b=document.createElement('button'); b.textContent=n+' Dart'+(n===1?'':'s');
+        b.className=n===picked?'green':''; b.onclick=()=>{picked=n;draw()};container.appendChild(b)});
+    }
+    draw();
+    document.getElementById('cancelSauCheck').onclick=closeModal;
+    document.getElementById('confirmSauCheck').onclick=()=>{closeModal();send(rest,{checkout:true,darts:picked,checkout_attempts:1,bullfinish:false})};
+  };
+
+  // X01: Ziffern 1, 2, 3 kurz antippen => Eingabe, lange halten => direkter Checkout.
+  // Touch und Maus; nach Long-Press wird das nachfolgende click unterdrückt.
+  const holdPanel=document.getElementById('hold');
+  holdPanel.classList.add('hide');
+  const cssHold=document.createElement('style');
+  cssHold.textContent='#hold{display:none!important} #pad button:nth-child(-n+3){touch-action:none}';
+  document.head.appendChild(cssHold);
+  const padButtons=Array.from(document.querySelectorAll('#pad button'));
+  [1,2,3].forEach((darts,index)=>{
+    const button=padButtons[index];
+    if (!button) return;
+    let timer=null, longPressed=false, suppressClick=false;
+    button.addEventListener('pointerdown',ev=>{
+      if (!S || S.kind!=='x01' || S.done || !S.can_checkout?.includes(darts)) return;
+      if (ev.button!==0 || busy) return;
+      longPressed=false;
+      timer=setTimeout(()=>{
+        timer=null;longPressed=true;suppressClick=true;
+        const rest=S.remaining[S.current];
+        const finish=()=>send(rest,{checkout:true,darts,checkout_attempts:1,bullfinish:false});
+        if (rest>=50) {
+          modal(`<h2>Bullfinish?</h2><p>Wurde das Checkout über Bullseye beendet?</p>
+            <div class="actions"><button id="bullNo">NEIN</button><button class="green" id="bullYes">JA</button></div>
+            <div class="actions"><button id="bullCancel">ABBRECHEN</button></div>`);
+          document.getElementById('bullNo').onclick=()=>{closeModal();finish()};
+          document.getElementById('bullYes').onclick=()=>{closeModal();send(rest,{checkout:true,darts,checkout_attempts:1,bullfinish:true})};
+          document.getElementById('bullCancel').onclick=closeModal;
+        } else finish();
+      },700);
+    });
+    const clear=()=>{if(timer!==null){clearTimeout(timer);timer=null}};
+    for(const name of ['pointerup','pointercancel','pointerleave']) button.addEventListener(name,clear);
+    button.addEventListener('click',ev=>{
+      if(!suppressClick)return;
+      ev.preventDefault();ev.stopImmediatePropagation();suppressClick=false;
+    },true);
+  });
+  const prevShowMatch=showMatch;
+  showMatch=function(){prevShowMatch();holdPanel.classList.add('hide');
+    if(S?.kind==='x01' && S.can_checkout?.length) document.getElementById('last').textContent='1 / 2 / 3 halten (0,7 Sek.) = Checkout';
+  };
+
   // Reload restores the current browser tab's match without affecting other devices.
   if (sessionStorage.getItem(gameKey)) {
     api('state').then(s=>{S=s;if(s.kind==='sau')showSau();else if(s.kind==='x01')showMatch()}).catch(()=>{});
