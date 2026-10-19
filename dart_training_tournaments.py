@@ -44,6 +44,7 @@ def _unpack_tournament(raw):
 
 async def restore_from_sheet():
     data=await sheet_load()
+    print(f'[DART SHEETS] Lade {len(data)} Snapshot-Zeilen aus Google Sheets',flush=True)
     loaded={}
     for key,raw in data.items():
         try:
@@ -53,11 +54,12 @@ async def restore_from_sheet():
             print(f'[DART SHEETS] Snapshot {key} fehlerhaft: {exc}')
     async with LOCK:
         TOURNAMENTS.update(loaded)
-    print(f'[DART SHEETS] {len(loaded)} Turniere wiederhergestellt')
+    print(f'[DART SHEETS] {len(loaded)} Turniere wiederhergestellt: {list(loaded)}',flush=True)
 
 
 async def _persist(t):
     await sheet_save(t['id'],_pack_tournament(t))
+    print(f'[DART SHEETS] Turnier {t["id"]} gespeichert',flush=True)
 
 
 def _json(t):
@@ -130,7 +132,7 @@ def _make_match(t,a,b,round_no):
         rules=Rules(start_score=501,mode='sets' if t['sets'] else 'legs',max_legs=t['best_of'],
                     best_of_sets=t['best_of'],best_of_legs_per_set=t['legs_per_set'],allow_draw=t['mode']!='ko' and t['best_of']%2==0)
         game=Match(rules,(a,b))
-    return {'id':secrets.token_urlsafe(9),'round':round_no,'a':a,'b':b,'game':game,'winner':None,'version':0,'undo':None}
+    return {'id':secrets.token_urlsafe(9),'round':round_no,'a':a,'b':b,'game':game,'winner':None,'version':0,'undo':None,'starter':None}
 
 def _advance(t):
     if t['mode']!='ko':return
@@ -179,10 +181,25 @@ async def create(request):
        'mode':mode,'players':names,'best_of':n,'sets':sets,'legs_per_set':per_set,
        'created':datetime.now(timezone.utc).isoformat(timespec='minutes'),'matches':[]}
     if mode!='ko':
-        for i,a in enumerate(names):
-            for b in names[i+1:]:
-                t['matches'].append(_make_match(t,a,b,1))
-                if mode=='round2':t['matches'].append(_make_match(t,b,a,2))
+        # Circle method: every participant plays at most once per round.
+        slots=names[:]
+        if len(slots)%2:slots.append(None)
+        count=len(slots)
+        rounds=[]
+        for round_no in range(1,count):
+            pairs=[]
+            for j in range(count//2):
+                a,b=slots[j],slots[count-j-1]
+                if a is not None and b is not None:
+                    if (round_no+j)%2==0:a,b=b,a
+                    pairs.append((a,b))
+            rounds.append(pairs)
+            slots=[slots[0],slots[-1],*slots[1:-1]]
+        for round_index,pairs in enumerate(rounds):
+            for a,b in pairs:t['matches'].append(_make_match(t,a,b,round_index+1))
+        if mode=='round2':
+            for round_index,pairs in enumerate(rounds):
+                for a,b in pairs:t['matches'].append(_make_match(t,b,a,len(rounds)+round_index+1))
     else:
         # Distribute byes so no empty-vs-empty match exists.
         slots=1 << (len(names)-1).bit_length()
@@ -210,16 +227,18 @@ async def tournament(request):return web.json_response(_json(_get(request)))
 async def game_state(request):
     t=_get(request);m=_match(t,request.match_info['mid']);g=m['game']
     return web.json_response({'id':m['id'],'tournament_id':t['id'],'version':m['version'],
-      'names':list(g.names),'remaining':g.remaining,'legs':g.legs,'sets':g.sets,
+      'kind':'x01','names':list(g.names),'remaining':g.remaining,'legs':g.legs,'sets':g.sets,
       'current':g.current,'done':g.done,'leg_number':g.leg_number,
       'rules':vars(g.rules), 'can_checkout':possible_checkout_darts(g.remaining[g.current]) if not g.done and g.remaining[g.current]<=170 else [],
       'current_stats':g.summary()['players'],'summary':g.summary() if g.done else None,
+      'starter':m.get('starter'), 'last':[vars(v) for v in g.visits[-8:]],
       'can_undo':m['undo'] is not None, 'history':[vars(v) for v in g.visits[-12:]]})
 
 async def game_throw(request):
     t=_get(request);data=await request.json()
     async with LOCK:
         m=_match(t,request.match_info['mid']);g=m['game']
+        if m.get('starter') is None:return web.json_response({'error':'Vor dem Spiel bitte ausbullen'},status=409)
         if g.done:return web.json_response({'error':'Spiel beendet'},status=409)
         if data.get('version')!=m['version']:
             return web.json_response({'error':'Spielstand wurde auf anderem Gerät geändert. Bitte aktualisieren.'},status=409)
@@ -258,15 +277,50 @@ async def game_undo(request):
     return await game_state(request)
 
 
+async def start_match(request):
+    t=_get(request)
+    data=await request.json()
+    async with LOCK:
+        m=_match(t,request.match_info['mid'])
+        if m.get('starter') is not None:
+            return await game_state(request)
+        if m['game'].visits:
+            return web.json_response({'error':'Match wurde bereits begonnen'},status=409)
+        try: starter=int(data['starter'])
+        except (KeyError,ValueError,TypeError): starter=-1
+        if starter not in (0,1):return web.json_response({'error':'Ungültiger Anwurf'},status=400)
+        original=copy.deepcopy(t)
+        m['starter']=starter
+        m['game'].current=starter
+        m['game'].first_throw=starter
+        try:await _persist(t)
+        except Exception as exc:
+            TOURNAMENTS[t['id']]=original
+            print(f'[DART SHEETS] Anwurf nicht gespeichert: {exc}',flush=True)
+            return web.json_response({'error':'Anwurf nicht gespeichert'},status=503)
+    return await game_state(request)
+
+async def storage_status(request):
+    try:
+        data=await sheet_load()
+    except Exception as exc:
+        print(f'[DART SHEETS] Diagnose fehlgeschlagen: {exc}',flush=True)
+        return web.json_response({'ok':False,'error':str(exc),'memory_count':len(TOURNAMENTS)},status=503)
+    return web.json_response({'ok':True,'sheet_count':len(data),'memory_count':len(TOURNAMENTS),
+                              'ids_in_sheet':list(data),'ids_in_memory':list(TOURNAMENTS)})
+
+
 def register_training_tournaments(app,auth):
     def protect(handler):
         async def wrapped(request):
             auth(request)
             return await handler(request)
         return wrapped
+    app.router.add_get('/dart/api/tournaments/storage',protect(storage_status))
     app.router.add_get('/dart/api/tournaments',protect(all_tournaments))
     app.router.add_post('/dart/api/tournaments',protect(create))
     app.router.add_get('/dart/api/tournaments/{tid}',protect(tournament))
     app.router.add_get('/dart/api/tournaments/{tid}/matches/{mid}',protect(game_state))
+    app.router.add_post('/dart/api/tournaments/{tid}/matches/{mid}/start',protect(start_match))
     app.router.add_post('/dart/api/tournaments/{tid}/matches/{mid}/throw',protect(game_throw))
     app.router.add_post('/dart/api/tournaments/{tid}/matches/{mid}/undo',protect(game_undo))

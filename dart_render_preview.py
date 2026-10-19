@@ -100,7 +100,7 @@ def _state(r):
 async def home(request):
     # Preserve the existing phase-5 UI. The upgrade script patches only Sau UX.
     html = (ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
-    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script>'
+    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script><script src="/dart/phase12.js" defer></script><script src="/dart/tournament_bridge.js" defer></script>'
     html = html.replace('</body>', injection + '</body>')
     return web.Response(text=html, content_type='text/html', charset='utf-8',headers={'Cache-Control':'no-store'})
 
@@ -108,6 +108,12 @@ async def home(request):
 async def phase6_js(request):
     return web.FileResponse(ROOT/'dart_ui'/'phase6.js',headers={'Cache-Control':'no-store'})
 
+
+async def phase12_js(request):
+    return web.FileResponse(ROOT/'dart_ui'/'phase12.js',headers={'Cache-Control':'no-store'})
+
+async def tournament_bridge_js(request):
+    return web.FileResponse(ROOT/'dart_ui'/'tournament_bridge.js',headers={'Cache-Control':'no-store'})
 
 async def phase11_js(request):
     return web.FileResponse(ROOT/'dart_ui'/'phase11.js', headers={'Cache-Control':'no-store'})
@@ -301,7 +307,9 @@ async def next_sau(request):
 
 async def tournaments_page(request):
     _auth(request)
-    return web.FileResponse(ROOT / 'dart_ui' / 'tournaments.html', headers={'Cache-Control':'no-store'})
+    html=(ROOT / 'dart_ui' / 'tournaments.html').read_text(encoding='utf-8')
+    html=html.replace('</body>','<script src="/dart/tournaments13.js"></script></body>')
+    return web.Response(text=html,content_type='text/html',headers={'Cache-Control':'no-store'})
 
 async def tournament_script(request):
     _auth(request)
@@ -310,6 +318,10 @@ async def tournament_script(request):
 async def tournament11_script(request):
     _auth(request)
     return web.FileResponse(ROOT / 'dart_ui' / 'tournaments11.js',headers={'Cache-Control':'no-store'})
+
+async def tournament13_script(request):
+    _auth(request)
+    return web.FileResponse(ROOT / "dart_ui" / "tournaments13.js",headers={"Cache-Control":"no-store"})
 
 async def menu_script(request):
     return web.FileResponse(ROOT / 'dart_ui' / 'tournament_menu.js', headers={'Cache-Control':'no-store'})
@@ -320,10 +332,13 @@ def register_dart_render_preview(app):
     app.router.add_get('/dart/',home)
     app.router.add_get('/dart/phase6.js',phase6_js)
     app.router.add_get('/dart/phase11.js',phase11_js)
+    app.router.add_get('/dart/phase12.js',phase12_js)
+    app.router.add_get('/dart/tournament_bridge.js',tournament_bridge_js)
     app.router.add_get('/dart/tournament_menu.js',menu_script)
     app.router.add_get('/dart/tournaments/',tournaments_page)
     app.router.add_get('/dart/tournaments.js',tournament_script)
     app.router.add_get('/dart/tournaments11.js',tournament11_script)
+    app.router.add_get('/dart/tournaments13.js',tournament13_script)
     register_training_tournaments(app,_auth)
     async def _restore_tournaments(application):
         await restore_from_sheet()
