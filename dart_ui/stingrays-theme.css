@@ -1,0 +1,33 @@
+/* Stingrays shared theme – applies to dart scorer and tournament pages */
+:root{color-scheme:dark!important;--sting-bg:#111111;--sting-panel:#252525;--sting-soft:#353535;--sting-border:#68605a;--sting-red:#a20813;--sting-gold:#c6a541;--sting-fg:#f5f3ef;--sting-muted:#d3cebf;background:var(--sting-bg)!important;color:var(--sting-fg)!important}
+html,body{background:var(--sting-bg)!important;color:var(--sting-fg)!important}
+header,.bar{background:#222!important;border-bottom:3px solid var(--sting-gold)!important}
+.panel,.box,.card,.player,.tugplayer,.dialog,.modal,.marks span{background:#252525!important;border-color:#59544c!important;color:#f5f3ef!important}
+.menucard{background:linear-gradient(130deg,#303030,#1b1b1b)!important;border-left:5px solid var(--sting-gold)!important}
+.menucard:hover{border-color:var(--sting-red)!important}
+button{background:#47423f;border-color:#746b5a;color:white}
+button:not(:disabled):hover{filter:brightness(1.12)}
+button.green,.green,#book,#saubook,#tugbook{background:#087653!important;border-color:#63ac82!important}
+button.red,.red,.tabs button,.tabbar button{background:var(--sting-red)!important;border-color:#bc3540!important}
+.player.current,.tugplayer.active{border-color:var(--sting-gold)!important;box-shadow:inset 0 0 0 1px #9d842f}
+.liveavg,.stat,.hint,.meta,.menucard small{color:#e4d8b9!important}
+.score,.rest,.sauvalue,.tugscore,.tugShared .value{color:white!important}
+#centerboard,#tugShared,.entry{background:#191919!important;border-color:var(--sting-gold)!important}
+#centerboard .setscore{color:var(--sting-gold)!important}
+input,select{background:#303030!important;border-color:#7e715b!important;color:white!important}
+table{border-collapse:collapse}th,td{border:1px solid #6e6254!important;padding:7px 9px!important;text-align:center!important}th{background:var(--sting-red)!important;color:white!important}td{background:#252525!important}
+#reportContent,.stats{width:100%;max-height:76vh;overflow:auto}
+.sting-table{width:100%;border-collapse:collapse;margin:8px 0 18px;font-size:clamp(12px,1.65vh,16px)}
+.sting-table th:first-child,.sting-table td:first-child{text-align:left!important;white-space:nowrap}
+.sting-table td,.sting-table th{border:1px solid #6d6252!important}
+.sting-table td{background:#292929!important}
+.sting-table .winner{color:var(--sting-gold);font-weight:900}
+.sting-history{font-size:clamp(12px,1.95vh,18px);font-weight:800;color:#f7dda0;margin-top:5px;letter-spacing:.02em}
+.sting-report-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+.sting-report-actions button{flex:1;min-width:130px}
+.sting-report-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;margin:10px 0}
+.sting-report-tabs button{background:var(--sting-red);border-color:var(--sting-red);font-size:clamp(10px,1.75vh,15px);padding:8px 2px}
+.sting-report-tabs button.active{box-shadow:inset 0 -4px var(--sting-gold)}
+.sting-report-scroll{max-height:min(62vh,650px);overflow:auto}
+#tugWinsBoard{font-size:clamp(23px,4.4vh,43px);font-weight:900;text-align:center;color:var(--sting-gold);background:#191919;border:2px solid var(--sting-gold);border-radius:10px;padding:6px;margin-bottom:4px}
+@media(max-width:600px){.sting-report-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}.sting-history{font-size:12px}.sting-table{font-size:11px}.sting-table td,.sting-table th{padding:5px!important}}
