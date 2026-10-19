@@ -232,7 +232,7 @@ async def game_state(request):
       'rules':vars(g.rules), 'can_checkout':possible_checkout_darts(g.remaining[g.current]) if not g.done and g.remaining[g.current]<=170 else [],
       'current_stats':g.summary()['players'],'summary':g.summary() if g.done else None,
       'starter':m.get('starter'), 'last':[vars(v) for v in g.visits[-8:]],
-      'can_undo':m['undo'] is not None, 'history':[vars(v) for v in g.visits[-12:]]})
+      'can_undo':m['undo'] is not None, 'history':[vars(v) for v in g.visits]})
 
 async def game_throw(request):
     t=_get(request);data=await request.json()

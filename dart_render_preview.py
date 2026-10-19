@@ -94,13 +94,14 @@ def _state(r):
             'rules':vars(m.rules), 'can_checkout':possible_checkout_darts(rest) if rest <= 170 and not m.done else [],
             'current_stats':stats['players'], 'last':[vars(v) for v in m.visits[-8:]],
             'summary':stats if m.done else None, 'starter':r.get('starter',0),
-            'history':[vars(v) for v in m.visits[-12:]], 'can_undo':r['game_id'] in LAST_ACTION}
+            'history':[vars(v) for v in m.visits], 'can_undo':r['game_id'] in LAST_ACTION}
 
 
 async def home(request):
     # Preserve the existing phase-5 UI. The upgrade script patches only Sau UX.
     html = (ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
-    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script><script src="/dart/phase12.js" defer></script><script src="/dart/tournament_bridge.js" defer></script>'
+    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script><script src="/dart/phase12.js" defer></script><script src="/dart/tournament_bridge.js" defer></script><script src="/dart/phase14.js" defer></script>'
+    html = html.replace('</head>', '<link rel="stylesheet" href="/dart/stingrays-theme.css"></head>')
     html = html.replace('</body>', injection + '</body>')
     return web.Response(text=html, content_type='text/html', charset='utf-8',headers={'Cache-Control':'no-store'})
 
@@ -308,6 +309,7 @@ async def next_sau(request):
 async def tournaments_page(request):
     _auth(request)
     html=(ROOT / 'dart_ui' / 'tournaments.html').read_text(encoding='utf-8')
+    html=html.replace('</head>','<link rel="stylesheet" href="/dart/stingrays-theme.css"></head>')
     html=html.replace('</body>','<script src="/dart/tournaments13.js"></script></body>')
     return web.Response(text=html,content_type='text/html',headers={'Cache-Control':'no-store'})
 
@@ -326,6 +328,12 @@ async def tournament13_script(request):
 async def menu_script(request):
     return web.FileResponse(ROOT / 'dart_ui' / 'tournament_menu.js', headers={'Cache-Control':'no-store'})
 
+async def stingrays_theme(request):
+    return web.FileResponse(ROOT/'dart_ui'/'stingrays-theme.css',headers={'Cache-Control':'no-store'})
+
+async def phase14_js(request):
+    return web.FileResponse(ROOT/'dart_ui'/'phase14.js',headers={'Cache-Control':'no-store'})
+
 def register_dart_render_preview(app):
     if len(os.environ.get('DART_ADMIN_PIN',''))<10:
         print('[STINGRAYS] Warning: DART_ADMIN_PIN is missing/too short')
@@ -333,6 +341,8 @@ def register_dart_render_preview(app):
     app.router.add_get('/dart/phase6.js',phase6_js)
     app.router.add_get('/dart/phase11.js',phase11_js)
     app.router.add_get('/dart/phase12.js',phase12_js)
+    app.router.add_get('/dart/stingrays-theme.css',stingrays_theme)
+    app.router.add_get('/dart/phase14.js',phase14_js)
     app.router.add_get('/dart/tournament_bridge.js',tournament_bridge_js)
     app.router.add_get('/dart/tournament_menu.js',menu_script)
     app.router.add_get('/dart/tournaments/',tournaments_page)
