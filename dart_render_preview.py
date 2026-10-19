@@ -64,6 +64,7 @@ def _sau_state(r):
         'finished':r['finished'], 'rounds_target':r['rounds_target'],
         'sau_target':SAU_TARGET, 'completed_rounds':r['completed_rounds'],
         'result':_sau_result(r) if r['finished'] else None,
+        'history':r.get('history',[])[-12:],
         'can_undo':r['game_id'] in LAST_ACTION,
     }
 
@@ -79,6 +80,11 @@ def _state(r):
         return {'kind':None}
     if r['kind'] == 'sau':
         return _sau_state(r)
+    if r['kind']=='tug':
+        return {'kind':'tug','game_id':r['game_id'],'names':r['names'], 'rounds':r['rounds'],
+          'round':r['round'],'position':r['position'], 'remaining':[r['position'],362-r['position']],
+          'current':r['current'],'visits':r['visits'][-12:], 'wins':r['wins'],
+          'done':r['done'], 'finished':r['finished'], 'can_undo':r['game_id'] in LAST_ACTION}
     m = r['match']
     stats = m.summary()
     rest = m.remaining[m.current]
@@ -87,19 +93,24 @@ def _state(r):
             'current':m.current, 'done':m.done, 'leg_number':m.leg_number,
             'rules':vars(m.rules), 'can_checkout':possible_checkout_darts(rest) if rest <= 170 and not m.done else [],
             'current_stats':stats['players'], 'last':[vars(v) for v in m.visits[-8:]],
-            'summary':stats if m.done else None, 'can_undo':r['game_id'] in LAST_ACTION}
+            'summary':stats if m.done else None, 'starter':r.get('starter',0),
+            'history':[vars(v) for v in m.visits[-12:]], 'can_undo':r['game_id'] in LAST_ACTION}
 
 
 async def home(request):
     # Preserve the existing phase-5 UI. The upgrade script patches only Sau UX.
     html = (ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
-    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script>'
+    injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script>'
     html = html.replace('</body>', injection + '</body>')
     return web.Response(text=html, content_type='text/html', charset='utf-8',headers={'Cache-Control':'no-store'})
 
 
 async def phase6_js(request):
     return web.FileResponse(ROOT/'dart_ui'/'phase6.js',headers={'Cache-Control':'no-store'})
+
+
+async def phase11_js(request):
+    return web.FileResponse(ROOT/'dart_ui'/'phase11.js', headers={'Cache-Control':'no-store'})
 
 
 async def login(request):
@@ -154,7 +165,14 @@ async def new_match(request):
                    'remaining':201,'visits':[],
                    'marks':{'sau':0,**{str(i):0 for i in range(4,13)}},
                    'round':1,'completed_rounds':0,'rounds_target':rounds,
-                   'done':False,'finished':False}
+                   'done':False,'finished':False,'history':[]}
+            elif kind=='tug':
+                rounds=int(data.get('rounds',5))
+                if not 1<=rounds<=100:raise ValueError('Rundenzahl 1 bis 100')
+                r={'kind':'tug','owner':user,'game_id':game_id,
+                   'names':[str(data.get('a') or 'Spieler 1')[:45],str(data.get('b') or 'Spieler 2')[:45]],
+                   'rounds':rounds,'round':1,'position':181,'current':0, 'visits':[],
+                   'wins':[0,0],'done':False,'finished':False}
             elif kind=='x01':
                 mode=data.get('mode','legs')
                 start=int(data.get('start_score',501))
@@ -167,7 +185,11 @@ async def new_match(request):
                 rules=Rules(start_score=start,mode=mode,max_legs=n,best_of_sets=n,
                             best_of_legs_per_set=per_set,allow_draw=(n%2==0))
                 names=(str(data.get('a') or 'Spieler 1')[:45],str(data.get('b') or 'Spieler 2')[:45])
-                r={'kind':'x01','owner':user,'game_id':game_id,'match':Match(rules,names)}
+                starter=int(data.get('starter',0))
+                if starter not in (0,1):raise ValueError('Ungültiger Anwurf')
+                match=Match(rules,names)
+                match.current=starter;match.first_throw=starter
+                r={'kind':'x01','owner':user,'game_id':game_id,'match':match,'starter':starter}
             else:
                 raise ValueError('Trainingsmodus nicht verfügbar')
         except (ValueError,TypeError) as exc:
@@ -192,6 +214,19 @@ async def throw(request):
                          checkout=bool(data.get('checkout',False)),
                          checkout_attempts=int(data.get('checkout_attempts',0)),
                          bullfinish=bool(data.get('bullfinish',False)))
+            elif r['kind']=='tug':
+                if r['finished']:raise ValueError('Training beendet')
+                points=int(data['points'])
+                if not 0<=points<=180:raise ValueError('Ungültiger Score')
+                player=r['current'];new_position=r['position']+ (points if player==1 else -points)
+                r['visits'].append({'round':r['round'],'player':player,'points':points,'before':r['position'],'after':new_position})
+                r['position']=max(0,min(362,new_position))
+                if new_position<=0 or new_position>=362:
+                    winner=0 if new_position<=0 else 1
+                    r['wins'][winner]+=1
+                    if r['round']>=r['rounds']:r['finished']=True;r['done']=True
+                    else:r['round']+=1;r['position']=181;r['current']=0
+                else:r['current']=1-player
             else:
                 if r['finished'] or r['done']:
                     raise ValueError('Durchgang beendet')
@@ -212,6 +247,7 @@ async def throw(request):
                 if rest-points==1:
                     points=0  # Bust
                 r['visits'].append({'score':points,'darts':darts,'checkout':checkout})
+                r.setdefault('history',[]).append({'round':r['round'],'score':points,'rest_after':rest-points})
                 r['remaining']-=points
                 total=sum(v['darts'] for v in r['visits'])
                 if checkout:
@@ -224,7 +260,7 @@ async def throw(request):
                     r['completed_rounds']+=1
                     r['finished']=(r['completed_rounds']>=r['rounds_target'] and r['marks']['sau']>=SAU_TARGET)
                     # Nach einem Sau-Strich sofort nächste Runde, sofern Training noch läuft.
-                    if not checkout and not r['finished']:
+                    if not r['finished']:
                         r['round']+=1
                         r['remaining']=201
                         r['visits']=[]
@@ -271,6 +307,10 @@ async def tournament_script(request):
     _auth(request)
     return web.FileResponse(ROOT / 'dart_ui' / 'tournaments.js', headers={'Cache-Control':'no-store'})
 
+async def tournament11_script(request):
+    _auth(request)
+    return web.FileResponse(ROOT / 'dart_ui' / 'tournaments11.js',headers={'Cache-Control':'no-store'})
+
 async def menu_script(request):
     return web.FileResponse(ROOT / 'dart_ui' / 'tournament_menu.js', headers={'Cache-Control':'no-store'})
 
@@ -279,9 +319,11 @@ def register_dart_render_preview(app):
         print('[STINGRAYS] Warning: DART_ADMIN_PIN is missing/too short')
     app.router.add_get('/dart/',home)
     app.router.add_get('/dart/phase6.js',phase6_js)
+    app.router.add_get('/dart/phase11.js',phase11_js)
     app.router.add_get('/dart/tournament_menu.js',menu_script)
     app.router.add_get('/dart/tournaments/',tournaments_page)
     app.router.add_get('/dart/tournaments.js',tournament_script)
+    app.router.add_get('/dart/tournaments11.js',tournament11_script)
     register_training_tournaments(app,_auth)
     app.router.add_post('/dart/api/login',login)
     app.router.add_post('/dart/api/logout',logout)

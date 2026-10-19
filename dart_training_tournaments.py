@@ -21,7 +21,40 @@ def _json(t):
     return {'id':t['id'],'title':t['title'],'mode':t['mode'],'players':t['players'],
             'best_of':t['best_of'],'sets':t['sets'],'legs_per_set':t['legs_per_set'],
             'created':t['created'],'matches':matches,'standings':_table(t),
-            'complete':_is_complete(t)}
+            'complete':_is_complete(t),'statistics':_statistics(t)}
+
+def _statistics(t):
+    result={name:{'name':name,'matches':0,'legs':0,'darts':0,'points':0,'first9_points':0,
+      'first9_darts':0,'attempts':0,'checkouts':0,'scores_180':0,'highfinish':0,
+      'lowdart':None,'specials':0} for name in t['players']}
+    for item in t['matches']:
+        g=item['game']
+        if not g or not g.done:continue
+        summary=g.summary()['players']
+        for i,name in enumerate(g.names):
+            z=result[name];z['matches']+=1;z['legs']+=g.legs[i]
+            vv=[v for v in g.visits if v.player==i]
+            z['darts']+=sum(v.darts for v in vv)
+            z['points']+=sum(0 if v.bust else v.score for v in vv)
+            z['attempts']+=sum(v.checkout_attempts for v in vv)
+            z['checkouts']+=sum(v.checkout for v in vv)
+            z['scores_180']+=sum(v.score==180 and not v.bust for v in vv)
+            z['specials']+=sum(summary[i].get(k,0) for k in ('lowdarts','bullfinishes','highfinishes','highscores'))
+            finishes=[v.score for v in vv if v.checkout]
+            if finishes:z['highfinish']=max(z['highfinish'],*finishes)
+            for leg in set(v.leg_index for v in vv):
+                leg_visits=[v for v in vv if v.leg_index==leg]
+                for v in leg_visits[:3]:
+                    z['first9_points']+=0 if v.bust else v.score
+                    z['first9_darts']+=v.darts
+                if leg_visits and leg_visits[-1].checkout:
+                    darts=sum(v.darts for v in leg_visits)
+                    if 9<=darts<=18:z['lowdart']=min(z['lowdart'] or darts,darts)
+    for z in result.values():
+        z['average']=round(z['points']*3/z['darts'],2) if z['darts'] else 0
+        z['first9']=round(z['first9_points']*3/z['first9_darts'],2) if z['first9_darts'] else 0
+        z['checkout_percentage']=round(z['checkouts']*100/z['attempts'],2) if z['attempts'] else 0
+    return list(result.values())
 
 def _is_complete(t):
     return all((m['game'] and m['game'].done) or (m['game'] is None and m['winner']) for m in t['matches']) and (
@@ -126,7 +159,7 @@ async def game_state(request):
       'current':g.current,'done':g.done,'leg_number':g.leg_number,
       'rules':vars(g.rules), 'can_checkout':possible_checkout_darts(g.remaining[g.current]) if not g.done and g.remaining[g.current]<=170 else [],
       'current_stats':g.summary()['players'],'summary':g.summary() if g.done else None,
-      'can_undo':m['undo'] is not None})
+      'can_undo':m['undo'] is not None, 'history':[vars(v) for v in g.visits[-12:]]})
 
 async def game_throw(request):
     t=_get(request);data=await request.json()
