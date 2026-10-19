@@ -17,8 +17,26 @@ async function getProfiles(){if(cached)return cached;if(!loading)loading=fetch('
 function openPicker(input){
  const layer=document.createElement('div');layer.className='profile-overlay';layer.setAttribute('role','dialog');layer.setAttribute('aria-modal','true');
  const box=document.createElement('div');box.className='profile-dialog';const h=document.createElement('h2');h.textContent='Spielerprofil auswählen';const query=document.createElement('input');query.placeholder='Mitglied suchen …';query.setAttribute('aria-label','Mitglied suchen');const list=document.createElement('div');list.className='profile-list';list.textContent='Lade Profile …';const close=document.createElement('button');close.className='profile-close';close.type='button';close.textContent='SCHLIESSEN';const dismiss=()=>{layer.remove();input.focus()};close.onclick=dismiss;layer.onclick=e=>{if(e.target===layer)dismiss()};layer.addEventListener('keydown',e=>{if(e.key==='Escape')dismiss()});box.append(h,query,list,close);layer.append(box);document.body.append(layer);query.focus();
- getProfiles().then(profiles=>{const draw=()=>{const q=query.value.toLocaleLowerCase('de').trim();list.replaceChildren();const subset=profiles.filter(p=>(p.display_name+' '+p.source_name).toLocaleLowerCase('de').includes(q));for(const p of subset){const b=document.createElement('button');b.type='button';b.textContent=p.display_name;b.onclick=()=>{input.value=p.display_name;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));dismiss()};list.append(b)}if(!subset.length)list.textContent='Keine Mitglieder gefunden';};query.addEventListener('input',draw);draw()}).catch(err=>list.textContent=err.message);
+ getProfiles().then(profiles=>{const draw=()=>{const q=query.value.toLocaleLowerCase('de').trim();list.replaceChildren();const subset=profiles.filter(p=>(p.display_name+' '+p.source_name).toLocaleLowerCase('de').includes(q));for(const p of subset){const b=document.createElement('button');b.type='button';b.textContent=p.display_name;b.onclick=()=>{input.value=p.display_name;input.dataset.profileId=p.id;input.dataset.profileLabel=p.display_name;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));dismiss()};list.append(b)}if(!subset.length)list.textContent='Keine Mitglieder gefunden';};query.addEventListener('input',draw);draw()}).catch(err=>list.textContent=err.message);
 }
-function attach(){const candidates=[...document.querySelectorAll('#a,#b,#sauName,#ta,#tb,#names input')];for(const input of candidates){if(input.dataset.profileAttached==='1')continue;input.dataset.profileAttached='1';const wrap=document.createElement('span');wrap.className='profile-wrap';input.parentNode.insertBefore(wrap,input);wrap.append(input);const plus=document.createElement('button');plus.type='button';plus.className='profile-plus';plus.textContent='+';plus.title='Spieler aus Mitgliederliste auswählen';plus.setAttribute('aria-label','Spielerprofil auswählen');plus.onclick=()=>openPicker(input);wrap.append(plus)}}
+function attach(){const candidates=[...document.querySelectorAll('#a,#b,#sauName,#ta,#tb,#names input')];for(const input of candidates){if(input.dataset.profileAttached==='1')continue;input.dataset.profileAttached='1';input.addEventListener('input',()=>{if(input.dataset.profileId && input.value!==input.dataset.profileLabel)delete input.dataset.profileId});const wrap=document.createElement('span');wrap.className='profile-wrap';input.parentNode.insertBefore(wrap,input);wrap.append(input);const plus=document.createElement('button');plus.type='button';plus.className='profile-plus';plus.textContent='+';plus.title='Spieler aus Mitgliederliste auswählen';plus.setAttribute('aria-label','Spielerprofil auswählen');plus.onclick=()=>openPicker(input);wrap.append(plus)}}
+// Transmit stable profile IDs along with name-based game creation requests.
+const nativeFetch=window.fetch.bind(window);
+window.fetch=function(url,opts){
+  const path=typeof url==='string'?url:(url?.url||'');
+  if(opts?.method==='POST' && opts.body && (path.endsWith('/dart/api/new') || path.endsWith('/dart/api/tournaments'))){
+    try{
+      const data=JSON.parse(opts.body);
+      let fields=[];
+      if(path.endsWith('/dart/api/tournaments'))fields=[...document.querySelectorAll('#names input')];
+      else if(data.kind==='sau')fields=[document.querySelector('#sauName')||document.querySelector('#a')];
+      else if(data.kind==='tug')fields=[document.querySelector('#ta'),document.querySelector('#tb')];
+      else fields=[document.querySelector('#a'),document.querySelector('#b')];
+      data.profile_ids=fields.map(el=>el?.dataset.profileId||null);
+      return nativeFetch(url,{...opts,body:JSON.stringify(data)});
+    }catch(e){console.warn('Profilbindung nicht verfügbar:',e)}
+  }
+  return nativeFetch(url,opts)
+};
 attach();let pending=false;const observer=new MutationObserver(()=>{if(pending)return;pending=true;queueMicrotask(()=>{pending=false;attach()})});observer.observe(document.body,{subtree:true,childList:true});
 })();
