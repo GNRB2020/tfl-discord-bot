@@ -147,12 +147,49 @@ class Match:
                 if used:
                     first9.append((points, used))
             lowdarts = 0
+            lowdart_details = []
+            highfinish_details = []
+            highscore_details = []
             for v in visits:
                 if v.checkout:
                     total = sum(x.darts for x in visits if x.leg_index == v.leg_index)
-                    lowdarts += 9 <= total <= 18
+                    if 9 <= total <= 18:
+                        lowdarts += 1
+                        lowdart_details.append(total)
+                    if v.score >= 100:
+                        highfinish_details.append(v.score)
+            highscore_details = [v.score for v in visits if v.score >= 171 and not v.bust]
+            by_leg = []
+            for leg in sorted({v.leg_index for v in self.visits}):
+                lv = [v for v in visits if v.leg_index == leg]
+                if not lv:
+                    by_leg.append({'leg': leg + 1, 'darts': None, 'average': None, 'checkout': None})
+                    continue
+                darts_leg = sum(v.darts for v in lv)
+                scored_leg = sum(0 if v.bust else v.score for v in lv)
+                finishing = next((v for v in lv if v.checkout), None)
+                by_leg.append({'leg': leg + 1, 'darts': darts_leg,
+                               'average': round(scored_leg * 3 / darts_leg, 2) if darts_leg else 0,
+                               'checkout': finishing.score if finishing else None})
+            first_darts = {}
+            for limit in (9, 12, 15, 18):
+                total_score = total_darts = 0
+                for leg in sorted({v.leg_index for v in visits}):
+                    count = 0
+                    for v in (x for x in visits if x.leg_index == leg):
+                        if count + v.darts > limit:
+                            break  # Individual dart scores are unavailable for partial visits.
+                        total_score += 0 if v.bust else v.score
+                        total_darts += v.darts
+                        count += v.darts
+                        if count == limit:
+                            break
+                first_darts[str(limit)] = round(3 * total_score / total_darts, 2) if total_darts else None
+            scoring_bands = {str(t): sum(v.score >= t and not v.bust for v in visits)
+                             for t in (60, 80, 100, 140, 180)}
             result.append({
                 'player': self.names[player],
+                'by_leg': by_leg, 'first_darts': first_darts, 'scoring_bands': scoring_bands,
                 'average': round(scored / thrown * 3, 2) if thrown else 0,
                 'first9': round(sum(p for p, d in first9) / sum(d for p, d in first9) * 3, 2) if first9 else 0,
                 'checkout_percentage': round(finishes / attempts * 100, 2) if attempts else 0,
@@ -162,6 +199,10 @@ class Match:
                 'lowdarts': lowdarts,
                 'bullfinishes': sum(v.bullfinish for v in visits),
                 'highfinishes': sum(v.checkout and v.score >= 100 for v in visits),
-                'highscores': sum(v.score >= 171 and not v.bust for v in visits),
+                'highscores': len(highscore_details),
+                'lowdart_details': lowdart_details,
+                'highfinish_details': highfinish_details,
+                'highscore_details': highscore_details,
+                'bullfinish_details': [v.score for v in visits if v.bullfinish],
             })
         return {'done': self.done, 'legs': self.legs[:], 'sets': self.sets[:], 'players': result}

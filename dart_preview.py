@@ -20,6 +20,7 @@ def view():
         'can_checkout': options if rest <= 170 and not m.done else [],
         'current_stats': stats['players'],
         'last': [vars(v) for v in m.visits[-6:]],
+        'visits': [vars(v) for v in m.visits],
         'summary': stats if m.done else None,
     }
 
@@ -33,7 +34,7 @@ async def reset(request):
     global MATCH
     data = await request.json()
     if MATCH and MATCH.visits and not MATCH.done:
-        return web.json_response({'error':'Aktives Spiel kann nicht zurückgesetzt werden.'}, status=409)
+        return web.json_response({'error':'Aktives Match läuft. Bitte erst beenden.'}, status=409)
     try:
         names=(str(data.get('a','Spieler A'))[:48],str(data.get('b','Spieler B'))[:48])
         rules=Rules(start_score=int(data.get('start_score',501)),mode=data.get('mode','legs'),
