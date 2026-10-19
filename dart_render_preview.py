@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from aiohttp import web
 from dart_engine import Match, Rules, possible_checkout_darts
-from dart_training_tournaments import register_training_tournaments
+from dart_training_tournaments import register_training_tournaments, restore_from_sheet
 
 ROOT = Path(__file__).resolve().parent
 SESSIONS: dict[str, tuple[str, float]] = {}
@@ -325,6 +325,9 @@ def register_dart_render_preview(app):
     app.router.add_get('/dart/tournaments.js',tournament_script)
     app.router.add_get('/dart/tournaments11.js',tournament11_script)
     register_training_tournaments(app,_auth)
+    async def _restore_tournaments(application):
+        await restore_from_sheet()
+    app.on_startup.append(_restore_tournaments)
     app.router.add_post('/dart/api/login',login)
     app.router.add_post('/dart/api/logout',logout)
     app.router.add_get('/dart/api/state',state)

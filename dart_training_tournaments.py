@@ -3,12 +3,62 @@ from __future__ import annotations
 import asyncio
 import copy
 import secrets
+from dataclasses import asdict
+from dart_engine import Visit
+from dart_sheet_store import save as sheet_save, load_all as sheet_load
 from datetime import datetime, timezone
 from aiohttp import web
 from dart_engine import Match, Rules, possible_checkout_darts
 
 TOURNAMENTS = {}
 LOCK = asyncio.Lock()
+
+def _pack_match(m):
+    if m is None:return None
+    return {'rules':asdict(m.rules),'names':list(m.names),'remaining':m.remaining[:],
+            'legs':m.legs[:],'sets':m.sets[:],'visits':[asdict(v) for v in m.visits],
+            'current':m.current,'first_throw':m.first_throw,'leg_number':m.leg_number,'done':m.done}
+
+
+def _unpack_match(raw):
+    if raw is None:return None
+    m=Match(Rules(**raw['rules']),tuple(raw['names']))
+    for name in ('remaining','legs','sets','current','first_throw','leg_number','done'):
+        setattr(m,name,raw[name])
+    m.visits=[Visit(**v) for v in raw['visits']]
+    return m
+
+
+def _pack_tournament(t):
+    return {**{k:v for k,v in t.items() if k!='matches'},
+            'matches':[{**{k:v for k,v in m.items() if k not in ('game','undo')},
+                        'game':_pack_match(m['game']), 'undo':_pack_match(m['undo'])} for m in t['matches']]}
+
+
+def _unpack_tournament(raw):
+    t={**raw}
+    t['matches']=[{**m,'game':_unpack_match(m['game']),
+                   'undo':_unpack_match(m.get('undo'))} for m in raw['matches']]
+    return t
+
+
+async def restore_from_sheet():
+    data=await sheet_load()
+    loaded={}
+    for key,raw in data.items():
+        try:
+            tournament=_unpack_tournament(raw)
+            if tournament['id']==key:loaded[key]=tournament
+        except (ValueError,KeyError,TypeError) as exc:
+            print(f'[DART SHEETS] Snapshot {key} fehlerhaft: {exc}')
+    async with LOCK:
+        TOURNAMENTS.update(loaded)
+    print(f'[DART SHEETS] {len(loaded)} Turniere wiederhergestellt')
+
+
+async def _persist(t):
+    await sheet_save(t['id'],_pack_tournament(t))
+
 
 def _json(t):
     matches=[]
@@ -147,7 +197,12 @@ async def create(request):
             if not b:m['winner']=a
             t['matches'].append(m)
         _advance(t)
-    async with LOCK:TOURNAMENTS[t['id']]=t
+    async with LOCK:
+        try:await _persist(t)
+        except Exception as exc:
+            print(f'[DART SHEETS] Speichern fehlgeschlagen: {exc}')
+            return web.json_response({'error':'Google Sheets nicht erreichbar – Turnier nicht angelegt'},status=503)
+        TOURNAMENTS[t['id']]=t
     return web.json_response(_json(t))
 
 async def tournament(request):return web.json_response(_json(_get(request)))
@@ -168,6 +223,7 @@ async def game_throw(request):
         if g.done:return web.json_response({'error':'Spiel beendet'},status=409)
         if data.get('version')!=m['version']:
             return web.json_response({'error':'Spielstand wurde auf anderem Gerät geändert. Bitte aktualisieren.'},status=409)
+        original=copy.deepcopy(t)
         before=copy.deepcopy(g)
         try:g.submit(g.current,int(data['points']),darts=int(data.get('darts',3)),
                       checkout=bool(data.get('checkout',False)),checkout_attempts=int(data.get('checkout_attempts',0)),
@@ -178,6 +234,11 @@ async def game_throw(request):
             a,b=g.sets if t['sets'] else g.legs
             m['winner']=m['a'] if a>b else m['b'] if b>a else None
             _advance(t)
+        try:await _persist(t)
+        except Exception as exc:
+            TOURNAMENTS[t['id']]=original
+            print(f'[DART SHEETS] Aufnahme nicht gespeichert: {exc}')
+            return web.json_response({'error':'Speicherung fehlgeschlagen – Aufnahme wurde nicht gebucht'},status=503)
     return await game_state(request)
 
 async def game_undo(request):
@@ -187,7 +248,13 @@ async def game_undo(request):
         if m['undo'] is None:return web.json_response({'error':'Keine Rücknahme möglich'},status=409)
         if t['mode']=='ko' and m['game'].done and any(x['round']>m['round'] for x in t['matches']):
             return web.json_response({'error':'Folgerunde bereits angelegt'},status=409)
+        original=copy.deepcopy(t)
         m['game']=m['undo'];m['undo']=None;m['winner']=None;m['version']+=1
+        try:await _persist(t)
+        except Exception as exc:
+            TOURNAMENTS[t['id']]=original
+            print(f'[DART SHEETS] Rücknahme nicht gespeichert: {exc}')
+            return web.json_response({'error':'Speicherung fehlgeschlagen – Rücknahme wurde nicht übernommen'},status=503)
     return await game_state(request)
 
 
