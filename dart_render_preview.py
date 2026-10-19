@@ -5,6 +5,7 @@ Server-side owner checks and session cookies protect every game operation.
 """
 from __future__ import annotations
 import asyncio
+import copy
 import hmac
 import os
 import secrets
@@ -16,6 +17,7 @@ from dart_engine import Match, Rules, possible_checkout_darts
 ROOT = Path(__file__).resolve().parent
 SESSIONS: dict[str, tuple[str, float]] = {}
 GAMES: dict[str, dict] = {}
+LAST_ACTION: dict[str, dict] = {}
 LOCK = asyncio.Lock()
 SESSION_TTL = 8 * 3600
 SAU_TARGET = 10
@@ -61,6 +63,7 @@ def _sau_state(r):
         'finished':r['finished'], 'rounds_target':r['rounds_target'],
         'sau_target':SAU_TARGET, 'completed_rounds':r['completed_rounds'],
         'result':_sau_result(r) if r['finished'] else None,
+        'can_undo':r['game_id'] in LAST_ACTION,
     }
 
 
@@ -83,7 +86,7 @@ def _state(r):
             'current':m.current, 'done':m.done, 'leg_number':m.leg_number,
             'rules':vars(m.rules), 'can_checkout':possible_checkout_darts(rest) if rest <= 170 and not m.done else [],
             'current_stats':stats['players'], 'last':[vars(v) for v in m.visits[-8:]],
-            'summary':stats if m.done else None}
+            'summary':stats if m.done else None, 'can_undo':r['game_id'] in LAST_ACTION}
 
 
 async def home(request):
@@ -123,6 +126,7 @@ async def logout(request):
     # Only this session's games. Other devices are unaffected.
     for gid in [gid for gid,r in GAMES.items() if r['owner']==user]:
         GAMES.pop(gid,None)
+        LAST_ACTION.pop(gid,None)
     resp=web.json_response({'ok':True})
     resp.del_cookie('stingrays_session',path='/dart/')
     return resp
@@ -168,6 +172,7 @@ async def new_match(request):
         except (ValueError,TypeError) as exc:
             return web.json_response({'error':str(exc)},status=400)
         GAMES[game_id]=r
+        LAST_ACTION.pop(game_id,None)
         return web.json_response(_state(r))
 
 
@@ -178,6 +183,7 @@ async def throw(request):
         r=_owned(request,user)
         if not r:
             return web.json_response({'error':'Kein Spiel für diesen Tab. Bitte neues Spiel starten.'},status=409)
+        before=copy.deepcopy(r)
         try:
             if r['kind']=='x01':
                 m=r['match']
@@ -224,7 +230,22 @@ async def throw(request):
                         r['done']=False
         except (ValueError,TypeError,KeyError) as exc:
             return web.json_response({'error':str(exc)},status=400)
+        LAST_ACTION[r['game_id']]=before
         return web.json_response(_state(r))
+
+
+async def undo(request):
+    user=_auth(request)
+    async with LOCK:
+        r=_owned(request,user)
+        if not r:
+            return web.json_response({'error':'Spiel nicht gefunden'},status=409)
+        gid=r['game_id']
+        previous=LAST_ACTION.pop(gid,None)
+        if previous is None:
+            return web.json_response({'error':'Keine Aufnahme zum Rückgängigmachen vorhanden'},status=409)
+        GAMES[gid]=previous
+        return web.json_response(_state(previous))
 
 
 async def next_sau(request):
@@ -233,6 +254,7 @@ async def next_sau(request):
         r=_owned(request,user)
         if not r or r['kind']!='sau' or not r['done'] or r['finished']:
             return web.json_response({'error':'Kein weiterer Durchgang möglich'},status=409)
+        LAST_ACTION.pop(r['game_id'],None)  # A new voluntary round closes the previous undo window.
         r['round']+=1
         r['remaining']=201
         r['visits']=[]
@@ -250,5 +272,6 @@ def register_dart_render_preview(app):
     app.router.add_get('/dart/api/state',state)
     app.router.add_post('/dart/api/new',new_match)
     app.router.add_post('/dart/api/throw',throw)
+    app.router.add_post('/dart/api/undo',undo)
     app.router.add_post('/dart/api/next-sau',next_sau)
     print('[STINGRAYS] Phase 7 registered at /dart/')
