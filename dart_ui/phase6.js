@@ -52,7 +52,7 @@
       banner=document.createElement('div');banner.id='sauWarning';
       document.getElementById('marks').before(banner);
     }
-    banner.textContent='DIE SAU  '+S.marks.sau+' / '+(S.sau_target||10);
+    banner.textContent='DIE SAU · '+S.marks.sau+' STRICHE (LIMIT '+(S.sau_target||10)+')';
     let info=document.getElementById('sauRoundsInfo');
     if (!info) {info=document.createElement('div');info.id='sauRoundsInfo';banner.after(info)}
     info.textContent='Abgeschlossene Runden: '+S.completed_rounds+' / Mindestzahl '+S.rounds_target;
