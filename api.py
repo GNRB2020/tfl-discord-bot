@@ -496,7 +496,7 @@ async def start():
 
     register_dartmarathon(app)
     register_dart_render_preview(app)
-    register_dartmarathon(app)
+
 
     port = int(os.getenv("PORT", "10000"))
     print(f"[API] STARTING on port {port}")
