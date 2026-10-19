@@ -310,7 +310,7 @@ async def tournaments_page(request):
     _auth(request)
     html=(ROOT / 'dart_ui' / 'tournaments.html').read_text(encoding='utf-8')
     html=html.replace('</head>','<link rel="stylesheet" href="/dart/stingrays-theme.css"></head>')
-    html=html.replace('</body>','<script src="/dart/tournaments13.js"></script></body>')
+    html=html.replace('</body>','<script src="/dart/tournaments13.js"></script><script src="/dart/tournaments15.js"></script></body>')
     return web.Response(text=html,content_type='text/html',headers={'Cache-Control':'no-store'})
 
 async def tournament_script(request):
@@ -334,6 +334,10 @@ async def stingrays_theme(request):
 async def phase14_js(request):
     return web.FileResponse(ROOT/'dart_ui'/'phase14.js',headers={'Cache-Control':'no-store'})
 
+async def tournament15_script(request):
+    _auth(request)
+    return web.FileResponse(ROOT / 'dart_ui' / 'tournaments15.js',headers={'Cache-Control':'no-store'})
+
 def register_dart_render_preview(app):
     if len(os.environ.get('DART_ADMIN_PIN',''))<10:
         print('[STINGRAYS] Warning: DART_ADMIN_PIN is missing/too short')
@@ -349,6 +353,7 @@ def register_dart_render_preview(app):
     app.router.add_get('/dart/tournaments.js',tournament_script)
     app.router.add_get('/dart/tournaments11.js',tournament11_script)
     app.router.add_get('/dart/tournaments13.js',tournament13_script)
+    app.router.add_get('/dart/tournaments15.js',tournament15_script)
     register_training_tournaments(app,_auth)
     async def _restore_tournaments(application):
         await restore_from_sheet()

@@ -78,7 +78,7 @@ def _json(t):
 def _statistics(t):
     result={name:{'name':name,'matches':0,'legs':0,'darts':0,'points':0,'first9_points':0,
       'first9_darts':0,'attempts':0,'checkouts':0,'scores_180':0,'highfinish':0,
-      'lowdart':None,'specials':0} for name in t['players']}
+      'lowdart':None,'specials':0,'visits_95_plus':0,'visits_133_plus':0,'visits_171_plus':0,'bullfinishes':0} for name in t['players']}
     for item in t['matches']:
         g=item['game']
         if not g or not g.done:continue
@@ -91,6 +91,10 @@ def _statistics(t):
             z['attempts']+=sum(v.checkout_attempts for v in vv)
             z['checkouts']+=sum(v.checkout for v in vv)
             z['scores_180']+=sum(v.score==180 and not v.bust for v in vv)
+            z['visits_95_plus']+=sum(v.score>=95 and not v.bust for v in vv)
+            z['visits_133_plus']+=sum(v.score>=133 and not v.bust for v in vv)
+            z['visits_171_plus']+=sum(v.score>=171 and not v.bust for v in vv)
+            z['bullfinishes']+=sum(bool(v.bullfinish) for v in vv)
             z['specials']+=sum(summary[i].get(k,0) for k in ('lowdarts','bullfinishes','highfinishes','highscores'))
             finishes=[v.score for v in vv if v.checkout]
             if finishes:z['highfinish']=max(z['highfinish'],*finishes)
