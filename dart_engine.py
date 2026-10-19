@@ -30,10 +30,8 @@ class Rules:
             raise ValueError('Invalid start score or mode')
         if self.max_legs < 1 or self.best_of_sets < 1 or self.best_of_legs_per_set < 1:
             raise ValueError('Leg and set counts must be positive')
-        if self.mode == 'sets' and (self.best_of_sets % 2 == 0 or self.best_of_legs_per_set % 2 == 0):
-            raise ValueError('Best-of sets and legs per set must be odd')
-        if self.mode == 'legs' and not self.allow_draw and self.max_legs % 2 == 0:
-            raise ValueError('Even max legs requires draw permission or a deciding-leg rule')
+        if self.mode == 'sets' and self.best_of_legs_per_set % 2 == 0:
+            raise ValueError('Legs je Set müssen ungerade sein, damit ein Set einen Sieger hat')
 
 
 @dataclass
@@ -119,7 +117,9 @@ class Match:
             if self.legs[winner] >= target:
                 self.sets[winner] += 1
                 self.legs = [0, 0]
-                self.done = self.sets[winner] >= r.best_of_sets // 2 + 1
+                played_sets = sum(self.sets)
+                remaining_sets = r.best_of_sets - played_sets
+                self.done = played_sets >= r.best_of_sets or max(self.sets) > min(self.sets) + remaining_sets
         if not self.done:
             self.remaining = [r.start_score, r.start_score]
             self.first_throw = 1 - self.first_throw
