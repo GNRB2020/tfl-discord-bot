@@ -31,3 +31,8 @@ table{border-collapse:collapse}th,td{border:1px solid #6e6254!important;padding:
 .sting-report-scroll{max-height:min(62vh,650px);overflow:auto}
 #tugWinsBoard{font-size:clamp(23px,4.4vh,43px);font-weight:900;text-align:center;color:var(--sting-gold);background:#191919;border:2px solid var(--sting-gold);border-radius:10px;padding:6px;margin-bottom:4px}
 @media(max-width:600px){.sting-report-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}.sting-history{font-size:12px}.sting-table{font-size:11px}.sting-table td,.sting-table th{padding:5px!important}}
+
+/* Phase 15: TRAINING is a top-level navigation heading, not a plain card */
+#menuView .menu > #trainingHub{background:linear-gradient(110deg,#9b0714,#6c0710)!important;border:2px solid var(--sting-gold)!important;border-left:9px solid var(--sting-gold)!important;color:#fff!important;font-weight:950!important;letter-spacing:.075em;text-transform:uppercase;box-shadow:0 2px 0 rgba(198,165,65,.35),0 0 16px rgba(198,165,65,.22);font-size:clamp(22px,3vh,33px)!important;min-height:82px}
+#menuView .menu > #trainingHub small{font-weight:600;letter-spacing:0;text-transform:none;color:#ffecc0!important}
+#trainingHubPanel.open{border:1px solid var(--sting-gold);border-radius:12px;background:#211e19;padding:12px;}

@@ -14,7 +14,15 @@ function playerHist(){
  }
 }
 const baseMatch=showMatch;
-showMatch=function(){baseMatch();playerHist()};
+// Disable the legacy result dialog while the original renderer updates scores.
+// Open our full report only after the legacy render path is finished.
+showMatch=function(){
+ const oldResult=result;
+ result=function(){};
+ try{baseMatch()}finally{result=report}
+ playerHist();
+ if(S?.kind==='x01'&&S.done)report();
+};
 // In Phase 11 the tug controller lives in a closure; observe its stable view instead.
 const tug=q('tugView');
 function tugWins(){if(!tug||S?.kind!=='tug')return;
