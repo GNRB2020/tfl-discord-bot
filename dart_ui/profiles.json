@@ -1,0 +1,497 @@
+[
+  {
+    "id": 1,
+    "display_name": "Manuel Andrae",
+    "source_name": "Andrae, Manuel"
+  },
+  {
+    "id": 2,
+    "display_name": "Niclas Bahn",
+    "source_name": "Bahn, Niclas"
+  },
+  {
+    "id": 3,
+    "display_name": "Tobias Bartel",
+    "source_name": "Bartel, Tobias"
+  },
+  {
+    "id": 4,
+    "display_name": "Matthias Barth",
+    "source_name": "Barth, Matthias"
+  },
+  {
+    "id": 5,
+    "display_name": "Jannis Becker",
+    "source_name": "Becker, Jannis"
+  },
+  {
+    "id": 6,
+    "display_name": "Frank Brammer",
+    "source_name": "Brammer, Frank"
+  },
+  {
+    "id": 7,
+    "display_name": "Lars Briem",
+    "source_name": "Briem, Lars"
+  },
+  {
+    "id": 8,
+    "display_name": "Andreas Buck",
+    "source_name": "Buck, Andreas"
+  },
+  {
+    "id": 9,
+    "display_name": "Dennis Degenhardt",
+    "source_name": "Degenhardt, Dennis"
+  },
+  {
+    "id": 10,
+    "display_name": "Laura Degenhardt",
+    "source_name": "Degenhardt, Laura"
+  },
+  {
+    "id": 11,
+    "display_name": "Heidi Derks",
+    "source_name": "Derks, Heidi"
+  },
+  {
+    "id": 12,
+    "display_name": "Christian Echterdiek",
+    "source_name": "Echterdiek, Christian"
+  },
+  {
+    "id": 13,
+    "display_name": "Thomas Edel",
+    "source_name": "Edel, Thomas"
+  },
+  {
+    "id": 14,
+    "display_name": "Mike Engelke",
+    "source_name": "Engelke, Mike"
+  },
+  {
+    "id": 15,
+    "display_name": "Francisco Ferrer Lampert",
+    "source_name": "Ferrer Lampert, Francisco"
+  },
+  {
+    "id": 16,
+    "display_name": "Andreas Friese",
+    "source_name": "Friese, Andreas"
+  },
+  {
+    "id": 17,
+    "display_name": "Maurice Friese",
+    "source_name": "Friese, Maurice"
+  },
+  {
+    "id": 18,
+    "display_name": "Sylvia Friese",
+    "source_name": "Friese, Sylvia"
+  },
+  {
+    "id": 19,
+    "display_name": "Siegfried Göhmann",
+    "source_name": "Göhmann, Siegfried"
+  },
+  {
+    "id": 20,
+    "display_name": "Jörn-Michel Grigoleit",
+    "source_name": "Grigoleit, Jörn-Michel"
+  },
+  {
+    "id": 21,
+    "display_name": "Jens Hamborg",
+    "source_name": "Hamborg, Jens"
+  },
+  {
+    "id": 22,
+    "display_name": "Marc Hanisch",
+    "source_name": "Hanisch, Marc"
+  },
+  {
+    "id": 23,
+    "display_name": "Jan Haushalter",
+    "source_name": "Haushalter, Jan"
+  },
+  {
+    "id": 24,
+    "display_name": "Lars Heeger",
+    "source_name": "Heeger, Lars"
+  },
+  {
+    "id": 25,
+    "display_name": "Felix Hempel",
+    "source_name": "Hempel, Felix"
+  },
+  {
+    "id": 26,
+    "display_name": "Sven Hothan",
+    "source_name": "Hothan, Sven"
+  },
+  {
+    "id": 27,
+    "display_name": "Silke Huras",
+    "source_name": "Huras, Silke"
+  },
+  {
+    "id": 28,
+    "display_name": "René Huschke",
+    "source_name": "Huschke, René"
+  },
+  {
+    "id": 29,
+    "display_name": "Andreas Jaguttis",
+    "source_name": "Jaguttis, Andreas"
+  },
+  {
+    "id": 30,
+    "display_name": "Bernd Jendrich",
+    "source_name": "Jendrich, Bernd"
+  },
+  {
+    "id": 31,
+    "display_name": "Filip Jensen",
+    "source_name": "Jensen, Filip"
+  },
+  {
+    "id": 32,
+    "display_name": "Gero Jensen",
+    "source_name": "Jensen, Gero"
+  },
+  {
+    "id": 33,
+    "display_name": "Collin John",
+    "source_name": "John, Collin"
+  },
+  {
+    "id": 34,
+    "display_name": "Bärbel Jonat",
+    "source_name": "Jonat, Bärbel"
+  },
+  {
+    "id": 35,
+    "display_name": "Carsten Jonat",
+    "source_name": "Jonat, Carsten"
+  },
+  {
+    "id": 36,
+    "display_name": "Halina Jonat",
+    "source_name": "Jonat, Halina"
+  },
+  {
+    "id": 37,
+    "display_name": "Bjarne Kanstein",
+    "source_name": "Kanstein, Bjarne"
+  },
+  {
+    "id": 38,
+    "display_name": "Lars Kießling",
+    "source_name": "Kießling, Lars"
+  },
+  {
+    "id": 39,
+    "display_name": "Finley Klöden",
+    "source_name": "Klöden, Finley"
+  },
+  {
+    "id": 40,
+    "display_name": "Marian Kück",
+    "source_name": "Kück, Marian"
+  },
+  {
+    "id": 41,
+    "display_name": "Eldin Kücken",
+    "source_name": "Kücken, Eldin"
+  },
+  {
+    "id": 42,
+    "display_name": "Stefan Kuhlmann",
+    "source_name": "Kuhlmann, Stefan"
+  },
+  {
+    "id": 43,
+    "display_name": "Michael Kull",
+    "source_name": "Kull, Michael"
+  },
+  {
+    "id": 44,
+    "display_name": "David Laity",
+    "source_name": "Laity, David"
+  },
+  {
+    "id": 45,
+    "display_name": "Christoph Lange",
+    "source_name": "Lange, Christoph"
+  },
+  {
+    "id": 46,
+    "display_name": "Kai-André Lasch",
+    "source_name": "Lasch, Kai-André"
+  },
+  {
+    "id": 47,
+    "display_name": "Arne Lattoch",
+    "source_name": "Lattoch, Arne"
+  },
+  {
+    "id": 48,
+    "display_name": "Bernd Lesemann",
+    "source_name": "Lesemann, Bernd"
+  },
+  {
+    "id": 49,
+    "display_name": "Florian Lesemann",
+    "source_name": "Lesemann, Florian"
+  },
+  {
+    "id": 50,
+    "display_name": "Michelle Lesemann",
+    "source_name": "Lesemann, Michelle"
+  },
+  {
+    "id": 51,
+    "display_name": "Ulf-Arvid Lührs",
+    "source_name": "Lührs, Ulf-Arvid"
+  },
+  {
+    "id": 52,
+    "display_name": "Robin Lüschen",
+    "source_name": "Lüschen, Robin"
+  },
+  {
+    "id": 53,
+    "display_name": "Jan Mangerich",
+    "source_name": "Mangerich, Jan"
+  },
+  {
+    "id": 54,
+    "display_name": "Klaus May",
+    "source_name": "May, Klaus"
+  },
+  {
+    "id": 55,
+    "display_name": "Jannik Mühr",
+    "source_name": "Mühr, Jannik"
+  },
+  {
+    "id": 56,
+    "display_name": "Marc Nieselski",
+    "source_name": "Nieselski, Marc"
+  },
+  {
+    "id": 57,
+    "display_name": "Marco Noll",
+    "source_name": "Noll, Marco"
+  },
+  {
+    "id": 58,
+    "display_name": "Ardit Pergjegjaj",
+    "source_name": "Pergjegjaj, Ardit"
+  },
+  {
+    "id": 59,
+    "display_name": "Bettina Pesaresi",
+    "source_name": "Pesaresi, Bettina"
+  },
+  {
+    "id": 60,
+    "display_name": "Ricardo Pietreczko",
+    "source_name": "Pietreczko, Ricardo"
+  },
+  {
+    "id": 61,
+    "display_name": "Matthias Rastel",
+    "source_name": "Rastel, Matthias"
+  },
+  {
+    "id": 62,
+    "display_name": "Lena Rehder",
+    "source_name": "Rehder, Lena"
+  },
+  {
+    "id": 63,
+    "display_name": "Christian Rendelmann",
+    "source_name": "Rendelmann, Christian"
+  },
+  {
+    "id": 64,
+    "display_name": "Julien Renno",
+    "source_name": "Renno, Julien"
+  },
+  {
+    "id": 65,
+    "display_name": "Jayson Roth",
+    "source_name": "Roth, Jayson"
+  },
+  {
+    "id": 66,
+    "display_name": "Mika Rüther",
+    "source_name": "Rüther, Mika"
+  },
+  {
+    "id": 67,
+    "display_name": "Frank Salisch",
+    "source_name": "Salisch, Frank"
+  },
+  {
+    "id": 68,
+    "display_name": "Manuel Sanftleben",
+    "source_name": "Sanftleben, Manuel"
+  },
+  {
+    "id": 69,
+    "display_name": "Manuel Schauer",
+    "source_name": "Schauer, Manuel"
+  },
+  {
+    "id": 70,
+    "display_name": "Fabiola Scheer",
+    "source_name": "Scheer, Fabiola"
+  },
+  {
+    "id": 71,
+    "display_name": "Andreas Schmidt",
+    "source_name": "Schmidt, Andreas"
+  },
+  {
+    "id": 72,
+    "display_name": "Stefan Schmidtchen",
+    "source_name": "Schmidtchen, Stefan"
+  },
+  {
+    "id": 73,
+    "display_name": "Sebastian Schnehage",
+    "source_name": "Schnehage, Sebastian"
+  },
+  {
+    "id": 74,
+    "display_name": "Martin Seffers",
+    "source_name": "Seffers, Martin"
+  },
+  {
+    "id": 75,
+    "display_name": "Christopher Seide",
+    "source_name": "Seide, Christopher"
+  },
+  {
+    "id": 76,
+    "display_name": "Jason Spurr",
+    "source_name": "Spurr, Jason"
+  },
+  {
+    "id": 77,
+    "display_name": "André Steinhoff",
+    "source_name": "Steinhoff, André"
+  },
+  {
+    "id": 78,
+    "display_name": "Dominik Strauß",
+    "source_name": "Strauß, Dominik"
+  },
+  {
+    "id": 79,
+    "display_name": "Dustin Szafranski",
+    "source_name": "Szafranski, Dustin"
+  },
+  {
+    "id": 80,
+    "display_name": "Volker Szepokat",
+    "source_name": "Szepokat, Volker"
+  },
+  {
+    "id": 81,
+    "display_name": "Jakob Varchmin",
+    "source_name": "Varchmin, Jakob"
+  },
+  {
+    "id": 82,
+    "display_name": "Maximilian Verhouven",
+    "source_name": "Verhouven, Maximilian"
+  },
+  {
+    "id": 83,
+    "display_name": "Tamara von Biedersee",
+    "source_name": "von Biedersee, Tamara"
+  },
+  {
+    "id": 84,
+    "display_name": "Dirk Wedekind",
+    "source_name": "Wedekind, Dirk"
+  },
+  {
+    "id": 85,
+    "display_name": "Kathrin Wedekind",
+    "source_name": "Wedekind, Kathrin"
+  },
+  {
+    "id": 86,
+    "display_name": "Bernd Wedemeyer",
+    "source_name": "Wedemeyer, Bernd"
+  },
+  {
+    "id": 87,
+    "display_name": "Paul Weide",
+    "source_name": "Weide, Paul"
+  },
+  {
+    "id": 88,
+    "display_name": "Christoph Weinert",
+    "source_name": "Weinert, Christoph"
+  },
+  {
+    "id": 89,
+    "display_name": "Adrian Weise",
+    "source_name": "Weise, Adrian"
+  },
+  {
+    "id": 90,
+    "display_name": "Gunnar Wendorf",
+    "source_name": "Wendorf, Gunnar"
+  },
+  {
+    "id": 91,
+    "display_name": "Mike Werner",
+    "source_name": "Werner, Mike"
+  },
+  {
+    "id": 92,
+    "display_name": "Frank Wienhöfer",
+    "source_name": "Wienhöfer, Frank"
+  },
+  {
+    "id": 93,
+    "display_name": "Jens Wilkens",
+    "source_name": "Wilkens, Jens"
+  },
+  {
+    "id": 94,
+    "display_name": "Lasse Wilkens",
+    "source_name": "Wilkens, Lasse"
+  },
+  {
+    "id": 95,
+    "display_name": "Marco Wilkens",
+    "source_name": "Wilkens, Marco"
+  },
+  {
+    "id": 96,
+    "display_name": "Vanessa Wilkens",
+    "source_name": "Wilkens, Vanessa"
+  },
+  {
+    "id": 97,
+    "display_name": "Annegret Wolter",
+    "source_name": "Wolter, Annegret"
+  },
+  {
+    "id": 98,
+    "display_name": "Markus Wolter",
+    "source_name": "Wolter, Markus"
+  },
+  {
+    "id": 99,
+    "display_name": "Wayne Wopat",
+    "source_name": "Wopat, Wayne"
+  }
+]

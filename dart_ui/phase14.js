@@ -43,12 +43,12 @@ function report(){if(!S?.summary?.players||!q('modal')?.classList.contains('hide
   let html=grid('Scoring',['Spieler','60+','80+','100+','140+','180'],p.map(x=>[x.player,...['60','80','100','140','180'].map(k=>x.scoring_bands?.[k]??0)]));
   html+=grid('Averages',['Spieler','Avg','First 9D','First 12D','First 15D','First 18D'],p.map(x=>[x.player,x.average,...['9','12','15','18'].map(k=>x.first_darts?.[k]??'–')]));
   for(const [label,key] of [['Darts/Leg','darts'],['Averages/Leg','average'],['Checkouts/Leg','checkout']])html+=grid(label,['Spieler',...byLeg.map(String)],p.map(x=>[x.player,...byLeg.map(k=>x.by_leg?.find(z=>z.leg===k)?.[key]??'–')]));
-  html+=grid('Specials – Einzelwerte',['Spieler','Lowdarts','Highfinishes','Bullfinishes','Highscores'],p.map(x=>[x.player,...['lowdart_details','highfinish_details','bullfinish_details','highscore_details'].map(k=>details(x,k))]));return html;
+  html+=grid('Specials – Einzelwerte (Checkout-Scores)',['Spieler','Lowdarts','Highfinishes','Bullfinishes','Highscores'],p.map(x=>[x.player,...['lowdart_details','highfinish_details','bullfinish_details','highscore_details'].map(k=>details(x,k))]));return html;
  };
  const best=()=>grid('Bestleistungen und Specials',['Spieler','Kategorie','Einzelwerte','Anzahl'],p.flatMap(x=>[
  [x.player,'Lowdarts',details(x,'lowdart_details'),x.lowdarts??0],
  [x.player,'Highfinishes',details(x,'highfinish_details'),x.highfinishes??0],
- [x.player,'Bullfinishes',details(x,'bullfinish_details'),x.bullfinishes??0],
+ [x.player,'Bullfinishes (Checkout-Score)',details(x,'bullfinish_details'),x.bullfinishes??0],
  [x.player,'Highscores',details(x,'highscore_details'),x.highscores??0],
  [x.player,'180er',list(hist.filter(v=>v.player===ns.indexOf(x.player)&&v.score===180).map(v=>v.score)),hist.filter(v=>v.player===ns.indexOf(x.player)&&v.score===180).length]
  ]));
