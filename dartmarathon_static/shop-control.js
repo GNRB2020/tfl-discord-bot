@@ -50,6 +50,15 @@
     if (button) button.click();
   }
 
+  function focusShopTasks() {
+    const tasks = $("shopOpenTasks");
+    if (!tasks) return;
+    tasks.closest(".inline-shop-tasks")?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  }
+
   function renderTasks(tasks) {
     const container = $("shopOpenTasks");
     const safe = Array.isArray(tasks) ? tasks : [];
@@ -287,6 +296,7 @@
 
     $("shopPurchaseTotal").textContent = euroFromCents(shop.summary?.purchase_cents);
     $("shopDonationTotal").textContent = euroFromCents(shop.summary?.donation_cents);
+    $("shopManualDonations").textContent = euroFromCents(shop.manual_donations_cents);
     $("shopOwnDonations").textContent = euroFromCents(shop.own_donations_cents);
     $("shopEventTotal").textContent = euroFromCents(shop.event_total_cents);
 
@@ -528,7 +538,7 @@
     openShopTab();
   };
 
-  $("shopAlertButton").onclick = openShopTab;
+  $("shopAlertButton").onclick = focusShopTasks;
   $("shopNewItem").onclick = () => { clearEditor(); showEditor(); };
   $("shopCancelItem").onclick = () => { $("shopEditor").classList.add("hidden"); clearEditor(); };
   $("shopSaveItem").onclick = saveItem;

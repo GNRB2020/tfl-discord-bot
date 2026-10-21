@@ -125,6 +125,33 @@
         return;
       }
 
+      if (message.type === "manual_donation_saved") {
+        showToast(
+          message.message || "Spende gespeichert.",
+          "success"
+        );
+        $("manualDonationName").value = "";
+        $("manualDonationAmount").value = "";
+        $("manualDonationMessage").value = "";
+        return;
+      }
+
+      if (message.type === "manual_donation_deleted") {
+        showToast(
+          message.message || "Spende gelöscht.",
+          "success"
+        );
+        return;
+      }
+
+      if (message.type === "manual_donation_imported") {
+        showToast(
+          message.message || "Spenden importiert.",
+          "success"
+        );
+        return;
+      }
+
       if (message.type === "popup_sent") {
         const labels = {
           foltershop: "Foltershop",
@@ -758,6 +785,12 @@
       );
     }
 
+    if (Number(safe.legacy || 0) > 0) {
+      parts.push(
+        `Altbestand ×${Number(safe.legacy)}`
+      );
+    }
+
     return parts.length
       ? parts.join(" · ")
       : "keine Specials";
@@ -893,6 +926,131 @@
         + "</div>"
       )
     ).join("");
+  }
+
+  function formatEuroValue(value) {
+    return Number(value || 0).toLocaleString(
+      "de-DE",
+      {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }
+    ) + " €";
+  }
+
+  function renderInlineSpecialOverview(state) {
+    const tzTotal = Number(
+      state?.player_special_totals?.tzmarty
+      || 0
+    );
+    const koTotal = Number(
+      state?.player_special_totals?.korsar
+      || 0
+    );
+
+    $("inlineSpecialTotal").textContent =
+      `${tzTotal + koTotal} Specials gesamt`;
+    $("inlineTzSpecialTotal").textContent = tzTotal;
+    $("inlineKoSpecialTotal").textContent = koTotal;
+    $("inlineTzSpecialSummary").textContent =
+      formatSpecialSummary(
+        state?.special_detail?.tzmarty || {}
+      );
+    $("inlineKoSpecialSummary").textContent =
+      formatSpecialSummary(
+        state?.special_detail?.korsar || {}
+      );
+  }
+
+  function renderManualDonations(state) {
+    const donations = Array.isArray(
+      state?.manual_donations
+    )
+      ? state.manual_donations
+      : [];
+
+    const totalCents = Number(
+      state?.manual_donation_total_cents
+      || 0
+    );
+
+    $("manualDonationTotal").textContent =
+      formatEuroValue(totalCents / 100);
+
+    const container = $("manualDonationList");
+
+    if (!donations.length) {
+      container.innerHTML = (
+        '<div class="empty-state">'
+        + "Noch keine manuellen Spenden gespeichert."
+        + "</div>"
+      );
+      return;
+    }
+
+    container.innerHTML = donations.map(
+      (donation) => {
+        const name = escapeHtml(
+          donation.name || "Anonym"
+        );
+        const amount = formatEuroValue(
+          Number(donation.amount_cents || 0)
+          / 100
+        );
+        const created = escapeHtml(
+          donation.created_at || ""
+        );
+        const note = donation.message
+          ? `<em>„${escapeHtml(donation.message)}“</em>`
+          : "";
+        const uid = escapeHtml(
+          donation.uid || ""
+        );
+
+        return (
+          '<div class="manual-donation-row">'
+          + '<div class="manual-donation-row-main">'
+          + `<strong>${name}</strong>`
+          + `<span>${amount}${created ? ` · ${created}` : ""}</span>`
+          + note
+          + "</div>"
+          + `<button class="mini-btn danger" type="button" data-manual-donation-delete="${uid}">LÖSCHEN</button>`
+          + "</div>"
+        );
+      }
+    ).join("");
+
+    all("[data-manual-donation-delete]").forEach(
+      (button) => {
+        button.onclick = () => {
+          const uid = String(
+            button.dataset.manualDonationDelete
+            || ""
+          );
+          if (
+            uid
+            && confirm(
+              "Diese manuell erfasste Spende wirklich löschen?"
+            )
+          ) {
+            send({
+              type: "manual_donation_delete",
+              uid,
+            });
+          }
+        };
+      }
+    );
+  }
+
+  function ownDonationPlayer() {
+    const player = String(
+      $("ownDonationPlayer")?.value
+      || ""
+    );
+    return ["tzmarty", "korsar"].includes(player)
+      ? player
+      : "tzmarty";
   }
 
   function setPauseColor(
@@ -1114,6 +1272,28 @@
       }
     );
 
+    const ownBreakdown = (
+      state.own_donations_by_player
+      || {}
+    );
+    $("ownDonationTzmarty").textContent =
+      formatEuroValue(ownBreakdown.tzmarty || 0);
+    $("ownDonationKorsar").textContent =
+      formatEuroValue(ownBreakdown.korsar || 0);
+
+    const legacyOwn = Number(
+      ownBreakdown.unassigned || 0
+    );
+    $("ownDonationLegacy").textContent =
+      formatEuroValue(legacyOwn);
+    $("ownDonationLegacyRow").classList.toggle(
+      "hidden",
+      legacyOwn <= 0
+    );
+
+    renderInlineSpecialOverview(state);
+    renderManualDonations(state);
+
     renderMatches(
       state.matches
     );
@@ -1296,11 +1476,138 @@
     if (
       send({
         type: "donation_adjust",
+        player: ownDonationPlayer(),
         amount: sign * amount,
       })
     ) {
       input.value = "";
     }
+  }
+
+  function addManualDonation() {
+    const name = String(
+      $("manualDonationName").value
+      || ""
+    ).trim();
+    const amount = Number(
+      String(
+        $("manualDonationAmount").value
+        || ""
+      ).replace(",", ".")
+    );
+    const message = String(
+      $("manualDonationMessage").value
+      || ""
+    ).trim();
+
+    if (!name) {
+      showToast(
+        "Bitte einen Namen für die Spende eintragen.",
+        "error"
+      );
+      return;
+    }
+
+    if (
+      !Number.isFinite(amount)
+      || amount <= 0
+      || amount > 10000
+    ) {
+      showToast(
+        "Bitte einen gültigen Spendenbetrag eingeben.",
+        "error"
+      );
+      return;
+    }
+
+    send({
+      type: "manual_donation_add",
+      name,
+      amount,
+      message,
+      announce: Boolean(
+        $("manualDonationAnnounce").checked
+      ),
+    });
+  }
+
+  function exportManualDonations() {
+    const donations = Array.isArray(
+      lastState?.manual_donations
+    )
+      ? lastState.manual_donations
+      : [];
+
+    const payload = {
+      schema: "dartmarathon-manual-donations-v1",
+      exported_at: new Date().toISOString(),
+      donations,
+    };
+
+    const blob = new Blob(
+      [JSON.stringify(payload, null, 2)],
+      {type: "application/json;charset=utf-8"}
+    );
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const stamp = new Date()
+      .toISOString()
+      .slice(0, 10);
+
+    link.href = url;
+    link.download =
+      `dartmarathon_spenden_${stamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+
+    showToast(
+      `${donations.length} manuelle Spenden exportiert.`,
+      "success"
+    );
+  }
+
+  async function importManualDonations(file) {
+    if (!file) return;
+
+    let raw;
+    try {
+      raw = JSON.parse(
+        await file.text()
+      );
+    } catch (_) {
+      showToast(
+        "Die JSON-Datei konnte nicht gelesen werden.",
+        "error"
+      );
+      return;
+    }
+
+    const donations = Array.isArray(raw)
+      ? raw
+      : raw?.donations;
+
+    if (!Array.isArray(donations)) {
+      showToast(
+        "Keine Spendenliste in der Datei gefunden.",
+        "error"
+      );
+      return;
+    }
+
+    if (
+      !confirm(
+        `${donations.length} Spenden aus der Datei einlesen? Bereits vorhandene Einträge werden anhand ihrer ID nicht doppelt angelegt.`
+      )
+    ) {
+      return;
+    }
+
+    send({
+      type: "manual_donation_import",
+      donations,
+    });
   }
 
   // -------------------------------------------------------
@@ -1466,6 +1773,7 @@
       button.onclick = () => {
         send({
           type: "donation_adjust",
+          player: ownDonationPlayer(),
           amount: Number(
             button.dataset.donation
           ),
@@ -1481,6 +1789,24 @@
   $("donationSubtract").onclick = () => (
     donationAmount(-1)
   );
+
+  $("manualDonationAdd").onclick = (
+    addManualDonation
+  );
+
+  $("manualDonationExport").onclick = (
+    exportManualDonations
+  );
+
+  $("manualDonationImport").onclick = () => {
+    $("manualDonationImportFile").click();
+  };
+
+  $("manualDonationImportFile").onchange = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    await importManualDonations(file);
+  };
 
   all(".tab").forEach(
     (button) => {

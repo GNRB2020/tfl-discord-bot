@@ -1141,3 +1141,341 @@ body.overlay-editor-active .dock{
     font-size:8px;
   }
 }
+
+/* =========================================================
+   V6.11 · SPENDEN / INLINE-SPECIALS / INLINE-SHOP-AUFGABEN
+   ========================================================= */
+
+.inline-special-overview {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 14px;
+  background: rgba(7,12,18,.42);
+}
+
+.inline-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.inline-section-head h3 {
+  margin: 2px 0 0;
+  font-size: 18px;
+}
+
+.inline-section-head > span {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  opacity: .78;
+}
+
+.inline-special-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.inline-special-player {
+  min-width: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,.09);
+  background: rgba(255,255,255,.035);
+}
+
+.inline-special-player.red-special-summary {
+  box-shadow: inset 3px 0 0 rgba(255,78,78,.65);
+}
+
+.inline-special-player.blue-special-summary {
+  box-shadow: inset 3px 0 0 rgba(79,155,255,.70);
+}
+
+.inline-special-player-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.inline-special-player-head strong {
+  font-size: 13px;
+  letter-spacing: .08em;
+}
+
+.inline-special-player-head b {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.inline-special-summary {
+  min-height: 34px;
+  font-size: 13px;
+  line-height: 1.45;
+  opacity: .90;
+}
+
+.inline-shop-tasks {
+  margin-top: 18px;
+  min-height: 0;
+}
+
+.inline-shop-tasks .shop-scroll {
+  max-height: 330px;
+}
+
+.own-donation-split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 9px 0 10px;
+}
+
+.own-donation-split > span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.08);
+  font-size: 11px;
+}
+
+.own-donation-player {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.own-donation-player > span {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  opacity: .74;
+}
+
+.own-donation-player select {
+  min-height: 38px;
+}
+
+.manual-donation-card {
+  margin-top: 14px;
+  padding: 18px;
+}
+
+.manual-donation-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.manual-donation-head h2 {
+  margin: 2px 0 3px;
+}
+
+.manual-donation-head p {
+  margin: 0;
+  font-size: 12px;
+  opacity: .68;
+}
+
+.manual-donation-total {
+  min-width: 160px;
+  text-align: right;
+}
+
+.manual-donation-total span {
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  opacity: .70;
+}
+
+.manual-donation-total strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 25px;
+}
+
+.manual-donation-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 130px minmax(240px, 1.6fr) auto auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 16px;
+}
+
+.manual-donation-form label {
+  min-width: 0;
+}
+
+.manual-donation-form label > span:first-child {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  opacity: .75;
+}
+
+.manual-donation-form input[type="text"],
+.manual-donation-form input[type="number"],
+.manual-donation-form input:not([type]) {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.manual-donation-announce {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 42px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.manual-donation-announce > span {
+  margin: 0 !important;
+  font-size: 11px !important;
+  letter-spacing: 0 !important;
+  opacity: .88 !important;
+}
+
+.manual-donation-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+
+.manual-donation-toolbar > strong {
+  font-size: 11px;
+  letter-spacing: .07em;
+}
+
+.manual-donation-toolbar > div {
+  display: flex;
+  gap: 7px;
+}
+
+.manual-donation-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.manual-donation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255,255,255,.035);
+  border: 1px solid rgba(255,255,255,.07);
+}
+
+.manual-donation-row-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(100px, .8fr) minmax(150px, 1fr) minmax(220px, 2fr);
+  gap: 12px;
+  align-items: center;
+  flex: 1;
+}
+
+.manual-donation-row-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-donation-row-main span {
+  font-size: 12px;
+  opacity: .78;
+}
+
+.manual-donation-row-main em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  opacity: .82;
+}
+
+@media (max-width: 1200px) {
+  .manual-donation-form {
+    grid-template-columns: 1fr 130px 1.4fr;
+  }
+
+  .manual-donation-announce,
+  #manualDonationAdd {
+    grid-column: auto;
+  }
+
+  .manual-donation-row-main {
+    grid-template-columns: minmax(100px, .8fr) minmax(140px, 1fr);
+  }
+
+  .manual-donation-row-main em {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .inline-special-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-donation-head,
+  .manual-donation-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .manual-donation-total {
+    text-align: left;
+  }
+
+  .manual-donation-form {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-donation-row {
+    align-items: flex-start;
+  }
+
+  .manual-donation-row-main {
+    grid-template-columns: 1fr;
+  }
+}
+
+.shop-admin-summary {
+  grid-template-columns: repeat(5, minmax(95px, 1fr));
+}
+
+.inline-shop-tasks .shop-scroll {
+  height: auto;
+}
+
+@media (max-width: 1320px) {
+  .shop-admin-summary {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
