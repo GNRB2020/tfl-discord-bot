@@ -489,15 +489,79 @@
       };
     });
 
-    const own = Number(
+    const manualDonations = Array.isArray(
+      state?.manual_donations
+    )
+      ? state.manual_donations
+      : [];
+
+    for (const donation of manualDonations) {
+      const cents = Number(
+        donation?.amount_cents || 0
+      );
+
+      if (cents <= 0) continue;
+
+      rows.push({
+        name:String(
+          donation?.name || "Anonym"
+        ),
+        action:"Spende",
+        amount:(cents / 100).toLocaleString(
+          "de-DE",
+          {
+            minimumFractionDigits:2,
+            maximumFractionDigits:2,
+          }
+        ) + " €",
+      });
+    }
+
+    const ownByPlayer = (
+      state?.own_donations_by_player
+      && typeof state.own_donations_by_player === "object"
+    )
+      ? state.own_donations_by_player
+      : {};
+
+    const ownRows = [
+      ["Tzmarty", Number(ownByPlayer.tzmarty || 0)],
+      ["Korsar", Number(ownByPlayer.korsar || 0)],
+      ["Tzmarty & Korsar", Number(ownByPlayer.unassigned || 0)],
+    ];
+
+    let ownBreakdownTotal = 0;
+
+    for (const [name, amountValue] of ownRows) {
+      if (amountValue <= 0) continue;
+
+      ownBreakdownTotal += amountValue;
+      rows.push({
+        name,
+        action:"Eigene Spende",
+        amount:amountValue.toLocaleString(
+          "de-DE",
+          {
+            minimumFractionDigits:2,
+            maximumFractionDigits:2,
+          }
+        ) + " €",
+      });
+    }
+
+    // Fallback für alte States ohne Spieler-Aufteilung.
+    const ownTotal = Number(
       state?.own_donations || 0
     );
 
-    if (own > 0) {
+    if (
+      ownTotal > 0
+      && ownBreakdownTotal <= 0
+    ) {
       rows.push({
         name:"Tzmarty & Korsar",
-        action:"Eigene Spenden",
-        amount:own.toLocaleString(
+        action:"Eigene Spende",
+        amount:ownTotal.toLocaleString(
           "de-DE",
           {
             minimumFractionDigits:2,
