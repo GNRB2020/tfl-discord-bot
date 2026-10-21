@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta http-equiv="Cache-Control" content="no-store">
   <title>Dartmarathon Control</title>
-  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.10.0">
+  <link rel="stylesheet" href="/dartmarathon/static/control.css?v=6.12.0">
 </head>
 <body>
   <div id="connectionAlarm" class="connection-alarm hidden">
@@ -87,6 +87,38 @@
         <button id="shopNewStart" class="btn warning" type="button">STARTEN</button>
       </div>
     </section>
+
+
+    <nav class="tabs main-tabs card" aria-label="Dartmarathon Bereiche">
+      <button class="tab active" data-tab="matches" type="button">
+        <span class="tab-icon">🎯</span>
+        <span>MATCHES</span>
+        <span id="matchCountBadge" class="tab-badge">0</span>
+      </button>
+      <button class="tab" data-tab="specials" type="button">
+        <span class="tab-icon">★</span>
+        <span>SPECIALS</span>
+        <span id="specialEntryBadge" class="tab-badge">0</span>
+      </button>
+      <button class="tab shop-tab" data-tab="shop" type="button">
+        <span class="tab-icon">☠</span>
+        <span>FOLTERSHOP</span>
+        <span id="shopTaskBadge" class="tab-badge hot">0</span>
+      </button>
+      <button class="tab donation-tab" data-tab="donations" type="button">
+        <span class="tab-icon">€</span>
+        <span>SPENDEN</span>
+        <span id="manualDonationBadge" class="tab-badge">0</span>
+      </button>
+      <button class="tab overlay-tab" data-tab="overlay" type="button">
+        <span class="tab-icon">▣</span>
+        <span>OVERLAY</span>
+      </button>
+      <button class="tab" data-tab="admin" type="button">
+        <span class="tab-icon">⚙</span>
+        <span>ADMIN</span>
+      </button>
+    </nav>
 
     <section class="dashboard">
       <article class="card match-card">
@@ -237,41 +269,49 @@
             </div>
           </section>
         </div>
-
-        <section class="inline-special-overview">
-          <div class="inline-section-head">
-            <div>
-              <div class="section-kicker">BISHER GEWORFEN</div>
-              <h3>Special-Übersicht</h3>
+        <section class="match-live-stack">
+          <section class="inline-special-overview compact-live-panel">
+            <div class="inline-section-head">
+              <div>
+                <div class="section-kicker">BISHER GEWORFEN</div>
+                <h3>Specials live</h3>
+              </div>
+              <span id="inlineSpecialTotal" class="inline-total-pill">0 Specials gesamt</span>
             </div>
-            <span id="inlineSpecialTotal">0 Specials gesamt</span>
-          </div>
 
-          <div class="inline-special-grid">
-            <article class="inline-special-player red-special-summary">
-              <div class="inline-special-player-head">
-                <strong>TZMARTY</strong>
-                <b id="inlineTzSpecialTotal">0</b>
+            <div class="inline-special-grid">
+              <article class="inline-special-player red-special-summary">
+                <div class="inline-special-player-head">
+                  <strong>TZMARTY</strong>
+                  <b id="inlineTzSpecialTotal">0</b>
+                </div>
+                <div id="inlineTzSpecialSummary" class="inline-special-summary special-chip-list">
+                  <span class="special-chip empty-chip">noch keine Specials</span>
+                </div>
+              </article>
+
+              <article class="inline-special-player blue-special-summary">
+                <div class="inline-special-player-head">
+                  <strong>KORSAR</strong>
+                  <b id="inlineKoSpecialTotal">0</b>
+                </div>
+                <div id="inlineKoSpecialSummary" class="inline-special-summary special-chip-list">
+                  <span class="special-chip empty-chip">noch keine Specials</span>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section class="shop-admin-box tasks-box inline-shop-tasks compact-live-panel">
+            <div class="shop-box-head compact-task-head">
+              <div>
+                <span class="section-kicker">JETZT ZU ERLEDIGEN</span>
+                <strong>Foltershop-Aufgaben</strong>
               </div>
-              <div id="inlineTzSpecialSummary" class="inline-special-summary">keine Specials</div>
-            </article>
-
-            <article class="inline-special-player blue-special-summary">
-              <div class="inline-special-player-head">
-                <strong>KORSAR</strong>
-                <b id="inlineKoSpecialTotal">0</b>
-              </div>
-              <div id="inlineKoSpecialSummary" class="inline-special-summary">keine Specials</div>
-            </article>
-          </div>
-        </section>
-
-        <section class="shop-admin-box tasks-box inline-shop-tasks">
-          <div class="shop-box-head">
-            <strong>OFFENE FOLTERSHOP-AUFGABEN</strong>
-            <span id="shopOpenHint">0 offen</span>
-          </div>
-          <div id="shopOpenTasks" class="shop-scroll"></div>
+              <span id="shopOpenHint" class="inline-total-pill">0 offen</span>
+            </div>
+            <div id="shopOpenTasks" class="shop-scroll compact-task-scroll"></div>
+          </section>
         </section>
       </article>
 
@@ -403,64 +443,7 @@
       </article>
     </section>
 
-    <section class="card manual-donation-card">
-      <div class="manual-donation-head">
-        <div>
-          <div class="section-kicker">BEREITS ERHALTENE SPENDEN</div>
-          <h2>Spenden manuell eintragen</h2>
-          <p>Für Überweisung, Barspende oder andere Zahlungen außerhalb des Foltershops.</p>
-        </div>
-        <div class="manual-donation-total">
-          <span>MANUELL ERHALTEN</span>
-          <strong id="manualDonationTotal">0,00 €</strong>
-        </div>
-      </div>
-
-      <div class="manual-donation-form">
-        <label>
-          <span>Name / Streamname</span>
-          <input id="manualDonationName" maxlength="80" placeholder="z. B. Jens">
-        </label>
-        <label>
-          <span>Betrag €</span>
-          <input id="manualDonationAmount" type="number" min="0.01" max="10000" step="0.01" inputmode="decimal" placeholder="10,00">
-        </label>
-        <label class="manual-donation-message">
-          <span>Nachricht (optional)</span>
-          <input id="manualDonationMessage" maxlength="180" placeholder="Nachricht für die Nennung">
-        </label>
-        <label class="manual-donation-announce">
-          <input id="manualDonationAnnounce" type="checkbox" checked>
-          <span>Jetzt im Stream nennen (Banner + TTS)</span>
-        </label>
-        <button id="manualDonationAdd" class="btn positive" type="button">SPENDE EINTRAGEN</button>
-      </div>
-
-      <div class="manual-donation-toolbar">
-        <strong>GESPEICHERTE MANUELLE SPENDEN</strong>
-        <div>
-          <input id="manualDonationImportFile" class="hidden" type="file" accept=".json,application/json">
-          <button id="manualDonationExport" class="mini-btn ghost" type="button">EXPORT JSON</button>
-          <button id="manualDonationImport" class="mini-btn ghost" type="button">IMPORT JSON</button>
-        </div>
-      </div>
-      <div id="manualDonationList" class="manual-donation-list"></div>
-    </section>
-
     <section class="dock card">
-      <nav class="tabs" aria-label="Dartmarathon Bereiche">
-        <button class="tab active" data-tab="matches" type="button">
-          MATCHES <span id="matchCountBadge" class="tab-badge">0</span>
-        </button>
-        <button class="tab" data-tab="specials" type="button">
-          SPECIALS <span id="specialEntryBadge" class="tab-badge">0</span>
-        </button>
-        <button class="tab shop-tab" data-tab="shop" type="button">
-          FOLTERSHOP <span id="shopTaskBadge" class="tab-badge hot">0</span>
-        </button>
-        <button class="tab overlay-tab" data-tab="overlay" type="button">OVERLAY</button>
-        <button class="tab" data-tab="admin" type="button">ADMIN</button>
-      </nav>
 
       <div class="tab-body">
         <section id="tab-matches" class="tab-panel active">
@@ -554,6 +537,61 @@
               <div id="shopPaymentHistory" class="shop-scroll"></div>
             </section>
           </div>
+        </section>
+
+
+        <section id="tab-donations" class="tab-panel donations-panel">
+          <div class="workspace-panel-head">
+            <div>
+              <div class="section-kicker">SPENDENVERWALTUNG</div>
+              <h2>Spenden erfassen & sichern</h2>
+            </div>
+            <p>Überweisung, Barspende und andere Zahlungen außerhalb des Foltershops.</p>
+          </div>
+          <section class="manual-donation-card donation-workspace-card">
+          <div class="donation-workspace-accent"></div>
+      <div class="manual-donation-head">
+        <div>
+          <div class="section-kicker">BEREITS ERHALTENE SPENDEN</div>
+          <h2>Spenden manuell eintragen</h2>
+          <p>Für Überweisung, Barspende oder andere Zahlungen außerhalb des Foltershops.</p>
+        </div>
+        <div class="manual-donation-total">
+          <span>MANUELL ERHALTEN</span>
+          <strong id="manualDonationTotal">0,00 €</strong>
+        </div>
+      </div>
+
+      <div class="manual-donation-form">
+        <label>
+          <span>Name / Streamname</span>
+          <input id="manualDonationName" maxlength="80" placeholder="z. B. Jens">
+        </label>
+        <label>
+          <span>Betrag €</span>
+          <input id="manualDonationAmount" type="number" min="0.01" max="10000" step="0.01" inputmode="decimal" placeholder="10,00">
+        </label>
+        <label class="manual-donation-message">
+          <span>Nachricht (optional)</span>
+          <input id="manualDonationMessage" maxlength="180" placeholder="Nachricht für die Nennung">
+        </label>
+        <label class="manual-donation-announce">
+          <input id="manualDonationAnnounce" type="checkbox" checked>
+          <span>Jetzt im Stream nennen (Banner + TTS)</span>
+        </label>
+        <button id="manualDonationAdd" class="btn positive" type="button">SPENDE EINTRAGEN</button>
+      </div>
+
+      <div class="manual-donation-toolbar">
+        <strong>GESPEICHERTE MANUELLE SPENDEN</strong>
+        <div>
+          <input id="manualDonationImportFile" class="hidden" type="file" accept=".json,application/json">
+          <button id="manualDonationExport" class="mini-btn ghost" type="button">EXPORT JSON</button>
+          <button id="manualDonationImport" class="mini-btn ghost" type="button">IMPORT JSON</button>
+        </div>
+      </div>
+      <div id="manualDonationList" class="manual-donation-list"></div>
+    </section>
         </section>
 
         <section id="tab-overlay" class="tab-panel overlay-editor-panel">
