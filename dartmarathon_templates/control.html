@@ -237,6 +237,42 @@
             </div>
           </section>
         </div>
+
+        <section class="inline-special-overview">
+          <div class="inline-section-head">
+            <div>
+              <div class="section-kicker">BISHER GEWORFEN</div>
+              <h3>Special-Übersicht</h3>
+            </div>
+            <span id="inlineSpecialTotal">0 Specials gesamt</span>
+          </div>
+
+          <div class="inline-special-grid">
+            <article class="inline-special-player red-special-summary">
+              <div class="inline-special-player-head">
+                <strong>TZMARTY</strong>
+                <b id="inlineTzSpecialTotal">0</b>
+              </div>
+              <div id="inlineTzSpecialSummary" class="inline-special-summary">keine Specials</div>
+            </article>
+
+            <article class="inline-special-player blue-special-summary">
+              <div class="inline-special-player-head">
+                <strong>KORSAR</strong>
+                <b id="inlineKoSpecialTotal">0</b>
+              </div>
+              <div id="inlineKoSpecialSummary" class="inline-special-summary">keine Specials</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="shop-admin-box tasks-box inline-shop-tasks">
+          <div class="shop-box-head">
+            <strong>OFFENE FOLTERSHOP-AUFGABEN</strong>
+            <span id="shopOpenHint">0 offen</span>
+          </div>
+          <div id="shopOpenTasks" class="shop-scroll"></div>
+        </section>
       </article>
 
       <aside class="card event-card">
@@ -335,6 +371,20 @@
           <div class="donation-total"><strong><span id="ownDonations">0,00</span> €</strong></div>
         </div>
 
+        <div class="own-donation-split">
+          <span>Tzmarty <strong id="ownDonationTzmarty">0,00 €</strong></span>
+          <span>Korsar <strong id="ownDonationKorsar">0,00 €</strong></span>
+          <span id="ownDonationLegacyRow" class="hidden">Altbestand <strong id="ownDonationLegacy">0,00 €</strong></span>
+        </div>
+
+        <label class="own-donation-player">
+          <span>SPENDE VON</span>
+          <select id="ownDonationPlayer">
+            <option value="tzmarty">Tzmarty</option>
+            <option value="korsar">Korsar</option>
+          </select>
+        </label>
+
         <div class="donation-controls">
           <div class="donation-quick">
             <button data-donation="1" class="btn bluebtn" type="button">+1 €</button>
@@ -349,8 +399,52 @@
           </div>
         </div>
 
-        <div class="donation-hint">1 € = +1 Minute Pause · Online-Spenden laufen über den Foltershop.</div>
+        <div class="donation-hint">1 € eigene Spende = +1 Minute Pause · der ausgewählte Spieler wird gespeichert.</div>
       </article>
+    </section>
+
+    <section class="card manual-donation-card">
+      <div class="manual-donation-head">
+        <div>
+          <div class="section-kicker">BEREITS ERHALTENE SPENDEN</div>
+          <h2>Spenden manuell eintragen</h2>
+          <p>Für Überweisung, Barspende oder andere Zahlungen außerhalb des Foltershops.</p>
+        </div>
+        <div class="manual-donation-total">
+          <span>MANUELL ERHALTEN</span>
+          <strong id="manualDonationTotal">0,00 €</strong>
+        </div>
+      </div>
+
+      <div class="manual-donation-form">
+        <label>
+          <span>Name / Streamname</span>
+          <input id="manualDonationName" maxlength="80" placeholder="z. B. Jens">
+        </label>
+        <label>
+          <span>Betrag €</span>
+          <input id="manualDonationAmount" type="number" min="0.01" max="10000" step="0.01" inputmode="decimal" placeholder="10,00">
+        </label>
+        <label class="manual-donation-message">
+          <span>Nachricht (optional)</span>
+          <input id="manualDonationMessage" maxlength="180" placeholder="Nachricht für die Nennung">
+        </label>
+        <label class="manual-donation-announce">
+          <input id="manualDonationAnnounce" type="checkbox" checked>
+          <span>Jetzt im Stream nennen (Banner + TTS)</span>
+        </label>
+        <button id="manualDonationAdd" class="btn positive" type="button">SPENDE EINTRAGEN</button>
+      </div>
+
+      <div class="manual-donation-toolbar">
+        <strong>GESPEICHERTE MANUELLE SPENDEN</strong>
+        <div>
+          <input id="manualDonationImportFile" class="hidden" type="file" accept=".json,application/json">
+          <button id="manualDonationExport" class="mini-btn ghost" type="button">EXPORT JSON</button>
+          <button id="manualDonationImport" class="mini-btn ghost" type="button">IMPORT JSON</button>
+        </div>
+      </div>
+      <div id="manualDonationList" class="manual-donation-list"></div>
     </section>
 
     <section class="dock card">
@@ -390,6 +484,7 @@
             <div class="shop-admin-summary">
               <div><span>KÄUFE</span><strong id="shopPurchaseTotal">0,00 €</strong></div>
               <div><span>ONLINE-SPENDEN</span><strong id="shopDonationTotal">0,00 €</strong></div>
+              <div><span>MANUELL ERHALTEN</span><strong id="shopManualDonations">0,00 €</strong></div>
               <div><span>EIGENE SPENDEN</span><strong id="shopOwnDonations">0,00 €</strong></div>
               <div class="grand"><span>EVENT GESAMT</span><strong id="shopEventTotal">0,00 €</strong></div>
             </div>
@@ -406,11 +501,6 @@
           </div>
 
           <div class="shop-admin-grid">
-            <section class="shop-admin-box tasks-box">
-              <div class="shop-box-head"><strong>OFFENE AUFGABEN</strong><span id="shopOpenHint">0 offen</span></div>
-              <div id="shopOpenTasks" class="shop-scroll"></div>
-            </section>
-
             <section class="shop-admin-box items-box">
               <div class="shop-box-head"><strong>ARTIKEL</strong><span>Preis · Limit · Cooldown</span></div>
               <div id="shopItemList" class="shop-scroll"></div>
@@ -578,8 +668,8 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/dartmarathon/static/shop-audio.js?v=6.9.1"></script>
-  <script src="/dartmarathon/static/control.js?v=6.10.0"></script>
-  <script src="/dartmarathon/static/shop-control.js?v=6.9.0"></script>
+  <script src="/dartmarathon/static/control.js?v=6.11.0"></script>
+  <script src="/dartmarathon/static/shop-control.js?v=6.11.0"></script>
   <script src="/dartmarathon/static/overlay-editor.js?v=6.9.0"></script>
 </body>
 </html>
