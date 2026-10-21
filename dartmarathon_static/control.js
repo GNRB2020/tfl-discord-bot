@@ -796,6 +796,44 @@
       : "keine Specials";
   }
 
+  function renderSpecialChips(detail) {
+    const safe = detail || {};
+    const chips = [];
+
+    const addChip = (label, value, extraClass = "") => {
+      chips.push(
+        `<span class="special-chip ${extraClass}"><b>${escapeHtml(label)}</b><span>${escapeHtml(value)}</span></span>`
+      );
+    };
+
+    if (safe.hf?.length) {
+      addChip("HF", compactValueList(safe.hf), "hot-chip");
+    }
+
+    if (safe.bf?.length) {
+      addChip("BF", compactValueList(safe.bf), "bull-chip");
+    }
+
+    for (const key of ["180", "177", "174", "171"]) {
+      const count = Number(safe[key] || 0);
+      if (count > 0) {
+        addChip(key, `×${count}`, key === "180" ? "max-chip" : "");
+      }
+    }
+
+    if (safe.ld?.length) {
+      addChip("LD", compactValueList(safe.ld), "low-chip");
+    }
+
+    if (Number(safe.legacy || 0) > 0) {
+      addChip("ALT", `×${Number(safe.legacy)}`, "legacy-chip");
+    }
+
+    return chips.length
+      ? chips.join("")
+      : '<span class="special-chip empty-chip">noch keine Specials</span>';
+  }
+
   function escapeHtml(value) {
     return String(
       value ?? ""
@@ -952,12 +990,12 @@
       `${tzTotal + koTotal} Specials gesamt`;
     $("inlineTzSpecialTotal").textContent = tzTotal;
     $("inlineKoSpecialTotal").textContent = koTotal;
-    $("inlineTzSpecialSummary").textContent =
-      formatSpecialSummary(
+    $("inlineTzSpecialSummary").innerHTML =
+      renderSpecialChips(
         state?.special_detail?.tzmarty || {}
       );
-    $("inlineKoSpecialSummary").textContent =
-      formatSpecialSummary(
+    $("inlineKoSpecialSummary").innerHTML =
+      renderSpecialChips(
         state?.special_detail?.korsar || {}
       );
   }
@@ -976,6 +1014,11 @@
 
     $("manualDonationTotal").textContent =
       formatEuroValue(totalCents / 100);
+
+    const donationBadge = $("manualDonationBadge");
+    if (donationBadge) {
+      donationBadge.textContent = donations.length;
+    }
 
     const container = $("manualDonationList");
 
@@ -1410,6 +1453,12 @@
 
     activeTab = name;
 
+    document.body.dataset.workspaceTab = name;
+    document.body.classList.toggle(
+      "workspace-detail-mode",
+      name !== "matches"
+    );
+
     all(".tab").forEach(
       (button) => {
         button.classList.toggle(
@@ -1427,6 +1476,17 @@
         );
       }
     );
+
+    requestAnimationFrame(() => {
+      const target = name === "matches"
+        ? document.querySelector(".dashboard")
+        : document.querySelector(".dock");
+
+      target?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
   }
 
   async function toggleFullscreen() {

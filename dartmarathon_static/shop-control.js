@@ -51,12 +51,19 @@
   }
 
   function focusShopTasks() {
-    const tasks = $("shopOpenTasks");
-    if (!tasks) return;
-    tasks.closest(".inline-shop-tasks")?.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
-    });
+    const mainButton = document.querySelector('.tab[data-tab="matches"]');
+    if (mainButton) {
+      mainButton.click();
+    }
+
+    setTimeout(() => {
+      const tasks = $("shopOpenTasks");
+      if (!tasks) return;
+      tasks.closest(".inline-shop-tasks")?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }, 80);
   }
 
   function renderTasks(tasks) {

@@ -1479,3 +1479,585 @@ body.overlay-editor-active .dock{
     grid-template-columns: repeat(3, 1fr);
   }
 }
+
+
+/* =========================================================
+   V6.12 – kompakter Control-Workspace
+   ========================================================= */
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+}
+
+.app-shell {
+  height: 100vh;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding: 7px;
+  gap: 6px;
+}
+
+/* Hauptnavigation bleibt immer sichtbar. */
+.main-tabs {
+  position: sticky;
+  top: 6px;
+  z-index: 2600;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  padding: 5px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid #2f435a;
+  border-radius: 12px;
+  background: rgba(7,16,26,.97);
+  box-shadow: 0 10px 26px rgba(0,0,0,.34);
+  backdrop-filter: blur(12px);
+}
+
+.main-tabs .tab {
+  flex: 1 0 120px;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  white-space: nowrap;
+  background: linear-gradient(180deg,#101c2a,#0b141f);
+  color: #aebacc;
+}
+
+.main-tabs .tab:hover {
+  color: #fff;
+  border-color: #38516d;
+}
+
+.main-tabs .tab.active {
+  color: #fff;
+  background: linear-gradient(180deg,#22354b,#142235);
+  border-color: #45617f;
+  box-shadow: inset 0 -2px 0 var(--gold), 0 4px 14px rgba(0,0,0,.22);
+}
+
+.main-tabs .shop-tab.active {
+  box-shadow: inset 0 -2px 0 #9a65ff, 0 4px 16px rgba(100,57,210,.18);
+}
+
+.main-tabs .donation-tab.active {
+  box-shadow: inset 0 -2px 0 var(--green), 0 4px 16px rgba(53,220,124,.14);
+}
+
+.tab-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: rgba(255,255,255,.055);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.main-tabs .tab-badge {
+  margin-left: 1px;
+}
+
+/* Detail-Tabs bekommen den Platz des Hauptformulars statt darunter zu verschwinden. */
+body.workspace-detail-mode .dashboard,
+body.workspace-detail-mode .quick-strip {
+  display: none;
+}
+
+body.workspace-detail-mode .dock {
+  flex: 1 0 calc(100vh - 150px);
+  min-height: 520px;
+}
+
+.dock {
+  flex: 1 0 210px;
+  min-height: 190px;
+  display: block;
+  overflow: hidden;
+  padding: 0;
+}
+
+.tab-body {
+  height: 100%;
+  min-height: 0;
+}
+
+.tab-panel {
+  min-height: 100%;
+}
+
+/* Match-Bereich etwas dichter, ohne Bedienelemente zu verkleinern. */
+.dashboard {
+  grid-template-columns: minmax(0,1.9fr) minmax(320px,.58fr);
+  gap: 6px;
+}
+
+.match-card,
+.event-card {
+  padding: 8px;
+}
+
+.match-top-row {
+  margin-top: 5px;
+}
+
+.specials-columns {
+  margin-top: 6px;
+  gap: 6px;
+}
+
+.player-special-card {
+  padding: 6px;
+}
+
+/* Specials + offene Aufgaben wirken wie ein integriertes Live-Dashboard. */
+.match-live-stack {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.compact-live-panel {
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid #273a50;
+  border-radius: 10px;
+  background: linear-gradient(180deg,rgba(12,21,31,.94),rgba(7,13,20,.94));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+
+.inline-section-head {
+  align-items: center;
+  margin-bottom: 6px;
+  gap: 8px;
+}
+
+.inline-section-head h3 {
+  margin: 1px 0 0;
+  font-size: 13px;
+}
+
+.inline-total-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 23px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid #354c67;
+  background: #111d2b;
+  color: #d7e2ef;
+  font-size: 9px !important;
+  font-weight: 900 !important;
+  letter-spacing: .035em !important;
+  opacity: 1 !important;
+  white-space: nowrap;
+}
+
+.inline-special-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.inline-special-player {
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #08111b;
+  border: 1px solid #263a50;
+}
+
+.inline-special-player.red-special-summary {
+  box-shadow: inset 3px 0 0 var(--red);
+}
+
+.inline-special-player.blue-special-summary {
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+.inline-special-player-head {
+  margin-bottom: 5px;
+}
+
+.inline-special-player-head strong {
+  font-size: 10px;
+}
+
+.inline-special-player-head b {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 23px;
+  padding: 0 6px;
+  border-radius: 7px;
+  background: #162334;
+  border: 1px solid #334963;
+  font-size: 14px;
+}
+
+.special-chip-list {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 9px;
+  line-height: 1.1;
+}
+
+.special-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid #31455e;
+  background: #101c2a;
+  color: #d9e4ef;
+  white-space: nowrap;
+}
+
+.special-chip b {
+  color: var(--gold);
+  font-size: 8px;
+  letter-spacing: .04em;
+}
+
+.special-chip.max-chip {
+  border-color: rgba(255,189,36,.5);
+  background: rgba(255,189,36,.08);
+}
+
+.special-chip.hot-chip {
+  border-color: rgba(255,81,75,.36);
+}
+
+.special-chip.bull-chip {
+  border-color: rgba(53,220,124,.36);
+}
+
+.special-chip.low-chip {
+  border-color: rgba(77,165,255,.36);
+}
+
+.special-chip.legacy-chip,
+.special-chip.empty-chip {
+  color: #8493a7;
+  border-style: dashed;
+  background: rgba(255,255,255,.025);
+}
+
+.compact-task-head {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.compact-task-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.compact-task-head > div > strong {
+  font-size: 11px;
+  letter-spacing: .025em;
+}
+
+.inline-shop-tasks {
+  margin-top: 0;
+}
+
+.inline-shop-tasks .compact-task-scroll {
+  height: auto;
+  max-height: 124px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.inline-shop-tasks .shop-task-row {
+  min-height: 42px;
+  padding: 5px 7px;
+  border-radius: 8px;
+}
+
+.inline-shop-tasks .shop-task-main {
+  gap: 1px;
+}
+
+.inline-shop-tasks .shop-task-title-line strong {
+  font-size: 10px;
+}
+
+.inline-shop-tasks .shop-task-main > span,
+.inline-shop-tasks .shop-task-main > em {
+  font-size: 9px;
+}
+
+.inline-shop-tasks .shop-task-actions {
+  gap: 4px;
+}
+
+.inline-shop-tasks .shop-empty {
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  color: #74859a;
+  font-size: 9px;
+  border: 1px dashed #2b3d52;
+  border-radius: 8px;
+}
+
+/* Eigene Spenden im Hauptfenster: kompakter, aber weiterhin direkt bedienbar. */
+.own-donation-split {
+  margin: 6px 0;
+  gap: 4px;
+}
+
+.own-donation-split > span {
+  padding: 4px 7px;
+  font-size: 9px;
+}
+
+.own-donation-player {
+  grid-template-columns: auto minmax(110px,1fr);
+  gap: 7px;
+  margin-bottom: 6px;
+}
+
+.own-donation-player select {
+  min-height: 30px;
+}
+
+.donation-controls {
+  gap: 5px;
+}
+
+/* Spendenverwaltung als eigener Tab statt als riesiger Block im Hauptfenster. */
+.donations-panel {
+  overflow-y: auto;
+  padding: 10px !important;
+}
+
+.workspace-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 2px 2px 8px;
+}
+
+.workspace-panel-head h2 {
+  margin: 2px 0 0;
+  font-size: 18px;
+}
+
+.workspace-panel-head p {
+  margin: 0;
+  color: #8998aa;
+  font-size: 10px;
+  text-align: right;
+}
+
+.donation-workspace-card {
+  position: relative;
+  overflow: hidden;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #2e435b;
+  background: linear-gradient(180deg,#101b29,#08111b);
+}
+
+.donation-workspace-accent {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(var(--green),#1679d1);
+}
+
+.manual-donation-head {
+  align-items: center;
+}
+
+.manual-donation-head h2 {
+  font-size: 16px;
+}
+
+.manual-donation-head p {
+  font-size: 10px;
+}
+
+.manual-donation-total {
+  min-width: 145px;
+  padding: 7px 10px;
+  border: 1px solid #30475f;
+  border-radius: 9px;
+  background: #0b1520;
+}
+
+.manual-donation-total strong {
+  font-size: 21px;
+}
+
+.manual-donation-form {
+  grid-template-columns: minmax(150px,.9fr) 110px minmax(220px,1.3fr) auto auto;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.manual-donation-form input {
+  min-height: 34px;
+}
+
+.manual-donation-announce {
+  min-height: 34px;
+  padding: 0 3px;
+}
+
+.manual-donation-toolbar {
+  margin-top: 11px;
+  padding-top: 9px;
+}
+
+.manual-donation-list {
+  max-height: calc(100vh - 410px);
+  min-height: 100px;
+  margin-top: 7px;
+}
+
+.manual-donation-row {
+  padding: 7px 9px;
+}
+
+/* FOLTERSHOP-/Special-/Admin-Tabs sollen einen normalen Browser-Viewport sauber nutzen. */
+.shop-admin-panel,
+#tab-specials,
+#tab-admin {
+  overflow-y: auto;
+}
+
+body.workspace-detail-mode .tab-body,
+body.workspace-detail-mode .tab-panel.active {
+  height: 100%;
+}
+
+@media (max-width: 1360px) {
+  .main-tabs .tab {
+    flex-basis: 104px;
+    padding-inline: 7px;
+  }
+
+  .main-tabs .tab-icon {
+    display: none;
+  }
+
+  .dashboard {
+    grid-template-columns: minmax(0,1.75fr) minmax(300px,.55fr);
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2,1fr);
+  }
+
+  .manual-donation-form {
+    grid-template-columns: 1fr 105px 1.2fr;
+  }
+
+  .manual-donation-announce,
+  #manualDonationAdd {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 1050px) {
+  body {
+    overflow: auto;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .main-tabs {
+    top: 4px;
+  }
+
+  .dashboard,
+  .quick-strip {
+    grid-template-columns: 1fr;
+  }
+
+  body.workspace-detail-mode .dock {
+    min-height: 620px;
+  }
+
+  .inline-special-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-donation-form {
+    grid-template-columns: 1fr 120px;
+  }
+
+  .manual-donation-message {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 720px) {
+  .main-tabs {
+    justify-content: flex-start;
+  }
+
+  .main-tabs .tab {
+    flex: 0 0 102px;
+    font-size: 9px;
+  }
+
+  .workspace-panel-head,
+  .manual-donation-head,
+  .manual-donation-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workspace-panel-head p,
+  .manual-donation-total {
+    text-align: left;
+  }
+
+  .manual-donation-form {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-donation-message,
+  .manual-donation-announce,
+  #manualDonationAdd {
+    grid-column: auto;
+  }
+}
