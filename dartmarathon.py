@@ -38,8 +38,8 @@ CONTROL_COOKIE_NAME = "dart_control"
 CONTROL_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 PREFIX = "/dartmarathon"
-SCHEMA_VERSION = 5
-ASSET_VERSION = "6.10.0"
+SCHEMA_VERSION = 6
+ASSET_VERSION = "6.11.0"
 
 INITIAL_PAUSE_SECONDS = 15 * 60
 MAX_PAUSE_SECONDS = 30 * 60
@@ -196,7 +196,17 @@ def default_state() -> Dict[str, Any]:
         "pause_active": False,
         "pause_started_at": None,
         "pause_used_seconds": 0.0,
+        # Eigene Spenden geben Pausenguthaben. Die Summe bleibt aus
+        # Kompatibilitätsgründen zusätzlich als own_donations erhalten.
         "own_donations": 0.0,
+        "own_donations_by_player": {
+            "tzmarty": 0.0,
+            "korsar": 0.0,
+            "unassigned": 0.0,
+        },
+        # Bereits außerhalb des Foltershops erhaltene Spenden. Sie zählen
+        # zum Event-Spendentopf und zur Supporterliste, aber NICHT zur Pause.
+        "manual_donations": [],
         "event_ended": False,
 
         # Altbestände aus der alten Zähler-Version bleiben erhalten.
@@ -384,6 +394,290 @@ def _sanitize_match(raw: Any) -> Dict[str, Any] | None:
     }
 
 
+
+def _manual_donation_uid(
+    name: str,
+    amount_cents: int,
+    created_ts: float,
+    message: str,
+) -> str:
+    source = (
+        f"{name.casefold()}|{amount_cents}|"
+        f"{created_ts:.6f}|{message}"
+    )
+    return (
+        "manual-"
+        + hashlib.sha256(
+            source.encode("utf-8")
+        ).hexdigest()[:24]
+    )
+
+
+def _sanitize_manual_donation(
+    raw: Any,
+) -> Dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    name = str(
+        raw.get("name", "")
+        or raw.get("display_name", "")
+        or "Anonym"
+    ).strip()[:80]
+
+    if not name:
+        name = "Anonym"
+
+    message = str(
+        raw.get("message", "") or ""
+    ).strip()[:180]
+
+    try:
+        if "amount_cents" in raw:
+            amount_cents = int(
+                raw.get("amount_cents", 0)
+                or 0
+            )
+        else:
+            amount_cents = int(
+                round(
+                    float(
+                        raw.get("amount", 0)
+                        or 0
+                    )
+                    * 100
+                )
+            )
+    except (TypeError, ValueError):
+        return None
+
+    if (
+        amount_cents <= 0
+        or amount_cents > 1_000_000
+    ):
+        return None
+
+    try:
+        created_ts = max(
+            0.0,
+            float(
+                raw.get("created_ts", 0.0)
+                or 0.0
+            ),
+        )
+    except (TypeError, ValueError):
+        created_ts = 0.0
+
+    created_at = str(
+        raw.get("created_at", "")
+        or ""
+    ).strip()[:40]
+
+    raw_uid = str(
+        raw.get("uid", "")
+        or ""
+    ).strip()[:80]
+
+    uid = raw_uid or _manual_donation_uid(
+        name,
+        amount_cents,
+        created_ts,
+        message,
+    )
+
+    return {
+        "uid": uid,
+        "name": name,
+        "amount_cents": amount_cents,
+        "amount": f"{amount_cents / 100:.2f}",
+        "message": message,
+        "created_at": created_at,
+        "created_ts": created_ts,
+    }
+
+
+def _own_donation_breakdown_locked() -> Dict[str, float]:
+    raw = _state.get(
+        "own_donations_by_player",
+        {},
+    )
+    if not isinstance(raw, dict):
+        raw = {}
+
+    result: Dict[str, float] = {}
+    for player in (
+        "tzmarty",
+        "korsar",
+        "unassigned",
+    ):
+        try:
+            result[player] = max(
+                0.0,
+                round(
+                    float(raw.get(player, 0.0) or 0.0),
+                    2,
+                ),
+            )
+        except (TypeError, ValueError):
+            result[player] = 0.0
+    return result
+
+
+def _manual_donation_total_cents_locked() -> int:
+    total = 0
+    for donation in _state.get(
+        "manual_donations",
+        [],
+    ):
+        if not isinstance(donation, dict):
+            continue
+        try:
+            total += max(
+                0,
+                int(
+                    donation.get(
+                        "amount_cents",
+                        0,
+                    )
+                    or 0
+                ),
+            )
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _merge_supporters_locked(
+    shop_supporters: Any,
+) -> list[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    anonymous_rows: list[Dict[str, Any]] = []
+
+    def add_supporter(
+        name: str,
+        amount_cents: int,
+        last_paid_ts: float,
+        anonymous_key: str = "",
+    ) -> None:
+        label = str(name or "Anonym").strip() or "Anonym"
+        cents = max(0, int(amount_cents or 0))
+        if cents <= 0:
+            return
+
+        is_anon = label.casefold() in {
+            "anonym",
+            "anonymous",
+        }
+        if is_anon:
+            anonymous_rows.append({
+                "name": "Anonym",
+                "amount_cents": cents,
+                "amount": f"{cents / 100:.2f}",
+                "last_paid_ts": float(last_paid_ts or 0.0),
+                "_key": anonymous_key,
+            })
+            return
+
+        key = label.casefold()
+        current = grouped.get(key)
+        if current is None:
+            current = {
+                "name": label,
+                "amount_cents": 0,
+                "last_paid_ts": 0.0,
+            }
+            grouped[key] = current
+
+        current["amount_cents"] += cents
+        current["last_paid_ts"] = max(
+            float(current["last_paid_ts"]),
+            float(last_paid_ts or 0.0),
+        )
+
+    if isinstance(shop_supporters, list):
+        for index, supporter in enumerate(
+            shop_supporters
+        ):
+            if not isinstance(supporter, dict):
+                continue
+            add_supporter(
+                str(
+                    supporter.get(
+                        "name",
+                        "Anonym",
+                    )
+                ),
+                int(
+                    supporter.get(
+                        "amount_cents",
+                        0,
+                    )
+                    or 0
+                ),
+                float(
+                    supporter.get(
+                        "last_paid_ts",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                f"shop:{index}",
+            )
+
+    for donation in _state.get(
+        "manual_donations",
+        [],
+    ):
+        if not isinstance(donation, dict):
+            continue
+        add_supporter(
+            str(donation.get("name", "Anonym")),
+            int(donation.get("amount_cents", 0) or 0),
+            float(donation.get("created_ts", 0.0) or 0.0),
+            str(donation.get("uid", "manual")),
+        )
+
+    own = _own_donation_breakdown_locked()
+    if own["tzmarty"] > 0:
+        add_supporter(
+            "Tzmarty",
+            int(round(own["tzmarty"] * 100)),
+            0.0,
+        )
+    if own["korsar"] > 0:
+        add_supporter(
+            "Korsar",
+            int(round(own["korsar"] * 100)),
+            0.0,
+        )
+    if own["unassigned"] > 0:
+        add_supporter(
+            "Tzmarty & Korsar",
+            int(round(own["unassigned"] * 100)),
+            0.0,
+        )
+
+    supporters = list(grouped.values())
+    for supporter in supporters:
+        supporter["amount"] = (
+            f"{supporter['amount_cents'] / 100:.2f}"
+        )
+
+    supporters.extend(anonymous_rows)
+    supporters.sort(
+        key=lambda item: float(
+            item.get("last_paid_ts", 0.0)
+            or 0.0
+        ),
+        reverse=True,
+    )
+
+    for supporter in supporters:
+        supporter.pop("_key", None)
+
+    return supporters[:150]
+
+
 def _sanitize_state(data: Dict[str, Any]) -> Dict[str, Any]:
     clean = default_state()
 
@@ -399,6 +693,8 @@ def _sanitize_state(data: Dict[str, Any]) -> Dict[str, Any]:
         "pause_started_at",
         "pause_used_seconds",
         "own_donations",
+        "own_donations_by_player",
+        "manual_donations",
         "event_ended",
         "history",
         "undo_stack",
@@ -438,18 +734,100 @@ def _sanitize_state(data: Dict[str, Any]) -> Dict[str, Any]:
             )
         ),
     )
-    clean["own_donations"] = max(
-        0.0,
-        round(
-            float(
-                clean.get(
-                    "own_donations",
-                    0.0,
-                )
+    try:
+        legacy_own_total = max(
+            0.0,
+            round(
+                float(
+                    clean.get(
+                        "own_donations",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                2,
             ),
-            2,
-        ),
+        )
+    except (TypeError, ValueError):
+        legacy_own_total = 0.0
+
+    raw_own_breakdown = data.get(
+        "own_donations_by_player",
+        None,
     )
+    own_breakdown = {
+        "tzmarty": 0.0,
+        "korsar": 0.0,
+        "unassigned": 0.0,
+    }
+
+    if isinstance(raw_own_breakdown, dict):
+        for player in own_breakdown:
+            try:
+                own_breakdown[player] = max(
+                    0.0,
+                    round(
+                        float(
+                            raw_own_breakdown.get(
+                                player,
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                        2,
+                    ),
+                )
+            except (TypeError, ValueError):
+                own_breakdown[player] = 0.0
+
+        known_total = round(
+            sum(own_breakdown.values()),
+            2,
+        )
+        if legacy_own_total > known_total:
+            own_breakdown["unassigned"] = round(
+                own_breakdown["unassigned"]
+                + legacy_own_total
+                - known_total,
+                2,
+            )
+    else:
+        # Migration aus V6.10: bisher war nur die Gesamtsumme bekannt.
+        own_breakdown["unassigned"] = legacy_own_total
+
+    clean["own_donations_by_player"] = own_breakdown
+    clean["own_donations"] = round(
+        sum(own_breakdown.values()),
+        2,
+    )
+
+    manual_donations: list[Dict[str, Any]] = []
+    seen_manual_uids: set[str] = set()
+    raw_manual = data.get(
+        "manual_donations",
+        [],
+    )
+    if isinstance(raw_manual, list):
+        for raw_donation in raw_manual[:1000]:
+            donation = _sanitize_manual_donation(
+                raw_donation
+            )
+            if not donation:
+                continue
+            uid = str(donation["uid"])
+            if uid in seen_manual_uids:
+                continue
+            seen_manual_uids.add(uid)
+            manual_donations.append(donation)
+
+    manual_donations.sort(
+        key=lambda item: float(
+            item.get("created_ts", 0.0)
+            or 0.0
+        )
+    )
+    clean["manual_donations"] = manual_donations
+
     clean["event_ended"] = bool(
         clean.get("event_ended", False)
     )
@@ -1475,11 +1853,46 @@ def _public_state_locked() -> Dict[str, Any]:
 
     metrics = _metrics_locked()
     shop = SHOP.public_state()
-    own_donation_cents = int(round(float(_state["own_donations"]) * 100))
-    shop["own_donations_cents"] = own_donation_cents
-    shop["own_donations"] = f"{own_donation_cents / 100:.2f}"
-    shop["event_total_cents"] = int(shop["summary"]["paid_cents"]) + own_donation_cents
-    shop["event_total"] = f"{shop['event_total_cents'] / 100:.2f}"
+
+    own_breakdown = _own_donation_breakdown_locked()
+    own_total = round(
+        sum(own_breakdown.values()),
+        2,
+    )
+    _state["own_donations"] = own_total
+    own_donation_cents = int(
+        round(own_total * 100)
+    )
+
+    manual_donation_cents = (
+        _manual_donation_total_cents_locked()
+    )
+
+    shop["own_donations_cents"] = (
+        own_donation_cents
+    )
+    shop["own_donations"] = (
+        f"{own_donation_cents / 100:.2f}"
+    )
+    shop["manual_donations_cents"] = (
+        manual_donation_cents
+    )
+    shop["manual_donations"] = (
+        f"{manual_donation_cents / 100:.2f}"
+    )
+    shop["supporters"] = (
+        _merge_supporters_locked(
+            shop.get("supporters", [])
+        )
+    )
+    shop["event_total_cents"] = (
+        int(shop["summary"]["paid_cents"])
+        + own_donation_cents
+        + manual_donation_cents
+    )
+    shop["event_total"] = (
+        f"{shop['event_total_cents'] / 100:.2f}"
+    )
 
     return {
         "stream_seconds": int(
@@ -1539,9 +1952,21 @@ def _public_state_locked() -> Dict[str, Any]:
             for player in PLAYERS
         },
 
-        "own_donations": round(
-            _state["own_donations"],
-            2,
+        "own_donations": own_total,
+        "own_donations_by_player": deepcopy(
+            own_breakdown
+        ),
+        "manual_donations": [
+            deepcopy(donation)
+            for donation in reversed(
+                _state.get(
+                    "manual_donations",
+                    [],
+                )
+            )
+        ],
+        "manual_donation_total_cents": (
+            manual_donation_cents
         ),
 
         "shop": shop,
@@ -2929,7 +3354,282 @@ async def _process_message(
 
         return
 
+    if msg_type == "manual_donation_add":
+        name = str(
+            message.get("name", "")
+            or "Anonym"
+        ).strip()[:80]
+        if not name:
+            name = "Anonym"
+
+        note = str(
+            message.get("message", "")
+            or ""
+        ).strip()[:180]
+
+        try:
+            amount = round(
+                float(
+                    message.get(
+                        "amount",
+                        0,
+                    )
+                ),
+                2,
+            )
+        except (TypeError, ValueError):
+            await _send_error(
+                ws,
+                "Ungültiger Spendenbetrag.",
+            )
+            return
+
+        if amount <= 0 or amount > 10000:
+            await _send_error(
+                ws,
+                "Spendenbetrag muss zwischen 0,01 € und 10.000 € liegen.",
+            )
+            return
+
+        amount_cents = int(
+            round(amount * 100)
+        )
+        created_ts = _now()
+        donation = {
+            "uid": (
+                "manual-"
+                + secrets.token_hex(12)
+            ),
+            "name": name,
+            "amount_cents": amount_cents,
+            "amount": f"{amount_cents / 100:.2f}",
+            "message": note,
+            "created_at": _timestamp(),
+            "created_ts": created_ts,
+        }
+
+        def fn():
+            _state.setdefault(
+                "manual_donations",
+                [],
+            ).append(
+                deepcopy(donation)
+            )
+            _state["manual_donations"] = (
+                _state["manual_donations"][-1000:]
+            )
+            return True
+
+        await _mutate(
+            (
+                "Erhaltene Spende "
+                f"{name} +{amount:.2f} €"
+            ),
+            fn,
+        )
+
+        if bool(
+            message.get(
+                "announce",
+                True,
+            )
+        ):
+            await _broadcast_payload({
+                "type": "shop_donation_popup",
+                "name": name,
+                "amount": f"{amount:.2f}",
+                "message": note,
+                "duration_ms": 10_000,
+            })
+
+        await _send_ack(
+            ws,
+            {
+                "type": "manual_donation_saved",
+                "uid": donation["uid"],
+                "message": (
+                    f"Spende von {name} über "
+                    f"{amount:.2f} € gespeichert."
+                ),
+            },
+        )
+        return
+
+    if msg_type == "manual_donation_delete":
+        uid = str(
+            message.get("uid", "")
+            or ""
+        ).strip()
+        if not uid:
+            await _send_error(
+                ws,
+                "Spende nicht gefunden.",
+            )
+            return
+
+        index = None
+        for donation_index, donation in enumerate(
+            _state.get(
+                "manual_donations",
+                [],
+            )
+        ):
+            if str(
+                donation.get("uid", "")
+            ) == uid:
+                index = donation_index
+                break
+
+        if index is None:
+            await _send_error(
+                ws,
+                "Spende nicht gefunden.",
+            )
+            return
+
+        donation = deepcopy(
+            _state["manual_donations"][index]
+        )
+
+        def fn():
+            _state[
+                "manual_donations"
+            ].pop(index)
+            return True
+
+        await _mutate(
+            (
+                "Erhaltene Spende gelöscht: "
+                f"{donation.get('name', 'Anonym')} "
+                f"{int(donation.get('amount_cents', 0)) / 100:.2f} €"
+            ),
+            fn,
+        )
+
+        await _send_ack(
+            ws,
+            {
+                "type": "manual_donation_deleted",
+                "uid": uid,
+                "message": "Spende gelöscht.",
+            },
+        )
+        return
+
+    if msg_type == "manual_donation_import":
+        raw_donations = message.get(
+            "donations",
+            [],
+        )
+        if not isinstance(raw_donations, list):
+            await _send_error(
+                ws,
+                "Ungültige Spenden-Exportdatei.",
+            )
+            return
+
+        if len(raw_donations) > 1000:
+            await _send_error(
+                ws,
+                "Maximal 1000 Spenden pro Import.",
+            )
+            return
+
+        imported: list[Dict[str, Any]] = []
+        seen_in_file: set[str] = set()
+        for raw_donation in raw_donations:
+            donation = _sanitize_manual_donation(
+                raw_donation
+            )
+            if not donation:
+                continue
+            uid = str(donation["uid"])
+            if uid in seen_in_file:
+                continue
+            seen_in_file.add(uid)
+            imported.append(donation)
+
+        if not imported and raw_donations:
+            await _send_error(
+                ws,
+                "Keine gültigen Spenden in der Datei gefunden.",
+            )
+            return
+
+        existing_uids = {
+            str(item.get("uid", ""))
+            for item in _state.get(
+                "manual_donations",
+                [],
+            )
+            if isinstance(item, dict)
+        }
+        additions = [
+            item
+            for item in imported
+            if str(item["uid"]) not in existing_uids
+        ]
+
+        if additions:
+            def fn():
+                _state.setdefault(
+                    "manual_donations",
+                    [],
+                ).extend(
+                    deepcopy(additions)
+                )
+                _state["manual_donations"].sort(
+                    key=lambda item: float(
+                        item.get(
+                            "created_ts",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                )
+                _state["manual_donations"] = (
+                    _state["manual_donations"][-1000:]
+                )
+                return True
+
+            await _mutate(
+                (
+                    f"{len(additions)} erhaltene "
+                    "Spenden importiert"
+                ),
+                fn,
+            )
+
+        await _send_ack(
+            ws,
+            {
+                "type": "manual_donation_imported",
+                "imported": len(additions),
+                "duplicates": (
+                    len(imported)
+                    - len(additions)
+                ),
+                "message": (
+                    f"{len(additions)} Spenden importiert; "
+                    f"{len(imported) - len(additions)} bereits vorhanden."
+                ),
+            },
+        )
+        return
+
     if msg_type == "donation_adjust":
+        player = str(
+            message.get("player", "")
+            or ""
+        ).strip().lower()
+
+        if player not in PLAYERS:
+            await _send_error(
+                ws,
+                "Bitte Tzmarty oder Korsar als Spender auswählen.",
+            )
+            return
+
         try:
             amount = round(
                 float(
@@ -2958,31 +3658,43 @@ async def _process_message(
             )
             return
 
+        breakdown = (
+            _own_donation_breakdown_locked()
+        )
         actual = amount
 
         if amount < 0:
             actual = -min(
                 abs(amount),
-                _state[
-                    "own_donations"
-                ],
+                breakdown[player],
             )
 
             if actual == 0:
                 await _send_error(
                     ws,
-                    "Keine eigene Spende zum Abziehen vorhanden.",
+                    (
+                        f"Für {PLAYER_NAMES[player]} ist "
+                        "keine eigene Spende zum Abziehen vorhanden."
+                    ),
                 )
                 return
 
         def fn():
+            current = (
+                _own_donation_breakdown_locked()
+            )
+            current[player] = round(
+                max(
+                    0.0,
+                    current[player] + actual,
+                ),
+                2,
+            )
             _state[
-                "own_donations"
-            ] = round(
-                _state[
-                    "own_donations"
-                ]
-                + actual,
+                "own_donations_by_player"
+            ] = current
+            _state["own_donations"] = round(
+                sum(current.values()),
                 2,
             )
 
@@ -3005,7 +3717,7 @@ async def _process_message(
 
         await _mutate(
             (
-                "Eigene Spende "
+                f"Eigene Spende {PLAYER_NAMES[player]} "
                 f"{sign}{actual:.2f} €"
             ),
             fn,
