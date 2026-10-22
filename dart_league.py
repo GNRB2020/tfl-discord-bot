@@ -154,6 +154,7 @@ async def manual_result(request):
   except (KeyError,ValueError,TypeError):return web.json_response({'error':'Legergebnis fehlt'},status=400)
   if not 0<=a<=51 or not 0<=b<=51 or (a==b and f['best_of']%2) or max(a,b)>f['best_of'] or (f['best_of']%2 and max(a,b)!=(f['best_of']//2+1)):return web.json_response({'error':'Ungültiges Legergebnis'},status=400)
   f.update(source='legacy',legs=[a,b],sets=None,game=None,undo=None,entered_at=_now(),import_note=str(data.get('note',''))[:500]);f['version']+=1
+  _advance_final(s)
   try:await asyncio.to_thread(_persist_sync,s)
   except Exception as e:return web.json_response({'error':f'Speicherung fehlgeschlagen: {e}'},status=503)
   LEAGUES[s['id']]=s
@@ -201,7 +202,9 @@ async def game_throw(request):
   try:g.submit(g.current,int(data['points']),darts=int(data.get('darts',3)),checkout=bool(data.get('checkout',False)),checkout_attempts=int(data.get('checkout_attempts',0)),bullfinish=bool(data.get('bullfinish',False)))
   except (KeyError,TypeError,ValueError) as e:return web.json_response({'error':str(e)},status=400)
   f['game']=_pack_match(g);f['version']+=1
-  if g.done:f.update(source='scorer',legs=g.legs[:],sets=g.sets[:],entered_at=_now(),finished_at=_now())
+  if g.done:
+   f.update(source='scorer',legs=g.legs[:],sets=g.sets[:],entered_at=_now(),finished_at=_now())
+   _advance_final(s)
   try:await asyncio.to_thread(_persist_sync,s)
   except Exception as e:return web.json_response({'error':f'Google Sheets: Aufnahme nicht gespeichert – {e}'},status=503)
   LEAGUES[s['id']]=s
@@ -216,6 +219,116 @@ async def game_undo(request):
   LEAGUES[s['id']]=s
  return web.json_response(_match_state(s,f))
 
+
+
+def _canon(value):
+ import unicodedata, re
+ value=unicodedata.normalize('NFKD',str(value)).casefold()
+ value=''.join(c for c in value if not unicodedata.combining(c))
+ return re.sub(r'[^a-z0-9]','',value)
+
+def _resolve_name(s,alias,aliases=None):
+ """Resolve only unambiguous candidates. Names like 'Manuel' cannot silently resolve to 'Manuel A.'"""
+ key=_canon(alias)
+ if aliases:
+  remap=aliases.get(key)
+  if remap:
+   candidates=[(g['id'],p) for g in s['groups'] for p in g['players'] if p['id']==remap or _canon(p['name'])==_canon(remap)]
+   if len(candidates)==1:return candidates[0],None
+   return None,'Alias-Zuordnung nicht eindeutig: '+alias
+ players=[(g['id'],p) for g in s['groups'] for p in g['players']]
+ exact=[(gid,p) for gid,p in players if _canon(p['name'])==key]
+ if len(exact)==1:return exact[0],None
+ if len(exact)>1:return None,'Name in mehreren Staffeln: '+alias
+ # Only unambiguous prefix/first-name matching; no fuzzy score assignments.
+ fuzzy=[(gid,p) for gid,p in players if _canon(p['name']).startswith(key) or key.startswith(_canon(p['name']))]
+ if len(fuzzy)==1:return fuzzy[0],None
+ return None,('Mehrdeutig' if fuzzy else 'Unbekannt')+': '+alias
+
+def _parse_import(s,raw,aliases=None):
+ import re
+ lines=[line.strip() for line in str(raw).splitlines() if line.strip()]
+ if len(lines)>600:return {'error':'Maximal 600 Ergebnisse je Import'}
+ assigned=set();report=[];pending=[]
+ for number,line in enumerate(lines,1):
+  match=re.match(r'^(.+?)\s+(\d{1,2})\s*:\s*(\d{1,2})\s+(.+?)$',line)
+  if not match:
+   report.append({'line':number,'text':line,'status':'error','message':'Format: Spieler A 4:1 Spieler B'});continue
+  left,a,b,right=match.groups();a=int(a);b=int(b)
+  pl,e1=_resolve_name(s,left.strip(),aliases);pr,e2=_resolve_name(s,right.strip(),aliases)
+  if e1 or e2:
+   report.append({'line':number,'text':line,'status':'error','message':'; '.join(filter(None,[e1,e2]))});continue
+  ga,pa=pl;gb,pb=pr
+  if ga!=gb or pa['id']==pb['id']:
+   report.append({'line':number,'text':line,'status':'error','message':'Spieler gehören nicht zur selben Staffel'});continue
+  valid=[f for f in s['fixtures'] if f['group_id']==ga and {f['a'],f['b']}=={pa['id'],pb['id']}]
+  available=[f for f in valid if f['legs'] is None and f['id'] not in assigned and not(f['game'] and f['game'].get('visits'))]
+  if not available:
+   report.append({'line':number,'text':line,'status':'error','message':'Keine freie Begegnung (bereits erfasst oder im Scorer begonnen)'});continue
+  # Prefer entered orientation; otherwise reverse score when assigning.
+  f=next((x for x in available if x['a']==pa['id']),available[0])
+  score=[a,b] if f['a']==pa['id'] else [b,a]
+  best=f['best_of'];win=(best//2+1)
+  if (best%2 and (max(score)!=win or min(score)>=win)) or (best%2==0 and max(score)>best):
+   report.append({'line':number,'text':line,'status':'error','message':f'Ungültig für Best of {best}: {a}:{b}'});continue
+  assigned.add(f['id']);pending.append({'id':f['id'],'legs':score,'line':number})
+  group=next(g['name'] for g in s['groups'] if g['id']==ga)
+  report.append({'line':number,'text':line,'status':'ok','message':f'{group} · Runde {f["round"]} · {pa["name"]} {a}:{b} {pb["name"]}'})
+ return {'rows':report,'pending':pending,'ready':len(pending),'errors':sum(x['status']=='error' for x in report)}
+
+async def bulk_import(request):
+ data=await request.json();lid=request.match_info['lid']
+ preview=bool(data.get('preview',True))
+ aliases={_canon(k):v for k,v in (data.get('aliases') or {}).items()} if isinstance(data.get('aliases',{}),dict) else {}
+ if not preview:_admin(data)
+ async with LOCK:
+  current=_get(lid);result=_parse_import(current,data.get('text',''),aliases)
+  if 'error' in result:return web.json_response({'error':result['error']},status=400)
+  if preview:return web.json_response({k:v for k,v in result.items() if k!='pending'})
+  if result['errors']:
+   return web.json_response({'error':'Import abgebrochen: Bitte erst alle unklaren Zeilen korrigieren','rows':result['rows']},status=409)
+  s=_pack(current)
+  for item in result['pending']:
+   f=_find(s,item['id']);f.update(source='legacy',legs=item['legs'],sets=None,game=None,undo=None,entered_at=_now(),import_note=f'Telegram-Sammelimport · Zeile {item["line"]}');f['version']+=1
+  try:await asyncio.to_thread(_persist_sync,s)
+  except Exception as exc:return web.json_response({'error':f'Google Sheets: {exc}'},status=503)
+  LEAGUES[lid]=s
+ return web.json_response({'imported':result['ready'],'season':_public(s),'rows':result['rows']})
+
+async def create_final(request):
+ data=await request.json();_admin(data)
+ async with LOCK:
+  s=_pack(_get(request.match_info['lid']))
+  if s.get('finals'):
+   return web.json_response({'error':'Finalturnier bereits angelegt'},status=409)
+  if len(s['groups'])!=2:return web.json_response({'error':'Finalturnier derzeit für genau zwei Staffeln vorgesehen'},status=400)
+  if not data.get('early') and any(f['legs'] is None for f in s['fixtures']):
+   return web.json_response({'error':'Liga noch nicht abgeschlossen – für vorzeitiges Finale ausdrücklich bestätigen'},status=409)
+  if any(len(g['players'])<2 for g in s['groups']):return web.json_response({'error':'Jede Staffel braucht mindestens zwei Spieler'},status=400)
+  a,b=( _table(s,g)[:2] for g in s['groups'])
+  if any(p['played']==0 for p in [*a,*b]):return web.json_response({'error':'Qualifizierte Spieler müssen mindestens ein Ligaspiel absolviert haben'},status=409)
+  best=int(data.get('best_of',5))
+  if best<1 or best>51 or best%2==0:return web.json_response({'error':'Finalspiele benötigen ungerades Best of X (1–51)'},status=400)
+  final_group={'id':'FINALS','name':'Finalturnier','players':[{'id':p['id'],'name':p['name']} for p in [a[0],a[1],b[0],b[1]]]}
+  s['finals']={'created':_now(),'early':bool(data.get('early')),'best_of':best,'qualifiers':[p['id'] for p in [a[0],a[1],b[0],b[1]]]}
+  s['groups'].append(final_group)
+  s['fixtures'].append(_fixture(final_group,1,a[0]['id'],b[1]['id'],'legs',best))
+  s['fixtures'].append(_fixture(final_group,1,b[0]['id'],a[1]['id'],'legs',best))
+  try:await asyncio.to_thread(_persist_sync,s)
+  except Exception as exc:return web.json_response({'error':f'Google Sheets: {exc}'},status=503)
+  LEAGUES[s['id']]=s
+ return web.json_response(_public(s))
+
+def _advance_final(s):
+ finals=s.get('finals')
+ if not finals or finals.get('final_created'):return
+ semi=[f for f in s['fixtures'] if f['group_id']=='FINALS' and f['round']==1]
+ if len(semi)!=2 or any(f['legs'] is None or f['legs'][0]==f['legs'][1] for f in semi):return
+ winners=[f['a'] if f['legs'][0]>f['legs'][1] else f['b'] for f in semi]
+ group=next(g for g in s['groups'] if g['id']=='FINALS')
+ s['fixtures'].append(_fixture(group,2,winners[0],winners[1],'legs',finals['best_of']))
+ finals['final_created']=True
+
 def register_stingray_league(app,auth):
  def protected(fn):
   async def wrapper(request):auth(request);return await fn(request)
@@ -223,6 +336,8 @@ def register_stingray_league(app,auth):
  app.router.add_get('/dart/api/league',protected(listing))
  app.router.add_post('/dart/api/league',protected(create))
  app.router.add_get('/dart/api/league/{lid}',protected(detail))
+ app.router.add_post('/dart/api/league/{lid}/bulk-import',protected(bulk_import))
+ app.router.add_post('/dart/api/league/{lid}/finals',protected(create_final))
  app.router.add_post('/dart/api/league/{lid}/matches/{mid}/result',protected(manual_result))
  app.router.add_post('/dart/api/league/{lid}/matches/{mid}/clear',protected(clear_result))
  app.router.add_get('/dart/api/league/{lid}/matches/{mid}',protected(game_state))
