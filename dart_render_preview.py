@@ -104,7 +104,8 @@ async def home(request):
     html = (ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
     injection = '<script src="/dart/phase6.js" defer></script><script src="/dart/tournament_menu.js" defer></script><script src="/dart/phase11.js" defer></script><script src="/dart/phase12.js" defer></script><script src="/dart/tournament_bridge.js" defer></script><script src="/dart/phase14.js" defer></script><script src="/dart/profiles.js" defer></script><script src="/dart/statistics-menu.js" defer></script>'
     html = html.replace('</head>', '<link rel="stylesheet" href="/dart/stingrays-theme.css"></head>')
-    html = html.replace('</body>', injection + '</body>')
+    html = html.replace('</body>', injection + '<script src="/dart/league_bridge.js" defer></script>' + '</body>')
+    html = html.replace('</body>', '<script defer>window.addEventListener("DOMContentLoaded",()=>{const menu=document.querySelector("#menuView .menu");if(menu&&!document.getElementById("leagueHub")){const b=document.createElement("button");b.id="leagueHub";b.className="menucard";b.innerHTML="STINGRAY LEAGUE<small>Saison · Staffeln · Spielplan · Ergebnisse</small>";b.onclick=()=>location.href="/dart/league/";menu.appendChild(b)}})</script></body>')
     return web.Response(text=html, content_type='text/html', charset='utf-8',headers={'Cache-Control':'no-store'})
 
 
@@ -410,7 +411,27 @@ async def profiles_json(request):
     _auth(request)
     return web.json_response(await sheet_profiles())
 
+async def league_page(request):
+    _auth(request)
+    return web.FileResponse(ROOT/'dart_ui'/'league.html',headers={'Cache-Control':'no-store'})
+
+async def league_script(request):
+    _auth(request)
+    return web.FileResponse(ROOT/'dart_ui'/'league.js',headers={'Cache-Control':'no-store'})
+
+async def league_bridge_script(request):
+    _auth(request)
+    return web.FileResponse(ROOT/'dart_ui'/'league_bridge.js',headers={'Cache-Control':'no-store'})
+
 def register_dart_render_preview(app):
+    from dart_league import register_stingray_league, restore_leagues
+    register_stingray_league(app,_auth)
+    app.router.add_get('/dart/league/',league_page)
+    app.router.add_get('/dart/league.js',league_script)
+    app.router.add_get('/dart/league_bridge.js',league_bridge_script)
+    async def _restore_leagues(application):
+        await restore_leagues()
+    app.on_startup.append(_restore_leagues)
     if len(os.environ.get('DART_ADMIN_PIN',''))<10:
         print('[STINGRAYS] Warning: DART_ADMIN_PIN is missing/too short')
     app.router.add_get('/dart/',home)
