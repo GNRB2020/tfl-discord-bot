@@ -9,3 +9,4 @@ pyz3r
 PyYAML
 openpyxl>=3.1.2
 # rebuild
+asyncpg>=0.30,<1

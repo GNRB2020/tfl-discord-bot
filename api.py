@@ -5,6 +5,7 @@ from aiohttp import web
 from dartmarathon import register_dartmarathon
 import json
 from dart_render_preview import register_dart_render_preview
+from stingrays_v2 import register_stingrays_v2
 
 # =========================================================
 # GLOBAL CACHE
@@ -496,6 +497,7 @@ async def start():
 
     register_dartmarathon(app)
     register_dart_render_preview(app)
+    register_stingrays_v2(app)
 
 
     port = int(os.getenv("PORT", "10000"))
