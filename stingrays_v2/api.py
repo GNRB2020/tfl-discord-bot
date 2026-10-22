@@ -918,12 +918,27 @@ async def save_solo_session(req):
     kind=d.get('kind');result=d.get('result')
     if kind not in ('sau','bobs27') or not isinstance(result,dict):raise web.HTTPBadRequest(text='Unbekanntes Trainingsformat')
     if not a['player_id']:raise web.HTTPForbidden(text='Ein verknüpftes Spielerprofil ist für Trainingsstatistiken erforderlich')
-    # Bound JSON size; the final summary is persisted, not each individual keystroke.
     if len(json.dumps(result))>20_000:raise web.HTTPBadRequest(text='Trainingsdaten zu groß')
+    # For team Sau, all participating profiles receive their own shared-result record.
+    # Server accepts only active club member profiles and limits team size.
+    team=result.get('team_ids',[]) if kind=='sau' else []
+    if not isinstance(team,list) or len(team)>30:raise web.HTTPBadRequest(text='Ungültiges Team')
+    members=[]
+    for value in team:
+        ident=uid(value)
+        if ident not in members:members.append(ident)
+    if not members:members=[a['player_id']]
     async with pool(req).acquire() as db:
-        row=await db.fetchrow(f'''INSERT INTO {SCHEMA}.training_sessions(player_id,kind,result)
-           VALUES($1,$2,$3::jsonb) RETURNING id,created_at''',a['player_id'],kind,json.dumps(result))
-    return response(dict(row),201)
+        async with db.transaction():
+            valid=await db.fetch(f'''SELECT id FROM {SCHEMA}.players
+                 WHERE id=ANY($1::uuid[]) AND is_active=true AND is_member=true''',members)
+            if len(valid)!=len(members):raise web.HTTPBadRequest(text='Team enthält unbekannte oder inaktive Mitglieder')
+            created=[]
+            for pid in members:
+                row=await db.fetchrow(f'''INSERT INTO {SCHEMA}.training_sessions(player_id,kind,result)
+                   VALUES($1,$2,$3::jsonb) RETURNING id,created_at''',pid,kind,json.dumps(result))
+                created.append(dict(row))
+    return response({'saved_profiles':len(created),'sessions':created},201)
 
 async def save_tug_session(req):
     a=await actor(req);d=await body(req)

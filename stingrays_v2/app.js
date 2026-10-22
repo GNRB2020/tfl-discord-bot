@@ -7,15 +7,11 @@ function clear(node){node.replaceChildren()}
 function el(tag,text,cls){const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(cls)x.className=cls;return x}
 function btn(label,fn){const x=el('button',label);x.type='button';x.onclick=fn;return x}
 function tile(title,sub,fn){const x=btn('',fn);x.className='tile';x.append(el('strong',title),el('small',sub));return x}
-// Alle Spiele in einem eigenen Fenster/Tab; die Vereinsverwaltung bleibt geöffnet.
-function openGameWindow(url, key){
- const target='stingrays_match_'+String(key).replace(/[^a-zA-Z0-9_-]/g,'_');
- const w=window.open(url,target);
- if(!w){notice('Bitte Pop-ups für diese Website erlauben, damit der Scorer separat geöffnet werden kann.',true);return false}
- try{w.focus()}catch{}return true;
-}
+// Jede Partie bekommt die gesamte aktuelle Browseransicht – KEIN zweiter Tab.
+// Zur Verwaltung gelangt man über den Zurück-Link des Scorers.
+function openGameWindow(url){window.location.assign(url);return true}
 function launchTrainingWindow(kind){
- openGameWindow('/dart/v2/?training='+encodeURIComponent(kind), 'training_'+kind+'_'+Date.now());
+ window.location.assign('/dart/v2/?training='+encodeURIComponent(kind));
 }
 
 // In-app configuration sheet: never uses blocking browser prompts.
@@ -77,15 +73,32 @@ async function quickTraining(){
   // A free training game is not a competition and must never appear in tournament tables.
   const m=await api('/free-x01',{other_id:d.other,rules:{start_score:501,mode:d.mode,
     max_legs:best,best_of_sets:best,best_of_legs_per_set:per,allow_draw:d.mode==='legs'&&best%2===0}});
-  location.replace('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id));
+  location.assign('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id));
  }catch(err){notice(err.message,true)}
 }
 // Same V2 account, results saved to Neon after finishing each solo discipline.
-function startSolo(kind){
- const box=$('trainingMode');box.hidden=false;clear(box);let visits=[],marks={sau:0},round=1,rest=201,points=kind==='bobs'?27:201,finished=false;
+async function startSolo(kind){
+ if(!players.length)players=await api('/players');
+ let team=[],minRounds=10;
+ if(kind==='sau'){
+   const own=user?.player_id;
+   const active=players.filter(p=>p.is_active&&p.is_member);
+   const config=await configure('Gegen die Sau – Spieler oder Team',[
+     {name:'members',label:'Mitspieler (mindestens einen auswählen)',type:'multi',options:active.map(p=>[p.id,p.display_name]),value:own?[own]:[]},
+     {name:'rounds',label:'Mindestzahl Durchgänge',type:'number',value:10,min:1,max:10000,required:true}
+   ],'Training starten');
+   if(!config)return;
+   minRounds=Number(config.rounds);
+   if(!Number.isInteger(minRounds)||minRounds<1||minRounds>10000)return notice('Ungültige Rundenzahl',true);
+   team=(config.members||[]).filter(id=>active.some(p=>p.id===id));
+   if(!team.length)return notice('Mindestens ein Mitglied auswählen',true);
+ }
+ const box=$('trainingMode');box.hidden=false;clear(box);const back=action('← Training',()=>window.location.assign('/dart/v2/'));back.className='training-back';box.append(back);let visits=[],marks={sau:0},round=1,rest=201,points=kind==='bobs'?27:201,finished=false;
  for(let i=4;i<=12;i++)marks[i]=0;
  const isBobs=kind==='bobs',target=10;
  box.append(el('h2',isBobs?'Bobs 27':'Gegen die Sau'));
+ const teamNames=team.map(id=>players.find(p=>p.id===id)?.display_name||'Spieler');
+ if(teamNames.length)box.append(el('div','Team: '+teamNames.join(' · '),'solo-team')); 
  const stat=el('div',undefined,'solo-score'),info=el('p',undefined,'helper'),history=el('div');box.append(stat,info);
  const form=el('form',undefined,'solo-form'),control=document.createElement('input');control.type='number';control.required=true;control.min='0';control.max=isBobs?'3':'180';
  const l=el('label',isBobs?'Treffer auf Doppel':'Score (0–180)');l.append(control);form.append(l);
@@ -100,7 +113,7 @@ function startSolo(kind){
      'Sau-Striche: '+marks.sau+'/'+target+' · Checkouts: '+Object.entries(marks).filter(([k])=>k!=='sau').reduce((n,[k,v])=>n+v,0)+' · 4 Aufnahmen je Runde, 201 Rest';
    clear(history);for(const v of visits.slice(-12).reverse())history.append(el('p',v));
  }
- async function finish(){finished=true;button.disabled=true;form.hidden=true;const result=isBobs?{points,rounds:round-1}:{sau:marks.sau,checkouts:Object.entries(marks).filter(([k])=>k!=='sau').reduce((a,[,v])=>a+v,0),marks,rounds:round};
+ async function finish(){finished=true;button.disabled=true;form.hidden=true;const result=isBobs?{points,rounds:round-1}:{sau:marks.sau,checkouts:Object.entries(marks).filter(([k])=>k!=='sau').reduce((a,[,v])=>a+v,0),marks,rounds:round-1,team_ids:team,team_names:teamNames};
    try{await api('/training/sessions',{kind:isBobs?'bobs27':'sau',result});info.textContent+=' · Ergebnis in Neon gespeichert'}catch(e){info.textContent+=' · Speicherung fehlgeschlagen: '+e.message;box.append(action('Erneut speichern',async()=>{await api('/training/sessions',{kind:isBobs?'bobs27':'sau',result});notice('Ergebnis gespeichert')}))}}
  const scoringKeys=el('div',undefined,'solo-pad');
  const undoButton=action('Letzte Aufnahme rückgängig',()=>{});
@@ -135,7 +148,7 @@ function startSolo(kind){
      const turn=Number(form.dataset.turn||0)+1;form.dataset.turn=String(turn);form.dataset.darts=String(totalDarts);
      if(checkout.checked){marks[totalDarts]++;form.dataset.turn='0';form.dataset.darts='0';round++;rest=201}
      else if(turn>=4){marks.sau++;form.dataset.turn='0';form.dataset.darts='0';round++;rest=201}
-     if(round>10&&marks.sau>=target)await finish();
+     if(round>minRounds&&marks.sau>=target)await finish();
    }
    control.value='';checkout.checked=false;draw();
  };
@@ -152,7 +165,7 @@ async function startTug(){
  if(!d)return;const opponent=players.find(p=>p.id===d.opponent);if(!opponent)return;
  const max=Number(d.rounds);if(!Number.isInteger(max)||max<1||max>100)return notice('Rundenzahl ungültig',true);
  const names=[players.find(p=>p.id===own)?.display_name||user.username,opponent.display_name];
- const box=$('trainingMode');box.hidden=false;clear(box);
+ const box=$('trainingMode');box.hidden=false;clear(box);const back=action('← Training',()=>window.location.assign('/dart/v2/'));back.className='training-back';box.append(back);
  const title=el('h2','TAUZIEHEN');const playersPanel=el('div',undefined,'tug-player-grid');
  const score=el('strong',undefined,'tug-position'),turn=el('p',undefined,'helper'),wins=el('p',undefined,'helper'),history=el('div',undefined,'tug-history');
  const form=el('form',undefined,'tug-entry'),inp=document.createElement('input');inp.type='number';inp.required=true;inp.min=0;inp.max=180;inp.placeholder='Score (0–180)';
@@ -385,7 +398,7 @@ async function openCompetition(id){
     if(c.kind!=='training_tournament')general.append(action('CSV exportieren',()=>location.href='/dart/v2/api/competitions/'+id+'/export?format=csv'),action('Excel exportieren',()=>location.href='/dart/v2/api/competitions/'+id+'/export?format=xlsx'));
     if(amAdmin()){
     general.append(picker([['','Status ändern …'],...['active','finished','archived'].map(v=>[v,v])],'',async state=>{if(!state||!await approve('Wettbewerbsstatus','Status ändern auf '+state+'?'))return;try{await api('/competitions/'+id+'/status',{status:state});await openCompetition(id)}catch(e){notice(e.message,true)}}));
-    general.append(action('Wettbewerb ausblenden',async()=>{if(!await approve('Wettbewerb ausblenden','Wettbewerb dauerhaft aus aktiven Ansichten und Statistiken entfernen?'))return;try{await api('/competitions/'+id+'/delete',{confirm:'DAUERHAFT AUSBLENDEN'});host.hidden=true;await loadCompetitions()}catch(e){notice(e.message,true)}},'danger'));
+    general.append(action('Testwettbewerb löschen',async()=>{if(!await approve('Testwettbewerb löschen (Soft-Delete)','Wettbewerb aus der Anwendung und allen Statistiken entfernen? Daten werden nicht endgültig zerstört, sondern für eine mögliche Wiederherstellung aufbewahrt.'))return;try{await api('/competitions/'+id+'/delete',{confirm:'DAUERHAFT AUSBLENDEN'});host.hidden=true;await loadCompetitions()}catch(e){notice(e.message,true)}},'danger'));
     }
     if(c.kind==='ladder'){
       const ladder=panel('Ladder','Laufzeit und Matchabschluss verwalten.');
@@ -414,14 +427,22 @@ const statsLabels={matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'N
 function multiplicities(values){const counts=new Map();for(const x of values||[])counts.set(String(x),(counts.get(String(x))||0)+1);return [...counts.entries()].sort((a,b)=>Number(b[0])-Number(a[0])).map(([value,n])=>n+'× '+value).join(' · ')||'–'}
 function statValue(k,v){if(Array.isArray(v))return multiplicities(v);if(v===null||v===undefined)return '–';if(typeof v==='number')return String(v).replace('.',',');return String(v)}
 function statisticsPanels(host,stats,h2h,scope){
- clear(host);host.classList.add('stats-dashboard');
- const blocks=[['Matchbilanz',['matches','wins','draws','losses','legs_for','legs_against']],['Averages & Aufnahmen',['average','first9','scored_visits']],['Bestleistungen',['180','95plus','100plus','133plus','exact133','140plus','171plus','lowdarts','lowdart_details','highfinishes','highfinish_details','bullfinishes','bullfinish_details','highscores']],['Training',['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions']]];
- for(const [title,keys] of blocks){if(title==='Training'&&scope!=='overall'&&scope!=='training_tournament')continue;
-   const rows=keys.filter(k=>Object.prototype.hasOwnProperty.call(stats,k)).map(k=>[statsLabels[k]||k.replace(/_/g,' '),statValue(k,stats[k])]);
-   if(!rows.length)continue;
-   const panel=el('section',undefined,'stats-panel');panel.append(el('h3',title),renderTable(['Kennzahl','Wert'],rows));host.append(panel);
- }
- const head=el('section',undefined,'stats-panel stats-h2h');head.append(el('h3','Head to Head'),renderTable(['Gegner','Sp.','S','U','N','Legs'],h2h.map(o=>[o.opponent,o.played,o.wins,o.draws,o.losses,o.legs_for+':'+o.legs_against])));host.append(head);
+ clear(host);host.className='stats-dashboard';
+ const show=(key)=>stats[key]!==null&&stats[key]!==undefined;
+ const pretty=(key)=>statValue(key,stats[key]);
+ function panel(title,classname='') {const p=el('section',undefined,'stat-block '+classname);p.append(el('h3',title));host.append(p);return p}
+ function cards(p,keys){const grid=el('div',undefined,'stat-cards');for(const k of keys){if(!show(k))continue;
+   const card=el('article',undefined,'stat-card');card.append(el('span',statsLabels[k]||k),el('strong',pretty(k)));grid.append(card)}p.append(grid)}
+ cards(panel('Spielbilanz','stat-wide'),['matches','wins','draws','losses','legs_for','legs_against']);
+ cards(panel('Durchschnitt & Aufnahmen','stat-wide'),['average','first9','scored_visits','missing_throw_stats_matches']);
+ cards(panel('Scoring & Specials','stat-wide'),['95plus','100plus','133plus','exact133','140plus','171plus','180','bullfinishes']);
+ const best=panel('Bestleistungen im Detail','stat-wide');
+ for(const [label,k] of [['Highfinishes','highfinish_details'],['Lowdarts','lowdart_details'],['Bullfinishes','bullfinish_details'],['Highscores','highscores']]){
+  if(!show(k))continue;const row=el('div',undefined,'stat-detail-row');row.append(el('b',label),el('span',multiplicities(stats[k])));best.append(row)}
+ if(scope==='overall'||scope==='training_tournament')cards(panel('Training','stat-wide'),['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions']);
+ const h=panel('Head to Head','stat-wide');
+ if(!h2h.length)h.append(el('p','Noch keine direkten Duelle in diesem Bereich.'));
+ else{const list=el('div',undefined,'h2h-rows');for(const o of h2h){const row=el('div',undefined,'h2h-row');row.append(el('b',o.opponent),el('span',o.played+' Spiele'),el('span',o.wins+' S · '+o.draws+' U · '+o.losses+' N'),el('span',o.legs_for+':'+o.legs_against+' Legs'));list.append(row)}h.append(list)}
 }
 $('statsLoad').onclick=async()=>{try{const pid=$('statPlayer').value,kind=$('statKind').value,s=await api('/players/'+pid+'/stats?kind='+kind),h=await api('/players/'+pid+'/h2h?kind='+kind);statisticsPanels($('statsResult'),s,h,kind)}catch(e){notice(e.message,true)}};
 $('memberForm').onsubmit=async e=>{e.preventDefault();if(!amAdmin())return;try{await api('/players',formData(e.target));e.target.reset();await loadPlayers();notice('Mitglied erstellt')}catch(err){notice(err.message,true)}};
