@@ -3,7 +3,7 @@
  const qs=new URLSearchParams(location.search),mid=qs.get('match'),freeMode=qs.get('free')==='1';
  if(!mid){location.replace('/dart/v2/');return}
  let version=0,completed=false,meta={};
- const back=()=>location.assign(freeMode?'/dart/v2/':'/dart/v2/?competition='+encodeURIComponent(qs.get('competition')||''));
+ const back=()=>{if(window.opener&&!window.opener.closed){window.close();return}location.assign(freeMode?'/dart/v2/':'/dart/v2/?competition='+encodeURIComponent(qs.get('competition')||''))};
  const base=(freeMode?'/dart/v2/api/free-x01/':'/dart/v2/api/matches/')+encodeURIComponent(mid);
  async function req(path='',data){const r=await fetch(base+path,{method:data===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});const txt=await r.text();let obj={};try{obj=JSON.parse(txt)}catch{}if(!r.ok)throw Error(obj.error||txt||'HTTP '+r.status);return obj}
  function normalize(raw){

@@ -67,3 +67,19 @@ h1::after {content:'';display:block;width:66px;height:2px;background:linear-grad
 .solo-quick button{min-height:43px}
 .solo-score{font-size:clamp(25px,5vw,55px);font-weight:900;text-align:center;color:#e9c778}
 @media(max-width:560px){.solo-pad{gap:5px}.solo-pad>button{min-height:49px}.solo-quick{grid-template-columns:repeat(3,1fr)}}
+
+/* Eigenständige Spielansichten und Statistik-Dashboard */
+body.standalone-training header nav,body.standalone-training #trainingList,body.standalone-training #newTraining{display:none!important}
+body.standalone-training main{max-width:1440px;margin:0 auto}
+body.standalone-training #training>h1{font-size:1.25rem}
+body.standalone-training .training-options{display:none!important}
+body.standalone-training #trainingMode{width:100%;max-width:none!important}
+.stats-dashboard{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:18px;align-items:start;width:100%}
+.stats-panel{min-width:0;width:100%;background:#212122;border:1px solid #715d31;border-radius:12px;padding:16px;overflow:hidden}
+.stats-panel h3{margin:0 0 12px;color:#e7c77e}
+.stats-panel .scroll,.stats-panel .table-frame{width:100%;overflow-x:auto;max-width:none}
+.stats-panel table{width:100%;min-width:0}
+.stats-panel table td:first-child{font-weight:600}
+.stats-h2h{grid-column:1/-1}
+.stats-h2h table{min-width:570px}
+@media(max-width:700px){.stats-dashboard{grid-template-columns:minmax(0,1fr)}.stats-panel{padding:10px}}

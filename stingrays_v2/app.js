@@ -7,6 +7,17 @@ function clear(node){node.replaceChildren()}
 function el(tag,text,cls){const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(cls)x.className=cls;return x}
 function btn(label,fn){const x=el('button',label);x.type='button';x.onclick=fn;return x}
 function tile(title,sub,fn){const x=btn('',fn);x.className='tile';x.append(el('strong',title),el('small',sub));return x}
+// Alle Spiele in einem eigenen Fenster/Tab; die Vereinsverwaltung bleibt geöffnet.
+function openGameWindow(url, key){
+ const target='stingrays_match_'+String(key).replace(/[^a-zA-Z0-9_-]/g,'_');
+ const w=window.open(url,target);
+ if(!w){notice('Bitte Pop-ups für diese Website erlauben, damit der Scorer separat geöffnet werden kann.',true);return false}
+ try{w.focus()}catch{}return true;
+}
+function launchTrainingWindow(kind){
+ openGameWindow('/dart/v2/?training='+encodeURIComponent(kind), 'training_'+kind+'_'+Date.now());
+}
+
 // In-app configuration sheet: never uses blocking browser prompts.
 function configure(title,fields,submitText='Speichern'){
  return new Promise(resolve=>{
@@ -53,7 +64,7 @@ async function createTraining(){
  try{const c=await api('/competitions',{kind:'training_tournament',title:d.title});await show('training');await openCompetition(c.id)}catch(e){notice(e.message,true)}
 }
 $('newTraining').onclick=createTraining;
-$('quickTraining').onclick=async()=>{
+async function quickTraining(){
  try{
   if(!players.length)players=await api('/players');
   const own=user.player_id,opts=players.filter(p=>p.is_active && p.id!==own);
@@ -66,9 +77,9 @@ $('quickTraining').onclick=async()=>{
   // A free training game is not a competition and must never appear in tournament tables.
   const m=await api('/free-x01',{other_id:d.other,rules:{start_score:501,mode:d.mode,
     max_legs:best,best_of_sets:best,best_of_legs_per_set:per,allow_draw:d.mode==='legs'&&best%2===0}});
-  location.href='/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id);
+  location.replace('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id));
  }catch(err){notice(err.message,true)}
-};
+}
 // Same V2 account, results saved to Neon after finishing each solo discipline.
 function startSolo(kind){
  const box=$('trainingMode');box.hidden=false;clear(box);let visits=[],marks={sau:0},round=1,rest=201,points=kind==='bobs'?27:201,finished=false;
@@ -130,7 +141,7 @@ function startSolo(kind){
  };
  draw();
 }
-$('sauTraining').onclick=()=>startSolo('sau');$('bobsTraining').onclick=()=>startSolo('bobs');
+$('sauTraining').onclick=()=>launchTrainingWindow('sau');$('bobsTraining').onclick=()=>launchTrainingWindow('bobs');
 
 // Tauziehen: same 181 -> 0 / 362 rules and per-round winner logic as the legacy scorer.
 async function startTug(){
@@ -177,7 +188,8 @@ async function startTug(){
  rewind.onclick=()=>{if(!historyStates.length||finished)return;const prev=historyStates.pop();position=prev.position;round=prev.round;current=prev.current;victories=prev.wins;visits=prev.visits;display()};
  display();
 }
-$('tugTraining').onclick=startTug;
+$('tugTraining').onclick=()=>launchTrainingWindow('tug');
+$('quickTraining').onclick=()=>launchTrainingWindow('x01');
 
 
 async function loadTraining(){
@@ -244,10 +256,7 @@ async function openCompetition(id){
     const row=el('div',undefined,'filterline');box.append(el('p','Matchstatistiken werden nur aus tatsächlich erfassten Aufnahmen berechnet. Importierte Altdaten enthalten keine erfundenen Wurfwerte.','helper'));
     const who=picker([['','Spieler wählen'],...selected.entries.map(e=>[e.player_id,e.display_name])],'',()=>{});
     row.append(who,action('Auswerten',async()=>{if(!who.value)return;const stats=await api('/players/'+who.value+'/stats?kind='+c.kind+'&competition_id='+encodeURIComponent(id));const head=await api('/players/'+who.value+'/h2h?kind='+c.kind+'&competition_id='+encodeURIComponent(id));const dest=$('currentStats');clear(dest);
-      const labels={matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Legs gewonnen',legs_against:'Legs verloren',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts',highfinishes:'Highfinishes',bullfinishes:'Bullfinishes',scored_visits:'Aufnahmen',highscores:'Highscores',missing_throw_stats_matches:'Alte Spiele ohne Wurfdaten'};
-      const entries=Object.entries(stats).filter(([k])=>!k.startsWith('training_')&&!['lowdart_details','highfinish_details','bullfinish_details'].includes(k));
-      dest.append(el('h3','Bestleistungen / Kennzahlen'),renderTable(['Kennzahl','Ergebnis'],entries.map(([k,v])=>[labels[k]||k,Array.isArray(v)?(v.join(', ')||'–'):(v??'–')])));
-      dest.append(el('h3','Head to Head'),renderTable(['Gegner','Spiele','S','U','N','Legs'],head.map(x=>[x.opponent,x.played,x.wins,x.draws,x.losses,x.legs_for+':'+x.legs_against])));
+      statisticsPanels(dest,stats,head,c.kind);
     }));box.append(row);const out=el('div');out.id='currentStats';box.append(out);
   }
   function showSchedule(box){
@@ -396,13 +405,25 @@ function renderTable(headers,rows,emphasize=false){
 
 async function openScorer(id){
  if(previewId){notice('Die Spieleransicht ist schreibgeschützt.',true);return}
- location.href='/dart/v2/spiel/?match='+encodeURIComponent(id)+'&competition='+encodeURIComponent(selected?.competition?.id||'');
+ openGameWindow('/dart/v2/spiel/?match='+encodeURIComponent(id)+'&competition='+encodeURIComponent(selected?.competition?.id||''),id);
 }
 function drawScore(){if(!playing)return;const s=playing.state||{},names=s.names||[playing.player1,playing.player2],rest=s.remaining||[501,501];$('playerOne').textContent=names[0];$('playerTwo').textContent=names[1];$('remainOne').textContent=rest[0];$('remainTwo').textContent=rest[1];$('resultOne').textContent='Legs '+(s.legs?.[0]??playing.legs1??0)+' · Sets '+(s.sets?.[0]??0);$('resultTwo').textContent='Legs '+(s.legs?.[1]??playing.legs2??0)+' · Sets '+(s.sets?.[1]??0);for(let i=0;i<2;i++)document.querySelectorAll('.scorecard')[i].classList.toggle('current',s.current===i&&!s.done);$('toThrow').textContent=s.done?'Spiel beendet':names[s.current??0]+' wirft';$('throwForm').hidden=s.done||playing.status==='finished'||!playing.can_score;$('scoreStatus').textContent='Version '+playing.state_version;const host=$('visits');clear(host);for(const v of (s.visits||[]).slice().reverse())host.append(el('p',names[v.player]+': '+v.score+' / '+v.darts+' Darts'+(v.checkout?' · Checkout':'')+(v.bust?' · Bust':'')))}
 $('throwForm').onsubmit=async e=>{e.preventDefault();const d=formData(e.target);try{const r=await api('/matches/'+playing.id+'/throw',{points:Number(d.points),darts:Number(d.darts),checkout:!!d.checkout,bullfinish:!!d.bullfinish,version:playing.state_version});playing.state=r.state;playing.state_version=r.version;e.target.reset();e.target.elements.darts.value=3;drawScore()}catch(err){notice(err.message,true)}};
 $('backToCompetition').onclick=()=>selected?openCompetition(selected.competition.id):show('dashboard');
-$('statsLoad').onclick=async()=>{try{const pid=$('statPlayer').value,kind=$('statKind').value,s=await api('/players/'+pid+'/stats?kind='+kind),h=await api('/players/'+pid+'/h2h?kind='+kind),host=$('statsResult');clear(host);const titles={matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts',highfinishes:'Highfinishes',bullfinishes:'Bullfinishes',highscores:'Highscores',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts'};
- host.append(el('h2','Leistungen & Bestleistungen'),renderTable(['Kennzahl','Wert'],Object.entries(s).filter(([k])=>kind==='overall'||kind==='training_tournament'||!k.startsWith('training_')).map(([k,v])=>[titles[k]||k,Array.isArray(v)?(v.join(', ')||'–'):(v??'–')])));host.append(el('h2','Head to Head'),renderTable(['Gegner','Spiele','S','U','N','Legs'],h.map(o=>[o.opponent,o.played,o.wins,o.draws,o.losses,o.legs_for+':'+o.legs_against])))}catch(e){notice(e.message,true)}};
+const statsLabels={matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','100plus':'100+','140plus':'140+','171plus':'171+','95plus':'95+','133plus':'133+','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
+function multiplicities(values){const counts=new Map();for(const x of values||[])counts.set(String(x),(counts.get(String(x))||0)+1);return [...counts.entries()].sort((a,b)=>Number(b[0])-Number(a[0])).map(([value,n])=>n+'× '+value).join(' · ')||'–'}
+function statValue(k,v){if(Array.isArray(v))return multiplicities(v);if(v===null||v===undefined)return '–';if(typeof v==='number')return String(v).replace('.',',');return String(v)}
+function statisticsPanels(host,stats,h2h,scope){
+ clear(host);host.classList.add('stats-dashboard');
+ const blocks=[['Matchbilanz',['matches','wins','draws','losses','legs_for','legs_against']],['Averages & Aufnahmen',['average','first9','scored_visits']],['Bestleistungen',['180','95plus','100plus','133plus','exact133','140plus','171plus','lowdarts','lowdart_details','highfinishes','highfinish_details','bullfinishes','bullfinish_details','highscores']],['Training',['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions']]];
+ for(const [title,keys] of blocks){if(title==='Training'&&scope!=='overall'&&scope!=='training_tournament')continue;
+   const rows=keys.filter(k=>Object.prototype.hasOwnProperty.call(stats,k)).map(k=>[statsLabels[k]||k.replace(/_/g,' '),statValue(k,stats[k])]);
+   if(!rows.length)continue;
+   const panel=el('section',undefined,'stats-panel');panel.append(el('h3',title),renderTable(['Kennzahl','Wert'],rows));host.append(panel);
+ }
+ const head=el('section',undefined,'stats-panel stats-h2h');head.append(el('h3','Head to Head'),renderTable(['Gegner','Sp.','S','U','N','Legs'],h2h.map(o=>[o.opponent,o.played,o.wins,o.draws,o.losses,o.legs_for+':'+o.legs_against])));host.append(head);
+}
+$('statsLoad').onclick=async()=>{try{const pid=$('statPlayer').value,kind=$('statKind').value,s=await api('/players/'+pid+'/stats?kind='+kind),h=await api('/players/'+pid+'/h2h?kind='+kind);statisticsPanels($('statsResult'),s,h,kind)}catch(e){notice(e.message,true)}};
 $('memberForm').onsubmit=async e=>{e.preventDefault();if(!amAdmin())return;try{await api('/players',formData(e.target));e.target.reset();await loadPlayers();notice('Mitglied erstellt')}catch(err){notice(err.message,true)}};
 $('accountForm').onsubmit=async e=>{e.preventDefault();try{await api('/accounts',formData(e.target));e.target.reset();notice('Konto erstellt. Erstpasswort nur direkt an die betreffende Person weitergeben.')}catch(err){notice(err.message,true)}};
 const migrationPanel=el('div',undefined,'panel');migrationPanel.append(el('h2','Vorhandene League und Profile übernehmen'),el('p','Übernahme erfolgt ausdrücklich als Kopie nach Neon. Die alte League bleibt unverändert.'));migrationPanel.append(btn('Aktive Google-Sheets-Profile nach Neon kopieren',async()=>{if(!await approve('Profile importieren','Aktive Profile nach Neon kopieren?'))return;try{const result=await api('/legacy/sync-profiles',{});notice(result.synced_active_profiles+' Profile kopiert');await loadPlayers()}catch(e){notice(e.message,true)}}));migrationPanel.append(btn('League-Migration: Vorschau',async()=>{try{const result=await api('/legacy/preview');if(!result.leagues.length){notice('Keine alten Liga-Snapshots gefunden');return}const d=await configure('League-Kopie nach Neon',[{name:'legacy_id',label:'Quellliga',type:'select',required:true,options:result.leagues.map(l=>[l.legacy_id,l.name+' ('+l.completed+'/'+l.fixtures+' gespielt)'])}],'Kopie prüfen');if(!d)return;
@@ -410,5 +431,19 @@ const choice=d.legacy_id;const source=result.leagues.find(l=>l.legacy_id===choic
 if(!source||!await approve('Import bestätigen','Liga '+source.name+' als eigenständige Kopie übernehmen?'))return;
 const r=await api('/legacy/import',{legacy_id:choice,confirm:true});notice(r.fixtures+' Begegnungen in Neon kopiert');await show('competitions')}catch(e){notice(e.message,true)}}));$('admin').append(migrationPanel);
 $('competitionForm').onsubmit=async e=>{e.preventDefault();let d=formData(e.target);for(const key of ['starts_at','ends_at']){if(d[key])d[key]=new Date(d[key]).toISOString();else delete d[key]}try{await api('/competitions',d);e.target.reset();notice('Wettbewerb erstellt');await show('competitions')}catch(err){notice(err.message,true)}};
-session().then(()=>{const c=new URLSearchParams(location.search).get('competition');if(c&&user)openCompetition(c).catch(e=>notice(e.message,true))});
+session().then(async()=>{
+ const params=new URLSearchParams(location.search),c=params.get('competition'),training=params.get('training');
+ if(!user)return;
+ if(training){
+   document.body.classList.add('standalone-training');
+   await show('training');
+   $('trainingList').hidden=true;
+   if(training==='x01')await quickTraining();
+   else if(training==='tug')await startTug();
+   else if(training==='sau'||training==='bobs')startSolo(training);
+   else notice('Unbekannter Trainingsmodus',true);
+   return;
+ }
+ if(c)openCompetition(c).catch(e=>notice(e.message,true));
+});
 })();
