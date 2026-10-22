@@ -440,7 +440,41 @@ async def standings(req):
             rows=await db.fetch(f'''SELECT r.*,p.display_name,round(100.0*r.wins/nullif(r.played,0),1) AS win_percent
                  FROM {SCHEMA}.ladder_ratings r JOIN {SCHEMA}.players p ON p.id=r.player_id
                  WHERE r.competition_id=$1 AND r.played>0 ORDER BY r.elo DESC,r.played DESC''',cid)
-            return response(list(map(dict,rows)))
+            # Averages are calculated from completed ladder matches only.
+            # Opponent ELO uses the recorded pre-match rating, not today's ELO.
+            events=await db.fetch(f'''SELECT le.match_id,le.player_id,le.elo_before,
+                 m.player1_id,m.player2_id,m.state,m.source
+                 FROM {SCHEMA}.ladder_events le
+                 JOIN {SCHEMA}.matches m ON m.id=le.match_id
+                 WHERE le.competition_id=$1 AND m.status='finished' ''',cid)
+            by_match={}
+            for e in events:by_match.setdefault(e['match_id'],[]).append(e)
+            totals={r['player_id']:{'opponent_elo':[],'own_scores':0,'own_darts':0,
+                 'opponent_scores':0,'opponent_darts':0} for r in rows}
+            for egroup in by_match.values():
+                if len(egroup)!=2:continue
+                for e in egroup:
+                    own=e['player_id'];op=next(x for x in egroup if x['player_id']!=own)
+                    if own not in totals:continue
+                    t=totals[own];t['opponent_elo'].append(float(op['elo_before']))
+                    if e['source']!='scorer':continue
+                    raw=as_json(e['state'])
+                    ix=0 if e['player1_id']==own else 1
+                    for visit in raw.get('visits',[]):
+                        if visit.get('player')==ix:
+                            t['own_scores']+=0 if visit.get('bust') else int(visit.get('score',0))
+                            t['own_darts']+=int(visit.get('darts',3))
+                        else:
+                            t['opponent_scores']+=0 if visit.get('bust') else int(visit.get('score',0))
+                            t['opponent_darts']+=int(visit.get('darts',3))
+            answer=[]
+            for r in rows:
+                item=dict(r);t=totals[r['player_id']];values=t['opponent_elo']
+                item['average_opponent_elo']=round(sum(values)/len(values),1) if values else None
+                item['own_average']=round(3*t['own_scores']/t['own_darts'],2) if t['own_darts'] else None
+                item['opponent_average']=round(3*t['opponent_scores']/t['opponent_darts'],2) if t['opponent_darts'] else None
+                answer.append(item)
+            return response(answer)
         gid=uid(req.query['group_id']) if req.query.get('group_id') else None
         if gid:
             entries=await db.fetch(f'''SELECT e.player_id,p.display_name FROM {SCHEMA}.group_members gm
@@ -775,6 +809,7 @@ async def export_open(req):
 
 async def stats(req):
     await actor(req);pid=uid(req.match_info['pid']);kind=req.query.get('kind','overall')
+    selected_competition=uid(req.query['competition_id']) if req.query.get('competition_id') else None
     if kind not in ('overall',*KINDS):raise web.HTTPBadRequest(text='Ungültiger Statistikfilter')
     async with pool(req).acquire() as db:
         sql=f'''SELECT m.id,m.status,m.source,m.legs1,m.legs2,m.sets1,m.sets2,m.player1_id,m.player2_id,m.state,
@@ -782,14 +817,36 @@ async def stats(req):
           WHERE c.deleted_at IS NULL AND m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)'''
         params=[pid]
         if kind!='overall':sql+=' AND c.kind=$2';params.append(kind)
+        if selected_competition:
+            params.append(selected_competition)
+            sql+=f' AND m.competition_id=${len(params)}'
         games=await db.fetch(sql,*params)
         scored=await db.fetch(f'''SELECT t.points,t.darts,t.is_bust,t.is_checkout,t.is_bullfinish,m.competition_id,c.kind
           FROM {SCHEMA}.throws t JOIN {SCHEMA}.matches m ON m.id=t.match_id
           JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
           WHERE t.player_id=$1 AND c.deleted_at IS NULL AND m.status='finished' AND m.source='scorer' ''',pid)
     if kind!='overall':scored=[s for s in scored if s['kind']==kind]
+    if selected_competition:scored=[s for s in scored if s['competition_id']==selected_competition]
+    games=list(games);scored=list(scored)
+    if kind in ('overall','training_tournament') and not selected_competition:
+        # Standalone X01 practice lives in its own table and never affects league/cup/ladder.
+        async with pool(req).acquire() as db:
+            free_games=await db.fetch(f'''SELECT player1_id,player2_id,state,status
+                FROM {SCHEMA}.free_x01_matches WHERE status='finished'
+                  AND (player1_id=$1 OR player2_id=$1)''',pid)
+        for m in free_games:
+            raw=as_json(m['state']);legs=raw.get('legs') or [0,0];sets=raw.get('sets') or [0,0]
+            games.append({'player1_id':m['player1_id'],'player2_id':m['player2_id'],
+                'legs1':legs[0],'legs2':legs[1],'sets1':sets[0],'sets2':sets[1],
+                'source':'scorer','state':raw})
+            me=0 if m['player1_id']==pid else 1
+            for visit in raw.get('visits',[]):
+                if visit.get('player')!=me:continue
+                scored.append({'points':int(visit['score']),'darts':int(visit.get('darts',3)),
+                     'is_bust':bool(visit.get('bust')),'is_checkout':bool(visit.get('checkout')),
+                     'is_bullfinish':bool(visit.get('bullfinish'))})
     solo=[]
-    if kind in ('overall','training_tournament'):
+    if kind in ('overall','training_tournament') and not selected_competition:
         async with pool(req).acquire() as db:
             solo=await db.fetch(f'''SELECT kind,result FROM {SCHEMA}.training_sessions WHERE player_id=$1''',pid)
     wins=draws=losses=legs_for=legs_against=0
@@ -829,6 +886,11 @@ async def stats(req):
         highscores.extend(int(v.get('score',0)) for v in own if int(v.get('score',0))>=171 and not v.get('bust'))
     sau_results=[as_json(v['result']) for v in solo if v['kind']=='sau']
     bobs_results=[as_json(v['result']) for v in solo if v['kind']=='bobs27']
+    tug_count=0
+    if kind in ('overall','training_tournament') and not selected_competition:
+        async with pool(req).acquire() as db:
+            tug_count=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.training_tug_sessions
+                 WHERE player_id=$1 OR opponent_id=$1''',pid)
     points=sum(s['points'] for s in scored if not s['is_bust']);darts=sum(s['darts'] for s in scored)
     return response({'matches':len(games),'wins':wins,'draws':draws,'losses':losses,'legs_for':legs_for,
         'legs_against':legs_against,'scored_visits':len(scored),'average':round(points/darts*3,2) if darts else None,
@@ -842,6 +904,7 @@ async def stats(req):
         '100plus':sum(s['points']>=100 and not s['is_bust'] for s in scored),
         'bullfinishes':sum(bool(s['is_bullfinish']) for s in scored),
         'training_sau_sessions':len(sau_results),'training_bobs_sessions':len(bobs_results),
+        'training_tug_sessions':tug_count,
         'training_sau_success':sum(int(x.get('checkouts',0)) for x in sau_results),
         'training_sau_marks':sum(int(x.get('sau',0)) for x in sau_results),
         'training_bobs_best':max([int(x.get('points',0)) for x in bobs_results],default=None),
@@ -859,8 +922,21 @@ async def save_solo_session(req):
            VALUES($1,$2,$3::jsonb) RETURNING id,created_at''',a['player_id'],kind,json.dumps(result))
     return response(dict(row),201)
 
+async def save_tug_session(req):
+    a=await actor(req);d=await body(req)
+    if not a['player_id']:raise web.HTTPForbidden(text='Spielerprofil fehlt')
+    other=uid(d.get('opponent_id'))
+    result=d.get('result')
+    if other==a['player_id'] or not isinstance(result,dict) or len(json.dumps(result))>50000:
+        raise web.HTTPBadRequest(text='Ungültiges Tauziehen-Ergebnis')
+    async with pool(req).acquire() as db:
+        item=await db.fetchrow(f'''INSERT INTO {SCHEMA}.training_tug_sessions(player_id,opponent_id,result)
+             VALUES($1,$2,$3::jsonb) RETURNING id''',a['player_id'],other,json.dumps(result))
+    return response({'id':item['id']},201)
+
 async def head_to_head(req):
     await actor(req);pid=uid(req.match_info['pid']);kind=req.query.get('kind','overall')
+    selected_competition=uid(req.query['competition_id']) if req.query.get('competition_id') else None
     if kind not in ('overall',*KINDS):raise web.HTTPBadRequest(text='Ungültiger Filter')
     async with pool(req).acquire() as db:
         rows=await db.fetch(f'''SELECT m.player1_id,m.player2_id,m.legs1,m.legs2,m.sets1,m.sets2,
@@ -868,7 +944,22 @@ async def head_to_head(req):
          FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
          JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
          WHERE c.deleted_at IS NULL AND m.status='finished' AND
-         (m.player1_id=$1 OR m.player2_id=$1) ORDER BY m.finished_at DESC''',pid)
+         (m.player1_id=$1 OR m.player2_id=$1) AND ($2::uuid IS NULL OR m.competition_id=$2)
+         ORDER BY m.finished_at DESC''',pid,selected_competition)
+    rows=list(rows)
+    if kind in ('overall','training_tournament') and not selected_competition:
+        async with pool(req).acquire() as db:
+            free=await db.fetch(f'''SELECT m.player1_id,m.player2_id,m.state,
+              p1.display_name AS name1,p2.display_name AS name2
+              FROM {SCHEMA}.free_x01_matches m
+              JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id
+              JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
+              WHERE m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)''',pid)
+            for m in free:
+                state=as_json(m['state']);legs=state.get('legs') or [0,0];sets=state.get('sets') or [0,0]
+                rows.append({'player1_id':m['player1_id'],'player2_id':m['player2_id'],
+                    'legs1':legs[0],'legs2':legs[1],'sets1':sets[0],'sets2':sets[1],
+                    'name1':m['name1'],'name2':m['name2'],'kind':'training_tournament'})
     out={}
     for m in rows:
         if kind!='overall' and m['kind']!=kind:continue
@@ -927,6 +1018,8 @@ async def register_cleanup(app):
 
 def register_stingrays_v2(app):
     app.on_startup.append(register_startup);app.on_cleanup.append(register_cleanup)
+    from .free_training import register as register_free_training
+    register_free_training(app)
     routes=[
       ('GET','/dart/v2',spa),('GET','/dart/v2/',spa),('GET','/dart/v2/spiel/',legacy_scorer_page),('GET','/dart/v2/assets/{filename}',assets),
       ('GET','/dart/v2/api/health',health),
@@ -964,6 +1057,7 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/players/{pid}/stats',stats),
       ('GET','/dart/v2/api/players/{pid}/h2h',head_to_head),
       ('POST','/dart/v2/api/training/sessions',save_solo_session),
+      ('POST','/dart/v2/api/training/tug',save_tug_session),
     ]
     for method,path,handler in routes:app.router.add_route(method,path,handler)
     print('[STINGRAYS V2] release r20261022-ui-scoring-roles installed under /dart/v2/')

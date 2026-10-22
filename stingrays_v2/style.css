@@ -45,3 +45,25 @@ h1::after {content:'';display:block;width:66px;height:2px;background:linear-grad
 @media(max-width:600px){.sheet-actions{flex-direction:column-reverse}.sheet-actions button{width:100%}}
 
 .build-stamp{text-align:center;font-size:11px;color:#8c846d;padding:8px 10px;letter-spacing:.4px}
+
+/* Training / Tauziehen */
+.tug-player-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}
+.tug-player{padding:18px;background:#222;border:1px solid #625338;border-radius:12px;text-align:center}
+.tug-player.active{border-color:#e5bb54}
+.tug-player b{display:block;font-size:clamp(30px,6vw,60px);font-variant-numeric:tabular-nums}
+.tug-position{display:block;text-align:center;color:#e5bb54;font-size:clamp(20px,4vw,38px)}
+.tug-entry{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.tug-entry input{flex:1 1 150px;max-width:360px}
+.tug-quick{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:15px}
+.tug-quick button{min-width:62px}
+.tug-history{max-height:230px;overflow:auto}
+
+/* Training scorers: large touch keys, visible latest scores */
+.solo-pad{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;max-width:760px;margin:18px auto}
+.solo-pad>button{min-height:62px;font-size:clamp(19px,2vw,27px);font-weight:800}
+.solo-pad>button.primary{background:#46694b}
+.solo-entry{grid-column:1/-1;text-align:center;font-size:clamp(35px,6vw,64px);font-weight:850;color:#e9c778}
+.solo-quick{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.solo-quick button{min-height:43px}
+.solo-score{font-size:clamp(25px,5vw,55px);font-weight:900;text-align:center;color:#e9c778}
+@media(max-width:560px){.solo-pad{gap:5px}.solo-pad>button{min-height:49px}.solo-quick{grid-template-columns:repeat(3,1fr)}}

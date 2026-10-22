@@ -1,10 +1,10 @@
 /* Original Stingrays scorer UI, V2 Neon transport; no legacy-session dependency. */
 (()=>{'use strict';
- const qs=new URLSearchParams(location.search),mid=qs.get('match');
+ const qs=new URLSearchParams(location.search),mid=qs.get('match'),freeMode=qs.get('free')==='1';
  if(!mid){location.replace('/dart/v2/');return}
  let version=0,completed=false,meta={};
- const back=()=>location.assign('/dart/v2/?competition='+encodeURIComponent(qs.get('competition')||''));
- const base='/dart/v2/api/matches/'+encodeURIComponent(mid);
+ const back=()=>location.assign(freeMode?'/dart/v2/':'/dart/v2/?competition='+encodeURIComponent(qs.get('competition')||''));
+ const base=(freeMode?'/dart/v2/api/free-x01/':'/dart/v2/api/matches/')+encodeURIComponent(mid);
  async function req(path='',data){const r=await fetch(base+path,{method:data===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});const txt=await r.text();let obj={};try{obj=JSON.parse(txt)}catch{}if(!r.ok)throw Error(obj.error||txt||'HTTP '+r.status);return obj}
  function normalize(raw){
    const state=typeof raw.state==='string'?JSON.parse(raw.state||'{}'):(raw.state||{}),rules=state.rules||(typeof meta.rules==='string'?JSON.parse(meta.rules):meta.rules)||{},rest=state.remaining||[rules.start_score||501,rules.start_score||501],visits=state.visits||[];
@@ -62,21 +62,98 @@
     for(const v of last){const pill=document.createElement('span');pill.className='v2-visit';pill.textContent=v.score+(v.checkout?' ✓':'');target.appendChild(pill)}
   }
  }
- const oldResult=result;
- result=function(){
-   if(completed||!S?.done)return;
-   completed=true;
-   if(S.summary?.players?.length===2){
-     oldResult();
-     const newReport=document.getElementById('newReport');
-     if(newReport){newReport.textContent='ZUM WETTBEWERB';newReport.onclick=back;}
-     const close=document.getElementById('closeReport');
-     if(close){close.textContent='ZUM WETTBEWERB';close.onclick=back;}
-   } else {
-     modal('<h2>Match beendet</h2><p>Das Ergebnis ist in Neon gespeichert.</p><div class="actions"><button id="returnV2" class="green">ZUM WETTBEWERB</button></div>');
-     document.getElementById('returnV2').onclick=back;
-   }
+ // Checkout: one choice, one booking. No redundant second dart-count dialog.
+ const nativeCheckout=checkoutDialog;
+ checkoutDialog=function(isSau,selected){
+   const remainder=isSau?S.remaining:S.remaining[S.current];
+   const choices=(isSau?possible(remainder):(S.can_checkout||[])).filter(d=>d>=1&&d<=3);
+   if(!choices.length){err('Kein gültiger Checkout für diese Restpunktzahl');return}
+   if(!choices.includes(selected))selected=choices[0];
+   const mask=document.createElement('div');mask.className='v2-checkout-choice';
+   const label=document.createElement('h2');label.textContent='Checkout · '+remainder+' Rest';mask.append(label);
+   const note=document.createElement('p');note.textContent='Wie viele Darts wurden benötigt? Ein Klick bucht den Checkout direkt.';mask.append(note);
+   const row=document.createElement('div');row.className='v2-checkout-actions';mask.append(row);
+   let bull=null;
+   if(remainder>=50){const b=document.createElement('label');b.className='v2-bull-choice';bull=document.createElement('input');bull.type='checkbox';b.append(bull,document.createTextNode(' Bullfinish'));mask.append(b)}
+   const help=document.createElement('small');help.textContent='Tipp: 1, 2 oder 3 auf dem Zahlenfeld lange halten, um direkt auszuchecken.';mask.append(help);
+   const cancel=document.createElement('button');cancel.textContent='Abbrechen';cancel.onclick=closeModal;
+   for(const darts of choices){const button=document.createElement('button');button.textContent=darts+' Dart'+(darts>1?'s':'');button.className='green';button.onclick=()=>{const isBull=!!bull?.checked;closeModal();send(remainder,{checkout:true,darts,bullfinish:isBull,checkout_attempts:1})};row.append(button)}
+   row.append(cancel);$('modalContent').replaceChildren(mask);$('modal').classList.remove('hide');
  };
+ // Existing generic 1/2/3 HOLD row is redundant. Long-holding number-pad keys
+ // now checks out directly, without a second question about dart count.
+ const oldHold=$('hold');if(oldHold)oldHold.style.display='none';
+ const pad=$('pad');let suppressNextClick=false;
+ pad?.addEventListener('click',ev=>{if(!suppressNextClick)return;ev.preventDefault();ev.stopImmediatePropagation();suppressNextClick=false},true);
+ for(const button of pad?.querySelectorAll('button')||[]){
+   const dart=Number(button.textContent.trim());if(![1,2,3].includes(dart))continue;
+   let holdTimer=null,triggered=false;
+   button.addEventListener('pointerdown',()=>{triggered=false;holdTimer=setTimeout(()=>{
+     if(!S||S.done||!(S.can_checkout||[]).includes(dart))return;
+     triggered=true;suppressNextClick=true;
+     const remainder=S.remaining[S.current];entry='';send(remainder,{checkout:true,darts:dart,bullfinish:false,checkout_attempts:1});
+   },650)});
+   for(const event of ['pointerup','pointerleave','pointercancel'])button.addEventListener(event,()=>{clearTimeout(holdTimer);holdTimer=null});
+ }
+ // Match-scoped statistics only, without solo modes from unrelated disciplines.
+ function summaryFromHistory(){
+   const names=S?.names||['Spieler 1','Spieler 2'],vis=S?.history||[];
+   const own=[0,1].map(i=>vis.filter(v=>v.player===i));
+   const avg=a=>{const d=a.reduce((n,v)=>n+(v.darts||3),0);return d?(3*a.reduce((n,v)=>n+(v.bust?0:v.score),0)/d).toFixed(2):'–'};
+   const firstNine=(a,limit=9)=>{const groups={};for(const v of a)(groups[v.leg_index]??=[]).push(v);
+      let score=0,darts=0;for(const leg of Object.values(groups)){let used=0;for(const v of leg){if(used+(v.darts||3)>limit)break;used+=v.darts||3;darts+=v.darts||3;score+=v.bust?0:v.score}}return darts?(score*3/darts).toFixed(2):'–'};
+   const count=(a,p)=>a.filter(p).length;
+   const rows=[
+     ['Ø Average',...own.map(avg)],['Ø First 9',...own.map(a=>firstNine(a,9))],
+     ['Ø First 12',...own.map(a=>firstNine(a,12))],['Ø First 15',...own.map(a=>firstNine(a,15))],['Ø First 18',...own.map(a=>firstNine(a,18))],
+     ['60+',...own.map(a=>count(a,v=>v.score>=60&&!v.bust))],
+     ['80+',...own.map(a=>count(a,v=>v.score>=80&&!v.bust))],
+     ['100+',...own.map(a=>count(a,v=>v.score>=100&&!v.bust))],
+     ['140+',...own.map(a=>count(a,v=>v.score>=140&&!v.bust))],
+     ['180',...own.map(a=>count(a,v=>v.score===180&&!v.bust))],
+     ['Gewonnene Legs',...(S.legs||[0,0])],
+     ['Gewonnene Sets',...(S.sets||[0,0])],
+   ];
+   const best=[['Highscore',...own.map(a=>Math.max(0,...a.filter(v=>!v.bust).map(v=>v.score)))],
+     ['Highfinish',...own.map(a=>Math.max(0,...a.filter(v=>v.checkout).map(v=>v.score)))],
+     ['Bullfinishes',...own.map(a=>count(a,v=>v.bullfinish))],
+     ['Shortgame',...own.map(a=>{const groups={};for(const v of a)(groups[v.leg_index]??=[]).push(v);const totals=Object.values(groups).filter(x=>x.some(v=>v.checkout)).map(x=>x.reduce((n,v)=>n+(v.darts||3),0));return totals.length?Math.min(...totals):'–'})]];
+   return {names,rows,best,vis};
+ }
+ function showCompleteReport(){
+   const data=summaryFromHistory();
+   const wrap=document.createElement('div');wrap.className='v2-final-report';
+   const title=document.createElement('h2');title.textContent='Match beendet · '+data.names[0]+' – '+data.names[1];wrap.append(title);
+   const tabs=document.createElement('div');tabs.className='v2-report-tabs';wrap.append(tabs);
+   const report=document.createElement('div');report.className='v2-report-body';wrap.append(report);
+   const makeGrid=(heads,records)=>{const sc=document.createElement('div');sc.className='v2-report-scroll';const table=document.createElement('table');table.className='v2-report-grid';
+     const tr=document.createElement('tr');for(const h of heads){const th=document.createElement('th');th.textContent=h;tr.append(th)}table.append(tr);
+     for(const record of records){const row=document.createElement('tr');for(const cell of record){const td=document.createElement('td');td.textContent=String(cell??'–');row.append(td)}table.append(row)}sc.append(table);return sc};
+   const render=(name)=>{report.replaceChildren();
+     if(name==='Statistiken')report.append(makeGrid(['Kennzahl',...data.names],data.rows));
+     if(name==='Bestleistungen')report.append(makeGrid(['Bestleistung',...data.names],data.best));
+     if(name==='Darts / Leg'){
+       const legs=[...new Set(data.vis.map(v=>v.leg_index))].sort((a,b)=>a-b);
+       const rows=legs.map(leg=>[leg+1,...[0,1].map(i=>{const own=data.vis.filter(v=>v.player===i&&v.leg_index===leg);const darts=own.reduce((n,v)=>n+(v.darts||3),0);return darts?(own.some(v=>v.checkout)?String(darts):'('+darts+')'):'–'})]);
+       report.append(makeGrid(['Leg',...data.names],rows));
+     }
+     if(name==='Averages / Leg'){
+       const legs=[...new Set(data.vis.map(v=>v.leg_index))].sort((a,b)=>a-b);
+       const rows=legs.map(leg=>[leg+1,...[0,1].map(i=>{const a=data.vis.filter(v=>v.player===i&&v.leg_index===leg),d=a.reduce((n,v)=>n+(v.darts||3),0);return d?(3*a.reduce((n,v)=>n+(v.bust?0:v.score),0)/d).toFixed(1):'–'})]);
+       report.append(makeGrid(['Leg',...data.names],rows));
+     }
+     if(name==='Checkouts / Leg'){
+       report.append(makeGrid(['Leg',...data.names],[...new Set(data.vis.map(v=>v.leg_index))].sort((a,b)=>a-b).map(leg=>[leg+1,...[0,1].map(i=>data.vis.find(v=>v.player===i&&v.leg_index===leg&&v.checkout)?.score??'–')])))
+     }
+   };
+   for(const item of ['Statistiken','Bestleistungen','Darts / Leg','Averages / Leg','Checkouts / Leg']){
+     const b=document.createElement('button');b.textContent=item;b.onclick=()=>render(item);tabs.append(b)
+   }
+   render('Statistiken');const close=document.createElement('button');close.className='green';close.textContent='ZUM WETTBEWERB';close.onclick=back;wrap.append(close);
+   $('modalContent').replaceChildren(wrap);$('modal').classList.remove('hide');
+ }
+
+ result=function(){if(!S?.done||completed)return;completed=true;showCompleteReport()};
  const originalShow=showMatch;showMatch=function(){originalShow();document.getElementById('context').textContent='STINGRAYS · WETTBEWERB';};
  const oldScreen=screen;screen=function(id){if(id==='loginView'||id==='menuView'||id==='configView'){back();return}oldScreen(id)};
  for(const id of ['homebtn','logout'])document.getElementById(id).onclick=back;

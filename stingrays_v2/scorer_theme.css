@@ -44,3 +44,24 @@ button.red,.red{background:#6e342e!important;border-color:#b37e6c!important}
 .v2-stats-table td,.v2-stats-table th{text-align:center;padding:9px;border-bottom:1px solid #514938}
 @media(max-width:730px){#scorerView .scorer{grid-template-rows:auto minmax(135px,29%) 1fr!important}#scorerView .players{grid-template-columns:minmax(0,1fr) minmax(82px,21%) minmax(0,1fr)!important;gap:4px!important}#scorerView .player{padding:6px!important;gap:2px;flex-direction:column!important;align-items:stretch!important}#scorerView .player .score{font-size:35px!important}#scorerView .player .liveavg{font-size:24px!important}.v2-central strong{font-size:23px}.v2-recent-head{font-size:9px}.v2-visit{font-size:14px;min-width:28px;padding:2px 3px}.v2-match-tabs button{font-size:10px!important;padding:4px!important}}
 @media(max-height:600px){.v2-recent-head{display:none}.v2-visit{font-size:13px}.v2-match-tabs{max-height:30px}.v2-match-tabs button{min-height:25px}}
+
+/* Accessible complete-width summary dialogs and checkout controls */
+#modal{padding:clamp(6px,2vw,20px)!important;align-items:center!important;justify-content:center!important}
+#modalContent{width:min(96vw,1260px)!important;max-width:1260px!important;max-height:94vh!important;overflow:auto!important}
+#modal .modal{width:min(96vw,1260px)!important;max-width:1260px!important;max-height:94vh!important;overflow:auto!important}
+.v2-final-report{width:100%;min-width:0;display:grid;gap:15px;padding:clamp(8px,2vw,24px);box-sizing:border-box}
+.v2-report-tabs{display:flex;flex-wrap:wrap;gap:8px}
+.v2-report-tabs button{flex:1 1 130px;min-height:44px}
+.v2-report-scroll{overflow-x:auto;max-width:100%;overscroll-behavior-x:contain}
+.v2-report-grid{border-collapse:collapse;width:100%;min-width:520px;table-layout:fixed;font-size:clamp(13px,1.3vw,17px)}
+.v2-report-grid th,.v2-report-grid td{padding:clamp(10px,1vw,17px);border-bottom:1px solid #514938;text-align:center}
+.v2-report-grid th{background:#4f3e22;color:#f3d27e}
+.v2-report-grid tr:nth-child(even) td{background:#242327}
+.v2-checkout-choice{display:grid;gap:15px;padding:12px}
+.v2-checkout-actions{display:flex;gap:12px;flex-wrap:wrap}
+.v2-checkout-actions button{min-width:110px;min-height:55px;font-weight:800;font-size:19px}
+.v2-bull-choice{font-size:18px;display:flex;align-items:center;gap:12px}
+.v2-bull-choice input{width:24px;height:24px}
+#scorerView #book{background:#356548!important;border:1px solid #9dd5ae!important;color:#fff!important}
+#scorerView #hold{display:none!important}
+@media(max-width:680px){.v2-final-report{padding:6px}.v2-report-grid{min-width:510px}.v2-report-tabs button{flex-basis:44%}}
