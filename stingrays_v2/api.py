@@ -83,8 +83,16 @@ async def spa(req):
 
 async def assets(req):
     which=req.match_info['filename']
-    if which not in ('app.js','style.css'):raise web.HTTPNotFound()
+    if which not in ('app.js','style.css','legacy_bridge.js'):raise web.HTTPNotFound()
     return web.FileResponse(HERE/which,headers={'Cache-Control':'public,max-age=120'})
+
+async def legacy_scorer_page(req):
+    await actor(req)
+    from dart_render_preview import ROOT
+    html=(ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
+    html=html.replace("api('state').then(s=>{S=s;if(S.kind==='x01')showMatch();else if(S.kind==='sau')showSau();else screen('menuView')}).catch(()=>screen('loginView'));",'')
+    html=html.replace('</body>', '<script src="/dart/v2/assets/legacy_bridge.js"></script></body>')
+    return web.Response(text=html,content_type='text/html',headers={'Cache-Control':'no-store'})
 
 async def bootstrap(req):
     d=await body(req)
@@ -450,6 +458,11 @@ async def start_match(req):
           DO UPDATE SET account_id=EXCLUDED.account_id,device_id=EXCLUDED.device_id,token_hash=EXCLUDED.token_hash,
           claimed_at=now(),lease_until=EXCLUDED.lease_until,released_at=NULL''',mid,a['id'],device,token_digest(req.cookies.get(COOKIE,'')))
         state=pack_game(unpack_game(m)) if not m['state'] else as_json(m['state'])
+        if not as_json(m['state']):
+            starter=int(d.get('starter',0))
+            if starter not in (0,1):raise web.HTTPBadRequest(text='Startspieler 0 oder 1')
+            state['current']=starter
+            state['first_throw']=starter
         await db.execute(f'''UPDATE {SCHEMA}.matches SET status='running',source='scorer',board_id=COALESCE($2,board_id),
            state=CASE WHEN state='{{}}'::jsonb THEN $3::jsonb ELSE state END,
            started_at=COALESCE(started_at,now()) WHERE id=$1''',mid,board,json.dumps(state))
@@ -507,6 +520,38 @@ async def throw(req):
         await db.execute(f"UPDATE {SCHEMA}.match_claims SET lease_until=now()+interval '45 minutes',released_at=CASE WHEN $2 THEN now() ELSE NULL END WHERE match_id=$1",mid,g.done)
         if g.done and m['kind']=='ladder':await apply_elo(db,m,[total_one,total_two],g.sets)
     return response({'state':current,'version':m['state_version']+1})
+
+async def undo_visit(req):
+    """Undo the last visit of a running match. Completed ELO matches remain final."""
+    a=await actor(req);d=await body(req);mid=uid(req.match_info['mid'])
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        m=await db.fetchrow(f'SELECT * FROM {SCHEMA}.matches WHERE id=$1 FOR UPDATE',mid)
+        if not m or m['status']!='running':raise web.HTTPConflict(text='Nur laufende Spiele können korrigiert werden')
+        if a['role']=='member' and a['player_id'] not in (m['player1_id'],m['player2_id']):raise web.HTTPForbidden()
+        claim=await db.fetchrow(f'SELECT account_id,token_hash,lease_until FROM {SCHEMA}.match_claims WHERE match_id=$1',mid)
+        if not claim or claim['account_id']!=a['id'] or claim['token_hash']!=token_digest(req.cookies.get(COOKIE,'')) or claim['lease_until']<=datetime.now(timezone.utc):
+            raise web.HTTPConflict(text='Dieses Match gehört nicht zu deiner aktuellen Sitzung')
+        if m['state_version']!=int(d.get('version',-1)):raise web.HTTPConflict(text='Spielstand wurde bereits geändert')
+        revision=await db.fetchrow(f"SELECT previous_state,new_state FROM {SCHEMA}.match_revisions WHERE match_id=$1 AND action='throw' ORDER BY id DESC LIMIT 1",mid)
+        current=as_json(m['state'])
+        if not revision or as_json(revision['new_state'])!=current:raise web.HTTPConflict(text='Keine letzte Aufnahme gefunden')
+        previous=as_json(revision['previous_state'])
+        if len(current.get('visits',[]))!=len(previous.get('visits',[]))+1:raise web.HTTPConflict(text='Ungültiger Spielstand')
+        last=current['visits'][-1]
+        player=m['player1_id'] if last['player']==0 else m['player2_id']
+        leg=int(last['leg_index'])+1
+        throw_id=await db.fetchval(f'''SELECT t.id FROM {SCHEMA}.throws t JOIN {SCHEMA}.match_legs l ON l.id=t.leg_id
+           WHERE t.match_id=$1 AND l.leg_number=$2 AND t.player_id=$3 ORDER BY t.id DESC LIMIT 1''',mid,leg,player)
+        if throw_id is None:raise web.HTTPConflict(text='Archivaufnahme nicht gefunden')
+        await db.execute(f'DELETE FROM {SCHEMA}.throws WHERE id=$1',throw_id)
+        if last.get('checkout'):
+            await db.execute(f'UPDATE {SCHEMA}.match_legs SET winner_id=NULL,darts_winner=NULL,finished_at=NULL WHERE match_id=$1 AND leg_number=$2',mid,leg)
+        await db.execute(f'UPDATE {SCHEMA}.matches SET state=$2::jsonb,state_version=state_version+1 WHERE id=$1',mid,json.dumps(previous))
+        await db.execute(f'''INSERT INTO {SCHEMA}.match_revisions(match_id,actor_id,action,previous_state,new_state)
+          VALUES($1,$2,'undo',$3::jsonb,$4::jsonb)''',mid,a['id'],json.dumps(current),json.dumps(previous))
+        await db.execute(f"UPDATE {SCHEMA}.match_claims SET lease_until=now()+interval '45 minutes' WHERE match_id=$1",mid)
+    return response({'state':previous,'version':m['state_version']+1})
 
 async def apply_elo(db,m,legs,sets):
     cid=m['competition_id'];a=m['player1_id'];b=m['player2_id']
@@ -706,18 +751,21 @@ async def elo_history(req):
 
 async def overview(req):
     a=await actor(req)
+    preview=req.query.get('player_id')
+    if preview and a['role']!='admin':raise web.HTTPForbidden(text='Nur Admin darf Spieleransicht nutzen')
+    viewed=uid(preview) if preview else a['player_id']
     async with pool(req).acquire() as db:
         entries=await db.fetch(f'''SELECT c.id,c.title,c.kind,c.status,count(m.id) FILTER(WHERE m.status='open') AS open_games
           FROM {SCHEMA}.competitions c LEFT JOIN {SCHEMA}.matches m ON m.competition_id=c.id
           WHERE c.deleted_at IS NULL GROUP BY c.id ORDER BY c.created_at DESC LIMIT 30''')
         own=[]
-        if a['player_id']:
+        if viewed:
             own=await db.fetch(f'''SELECT m.id,c.title,c.kind,p1.display_name AS player1,p2.display_name AS player2
                 FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
                 JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
                 WHERE c.deleted_at IS NULL AND m.status='open' AND (m.player1_id=$1 OR m.player2_id=$1)
-                LIMIT 30''',a['player_id'])
-    return response({'competitions':list(map(dict,entries)),'own_open':list(map(dict,own))})
+                LIMIT 30''',viewed)
+    return response({'competitions':list(map(dict,entries)),'own_open':list(map(dict,own)),'viewed_player_id':viewed,'preview':bool(preview)})
 
 async def register_startup(app):
     url=os.environ.get('STINGRAYS_DATABASE_URL')
@@ -738,7 +786,7 @@ async def register_cleanup(app):
 def register_stingrays_v2(app):
     app.on_startup.append(register_startup);app.on_cleanup.append(register_cleanup)
     routes=[
-      ('GET','/dart/v2',spa),('GET','/dart/v2/',spa),('GET','/dart/v2/assets/{filename}',assets),
+      ('GET','/dart/v2',spa),('GET','/dart/v2/',spa),('GET','/dart/v2/spiel/',legacy_scorer_page),('GET','/dart/v2/assets/{filename}',assets),
       ('GET','/dart/v2/api/health',health),
       ('GET','/dart/v2/api/legacy/preview',preview_legacy),
       ('POST','/dart/v2/api/legacy/sync-profiles',sync_legacy_profiles),
@@ -760,7 +808,7 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/competitions/{cid}/standings',standings),
       ('GET','/dart/v2/api/matches/{mid}',match_state),
       ('POST','/dart/v2/api/matches/{mid}/start',start_match),
-      ('POST','/dart/v2/api/matches/{mid}/throw',throw),
+      ('POST','/dart/v2/api/matches/{mid}/throw',throw),('POST','/dart/v2/api/matches/{mid}/undo',undo_visit),
       ('POST','/dart/v2/api/matches/{mid}/manual',manual_result),
       ('POST','/dart/v2/api/competitions/{cid}/withdraw',withdraw),
       ('POST','/dart/v2/api/phases/{pid}/close',close_phase),
