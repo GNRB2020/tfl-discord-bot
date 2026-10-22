@@ -14,7 +14,7 @@
    return {...state,kind:'x01',names:state.names||[meta.player1,meta.player2],rules,remaining:rest,current,
       legs:state.legs||[raw.legs1||0,raw.legs2||0],sets:state.sets||[raw.sets1||0,raw.sets2||0],
       done:!!state.done||raw.status==='finished',can_checkout:state.done?[]:possible(rest[current]),
-      current_stats:stats,last:visits.slice(-8),can_undo:raw.status==='running'&&visits.length>0,summary:null};
+      current_stats:stats,last:visits.slice(-8),can_undo:raw.status==='running'&&visits.length>0,summary:raw.summary||null};
  }
  api=async function(path,data){
    if(path==='state'){const m=await req();meta=m;return normalize(m)}
@@ -25,7 +25,21 @@
    if(path==='undo'){const r=await req('/undo',{version});return normalize({...r,status:'running'})}
    throw Error('Bitte den Wettbewerb über die V2-Übersicht verwalten.');
  };
- result=function(){if(completed||!S?.done)return;completed=true;modal('<h2>Match beendet</h2><p>Das Ergebnis wurde automatisch in Neon gespeichert.</p><div class="actions"><button id="returnV2" class="green">ZUM WETTBEWERB</button></div>');document.getElementById('returnV2').onclick=back};
+ const oldResult=result;
+ result=function(){
+   if(completed||!S?.done)return;
+   completed=true;
+   if(S.summary?.players?.length===2){
+     oldResult();
+     const newReport=document.getElementById('newReport');
+     if(newReport){newReport.textContent='ZUM WETTBEWERB';newReport.onclick=back;}
+     const close=document.getElementById('closeReport');
+     if(close){close.textContent='ZUM WETTBEWERB';close.onclick=back;}
+   } else {
+     modal('<h2>Match beendet</h2><p>Das Ergebnis ist in Neon gespeichert.</p><div class="actions"><button id="returnV2" class="green">ZUM WETTBEWERB</button></div>');
+     document.getElementById('returnV2').onclick=back;
+   }
+ };
  const originalShow=showMatch;showMatch=function(){originalShow();document.getElementById('context').textContent='STINGRAYS · WETTBEWERB';};
  const oldScreen=screen;screen=function(id){if(id==='loginView'||id==='menuView'||id==='configView'){back();return}oldScreen(id)};
  for(const id of ['homebtn','logout'])document.getElementById(id).onclick=back;

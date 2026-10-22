@@ -83,14 +83,15 @@ async def spa(req):
 
 async def assets(req):
     which=req.match_info['filename']
-    if which not in ('app.js','style.css','legacy_bridge.js'):raise web.HTTPNotFound()
-    return web.FileResponse(HERE/which,headers={'Cache-Control':'public,max-age=120'})
+    if which not in ('app.js','style.css','legacy_bridge.js','scorer_theme.css','brand.png'):raise web.HTTPNotFound()
+    return web.FileResponse(HERE/which,headers={'Cache-Control':'no-store'})
 
 async def legacy_scorer_page(req):
     await actor(req)
     from dart_render_preview import ROOT
     html=(ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
     html=html.replace("api('state').then(s=>{S=s;if(S.kind==='x01')showMatch();else if(S.kind==='sau')showSau();else screen('menuView')}).catch(()=>screen('loginView'));",'')
+    html=html.replace('</head>', '<link rel="stylesheet" href="/dart/v2/assets/scorer_theme.css"></head>')
     html=html.replace('</body>', '<script src="/dart/v2/assets/legacy_bridge.js"></script></body>')
     return web.Response(text=html,content_type='text/html',headers={'Cache-Control':'no-store'})
 
@@ -252,9 +253,27 @@ async def create_competition(req):
     if not isinstance(rules,dict):raise web.HTTPBadRequest(text='Regeln als Objekt erwartet')
     if kind=='ladder':rules.update(k_factor=64,initial_elo=1000,rematch_cooldown_days=7)
     async with pool(req).acquire() as db:
-        c=await db.fetchrow(f'''INSERT INTO {SCHEMA}.competitions(title,kind,status,starts_at,ends_at,rules,created_by)
-            VALUES($1,$2,'draft',$3,$4,$5::jsonb,$6) RETURNING id,title,kind,status''',title,kind,start,end,json.dumps(rules),a['id'])
-    return response(dict(c),201)
+        async with db.transaction():
+            c=await db.fetchrow(f'''INSERT INTO {SCHEMA}.competitions(title,kind,status,starts_at,ends_at,rules,created_by)
+                VALUES($1,$2,'draft',$3,$4,$5::jsonb,$6) RETURNING id,title,kind,status''',
+                title,kind,start,end,json.dumps(rules),a['id'])
+            if kind=='ladder':
+                # Enroll every active club member, independent of whether they own a login.
+                await db.execute(f'''INSERT INTO {SCHEMA}.entries(competition_id,player_id)
+                    SELECT $1,p.id FROM {SCHEMA}.players p
+                    WHERE p.is_member IS TRUE AND p.is_active IS TRUE
+                    ON CONFLICT(competition_id,player_id) DO NOTHING''',c['id'])
+                # Keep eligible but not-yet-playing members at initial Elo, with played=0.
+                # The rankings endpoint deliberately filters played>0.
+                await db.execute(f'''INSERT INTO {SCHEMA}.ladder_ratings(competition_id,player_id)
+                    SELECT $1,e.player_id FROM {SCHEMA}.entries e
+                    WHERE e.competition_id=$1
+                    ON CONFLICT DO NOTHING''',c['id'])
+                enrolled=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.entries
+                    WHERE competition_id=$1''',c['id'])
+    result=dict(c)
+    if kind=='ladder':result['enrolled_members']=enrolled
+    return response(result,201)
 
 async def competition_detail(req):
     await actor(req);cid=uid(req.match_info['cid'])
@@ -406,7 +425,7 @@ async def match_state(req):
           JOIN {SCHEMA}.competitions c ON c.id=m.competition_id WHERE m.id=$1 AND c.deleted_at IS NULL''',mid)
         if not m:raise web.HTTPNotFound()
         claimed=await db.fetchrow(f'SELECT account_id,lease_until FROM {SCHEMA}.match_claims WHERE match_id=$1',mid)
-    item=dict(m);item['can_score']=a['role'] in ('admin','tournament') or a['player_id'] in (m['player1_id'],m['player2_id'])
+    item=dict(m);item['summary']=unpack_game(m).summary() if m['status']=='finished' and as_json(m['state']) else None;item['can_score']=a['role'] in ('admin','tournament') or a['player_id'] in (m['player1_id'],m['player2_id'])
     item['claim_active']=bool(claimed and claimed['lease_until']>datetime.now(timezone.utc))
     item['claim_mine']=bool(claimed and claimed['account_id']==a['id'] and item['claim_active'])
     return response(item)
@@ -519,7 +538,7 @@ async def throw(req):
         # There is one revision per valid throw; append-only history supports proper recovery and review.
         await db.execute(f"UPDATE {SCHEMA}.match_claims SET lease_until=now()+interval '45 minutes',released_at=CASE WHEN $2 THEN now() ELSE NULL END WHERE match_id=$1",mid,g.done)
         if g.done and m['kind']=='ladder':await apply_elo(db,m,[total_one,total_two],g.sets)
-    return response({'state':current,'version':m['state_version']+1})
+    return response({'state':current,'version':m['state_version']+1,'summary':g.summary() if g.done else None})
 
 async def undo_visit(req):
     """Undo the last visit of a running match. Completed ELO matches remain final."""

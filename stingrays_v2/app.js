@@ -67,8 +67,9 @@ async function openCompetition(id){
     async function fill(){clear(area);const g=selected.groups.find(g=>g.id===chosen.value);if(!g)return;
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
-      area.append(el('h3',g.name),renderTable(['Pl.','Spieler','Sp.','S','U','N','Legs +','Legs −','Diff.','Pkt.'],rows.map(r=>[
-          r.rank,r.name+(withdrawals.has(r.player_id)?' · ausgetreten':''),r.played,r.wins,r.draws,r.losses,r.legs_for,r.legs_against,signed(r.legs_for-r.legs_against),r.points
+      area.append(el('h3',g.name),renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt'],rows.map(r=>[
+          r.rank,r.name+(withdrawals.has(r.player_id)?' · ausgetreten':''),r.played,r.wins,r.draws,r.losses,
+          String(r.legs_for)+':'+String(r.legs_against),signed(r.legs_for-r.legs_against),r.points
       ]),true));
       const games=selected.matches.filter(m=>m.group_id===g.id&&m.status==='finished').length;
       area.append(el('p',games+' gewertete Spiele in dieser Staffel','helper'));
