@@ -225,10 +225,20 @@ async def edit_board(req):
                          bid,str(d['label'])[:100] if 'label' in d else None,d.get('enabled'))
     return response({'ok':True})
 
+async def allowed_to_manage(db, account, competition_id):
+    if account['role']=='admin':return True
+    return bool(await db.fetchval(f'''SELECT 1 FROM {SCHEMA}.competitions
+        WHERE id=$1 AND kind='training_tournament' AND created_by=$2 AND deleted_at IS NULL''',
+        competition_id,account['id']))
+
+async def require_manager(db, account, competition_id):
+    if not await allowed_to_manage(db, account, competition_id):
+        raise web.HTTPForbidden(text='Nur Vereinsadministratoren bzw. Ersteller eigener Trainingsturniere')
+
 async def competition_list(req):
     await actor(req)
     async with pool(req).acquire() as db:
-        rows=await db.fetch(f'''SELECT c.id,c.title,c.kind,c.status,c.starts_at,c.ends_at,c.rules,
+        rows=await db.fetch(f'''SELECT c.id,c.title,c.kind,c.status,c.starts_at,c.ends_at,c.rules,c.created_by,
             (SELECT count(*) FROM {SCHEMA}.entries e WHERE e.competition_id=c.id) AS players
             FROM {SCHEMA}.competitions c WHERE c.deleted_at IS NULL ORDER BY c.created_at DESC''')
     return response(list(map(dict,rows)))
@@ -255,8 +265,16 @@ async def create_competition(req):
     async with pool(req).acquire() as db:
         async with db.transaction():
             c=await db.fetchrow(f'''INSERT INTO {SCHEMA}.competitions(title,kind,status,starts_at,ends_at,rules,created_by)
-                VALUES($1,$2,'draft',$3,$4,$5::jsonb,$6) RETURNING id,title,kind,status''',
-                title,kind,start,end,json.dumps(rules),a['id'])
+                VALUES($1,$2,$7,$3,$4,$5::jsonb,$6) RETURNING id,title,kind,status''',
+                title,kind,start,end,json.dumps(rules),a['id'],'active' if kind in ('ladder','training_tournament') else 'draft')
+            if kind in ('ladder','training_tournament'):
+                await db.execute(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status)
+                  VALUES($1,$2,$3,1,'open')''',c['id'],
+                  'Ladder-Saison' if kind=='ladder' else 'Training',
+                  'ladder' if kind=='ladder' else 'groups')
+            if kind=='training_tournament' and a['player_id']:
+                await db.execute(f'''INSERT INTO {SCHEMA}.entries(competition_id,player_id)
+                    VALUES($1,$2) ON CONFLICT DO NOTHING''',c['id'],a['player_id'])
             if kind=='ladder':
                 # Enroll every active club member, independent of whether they own a login.
                 await db.execute(f'''INSERT INTO {SCHEMA}.entries(competition_id,player_id)
@@ -295,40 +313,47 @@ async def competition_detail(req):
                      'entries':list(map(dict,entries)),'memberships':list(map(dict,membership)),'matches':list(map(dict,matches))})
 
 async def add_entries(req):
-    await actor(req,'admin');d=await body(req);cid=uid(req.match_info['cid']);ids=d.get('player_ids',[])
+    a=await actor(req);d=await body(req);cid=uid(req.match_info['cid']);ids=d.get('player_ids',[])
     if not isinstance(ids,list) or len(ids)>500:raise web.HTTPBadRequest(text='Ungültige Teilnehmer')
     async with pool(req).acquire() as db:
         async with db.transaction():
+            await require_manager(db,a,cid)
             for pid in ids:
                 await db.execute(f'''INSERT INTO {SCHEMA}.entries(competition_id,player_id)
                     VALUES($1,$2) ON CONFLICT(competition_id,player_id) DO NOTHING''',cid,uid(pid))
     return response({'added':len(ids)})
 
 async def create_phase(req):
-    await actor(req,'admin');d=await body(req);cid=uid(req.match_info['cid'])
+    a=await actor(req);d=await body(req);cid=uid(req.match_info['cid'])
     kind=str(d.get('kind',''))
     if kind not in ('league','groups','knockout','ladder'):raise web.HTTPBadRequest(text='Ungültige Phase')
     async with pool(req).acquire() as db:
+        await require_manager(db,a,cid)
+        if await db.fetchval(f"SELECT kind='ladder' FROM {SCHEMA}.competitions WHERE id=$1",cid):raise web.HTTPConflict(text='Ladder benötigt keine Gruppenphase')
         n=await db.fetchval(f'SELECT coalesce(max(phase_order),0)+1 FROM {SCHEMA}.phases WHERE competition_id=$1',cid)
         row=await db.fetchrow(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
           VALUES($1,$2,$3,$4,'open',$5::jsonb) RETURNING *''',cid,str(d.get('name',kind))[:120],kind,n,json.dumps(d.get('rules') or {}))
     return response(dict(row),201)
 
 async def create_group(req):
-    await actor(req,'admin');d=await body(req);pid=uid(req.match_info['pid'])
+    a=await actor(req);d=await body(req);pid=uid(req.match_info['pid'])
     async with pool(req).acquire() as db:
+        cid=await db.fetchval(f'SELECT competition_id FROM {SCHEMA}.phases WHERE id=$1',pid)
+        if not cid:raise web.HTTPNotFound()
+        await require_manager(db,a,cid)
         n=await db.fetchval(f'SELECT coalesce(max(sort_order),0)+1 FROM {SCHEMA}.groups WHERE phase_id=$1',pid)
         row=await db.fetchrow(f'''INSERT INTO {SCHEMA}.groups(phase_id,name,sort_order)
              VALUES($1,$2,$3) RETURNING *''',pid,str(d.get('name','Gruppe '+str(n)))[:120],n)
     return response(dict(row),201)
 
 async def assign_group(req):
-    await actor(req,'admin');d=await body(req);gid=uid(req.match_info['gid']);ids=d.get('entry_ids',[])
+    a=await actor(req);d=await body(req);gid=uid(req.match_info['gid']);ids=d.get('entry_ids',[])
     if not isinstance(ids,list):raise web.HTTPBadRequest()
     async with pool(req).acquire() as db:
         group=await db.fetchrow(f'''SELECT g.phase_id,p.competition_id,p.status FROM {SCHEMA}.groups g
           JOIN {SCHEMA}.phases p ON p.id=g.phase_id WHERE g.id=$1''',gid)
         if not group:raise web.HTTPNotFound()
+        await require_manager(db,a,group['competition_id'])
         if group['status']=='closed':raise web.HTTPConflict(text='Phase geschlossen')
         if await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches WHERE group_id=$1 AND status IN ('running','finished'))''',gid):
             raise web.HTTPConflict(text='Gruppe hat bereits gestartete oder abgeschlossene Spiele')
@@ -343,13 +368,14 @@ async def assign_group(req):
     return response({'assigned':len(ids)})
 
 async def generate_rounds(req):
-    await actor(req,'admin');d=await body(req);gid=uid(req.match_info['gid'])
+    a=await actor(req);d=await body(req);gid=uid(req.match_info['gid'])
     async with pool(req).acquire() as db:
         async with db.transaction():
             g=await db.fetchrow(f'''SELECT g.phase_id,p.competition_id,c.kind,p.kind AS phase_kind,p.status
                FROM {SCHEMA}.groups g JOIN {SCHEMA}.phases p ON p.id=g.phase_id
                JOIN {SCHEMA}.competitions c ON c.id=p.competition_id WHERE g.id=$1 FOR UPDATE OF g''',gid)
             if not g:raise web.HTTPNotFound()
+            await require_manager(db,a,g['competition_id'])
             if g['status']=='closed':raise web.HTTPConflict(text='Phase geschlossen')
             if await db.fetchval(f'SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches WHERE group_id=$1)',gid):
                 raise web.HTTPConflict(text='Spielplan bereits vorhanden')
@@ -365,12 +391,15 @@ async def generate_rounds(req):
 async def create_match(req):
     a=await actor(req);d=await body(req);cid=uid(req.match_info['cid'])
     async with pool(req).acquire() as db:
-        c=await db.fetchrow(f'SELECT kind,status,starts_at,ends_at FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL',cid)
+        c=await db.fetchrow(f'SELECT kind,status,starts_at,ends_at,created_by FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL',cid)
         if not c:raise web.HTTPNotFound()
-        if c['kind']!='ladder' and a['role']!='admin':raise web.HTTPForbidden(text='Nur Administratoren legen Begegnungen an')
+        if c['kind'] not in ('ladder','training_tournament') and a['role']!='admin':raise web.HTTPForbidden(text='Nur Administratoren legen Vereinsbegegnungen an')
+        if c['kind']=='training_tournament' and a['role']!='admin' and c['created_by']!=a['id']:
+            raise web.HTTPForbidden(text='Nur eigene Trainingsturniere bearbeiten')
         if c['kind']=='ladder' and c['status']!='active':raise web.HTTPConflict(text='Ladder nicht aktiv')
         ids=[uid(d.get('player1_id')),uid(d.get('player2_id'))]
         if ids[0]==ids[1]:raise web.HTTPBadRequest(text='Verschiedene Spieler erforderlich')
+        if c['kind']=='training_tournament' and a['role']=='member' and a['player_id'] not in ids:raise web.HTTPForbidden(text='Nur eigene Trainingsspiele starten')
         if c['kind']=='ladder':
             if c['starts_at'] and datetime.now(timezone.utc)<c['starts_at'] or c['ends_at'] and datetime.now(timezone.utc)>=c['ends_at']:
                 raise web.HTTPConflict(text='Außerhalb des Ladder-Zeitraums')
@@ -379,14 +408,25 @@ async def create_match(req):
         for pid in ids:
             if not await db.fetchval(f'SELECT EXISTS(SELECT 1 FROM {SCHEMA}.entries WHERE competition_id=$1 AND player_id=$2)',cid,pid):
                 raise web.HTTPBadRequest(text='Spieler nicht im Wettbewerb')
-        phase=await db.fetchval(f'''SELECT id FROM {SCHEMA}.phases WHERE competition_id=$1 AND kind=$2 ORDER BY phase_order LIMIT 1''',cid,'ladder' if c['kind']=='ladder' else 'league')
+        phase=await db.fetchval(f'''SELECT id FROM {SCHEMA}.phases WHERE competition_id=$1 AND kind=$2 ORDER BY phase_order LIMIT 1''',cid,'ladder' if c['kind']=='ladder' else 'groups' if c['kind']=='training_tournament' else 'league')
+        if not phase and c['kind']=='ladder':
+            phase=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status)
+                VALUES($1,'Ladder-Saison','ladder',1,'open') ON CONFLICT(competition_id,phase_order)
+                DO UPDATE SET kind='ladder' RETURNING id''',cid)
         if not phase:raise web.HTTPConflict(text='Phase fehlt')
         if c['kind']=='ladder':
             recent=await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches WHERE competition_id=$1
                   AND status='finished' AND finished_at>now()-interval '7 days'
                   AND ((player1_id=$2 AND player2_id=$3) OR (player1_id=$3 AND player2_id=$2)))''',cid,*ids)
             if recent:raise web.HTTPConflict(text='Diese Paarung darf erst nach 7 Tagen erneut gewertet werden')
-        rules=mode_rules(c['kind'],'ladder',overrides=d.get('rules') or {})
+        user_rules=d.get('rules') or {}
+        if not isinstance(user_rules,dict):raise web.HTTPBadRequest(text='Ungültige Spielregeln')
+        try:rules=mode_rules(c['kind'],'ladder' if c['kind']=='ladder' else 'groups',overrides=user_rules)
+        except (ValueError,TypeError,KeyError) as exc:raise web.HTTPBadRequest(text=str(exc))
+        if c['kind']=='ladder':
+            if rules['mode']=='legs' and int(rules['max_legs'])<5:
+                raise web.HTTPBadRequest(text='Ladder: mindestens Best of 5 Legs')
+            rules['allow_draw']=rules['mode']=='legs' and int(rules['max_legs'])%2==0
         row=await db.fetchrow(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,player1_id,player2_id,rules)
            VALUES($1,$2,$3,$4,$5::jsonb) RETURNING id''',cid,phase,*ids,json.dumps(rules))
     return response({'id':row['id']},201)
@@ -435,10 +475,12 @@ def unpack_game(m):
     if not raw:
         g=Match(Rules(**rules),(m['player1'],m['player2']))
         return g
-    g=Match(Rules(**raw['rules']),tuple(raw['names']))
+    # Some earlier V2 starts saved only {current,first_throw}. Merge, never
+    # assume a partial JSON state contains the complete scoring engine.
+    g=Match(Rules(**{**rules,**raw.get('rules',{})}),tuple(raw.get('names') or (m['player1'],m['player2'])))
     for k in ('remaining','legs','sets','current','first_throw','leg_number','done'):
-        setattr(g,k,raw[k])
-    g.visits=[Visit(**v) for v in raw['visits']]
+        if k in raw:setattr(g,k,raw[k])
+    g.visits=[Visit(**v) for v in raw.get('visits',[])]
     return g
 
 def pack_game(g):
@@ -476,7 +518,7 @@ async def start_match(req):
           VALUES($1,$2,$3,$4,now(),now()+interval '45 minutes') ON CONFLICT(match_id)
           DO UPDATE SET account_id=EXCLUDED.account_id,device_id=EXCLUDED.device_id,token_hash=EXCLUDED.token_hash,
           claimed_at=now(),lease_until=EXCLUDED.lease_until,released_at=NULL''',mid,a['id'],device,token_digest(req.cookies.get(COOKIE,'')))
-        state=pack_game(unpack_game(m)) if not m['state'] else as_json(m['state'])
+        state=pack_game(unpack_game(m))
         if not as_json(m['state']):
             starter=int(d.get('starter',0))
             if starter not in (0,1):raise web.HTTPBadRequest(text='Startspieler 0 oder 1')
@@ -630,18 +672,19 @@ async def withdraw(req):
     return response({'revalued':len(ms)})
 
 async def close_phase(req):
-    a=await actor(req,'admin');pid=uid(req.match_info['pid']);await body(req)
+    a=await actor(req);pid=uid(req.match_info['pid']);await body(req)
     async with pool(req).acquire() as db:
       async with db.transaction():
         p=await db.fetchrow(f'SELECT * FROM {SCHEMA}.phases WHERE id=$1 FOR UPDATE',pid)
         if not p:raise web.HTTPNotFound()
+        await require_manager(db,a,p['competition_id'])
         remaining=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.matches WHERE phase_id=$1 AND status IN ('open','running')",pid)
         if remaining:raise web.HTTPConflict(text=f'{remaining} offene oder laufende Begegnungen')
         await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_by=$2,closed_at=now() WHERE id=$1",pid,a['id'])
     return response({'closed':True})
 
 async def bracket(req):
-    await actor(req,'admin');d=await body(req);pid=uid(req.match_info['pid']);ids=d.get('player_ids',[])
+    a=await actor(req);d=await body(req);pid=uid(req.match_info['pid']);ids=d.get('player_ids',[])
     if not isinstance(ids,list) or not 2<=len(ids)<=128:raise web.HTTPBadRequest(text='2–128 gesetzte Spieler erforderlich')
     pairs=bracket_pairs([uid(p) for p in ids]);created=0
     async with pool(req).acquire() as db:
@@ -649,6 +692,7 @@ async def bracket(req):
         p=await db.fetchrow(f'''SELECT p.*,c.kind FROM {SCHEMA}.phases p
              JOIN {SCHEMA}.competitions c ON c.id=p.competition_id WHERE p.id=$1 FOR UPDATE OF p''',pid)
         if not p or p['kind']!='knockout':raise web.HTTPBadRequest(text='Keine K.O.-Phase')
+        await require_manager(db,a,p['competition_id'])
         if await db.fetchval(f'SELECT count(*) FROM {SCHEMA}.matches WHERE phase_id=$1',pid):raise web.HTTPConflict(text='K.O.-Phase enthält schon Begegnungen')
         valid={r['player_id'] for r in await db.fetch(f'SELECT player_id FROM {SCHEMA}.entries WHERE competition_id=$1',p['competition_id'])}
         if len(set(ids))!=len(ids) or any(v not in valid for v in [uid(x) for x in ids]):raise web.HTTPBadRequest(text='Ungültige Setzliste')
@@ -661,12 +705,13 @@ async def bracket(req):
     return response({'created':created,'byes':sum(1 for x,y in pairs if x is None or y is None),'pairs':pairs})
 
 async def advance_knockout(req):
-    await actor(req,'admin');d=await body(req);pid=uid(req.match_info['pid'])
+    a=await actor(req);d=await body(req);pid=uid(req.match_info['pid'])
     async with pool(req).acquire() as db:
       async with db.transaction():
         p=await db.fetchrow(f'''SELECT p.*,c.kind FROM {SCHEMA}.phases p JOIN {SCHEMA}.competitions c
             ON c.id=p.competition_id WHERE p.id=$1 FOR UPDATE OF p''',pid)
         if not p or p['kind']!='knockout':raise web.HTTPBadRequest(text='Keine K.O.-Phase')
+        await require_manager(db,a,p['competition_id'])
         mx=await db.fetchval(f'SELECT max(round_number) FROM {SCHEMA}.matches WHERE phase_id=$1',pid)
         if mx is None:raise web.HTTPConflict(text='Setzliste fehlt')
         rows=await db.fetch(f'SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1 AND round_number=$2 ORDER BY bracket_position',pid,mx)
@@ -732,7 +777,7 @@ async def stats(req):
     await actor(req);pid=uid(req.match_info['pid']);kind=req.query.get('kind','overall')
     if kind not in ('overall',*KINDS):raise web.HTTPBadRequest(text='Ungültiger Statistikfilter')
     async with pool(req).acquire() as db:
-        sql=f'''SELECT m.id,m.status,m.source,m.legs1,m.legs2,m.sets1,m.sets2,m.player1_id,m.player2_id,
+        sql=f'''SELECT m.id,m.status,m.source,m.legs1,m.legs2,m.sets1,m.sets2,m.player1_id,m.player2_id,m.state,
           c.kind,c.title FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
           WHERE c.deleted_at IS NULL AND m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)'''
         params=[pid]
@@ -743,6 +788,10 @@ async def stats(req):
           JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
           WHERE t.player_id=$1 AND c.deleted_at IS NULL AND m.status='finished' AND m.source='scorer' ''',pid)
     if kind!='overall':scored=[s for s in scored if s['kind']==kind]
+    solo=[]
+    if kind in ('overall','training_tournament'):
+        async with pool(req).acquire() as db:
+            solo=await db.fetch(f'''SELECT kind,result FROM {SCHEMA}.training_sessions WHERE player_id=$1''',pid)
     wins=draws=losses=legs_for=legs_against=0
     for m in games:
         left=m['player1_id']==pid
@@ -752,14 +801,88 @@ async def stats(req):
         if x>y:wins+=1
         elif x==y:draws+=1
         else:losses+=1
+    # Precise First 9, lowdarts and highest finishes derive only from saved scorer
+    # visits, never from manual or legacy scores.
+    first9_score=first9_darts=0;lowdarts=[];highfinishes=[];bull_finishes=[];highscores=[]
+    for m in games:
+        if m['source']!='scorer':continue
+        raw=as_json(m['state'])
+        visits=raw.get('visits') or []
+        player_index=0 if m['player1_id']==pid else 1
+        own=[v for v in visits if v.get('player')==player_index]
+        legs={}
+        for v in own:legs.setdefault(v.get('leg_index',0),[]).append(v)
+        for items in legs.values():
+            n=0
+            for v in items:
+                nd=int(v.get('darts',3))
+                if n+nd>9:break
+                n+=nd;first9_darts+=nd
+                if not v.get('bust'):first9_score+=int(v.get('score',0))
+            finished=[v for v in items if v.get('checkout')]
+            if finished:
+                total=sum(int(v.get('darts',3)) for v in items)
+                if 9<=total<=18:lowdarts.append(total)
+                value=int(finished[-1].get('score',0))
+                if value>=100:highfinishes.append(value)
+                if finished[-1].get('bullfinish'):bull_finishes.append(value)
+        highscores.extend(int(v.get('score',0)) for v in own if int(v.get('score',0))>=171 and not v.get('bust'))
+    sau_results=[as_json(v['result']) for v in solo if v['kind']=='sau']
+    bobs_results=[as_json(v['result']) for v in solo if v['kind']=='bobs27']
     points=sum(s['points'] for s in scored if not s['is_bust']);darts=sum(s['darts'] for s in scored)
     return response({'matches':len(games),'wins':wins,'draws':draws,'losses':losses,'legs_for':legs_for,
         'legs_against':legs_against,'scored_visits':len(scored),'average':round(points/darts*3,2) if darts else None,
+        'first9':round(3*first9_score/first9_darts,2) if first9_darts else None,
+        'lowdarts':len(lowdarts),'lowdart_details':sorted(lowdarts),
+        'highfinishes':len(highfinishes),'highfinish_details':sorted(highfinishes,reverse=True),
+        'bullfinish_details':bull_finishes,'highscores':highscores[:30],
         '180':sum(s['points']==180 and not s['is_bust'] for s in scored),
         '140plus':sum(s['points']>=140 and not s['is_bust'] for s in scored),
+        '171plus':sum(s['points']>=171 and not s['is_bust'] for s in scored),
         '100plus':sum(s['points']>=100 and not s['is_bust'] for s in scored),
         'bullfinishes':sum(bool(s['is_bullfinish']) for s in scored),
+        'training_sau_sessions':len(sau_results),'training_bobs_sessions':len(bobs_results),
+        'training_sau_success':sum(int(x.get('checkouts',0)) for x in sau_results),
+        'training_sau_marks':sum(int(x.get('sau',0)) for x in sau_results),
+        'training_bobs_best':max([int(x.get('points',0)) for x in bobs_results],default=None),
         'missing_throw_stats_matches':sum(m['source']!='scorer' for m in games)})
+
+async def save_solo_session(req):
+    a=await actor(req);d=await body(req)
+    kind=d.get('kind');result=d.get('result')
+    if kind not in ('sau','bobs27') or not isinstance(result,dict):raise web.HTTPBadRequest(text='Unbekanntes Trainingsformat')
+    if not a['player_id']:raise web.HTTPForbidden(text='Ein verknüpftes Spielerprofil ist für Trainingsstatistiken erforderlich')
+    # Bound JSON size; the final summary is persisted, not each individual keystroke.
+    if len(json.dumps(result))>20_000:raise web.HTTPBadRequest(text='Trainingsdaten zu groß')
+    async with pool(req).acquire() as db:
+        row=await db.fetchrow(f'''INSERT INTO {SCHEMA}.training_sessions(player_id,kind,result)
+           VALUES($1,$2,$3::jsonb) RETURNING id,created_at''',a['player_id'],kind,json.dumps(result))
+    return response(dict(row),201)
+
+async def head_to_head(req):
+    await actor(req);pid=uid(req.match_info['pid']);kind=req.query.get('kind','overall')
+    if kind not in ('overall',*KINDS):raise web.HTTPBadRequest(text='Ungültiger Filter')
+    async with pool(req).acquire() as db:
+        rows=await db.fetch(f'''SELECT m.player1_id,m.player2_id,m.legs1,m.legs2,m.sets1,m.sets2,
+         p1.display_name AS name1,p2.display_name AS name2,c.kind
+         FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
+         JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
+         WHERE c.deleted_at IS NULL AND m.status='finished' AND
+         (m.player1_id=$1 OR m.player2_id=$1) ORDER BY m.finished_at DESC''',pid)
+    out={}
+    for m in rows:
+        if kind!='overall' and m['kind']!=kind:continue
+        left=m['player1_id']==pid;other=m['player2_id'] if left else m['player1_id']
+        name=m['name2'] if left else m['name1']
+        record=out.setdefault(str(other),{'opponent':name,'played':0,'wins':0,'draws':0,'losses':0,'legs_for':0,'legs_against':0})
+        a=int((m['legs1'] if left else m['legs2']) or 0);b=int((m['legs2'] if left else m['legs1']) or 0)
+        sa=int((m['sets1'] if left else m['sets2']) or 0);sb=int((m['sets2'] if left else m['sets1']) or 0)
+        x,y=(sa,sb) if sa or sb else (a,b)
+        record['played']+=1;record['legs_for']+=a;record['legs_against']+=b
+        if x>y:record['wins']+=1
+        elif x<y:record['losses']+=1
+        else:record['draws']+=1
+    return response(sorted(out.values(),key=lambda x:(-x['played'],x['opponent'].casefold())))
 
 async def elo_history(req):
     await actor(req);cid=uid(req.match_info['cid'])
@@ -839,9 +962,11 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/competitions/{cid}/export',export_open),
       ('GET','/dart/v2/api/competitions/{cid}/elo-history',elo_history),
       ('GET','/dart/v2/api/players/{pid}/stats',stats),
+      ('GET','/dart/v2/api/players/{pid}/h2h',head_to_head),
+      ('POST','/dart/v2/api/training/sessions',save_solo_session),
     ]
     for method,path,handler in routes:app.router.add_route(method,path,handler)
-    print('[STINGRAYS V2] installed under /dart/v2/')
+    print('[STINGRAYS V2] release r20261022-ui-scoring-roles installed under /dart/v2/')
 
 # The existing Google-Sheets League remains authoritative until an administrator
 # explicitly imports a checked copy. No old record is mutated by these routes.

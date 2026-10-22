@@ -14,7 +14,7 @@
    return {...state,kind:'x01',names:state.names||[meta.player1,meta.player2],rules,remaining:rest,current,
       legs:state.legs||[raw.legs1||0,raw.legs2||0],sets:state.sets||[raw.sets1||0,raw.sets2||0],
       done:!!state.done||raw.status==='finished',can_checkout:state.done?[]:possible(rest[current]),
-      current_stats:stats,last:visits.slice(-8),can_undo:raw.status==='running'&&visits.length>0,summary:raw.summary||null};
+      current_stats:stats,last:visits.slice(-8),history:visits,can_undo:raw.status==='running'&&visits.length>0,summary:raw.summary||null};
  }
  api=async function(path,data){
    if(path==='state'){const m=await req();meta=m;return normalize(m)}
@@ -25,6 +25,43 @@
    if(path==='undo'){const r=await req('/undo',{version});return normalize({...r,status:'running'})}
    throw Error('Bitte den Wettbewerb über die V2-Übersicht verwalten.');
  };
+ // The original scorer remains untouched; add a match header and per-player history.
+ const playersRow=document.querySelector('#scorerView .players');
+ const middle=document.createElement('aside');middle.id='v2Central';middle.className='v2-central';
+ middle.innerHTML='<span class="v2-sub">SPIELSTAND</span><strong id="v2LegScore">0 : 0</strong><span id="v2SetScore">SETS 0 : 0</span><small id="v2MatchFormat"></small>';
+ playersRow.insertBefore(middle,document.getElementById('p1'));
+ for(let i=0;i<2;i++){const wrap=document.createElement('div');wrap.className='v2-recent';wrap.innerHTML='<div class="v2-recent-head">LETZTE 3 AUFNAHMEN</div><div id="v2Recent'+i+'" class="v2-recent-list">–</div>';
+   document.getElementById('p'+i).querySelector('div').append(wrap)}
+ const tabs=document.createElement('div');tabs.className='v2-match-tabs';tabs.innerHTML='<button type="button" id="v2ScoreTab">SCORER</button><button type="button" id="v2StatsTab">STATISTIKEN</button><button type="button" id="v2BestTab">BESTLEISTUNGEN</button>';
+ const scorer=document.querySelector('#scorerView .scorer');scorer.prepend(tabs);
+ document.getElementById('v2StatsTab').onclick=()=>showLiveStats('stats');
+ document.getElementById('v2BestTab').onclick=()=>showLiveStats('best');
+ document.getElementById('v2ScoreTab').onclick=()=>{closeModal()};
+ function showLiveStats(mode){
+  const vis=S?.history||[],names=S?.names||['Spieler 1','Spieler 2'];
+  const items=[0,1].map(i=>vis.filter(v=>v.player===i));
+  const fields=mode==='best'?[
+    ['180',p=>p.filter(v=>v.score===180).length],['171+',p=>p.filter(v=>v.score>=171).length],
+    ['Highfinish',p=>Math.max(0,...p.filter(v=>v.checkout).map(v=>v.score))],['Bullfinishes',p=>p.filter(v=>v.bullfinish).length]
+  ]:[['Aufnahmen',p=>p.length],['Average',p=>{const d=p.reduce((s,v)=>s+(v.darts||3),0);return d?(3*p.filter(v=>!v.bust).reduce((s,v)=>s+v.score,0)/d).toFixed(2):'0,00'}],
+    ['100+',p=>p.filter(v=>v.score>=100).length],['140+',p=>p.filter(v=>v.score>=140).length],
+    ['Checkouts',p=>p.filter(v=>v.checkout).length],['Legs',(_,i)=>S.legs[i]]];
+  let html='<h2>'+(mode==='best'?'Bestleistungen':'Matchstatistiken')+'</h2><table class="v2-stats-table"><thead><tr><th>'+names[0]+'</th><th>Wert</th><th>'+names[1]+'</th></tr></thead><tbody>';
+  for(const [title,calc] of fields){html+='<tr><td>'+calc(items[0],0)+'</td><th>'+title+'</th><td>'+calc(items[1],1)+'</td></tr>'}
+  html+='</tbody></table><div class="actions"><button id="v2CloseStats">ZUM SCORER</button></div>';
+  modal(html);document.getElementById('v2CloseStats').onclick=closeModal;
+ }
+ function showBoard(){
+  if(!S?.names)return;
+  document.getElementById('v2LegScore').textContent=(S.legs?.[0]||0)+' : '+(S.legs?.[1]||0);
+  document.getElementById('v2SetScore').textContent='SETS '+(S.sets?.[0]||0)+' : '+(S.sets?.[1]||0);
+  document.getElementById('v2MatchFormat').textContent=S.rules?.mode==='sets'?'Best of '+S.rules.best_of_sets+' Sets':'Best of '+S.rules?.max_legs+' Legs';
+  for(let i=0;i<2;i++){const target=document.getElementById('v2Recent'+i);target.replaceChildren();
+    const last=(S.history||[]).filter(v=>v.player===i).slice(-3).reverse();
+    if(!last.length){target.textContent='Noch keine Aufnahme';continue}
+    for(const v of last){const pill=document.createElement('span');pill.className='v2-visit';pill.textContent=v.score+(v.checkout?' ✓':'');target.appendChild(pill)}
+  }
+ }
  const oldResult=result;
  result=function(){
    if(completed||!S?.done)return;
@@ -46,7 +83,7 @@
  const undo=document.createElement('button');undo.textContent='↶ LETZTE AUFNAHME ZURÜCK';undo.type='button';undo.style.cssText='background:#37495f;border:1px solid #c7a86a;color:white;font-weight:800';
  undo.onclick=async()=>{if(!S?.can_undo||!confirm('Letzte Aufnahme zurücknehmen?'))return;try{S=await api('undo',{});entry='';closeModal();showMatch()}catch(e){err(e.message)}};
  document.querySelector('#scorerView .columns .box')?.append(undo);
- const showWithUndo=showMatch;showMatch=function(){showWithUndo();undo.disabled=!S?.can_undo};
+ const showWithUndo=showMatch;showMatch=function(){showWithUndo();undo.disabled=!S?.can_undo;showBoard()};
 
  req().then(async m=>{
    meta=m;if(!m.can_score&&m.status!=='finished')throw Error('Für dieses Spiel fehlen die Spielrechte');

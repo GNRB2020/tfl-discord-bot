@@ -19,3 +19,28 @@ button.red,.red{background:#6e342e!important;border-color:#b37e6c!important}
 .stats th,.tabs button{background:#5d4c2d!important}
 .bar:after{content:'';position:absolute;right:10px;bottom:0;width:14%;height:3px;background:linear-gradient(90deg,transparent,#f1ce6d);pointer-events:none}
 .bar{position:relative}
+
+/* V2 match board: score between the two players, legibly visible averages and visits */
+#scorerView .scorer{grid-template-rows:auto minmax(155px,30%) minmax(0,1fr)!important}
+#scorerView .players{grid-template-columns:minmax(0,1fr) minmax(115px,18%) minmax(0,1fr)!important;gap:10px!important}
+#scorerView .player{padding:14px!important;min-width:0;gap:10px;align-items:flex-start!important}
+#scorerView .player > div{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}
+#scorerView .player .name{font-size:clamp(17px,2.4vh,27px)!important}
+#scorerView .player .meta:has(.liveavg){display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
+#scorerView .player .liveavg{font-size:clamp(25px,4vh,45px)!important;color:#f2ce77!important;line-height:1.1}
+#scorerView .player .score{font-size:clamp(38px,7vh,90px)!important}
+.v2-central{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;text-align:center;border:2px solid #bd9a47;background:linear-gradient(140deg,#201d17,#111);border-radius:14px;min-width:0;padding:10px 4px}
+.v2-central strong{font-size:clamp(25px,5.4vh,57px);color:#f0cc70;white-space:nowrap;font-variant-numeric:tabular-nums}
+.v2-central .v2-sub{font-size:11px;font-weight:850;letter-spacing:1.2px;color:#c7b88c}
+.v2-central span#v2SetScore{font-weight:850;color:#e6d3a8}
+.v2-central small{font-size:11px;color:#c7c0ab}
+.v2-recent{margin-top:auto;min-width:0;}
+.v2-recent-head{font-size:10px;font-weight:850;letter-spacing:1px;color:#bcb7a8}
+.v2-recent-list{display:flex;gap:4px;flex-wrap:wrap;margin-top:5px;font-size:12px;color:#ddd}
+.v2-visit{font-size:clamp(14px,2.2vh,22px);font-weight:850;min-width:38px;text-align:center;padding:3px 6px;border-radius:6px;background:#453c27;color:#f4ddb1;border:1px solid #8c7645}
+.v2-match-tabs{display:flex;gap:6px;justify-content:center;max-height:45px}
+.v2-match-tabs button{font-size:12px!important;min-height:35px;background:#4e412c!important;border-color:#9e854f!important}
+.v2-stats-table{width:100%;border-collapse:collapse}
+.v2-stats-table td,.v2-stats-table th{text-align:center;padding:9px;border-bottom:1px solid #514938}
+@media(max-width:730px){#scorerView .scorer{grid-template-rows:auto minmax(135px,29%) 1fr!important}#scorerView .players{grid-template-columns:minmax(0,1fr) minmax(82px,21%) minmax(0,1fr)!important;gap:4px!important}#scorerView .player{padding:6px!important;gap:2px;flex-direction:column!important;align-items:stretch!important}#scorerView .player .score{font-size:35px!important}#scorerView .player .liveavg{font-size:24px!important}.v2-central strong{font-size:23px}.v2-recent-head{font-size:9px}.v2-visit{font-size:14px;min-width:28px;padding:2px 3px}.v2-match-tabs button{font-size:10px!important;padding:4px!important}}
+@media(max-height:600px){.v2-recent-head{display:none}.v2-visit{font-size:13px}.v2-match-tabs{max-height:30px}.v2-match-tabs button{min-height:25px}}
