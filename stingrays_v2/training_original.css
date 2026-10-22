@@ -1,0 +1,17 @@
+/* Tablet-first screen. The legacy scorer's original control sizes and layout remain. */
+.v2-training-top{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:6px 12px;background:#151619;border-bottom:2px solid #bda067;color:#f3dca5;font-size:clamp(13px,2vw,18px)}
+.v2-training-top button{background:#41454b;border:1px solid #bda067;color:white;min-height:38px;font-weight:700}
+.v2-training-players{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));max-height:42vh;overflow:auto;gap:5px;padding:10px;border:1px solid #4d5158;border-radius:8px;margin:8px 0}
+.v2-player-choice{display:flex;align-items:center;gap:8px;font-size:15px;cursor:pointer;padding:6px;border-radius:6px;background:#292c32}
+.v2-player-choice input{width:20px;height:20px;flex:none}
+#bobs27View{display:flex;flex-direction:column;gap:8px;padding:clamp(6px,1vw,14px);height:calc(100dvh - 92px);overflow:hidden}
+#bobs27View.hide{display:none!important}
+.v2-bobs-top{text-align:center;display:flex;align-items:center;justify-content:center;gap:clamp(10px,2vw,25px);flex-wrap:wrap}
+.v2-bobs-top h2{margin:0}.v2-bobs-total{font-weight:900;color:#d6b674;font-size:clamp(36px,7vh,78px)}
+.v2-bobs-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));grid-template-rows:repeat(3,1fr);gap:5px;flex:1;min-height:0}
+.v2-bobs-round{border-radius:8px;background:#262a30;border:1px solid #555;text-align:center;display:flex;align-items:center;justify-content:center;font-size:clamp(11px,1.6vw,18px);font-weight:700}
+.v2-bobs-round.active{border:2px solid #e3bc73;background:#735323;color:white}.v2-bobs-round.done{background:#2c4e43;color:#dff9ef}
+.v2-bobs-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;min-height:75px}
+.v2-bobs-actions button{background:#215c4b;color:#fff;font-size:clamp(13px,2.5vh,23px);font-weight:900;border:1px solid #93d9bd}
+#bobsUndo{align-self:center;background:#4a515e;color:white}
+@media(max-width:640px){.v2-bobs-grid{grid-template-columns:repeat(7,minmax(0,1fr))}.v2-bobs-actions{min-height:64px}}

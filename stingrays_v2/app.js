@@ -11,6 +11,7 @@ function tile(title,sub,fn){const x=btn('',fn);x.className='tile';x.append(el('s
 // Zur Verwaltung gelangt man über den Zurück-Link des Scorers.
 function openGameWindow(url){window.location.assign(url);return true}
 function launchTrainingWindow(kind){
+ if(kind==='sau'||kind==='tug'||kind==='bobs')return window.location.assign('/dart/v2/training/scorer/?kind='+encodeURIComponent(kind==='bobs'?'bobs27':kind));
  window.location.assign('/dart/v2/?training='+encodeURIComponent(kind));
 }
 
@@ -459,12 +460,14 @@ session().then(async()=>{
    document.body.classList.add('standalone-training');
    await show('training');
    $('trainingList').hidden=true;
+   if(['sau','tug','bobs'].includes(training)){launchTrainingWindow(training);return}
    if(training==='x01')await quickTraining();
    else if(training==='tug')await startTug();
    else if(training==='sau'||training==='bobs')startSolo(training);
    else notice('Unbekannter Trainingsmodus',true);
    return;
  }
+ if(params.get('view')==='training'){await show('training');return}
  if(c)openCompetition(c).catch(e=>notice(e.message,true));
 });
 })();

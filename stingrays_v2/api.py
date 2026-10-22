@@ -83,7 +83,7 @@ async def spa(req):
 
 async def assets(req):
     which=req.match_info['filename']
-    if which not in ('app.js','style.css','legacy_bridge.js','scorer_theme.css','brand.png'):raise web.HTTPNotFound()
+    if which not in ('app.js','style.css','legacy_bridge.js','scorer_theme.css','brand.png','training_original.js','training_original.css'):raise web.HTTPNotFound()
     return web.FileResponse(HERE/which,headers={'Cache-Control':'no-store'})
 
 async def legacy_scorer_page(req):
@@ -1035,6 +1035,8 @@ async def register_cleanup(app):
     if p:await p.close()
 
 def register_stingrays_v2(app):
+    from . import training_original
+    training_original.register(app)
     app.on_startup.append(register_startup);app.on_cleanup.append(register_cleanup)
     from .free_training import register as register_free_training
     register_free_training(app)
