@@ -117,7 +117,7 @@ async def setup(req):
             for i,(p1,p2) in enumerate(pairs):
                 if p1 is None or p2 is None:continue
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
-                  VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,phase,i+1,p1,p2,json.dumps(spec['rules']))
+                  VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,phase,i+1,p1,p2,json.dumps({**spec['rules'],'bracket':'winner'} if spec['format']=='double_ko' else spec['rules']))
                 created+=1
         if not created:raise web.HTTPBadRequest(text='Keine Begegnungen erzeugt')
     return response({'id':cid,'created':created,'groups':spec['group_count'],'automatic':True},201)
@@ -158,7 +158,7 @@ async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=Fa
         for i,(p1,p2) in enumerate(pairs):
             if p1 is None or p2 is None:continue
             await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
-             VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,ph,i+1,p1,p2,json.dumps(match_rules));count+=1
+             VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,ph,i+1,p1,p2,json.dumps({**match_rules,'bracket':'winner'} if fmt=='double_ko' else match_rules));count+=1
     return count
 
 def rank_wildcards(candidates):
@@ -172,6 +172,63 @@ def rank_wildcards(candidates):
         n=max(1,int(row['played']))
         return (row['points']/n, (row['legs_for']-row['legs_against'])/n, row['legs_for']/n)
     return sorted(candidates,key=lambda item:(-metrics(item)[0],-metrics(item)[1],-metrics(item)[2],item[2],str(item[0])))
+
+
+def double_ko_next_matches(participants, allrows):
+    """Return (bracket, p1, p2) for the next DOUBLE KO wave.
+
+    One loss moves a player into the lower bracket; the second eliminates.
+    The undefeated player only meets the lower-bracket winner in the grand final.
+    Each participant plays at most once per wave. Past opponents are avoided
+    until unavoidable (notably the grand final / reset).
+    """
+    losses={p:0 for p in participants}
+    met=set()
+    last_round={p:0 for p in participants}
+    newly_dropped=set()
+    for m in allrows:
+        w=winner(m)
+        if w is None:
+            raise ValueError('Unvollständiges oder unentschiedenes KO-Ergebnis')
+        p1,p2=m['player1_id'],m['player2_id']
+        if p1 not in losses or p2 not in losses:
+            raise ValueError('Unbekannter Teilnehmer im KO-Baum')
+        if losses[p1]>=2 or losses[p2]>=2:
+            raise ValueError('Ein bereits ausgeschiedener Spieler wurde erneut angesetzt')
+        l=p2 if w==p1 else p1
+        losses[l]+=1
+        if losses[l]==1 and int(m['round_number'])==int(allrows[-1]['round_number']):
+            newly_dropped.add(l)
+        met.add(frozenset((p1,p2)))
+        last_round[p1]=last_round[p2]=int(m['round_number'])
+    undefeated=[p for p in participants if losses[p]==0]
+    lower=[p for p in participants if losses[p]==1]
+    if len(undefeated)+len(lower)<=1:
+        return []
+    if len(undefeated)==1 and len(lower)==1:
+        # First meeting of finalists or reset match if the previously undefeated
+        # player lost the first grand final.
+        return [('grand_final',undefeated[0],lower[0])] if undefeated else []
+    if not undefeated and len(lower)==2:
+        # A reset final: both finalists now have exactly one loss.
+        return [('grand_final_reset',lower[0],lower[1])]
+    upcoming=[]
+    def pair_group(people,kind):
+        pool=sorted(people,key=lambda p:(last_round[p],str(p)))
+        # The fresh loser of the upper-bracket final waits until the lower
+        # bracket has produced its challenger (when there are three players).
+        if kind=='loser' and len(pool)%2 and len(pool)>=3:
+            waiting=next((p for p in pool if p in newly_dropped),None)
+            if waiting is not None:pool.remove(waiting)
+        while len(pool)>1:
+            p=pool.pop(0)
+            # Favor opponents not yet played, with the oldest last appearance.
+            q=min(pool,key=lambda x:(frozenset((p,x)) in met,last_round[x],str(x)))
+            pool.remove(q)
+            upcoming.append((kind,p,q))
+    pair_group(undefeated,'winner')
+    pair_group(lower,'loser')
+    return upcoming
 
 
 async def progress(req,cid):
@@ -253,12 +310,25 @@ async def progress(req,cid):
                 remaining=[winner(m) for m in rows]
                 if mx==1:remaining+= [UUID(x) for x in pr.get('bye_players',[])]
             else:
-                loss={p:0 for p in participants}
-                for m in allrows:
-                    w=winner(m)
-                    if w is None:return
-                    l=m['player2_id'] if w==m['player1_id'] else m['player1_id'];loss[l]=loss.get(l,0)+1
-                remaining=[p for p in participants if loss.get(p,0)<2]
+                try:
+                    double_pairs=double_ko_next_matches(participants,allrows)
+                except ValueError as exc:
+                    logging.error('Doppel-KO konnte nicht fortgesetzt werden: %s',exc)
+                    continue
+                if not double_pairs:
+                    await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id'])
+                    continue
+                rules={**pr.get('match_rules',cfg['training_match']),'allow_draw':False}
+                if rules.get('mode')=='legs':
+                    is_final=double_pairs[0][0].startswith('grand_final')
+                    length_key='final' if is_final else 'semifinal' if len(double_pairs)<=2 else 'quarterfinal'
+                    value=cfg.get('round_lengths',{}).get(length_key) if pr.get('stage')=='final' else None
+                    if value is not None:rules['max_legs']=int(value)
+                for i,(bracket,p1,p2) in enumerate(double_pairs):
+                    match_rules={**rules,'bracket':bracket}
+                    await db.execute(f"""INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
+                     VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)""",cid,ph['id'],mx+1,i+1,p1,p2,json.dumps(match_rules))
+                continue
             remaining=[p for p in remaining if p is not None]
             if len(remaining)<=1:
                 await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id']);continue

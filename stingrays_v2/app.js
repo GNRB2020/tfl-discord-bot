@@ -659,13 +659,14 @@ async function openCompetition(id){
       const perRound=new Map();for(const m of matches){const r=Number(m.round_number||1);if(!perRound.has(r))perRound.set(r,[]);perRound.get(r).push(m)}
       for(const [round,ms] of [...perRound].sort((a,b)=>a[0]-b[0])){
         for(const m of ms){const l1=loss.get(String(m.player1_id))||0,l2=loss.get(String(m.player2_id))||0;
-          m._bracketGroup=!isDouble?'winner':l1===0&&l2===0?'winner':l1===1&&l2===1?'loser':'crossover';
+          const tagged=(typeof m.rules==='string'?(()=>{try{return JSON.parse(m.rules||'{}')}catch{return {}}})():m.rules||{}).bracket;
+          m._bracketGroup=!isDouble?'winner':tagged==='grand_final'||tagged==='grand_final_reset'?'crossover':tagged==='winner'||tagged==='loser'?tagged:l1===0&&l2===0?'winner':l1===1&&l2===1?'loser':'crossover';
           groups[m._bracketGroup].push(m);
         }
         for(const m of ms){const w=won(m);if(w){const loser=other(m,w);loss.set(loser,(loss.get(loser)||0)+1)}}
       }
       const hasCross=groups.crossover.length>0;
-      if(isDouble){const message=el('p','Doppel-KO: Winner- und Loser-Partien sind nach bisheriger Niederlagenzahl gruppiert. Begegnungen zwischen beiden Bereichen stehen unter „Final- / Übergangsspiele“. Die bestehende Turnierlogik speichert noch keine festen Bracket-Pfade.','bracket-explanation');stage.append(message)}
+      if(isDouble){const message=el('p','Doppel-KO: Die Partien werden getrennt nach Winner-Bracket und Loser-Bracket dargestellt. Im Grand Final trifft der Sieger des Winner-Brackets auf den Sieger des Loser-Brackets. Gewinnt zunächst der Loser-Bracket-Sieger, folgt ein Reset-Finale.','bracket-explanation');stage.append(message)}
       function renderSection(list,title,kind){if(!list.length)return;
         const head=el('h3',title,'bracket-section-title');stage.append(head);
         const scroll=el('div',undefined,'bracket-scroll');const canvas=el('div',undefined,'sting-bracket-canvas');const wires=document.createElementNS('http://www.w3.org/2000/svg','svg');wires.setAttribute('class','sting-bracket-wires');wires.setAttribute('aria-hidden','true');canvas.append(wires);
