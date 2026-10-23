@@ -48,19 +48,111 @@ $('setupForm').onsubmit=async e=>{e.preventDefault();try{await api('/bootstrap',
 $('loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/login',formData(e.target));await session()}catch(err){notice(err.message,true)}};
 $('passwordForm').onsubmit=async e=>{e.preventDefault();try{await api('/password',formData(e.target));await session()}catch(err){notice(err.message,true)}};
 $('logout').onclick=async()=>{try{await api('/logout',{})}catch{}user=null;section('login')};
-async function dashboard(){const d=await api('/dashboard'+(previewId?'?player_id='+encodeURIComponent(previewId):''));const label=$('previewLabel');label.hidden=!previewId;$('previewBack').hidden=!previewId;if(previewId)label.textContent='SCHREIBGESCHÜTZTE VORSCHAU: '+(players.find(p=>p.id===previewId)?.display_name||previewId)+' – Spiele starten ist als Vorschau nicht möglich.';const host=$('summary');clear(host);for(const c of d.competitions)host.append(tile(c.title,c.kind+' · '+c.status+' · '+c.open_games+' offen',()=>openCompetition(c.id)));const list=$('myOpen');clear(list);if(!d.own_open.length)list.append(el('p','Keine offenen Begegnungen'));for(const m of d.own_open){const x=el('div',undefined,'matchrow');x.append(el('span',m.title+': '+m.player1+' – '+m.player2),btn(previewId?'Nur ansehen':'Spielen',()=>{if(previewId){notice('Spieleransicht ist schreibgeschützt. Zum Spielen Vorschau verlassen.',true);return}openScorer(m.id)}));list.append(x)}}
+async function dashboard(){
+ const d=await api('/dashboard'+(previewId?'?player_id='+encodeURIComponent(previewId):''));
+ const label=$('previewLabel');label.hidden=!previewId;$('previewBack').hidden=!previewId;
+ if(previewId)label.textContent='SCHREIBGESCHÜTZTE VORSCHAU: '+(d.profile?.display_name||'Spieler')+' – keine Spiele im Namen dieses Mitglieds starten.';
+ $('dashboardGreeting').textContent=d.profile?'Dein Dashboard · '+d.profile.display_name:'Dashboard · '+user.username;
+ const summary=$('summary');clear(summary);
+ let performance={};if(d.viewed_player_id){try{performance=await api('/players/'+d.viewed_player_id+'/stats?kind=overall')}catch(e){console.warn('Dashboard-Statistik nicht abrufbar',e)}}
+ const tiles=[['Aktive Wettbewerbe',d.competitions.filter(c=>c.status==='active').length],
+  ['Offene Begegnungen',d.own_open.length],['Letzte 12 · Siege',d.recent_totals.wins],
+  ['Letzte 12 · Bilanz',d.recent_totals.wins+' / '+d.recent_totals.draws+' / '+d.recent_totals.losses],
+  ['Ø Average',performance.average??'–'],['Ø First 9',performance.first9??'–'],
+  ['180er',performance['180']??'–'],['95+',performance['95plus']??'–']];
+ for(const [title,value] of tiles){const x=el('article',undefined,'dash-kpi');x.append(el('span',title),el('strong',String(value)));summary.append(x)}
+ const ladders=$('dashboardLadder');clear(ladders);
+ for(const l of d.ladder){const card=el('article',undefined,'dash-ladder-card');card.append(el('strong',l.title),el('b',l.played?Number(l.elo).toFixed(1)+' ELO · Platz '+l.position:'1000 ELO · Noch kein Spiel'),el('small',l.played+' Spiele · '+l.wins+' S / '+l.draws+' U / '+l.losses+' N'));card.append(action('Rangliste',()=>openCompetition(l.competition_id),'subtle'));ladders.append(card)}
+ if(!d.ladder.length)ladders.append(el('p','Keine aktive Ladder-Teilnahme vorhanden.','helper'));
+ const tournaments=$('dashboardCompetitions');clear(tournaments);
+ for(const c of d.competitions){const x=el('article',undefined,'dash-competition');x.append(el('strong',c.title),el('small',(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.open_games+' eigene offene Spiele'));
+ x.append(action('Öffnen',()=>openCompetition(c.id),'subtle'));tournaments.append(x)}
+ if(!d.competitions.length)tournaments.append(el('p','Noch keine Wettbewerbe eingetragen.','helper'));
+ const list=$('myOpen');clear(list);
+ for(const m of d.own_open){const x=el('div',undefined,'dash-match');x.append(el('div',m.title+' · '+m.player1+' – '+m.player2),el('span',m.status==='running'?'Laufend':'Offen','chip'));
+ x.append(action(previewId?'Spiel ansehen':'Scorer starten',()=>previewId?notice('Die Vorschau ist schreibgeschützt.',true):openScorer(m.id),'primary'));list.append(x)}
+ if(!d.own_open.length)list.append(el('p','Keine offenen Begegnungen','helper'));
+ const recent=$('dashboardRecent');clear(recent);
+ for(const m of d.recent){const ownLeft=m.player1_id===d.viewed_player_id;const score=((m.sets1||m.sets2)?m.sets1:m.legs1)+':'+((m.sets1||m.sets2)?m.sets2:m.legs2);
+ const x=el('article',undefined,'dash-result');x.append(el('div',m.player1+' – '+m.player2+' · '+m.title),el('strong',score),el('small',m.finished_at?new Date(m.finished_at).toLocaleDateString('de-DE'):'Abgeschlossen'));recent.append(x)}
+ if(!d.recent.length)recent.append(el('p','Noch keine abgeschlossenen Wettbewerbsspiele.','helper'));
+}
 async function loadPlayers(){players=await api('/players');renderPlayers()}
-function renderPlayers(){const q=$('memberSearch').value.toLocaleLowerCase('de');const host=$('membersList');clear(host);for(const p of players.filter(p=>p.display_name.toLocaleLowerCase('de').includes(q))){const t=el('article',undefined,'tile');t.append(el('strong',p.display_name),el('small',(p.legacy_profile_id||'Neues Profil')+' · '+(p.username?p.username+' / '+p.role:'Noch kein Konto')));host.append(t)}}
+async function newAccountForPlayer(player){
+ if(!amAdmin())return notice('Nur Administratoren dürfen Konten vergeben.',true);
+ if(player.username)return notice('Dieses Mitglied besitzt bereits ein Konto.',true);
+ const username=player.display_name.toLocaleLowerCase('de').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'.').replace(/^\.|\.$/g,'').slice(0,60);
+ const d=await configure('Benutzerkonto für '+player.display_name,[
+  {name:'username',label:'Benutzername',value:username,required:true},
+  {name:'initial_password',label:'Erstpasswort (mindestens 12 Zeichen)',type:'password',required:true},
+  {name:'role',label:'Benutzerrolle',type:'select',options:[['member','Mitglied · eigene Spiele und Training'],['tournament','Turnieraccount · alle Boards'],['admin','Administrator · volle Verwaltung']]}],
+  'Konto für Mitglied erstellen');
+ if(!d)return;
+ if(d.initial_password.length<12)return notice('Das Erstpasswort muss mindestens 12 Zeichen enthalten.',true);
+ try{await api('/accounts',{player_id:player.id,username:d.username,initial_password:d.initial_password,role:d.role});
+  await loadPlayers();notice('Zugang für '+player.display_name+' angelegt. Beim ersten Login muss das Passwort geändert werden.');}
+ catch(e){notice(e.message,true)}
+}
+function renderPlayers(){
+ const q=$('memberSearch').value.toLocaleLowerCase('de');const host=$('membersList');clear(host);
+ for(const p of players.filter(p=>p.display_name.toLocaleLowerCase('de').includes(q))){
+  const t=el('article',undefined,'member-tile');t.append(el('strong',p.display_name),el('small',p.username?'Konto: '+p.username+' · '+p.role:'Ohne Benutzerkonto'));
+  const foot=el('div',undefined,'member-actions');if(amAdmin()&&!p.username)foot.append(action('Zugang erstellen',()=>newAccountForPlayer(p),'primary'));
+  if(amAdmin()&&p.username)foot.append(el('span',p.is_enabled?'Zugang aktiv':'Zugang gesperrt','helper'));
+  t.append(foot);host.append(t)
+ }
+}
 $('memberSearch').oninput=renderPlayers;
 function fillPlayerSelect(id,blank){const host=$(id);clear(host);if(blank)host.append(new Option('Turnierkonto ohne Spieler',''));for(const p of players)host.append(new Option(p.display_name,p.id))}
-async function loadCompetitions(){competitions=await api('/competitions');const host=$('competitionsList');clear(host);for(const c of competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id))host.append(tile(c.title,(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)))}
+async function loadCompetitions(){
+ $('createCompetitionWizard').hidden=!amAdmin();competitions=await api('/competitions');const host=$('competitionsList');clear(host);for(const c of competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id))host.append(tile(c.title,(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)))}
 async function loadLadder(){const data=await api('/competitions'),host=$('ladderList');clear(host);const ladders=data.filter(c=>c.kind==='ladder');for(const c of ladders)host.append(tile(c.title,(c.status||'')+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)));if(!ladders.length)host.append(el('p','Noch keine Ladder-Saison angelegt. Administratoren können hier die erste Saison erstellen.'));$('ladderCreate').hidden=user.role!=='admin'}
-$('ladderForm').onsubmit=async e=>{e.preventDefault();const d=formData(e.target);d.kind='ladder';d.starts_at=new Date(d.starts_at).toISOString();d.ends_at=new Date(d.ends_at).toISOString();try{const c=await api('/competitions',d);e.target.reset();await loadLadder();notice('Ladder angelegt – '+c.enrolled_members+' aktive Mitglieder automatisch übernommen. Die Tabelle zeigt Spieler erst nach dem ersten Match.')}catch(err){notice(err.message,true)}};
+async function createCompetitionWizard(){
+ if(!amAdmin())return notice('Nur Administratoren dürfen Vereinswettbewerbe anlegen.',true);
+ if(!players.length)players=await api('/players');
+ const first=await configure('1 / 3 · Neuen Wettbewerb anlegen',[
+  {name:'kind',label:'Wettbewerbsart',type:'select',options:[['league','Stingray League'],['cup','Stingray Cup'],['vm','Vereinsmeisterschaft'],['ladder','Stingray Ladder']]},
+  {name:'title',label:'Name des Wettbewerbs',value:'',required:true}], 'Weiter');
+ if(!first)return;
+ let schedule={},participantIds=[];
+ if(first.kind==='ladder'){
+   schedule=await configure('2 / 3 · Ladder-Saison',[
+    {name:'starts_at',label:'Saisonbeginn',type:'datetime-local',required:true},
+    {name:'ends_at',label:'Saisonende',type:'datetime-local',required:true},
+    {name:'min_games',label:'Mindestspiele für Finalqualifikation',type:'number',value:5,min:1,max:250,required:true},
+    {name:'min_opponents',label:'Unterschiedliche Gegner mindestens',type:'number',value:3,min:1,max:200,required:true},
+    {name:'finalists',label:'Anzahl Finalplätze',type:'number',value:8,min:2,max:128,required:true}], 'Weiter');
+   if(!schedule)return;
+   if(new Date(schedule.ends_at)<=new Date(schedule.starts_at))return notice('Saisonende muss nach dem Beginn liegen.',true);
+ }else{
+   const roster=await configure('2 / 3 · Teilnehmer auswählen',[
+    {name:'members',label:'Vereinsmitglieder für '+first.title,type:'multi',options:players.filter(p=>p.is_active).map(p=>[p.id,p.display_name]),value:[]}], 'Weiter');
+   if(!roster)return;participantIds=roster.members;
+ }
+ const desc=first.kind==='ladder'?`Alle aktiven Vereinsmitglieder werden automatisch angemeldet. Finalplätze: ${schedule.finalists}; mindestens ${schedule.min_games} Spiele gegen ${schedule.min_opponents} Gegner. Rematch nach 7 Tagen.`:
+    `${participantIds.length} Spieler werden angemeldet. Gruppen, Spielplan und K.O. werden anschließend über die Wettbewerbsverwaltung konfiguriert.`;
+ if(!await approve('3 / 3 · '+first.title+' erstellen',desc))return;
+ try{
+  const payload={...first};
+  if(first.kind==='ladder'){
+   payload.starts_at=new Date(schedule.starts_at).toISOString();payload.ends_at=new Date(schedule.ends_at).toISOString();
+   payload.rules={min_games:Number(schedule.min_games),min_opponents:Number(schedule.min_opponents),finalists:Number(schedule.finalists)};
+  }
+  const created=await api('/competitions',payload);
+  if(participantIds.length)await api('/competitions/'+created.id+'/entries',{player_ids:participantIds});
+  await loadCompetitions();await openCompetition(created.id);notice('Wettbewerb angelegt. Konfiguriere jetzt Phasen und Gruppen im Tab Verwaltung.');
+ }catch(e){notice('Erstellen fehlgeschlagen: '+e.message,true)}
+}
+
+$('ladderForm').onsubmit=async e=>{e.preventDefault();const d=formData(e.target);d.kind='ladder';d.starts_at=new Date(d.starts_at).toISOString();d.ends_at=new Date(d.ends_at).toISOString();d.rules={min_games:Number(d.min_games),min_opponents:Number(d.min_opponents),finalists:Number(d.finalists)};delete d.min_games;delete d.min_opponents;delete d.finalists;try{const c=await api('/competitions',d);e.target.reset();await loadLadder();notice('Ladder angelegt – '+c.enrolled_members+' aktive Mitglieder automatisch übernommen. Die Tabelle zeigt Spieler erst nach dem ersten Match.')}catch(err){notice(err.message,true)}};
 async function createTraining(){
  const d=await configure('Neues Trainingsturnier',[{name:'title',label:'Turniername',required:true,value:'Trainingsturnier'}],'Turnier erstellen');if(!d)return;
  try{const c=await api('/competitions',{kind:'training_tournament',title:d.title});await show('training');await openCompetition(c.id)}catch(e){notice(e.message,true)}
 }
 $('newTraining').onclick=createTraining;
+$('dashTraining').onclick=()=>show('training');
+$('createCompetitionWizard').onclick=createCompetitionWizard;
+$('createCompetitionAdmin').onclick=createCompetitionWizard;
 async function quickTraining(){
  try{
   if(!players.length)players=await api('/players');
@@ -246,8 +338,42 @@ async function openCompetition(id){
   const names=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
   async function showTables(box){
     if(c.kind==='ladder'){
-      const rows=await api('/competitions/'+id+'/standings');box.append(el('p','ELO · Ausgangswert 1000 · K-Faktor 64 · ein Spiel zählt ab Abschluss','helper'));
-      box.append(renderTable(['PL','Name','Sp.','S','U','N','Legs','Diff','ELO','Siegquote','Ø ELO Gegner','Ø Average','Ø Average Gegner'],rows.map((r,i)=>[i+1,r.display_name,r.played,r.wins,r.draws,r.losses,r.legs_for+':'+r.legs_against,signed(r.legs_for-r.legs_against),r.elo,(r.win_percent??0)+' %',r.average_opponent_elo??'–',r.own_average??'–',r.opponent_average??'–'])));return;
+      const data=await api('/competitions/'+id+'/standings');const rules=data.conditions;
+      const wrap=el('div',undefined,'ladder-table-page');box.append(wrap);
+      const expl=el('div',undefined,'qualification-explanation');
+      expl.append(el('strong','Qualifikation · Top '+rules.finalists),el('span','Min. '+rules.min_games+' Spiele · '+rules.min_opponents+' verschiedene Gegner · 7 Tage Sperre je Paarung'));
+      wrap.append(expl);
+      const controls=el('div',undefined,'ladder-filters'),area=el('div'),history=el('section',undefined,'ladder-history');
+      const filter=picker([['all','Alle Spieler'],['eligible','Mindestbedingungen erfüllt'],['qualified','Aktuelle Finalplätze']],
+        'all',()=>draw());controls.append(el('label','Rangliste filtern'),filter);wrap.append(controls,area,history);
+      async function showPlayerHistory(row){
+       clear(history);history.append(el('h3','Ladder-Spiele · '+row.display_name),el('p','Alle gewerteten Ergebnisse und die ELO-Entwicklung dieses Spielers.','helper'));
+       const close=action('Schließen',()=>clear(history),'subtle');history.append(close);
+       try{
+        const details=await api('/competitions/'+id+'/players/'+row.player_id+'/history');
+        if(!details.matches.length)history.append(el('p','Noch keine abgeschlossenen Spiele.','helper'));
+        for(const m of details.matches){const x=el('article',undefined,'ladder-history-match');
+          x.append(el('span',(m.finished_at?new Date(m.finished_at).toLocaleDateString('de-DE'):'Ohne Datum')+' · '+m.opponent),
+           el('b',m.result+' · '+m.score),el('strong',m.elo_change===null?'ELO noch nicht berechnet':signed(Number(m.elo_change).toFixed(1))+' ELO'),
+           el('small',m.elo_before===null?'Kein ELO-Datensatz':'ELO '+Number(m.elo_before).toFixed(1)+' → '+Number(m.elo_after).toFixed(1)+' · Gegner vor Spiel: '+(m.opponent_elo??'–')));
+          history.append(x)
+        }
+       }catch(e){history.append(el('p',e.message,'error'))}
+       history.scrollIntoView({block:'nearest',behavior:'smooth'});
+      }
+      function draw(){clear(area);clear(history);
+       const rows=data.rows.filter(r=>filter.value==='all'||(filter.value==='eligible'&&r.eligible)||(filter.value==='qualified'&&r.qualified));
+       const info=el('p',`${data.eligible_count} erfüllen die Mindestbedingungen · ${data.qualified_count} derzeit auf einem Finalplatz. Die Platzierung ist bis Saisonende vorläufig.`,'helper');area.append(info);
+       if(!rows.length){area.append(el('p','Noch keine Spieler mit dieser Qualifikation.','empty'));return}
+       const host=el('div',undefined,'scroll ladder-table-wrap'),table=el('table',undefined,'data-table polished ladder-table'),head=el('thead'),hr=el('tr');
+       for(const h of ['PL','Name','Sp.','S','U','N','Legs','Diff','ELO','Siegquote','Ø ELO Gegner','Ø Average','Ø Average Gegner','Gegner'])hr.append(el('th',h));head.append(hr);table.append(head);
+       const body=el('tbody');for(const [i,r] of rows.entries()){
+        const tr=el('tr');if(r.qualified)tr.className='final-place';else if(r.eligible)tr.className='qualifying-ready';
+        const cells=[data.rows.indexOf(r)+1,null,r.played,r.wins,r.draws,r.losses,r.legs_for+':'+r.legs_against,signed(r.legs_for-r.legs_against),Number(r.elo).toFixed(1),(r.win_percent??0)+' %',r.average_opponent_elo??'–',r.own_average??'–',r.opponent_average??'–',r.distinct_opponents];
+        for(const cell of cells){const td=el('td');if(cell===null){const link=action(r.display_name,()=>showPlayerHistory(r),'ladder-name');td.append(link)}else td.textContent=String(cell);tr.append(td)}body.append(tr)
+       }table.append(body);host.append(table);area.append(host);
+       area.append(el('p','Gold = aktuell innerhalb der Finalplätze und Mindestbedingungen erfüllt. Die eigene Ansicht zeigt bei Bedarf nur berechtigte Spieler.','helper'));
+      }draw();return;
     }
     if(!selected.groups.length){box.append(el('p','Noch keine Gruppen angelegt. Die Einteilung erfolgt unter Verwaltung.','empty'));return}
     const switcher=el('div',undefined,'filterline');switcher.append(el('span','Staffel anzeigen'));
@@ -320,6 +446,13 @@ async function openCompetition(id){
         if(m.source==='forfeit')actions.append(el('small','Wertung'));
         else if(m.source==='legacy')actions.append(el('small','Altbestand'));
         else if(m.status==='finished'||amAdmin()||user.role==='tournament'||[m.player1_id,m.player2_id].includes(user.player_id))actions.append(action(m.status==='finished'?'Spiel ansehen':'Scorer',()=>openScorer(m.id),'primary'));
+        if((amAdmin()||trainingOwner())&&['running','cancelled'].includes(m.status))actions.append(action('Auf OPEN zurücksetzen',async()=>{
+          const data=await configure('Begegnung zurücksetzen',[
+            {name:'reason',label:'Grund (Audit-Protokoll)',value:'Testspiel neu starten',required:true},
+            {name:'confirmation',label:'Dabei gehen alle erfassten Aufnahmen dieses Spiels verloren.',type:'select',required:true,options:[['','Bitte auswählen'],['yes','Spiel zurücksetzen']]}], 'Zurücksetzen');
+          if(!data||data.confirmation!=='yes')return;
+          try{await api('/matches/'+m.id+'/reset',{reason:data.reason,confirm:'ZURUECKSETZEN'});await openCompetition(id);notice('Begegnung ist wieder OPEN.')}catch(e){notice(e.message,true)}
+        },'danger'));
         if(user.role==='admin'&&m.status==='open')actions.append(action('Altes Ergebnis',async()=>{
           const d=await configure('Altes Ergebnis erfassen',[{name:'score',label:'Endstand (z.B. 4:2)',required:true}]);if(!d)return;const raw=d.score;
           const match=/^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(raw);if(!match){notice('Format: 4:2',true);return}
@@ -338,16 +471,27 @@ async function openCompetition(id){
     box.append(grid);
   }
   function showLadderAdmin(box){
-    box.append(el('p','Ladder: keine Gruppeneinteilung, keine automatische Paarungsliste. Matches können im Spielplan frei vereinbart werden.','helper'));
+    box.append(el('p','Ladder-Verwaltung · Freie Matchvereinbarung, ELO und Finalqualifikation. Keine künstlichen Gruppen für die Vorrunde.','helper'));
+    const q=c.rules||{},panel=el('article',undefined,'manage-card');panel.append(el('h3','Qualifikation fürs Finale'));
+    const current=el('p',`Mindestspiele: ${q.min_games??5} · Verschiedene Gegner: ${q.min_opponents??3} · Finalplätze: ${q.finalists??8} · Rematch: 7 Tage`,'helper');panel.append(current);
+    panel.append(action('Qualifikationsbedingungen bearbeiten',async()=>{
+      const data=await configure('Finalqualifikation konfigurieren',[
+        {name:'min_games',label:'Mindestens gespielte Matches',type:'number',min:1,max:250,value:q.min_games??5,required:true},
+        {name:'min_opponents',label:'Mindestens verschiedene Gegner',type:'number',min:1,max:200,value:q.min_opponents??3,required:true},
+        {name:'finalists',label:'Spieler im Finale (Top X)',type:'number',min:2,max:128,value:q.finalists??8,required:true}], 'Speichern');
+      if(!data)return;
+      try{await api('/competitions/'+id+'/ladder-conditions',data);await openCompetition(id);notice('Neue Qualifikationsgrenzen gespeichert. Die Rangliste ist aktualisiert.')}catch(e){notice(e.message,true)}
+    },'primary'));box.append(panel);
     const status=picker([['active','Aktiv'],['finished','Beendet'],['archived','Archiviert']],c.status,async value=>{try{await api('/competitions/'+id+'/status',{status:value});await openCompetition(id)}catch(e){notice(e.message,true)}});
     const l=el('label','Ladder-Status');l.append(status);box.append(l);
     box.append(action('Ladder nach Saisonende abschließen',async()=>{if(!await approve('Ladder abschließen','Offene Matches nach Saisonende abbrechen und ELO einfrieren?'))return;try{await api('/competitions/'+id+'/end-ladder',{});await openCompetition(id)}catch(e){notice(e.message,true)}},'danger'));
     box.append(action('Wettbewerb archivieren',async()=>{if(!await approve('Ladder archivieren','Saison aus der aktiven Übersicht ins Archiv verschieben?'))return;try{await api('/competitions/'+id+'/status',{status:'archived'});await openCompetition(id)}catch(e){notice(e.message,true)}}));
-    box.append(action('Wettbewerb ausblenden',async()=>{if(!await approve('Ladder ausblenden','Achtung: Dieser Wettbewerb wird aus der Statistik entfernt.'))return;try{await api('/competitions/'+id+'/delete',{confirm:'DAUERHAFT AUSBLENDEN'});$('competitionDetail').hidden=true;await loadCompetitions()}catch(e){notice(e.message,true)}},'danger'));
+    box.append(action('Testwettbewerb löschen',async()=>{if(!await approve('Ladder ausblenden','Achtung: Dieser Wettbewerb wird aus der Statistik entfernt.'))return;try{await api('/competitions/'+id+'/delete',{confirm:'DAUERHAFT AUSBLENDEN'});$('competitionDetail').hidden=true;await loadCompetitions()}catch(e){notice(e.message,true)}},'danger'));
   }
   function showManagement(box){
     if(!amAdmin()&&!trainingOwner())return;
     if(c.kind==='ladder'){showLadderAdmin(box);return}
+    const steps=el('div',undefined,'setup-steps');steps.append(el('b','1. Teilnehmer'),el('b','2. Phasen & Gruppen'),el('b','3. Spielplan'),el('b','4. Ergebnisse & Abschluss'));box.append(steps);
     const ad=el('p','Administrative Werkzeuge – Änderungen betreffen den Wettbewerb und seine Ergebnisse.','helper');box.append(ad);
     const management=el('div',undefined,'management-grid');box.append(management);
     function panel(title,description){const panel=el('section',undefined,'manage-card');panel.append(el('h3',title),el('p',description,'helper'));management.append(panel);return panel}
@@ -452,7 +596,6 @@ const migrationPanel=el('div',undefined,'panel');migrationPanel.append(el('h2','
 const choice=d.legacy_id;const source=result.leagues.find(l=>l.legacy_id===choice);
 if(!source||!await approve('Import bestätigen','Liga '+source.name+' als eigenständige Kopie übernehmen?'))return;
 const r=await api('/legacy/import',{legacy_id:choice,confirm:true});notice(r.fixtures+' Begegnungen in Neon kopiert');await show('competitions')}catch(e){notice(e.message,true)}}));$('admin').append(migrationPanel);
-$('competitionForm').onsubmit=async e=>{e.preventDefault();let d=formData(e.target);for(const key of ['starts_at','ends_at']){if(d[key])d[key]=new Date(d[key]).toISOString();else delete d[key]}try{await api('/competitions',d);e.target.reset();notice('Wettbewerb erstellt');await show('competitions')}catch(err){notice(err.message,true)}};
 session().then(async()=>{
  const params=new URLSearchParams(location.search),c=params.get('competition'),training=params.get('training');
  if(!user)return;

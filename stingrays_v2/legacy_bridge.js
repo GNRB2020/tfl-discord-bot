@@ -160,7 +160,34 @@
  const undo=document.createElement('button');undo.textContent='↶ LETZTE AUFNAHME ZURÜCK';undo.type='button';undo.style.cssText='background:#37495f;border:1px solid #c7a86a;color:white;font-weight:800';
  undo.onclick=async()=>{if(!S?.can_undo||!confirm('Letzte Aufnahme zurücknehmen?'))return;try{S=await api('undo',{});entry='';closeModal();showMatch()}catch(e){err(e.message)}};
  document.querySelector('#scorerView .columns .box')?.append(undo);
- const showWithUndo=showMatch;showMatch=function(){showWithUndo();undo.disabled=!S?.can_undo;showBoard()};
+ // Highlight the original keypad's 1/2/3 only if that dart count is a legal checkout.
+ // A short tap remains the existing number input; a long press is handled above.
+ const checkoutKeys=new Map();
+ for(const button of document.querySelectorAll('#pad button')){
+   const value=button.textContent.trim();
+   if(['1','2','3'].includes(value))checkoutKeys.set(Number(value),button);
+ }
+ const checkoutKeyStyle=document.createElement('style');
+ checkoutKeyStyle.textContent=`
+ #pad button.v2-check-ready {background:#147847!important;color:#fff!important;
+   border:2px solid #e6d18a!important;box-shadow:0 0 0 2px rgba(230,209,138,.22);
+   font-weight:900;position:relative;touch-action:none}
+ #pad button.v2-check-ready::after{content:'CHECK';display:block;font-size:10px;line-height:1.1;
+   font-weight:700;letter-spacing:.06em;color:#fff2bd}
+ #pad button.v2-check-ready:active{background:#0b5634!important}
+ `;
+ document.head.appendChild(checkoutKeyStyle);
+ function updateCheckoutKeys(){
+   const legal=(S?.kind==='x01' && !S?.done && Array.isArray(S?.can_checkout)) ? S.can_checkout : [];
+   for(const [darts,button] of checkoutKeys){
+     const active=legal.includes(darts);
+     button.classList.toggle('v2-check-ready',active);
+     button.setAttribute('aria-label',active?`${darts} – kurz tippen: Ziffer, lange halten: Checkout mit ${darts} Dart${darts===1?'':'s'}`:`${darts}`);
+     button.title=active?`${darts} Dart${darts===1?'':'s'} Checkout möglich: lange halten`:`Ziffer ${darts}`;
+   }
+ }
+
+ const showWithUndo=showMatch;showMatch=function(){showWithUndo();undo.disabled=!S?.can_undo;showBoard();updateCheckoutKeys()};
 
  req().then(async m=>{
    meta=m;if(!m.can_score&&m.status!=='finished')throw Error('Für dieses Spiel fehlen die Spielrechte');

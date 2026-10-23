@@ -71,6 +71,30 @@ async def actor(req,minimum=None,allow_change=False):
     if minimum=='tournament' and a['role'] not in ('admin','tournament'):raise web.HTTPForbidden(text='Nur Turnierleitung')
     return a
 
+
+# Ladder qualification is derived from finished matches, never manually asserted.
+LADDER_DEFAULTS={'min_games':5,'min_opponents':3,'finalists':8,'rematch_cooldown_days':7}
+
+def ladder_conditions(rules):
+    raw=as_json(rules)
+    return {key:int(raw.get(key,default)) for key,default in LADDER_DEFAULTS.items()}
+
+def ladder_qualification(rows,opponents,rules):
+    settings=ladder_conditions(rules)
+    considered=[]
+    for r in rows:
+        item=dict(r)
+        item['distinct_opponents']=int(opponents.get(item['player_id'],0))
+        item['eligible']=item['played']>=settings['min_games'] and item['distinct_opponents']>=settings['min_opponents']
+        item['qualified']=False
+        item['qualification_rank']=None
+        considered.append(item)
+    qualifying=[r for r in considered if r['eligible']]
+    for i,r in enumerate(qualifying,1):
+        r['qualification_rank']=i
+        r['qualified']=i<=settings['finalists']
+    return considered,settings
+
 async def health(req):
     try:
         async with pool(req).acquire() as db:
@@ -261,7 +285,14 @@ async def create_competition(req):
     if start and end and end<=start:raise web.HTTPBadRequest(text='Ende muss nach dem Start liegen')
     rules=d.get('rules') or {}
     if not isinstance(rules,dict):raise web.HTTPBadRequest(text='Regeln als Objekt erwartet')
-    if kind=='ladder':rules.update(k_factor=64,initial_elo=1000,rematch_cooldown_days=7)
+    if kind=='ladder':
+        rules.update(k_factor=64,initial_elo=1000,rematch_cooldown_days=7)
+        for key,default in LADDER_DEFAULTS.items():rules.setdefault(key,default)
+        for key,low,high in (('min_games',1,250),('min_opponents',1,200),('finalists',2,128)):
+            try:value=int(rules[key])
+            except (TypeError,ValueError):raise web.HTTPBadRequest(text='Ungültige Ladder-Regel: '+key)
+            if not low<=value<=high:raise web.HTTPBadRequest(text='Ungültige Ladder-Regel: '+key)
+            rules[key]=value
     async with pool(req).acquire() as db:
         async with db.transaction():
             c=await db.fetchrow(f'''INSERT INTO {SCHEMA}.competitions(title,kind,status,starts_at,ends_at,rules,created_by)
@@ -390,24 +421,26 @@ async def generate_rounds(req):
 
 async def create_match(req):
     a=await actor(req);d=await body(req);cid=uid(req.match_info['cid'])
+    ids=[uid(d.get('player1_id')),uid(d.get('player2_id'))]
+    if ids[0]==ids[1]:raise web.HTTPBadRequest(text='Verschiedene Spieler erforderlich')
     async with pool(req).acquire() as db:
-        c=await db.fetchrow(f'SELECT kind,status,starts_at,ends_at,created_by FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL',cid)
+      async with db.transaction():
+        c=await db.fetchrow(f'''SELECT kind,status,starts_at,ends_at,created_by,rules FROM {SCHEMA}.competitions
+             WHERE id=$1 AND deleted_at IS NULL''',cid)
         if not c:raise web.HTTPNotFound()
         if c['kind'] not in ('ladder','training_tournament') and a['role']!='admin':raise web.HTTPForbidden(text='Nur Administratoren legen Vereinsbegegnungen an')
         if c['kind']=='training_tournament' and a['role']!='admin' and c['created_by']!=a['id']:
             raise web.HTTPForbidden(text='Nur eigene Trainingsturniere bearbeiten')
         if c['kind']=='ladder' and c['status']!='active':raise web.HTTPConflict(text='Ladder nicht aktiv')
-        ids=[uid(d.get('player1_id')),uid(d.get('player2_id'))]
-        if ids[0]==ids[1]:raise web.HTTPBadRequest(text='Verschiedene Spieler erforderlich')
         if c['kind']=='training_tournament' and a['role']=='member' and a['player_id'] not in ids:raise web.HTTPForbidden(text='Nur eigene Trainingsspiele starten')
         if c['kind']=='ladder':
-            if c['starts_at'] and datetime.now(timezone.utc)<c['starts_at'] or c['ends_at'] and datetime.now(timezone.utc)>=c['ends_at']:
+            now=datetime.now(timezone.utc)
+            if c['starts_at'] and now<c['starts_at'] or c['ends_at'] and now>=c['ends_at']:
                 raise web.HTTPConflict(text='Außerhalb des Ladder-Zeitraums')
-            # Player account can only initiate games in which they participate.
             if a['role']=='member' and a['player_id'] not in ids:raise web.HTTPForbidden(text='Nicht deine Begegnung')
         for pid in ids:
-            if not await db.fetchval(f'SELECT EXISTS(SELECT 1 FROM {SCHEMA}.entries WHERE competition_id=$1 AND player_id=$2)',cid,pid):
-                raise web.HTTPBadRequest(text='Spieler nicht im Wettbewerb')
+            if not await db.fetchval(f"SELECT EXISTS(SELECT 1 FROM {SCHEMA}.entries WHERE competition_id=$1 AND player_id=$2 AND status='active')",cid,pid):
+                raise web.HTTPBadRequest(text='Spieler nicht aktiv im Wettbewerb')
         phase=await db.fetchval(f'''SELECT id FROM {SCHEMA}.phases WHERE competition_id=$1 AND kind=$2 ORDER BY phase_order LIMIT 1''',cid,'ladder' if c['kind']=='ladder' else 'groups' if c['kind']=='training_tournament' else 'league')
         if not phase and c['kind']=='ladder':
             phase=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status)
@@ -415,10 +448,23 @@ async def create_match(req):
                 DO UPDATE SET kind='ladder' RETURNING id''',cid)
         if not phase:raise web.HTTPConflict(text='Phase fehlt')
         if c['kind']=='ladder':
-            recent=await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches WHERE competition_id=$1
-                  AND status='finished' AND finished_at>now()-interval '7 days'
-                  AND ((player1_id=$2 AND player2_id=$3) OR (player1_id=$3 AND player2_id=$2)))''',cid,*ids)
-            if recent:raise web.HTTPConflict(text='Diese Paarung darf erst nach 7 Tagen erneut gewertet werden')
+            # Serialise concurrent requests for the same player pair. No duplicate games on tablets.
+            from hashlib import blake2b
+            lock_key='|'.join(sorted(map(str,[cid,*ids])))
+            lock=int.from_bytes(blake2b(lock_key.encode(),digest_size=8).digest(),'big',signed=True)
+            await db.execute('SELECT pg_advisory_xact_lock($1::bigint)',lock)
+            active=await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches
+                 WHERE competition_id=$1 AND status IN ('open','running')
+                 AND ((player1_id=$2 AND player2_id=$3) OR (player1_id=$3 AND player2_id=$2)))''',cid,*ids)
+            if active:raise web.HTTPConflict(text='Für diese Paarung besteht bereits eine offene oder laufende Begegnung')
+            last=await db.fetchval(f'''SELECT max(coalesce(finished_at,created_at)) FROM {SCHEMA}.matches
+                 WHERE competition_id=$1 AND status='finished'
+                 AND ((player1_id=$2 AND player2_id=$3) OR (player1_id=$3 AND player2_id=$2))''',cid,*ids)
+            if last:
+                from datetime import timedelta
+                allowed=last+timedelta(days=7)
+                if datetime.now(timezone.utc)<allowed:
+                    raise web.HTTPConflict(text='7-Tage-Sperre: erneutes Match ab '+allowed.astimezone(timezone.utc).strftime('%d.%m.%Y %H:%M UTC'))
         user_rules=d.get('rules') or {}
         if not isinstance(user_rules,dict):raise web.HTTPBadRequest(text='Ungültige Spielregeln')
         try:rules=mode_rules(c['kind'],'ladder' if c['kind']=='ladder' else 'groups',overrides=user_rules)
@@ -437,11 +483,19 @@ async def standings(req):
         c=await db.fetchrow(f'SELECT kind FROM {SCHEMA}.competitions WHERE id=$1',cid)
         if not c:raise web.HTTPNotFound()
         if c['kind']=='ladder':
+            settings=await db.fetchval(f'SELECT rules FROM {SCHEMA}.competitions WHERE id=$1',cid)
             rows=await db.fetch(f'''SELECT r.*,p.display_name,round(100.0*r.wins/nullif(r.played,0),1) AS win_percent
                  FROM {SCHEMA}.ladder_ratings r JOIN {SCHEMA}.players p ON p.id=r.player_id
-                 WHERE r.competition_id=$1 AND r.played>0 ORDER BY r.elo DESC,r.played DESC''',cid)
-            # Averages are calculated from completed ladder matches only.
-            # Opponent ELO uses the recorded pre-match rating, not today's ELO.
+                 WHERE r.competition_id=$1 AND r.played>0 ORDER BY r.elo DESC,r.played DESC,r.wins DESC,p.display_name''',cid)
+            competitors=await db.fetch(f'''SELECT player1_id,player2_id FROM {SCHEMA}.matches
+                WHERE competition_id=$1 AND status='finished' AND source='scorer' ''',cid)
+            opponent_sets={}
+            for m in competitors:
+                p1,p2=m['player1_id'],m['player2_id']
+                opponent_sets.setdefault(p1,set()).add(p2)
+                opponent_sets.setdefault(p2,set()).add(p1)
+            qualified,conditions=ladder_qualification(rows,{p:len(op) for p,op in opponent_sets.items()},settings)
+            # Every result is based on the players' pre-game rating and actual scorer visits.
             events=await db.fetch(f'''SELECT le.match_id,le.player_id,le.elo_before,
                  m.player1_id,m.player2_id,m.state,m.source
                  FROM {SCHEMA}.ladder_events le
@@ -450,7 +504,7 @@ async def standings(req):
             by_match={}
             for e in events:by_match.setdefault(e['match_id'],[]).append(e)
             totals={r['player_id']:{'opponent_elo':[],'own_scores':0,'own_darts':0,
-                 'opponent_scores':0,'opponent_darts':0} for r in rows}
+                 'opponent_scores':0,'opponent_darts':0} for r in qualified}
             for egroup in by_match.values():
                 if len(egroup)!=2:continue
                 for e in egroup:
@@ -468,13 +522,16 @@ async def standings(req):
                             t['opponent_scores']+=0 if visit.get('bust') else int(visit.get('score',0))
                             t['opponent_darts']+=int(visit.get('darts',3))
             answer=[]
-            for r in rows:
+            for r in qualified:
                 item=dict(r);t=totals[r['player_id']];values=t['opponent_elo']
                 item['average_opponent_elo']=round(sum(values)/len(values),1) if values else None
                 item['own_average']=round(3*t['own_scores']/t['own_darts'],2) if t['own_darts'] else None
                 item['opponent_average']=round(3*t['opponent_scores']/t['opponent_darts'],2) if t['opponent_darts'] else None
                 answer.append(item)
-            return response(answer)
+            if req.query.get('filter')=='eligible':answer=[r for r in answer if r['eligible']]
+            elif req.query.get('filter')=='qualified':answer=[r for r in answer if r['qualified']]
+            return response({'rows':answer,'conditions':conditions,'eligible_count':sum(r['eligible'] for r in qualified),
+                'qualified_count':sum(r['qualified'] for r in qualified)})
         gid=uid(req.query['group_id']) if req.query.get('group_id') else None
         if gid:
             entries=await db.fetch(f'''SELECT e.player_id,p.display_name FROM {SCHEMA}.group_members gm
@@ -489,6 +546,78 @@ async def standings(req):
     ranks=rank_rows([dict(m) for m in ms],[r['player_id'] for r in entries]);names={r['player_id']:r['display_name'] for r in entries}
     for i,r in enumerate(ranks,1):r.update(rank=i,name=names.get(r['player_id']))
     return response(ranks)
+
+async def update_ladder_conditions(req):
+    a=await actor(req,'admin');d=await body(req);cid=uid(req.match_info['cid'])
+    values={}
+    for key,low,high in (('min_games',1,250),('min_opponents',1,200),('finalists',2,128)):
+        try:value=int(d[key])
+        except (ValueError,KeyError,TypeError):raise web.HTTPBadRequest(text='Ungültiger Wert für '+key)
+        if not low<=value<=high:raise web.HTTPBadRequest(text=f'{key}: {low} bis {high}')
+        values[key]=value
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        c=await db.fetchrow(f'''SELECT kind,rules,status FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL FOR UPDATE''',cid)
+        if not c or c['kind']!='ladder':raise web.HTTPNotFound(text='Ladder fehlt')
+        if c['status'] in ('finished','archived'):raise web.HTTPConflict(text='Abgeschlossene Ladder nicht umkonfigurieren')
+        rules=as_json(c['rules']);rules.update(values)
+        rules['rematch_cooldown_days']=7
+        await db.execute(f'''UPDATE {SCHEMA}.competitions SET rules=$2::jsonb WHERE id=$1''',cid,json.dumps(rules))
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+          VALUES($1,'update_ladder_qualification','competition',$2,$3::jsonb)''',a['id'],str(cid),json.dumps(values))
+    return response({'conditions':ladder_conditions(rules)})
+
+async def ladder_player_history(req):
+    await actor(req);cid=uid(req.match_info['cid']);pid=uid(req.match_info['pid'])
+    async with pool(req).acquire() as db:
+        c=await db.fetchrow(f'''SELECT kind,title FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL''',cid)
+        if not c or c['kind']!='ladder':raise web.HTTPNotFound(text='Ladder fehlt')
+        player=await db.fetchval(f'''SELECT display_name FROM {SCHEMA}.players WHERE id=$1''',pid)
+        if not player:raise web.HTTPNotFound(text='Spieler fehlt')
+        rows=await db.fetch(f'''SELECT m.id,m.finished_at,m.created_at,m.legs1,m.legs2,m.sets1,m.sets2,
+           m.player1_id,m.player2_id,m.source,p.display_name AS opponent,
+           le.elo_before,le.elo_after,le.elo_change,le.expected,le.outcome,other.elo_before AS opponent_elo
+           FROM {SCHEMA}.matches m JOIN {SCHEMA}.players p
+             ON p.id=CASE WHEN m.player1_id=$2 THEN m.player2_id ELSE m.player1_id END
+           LEFT JOIN {SCHEMA}.ladder_events le ON le.match_id=m.id AND le.player_id=$2
+           LEFT JOIN {SCHEMA}.ladder_events other ON other.match_id=m.id AND other.player_id<>$2
+           WHERE m.competition_id=$1 AND m.status='finished'
+             AND (m.player1_id=$2 OR m.player2_id=$2)
+           ORDER BY m.finished_at DESC NULLS LAST,m.created_at DESC,m.id DESC''',cid,pid)
+    out=[]
+    for row in rows:
+        m=dict(row);own_left=m['player1_id']==pid
+        scores=(m['legs1'],m['legs2']) if own_left else (m['legs2'],m['legs1'])
+        m['score']=f'{scores[0] or 0}:{scores[1] or 0}'
+        m['result']='S' if (scores[0] or 0)>(scores[1] or 0) else 'N' if (scores[0] or 0)<(scores[1] or 0) else 'U'
+        out.append({k:m[k] for k in ('id','finished_at','created_at','opponent','score','result','source',
+                  'elo_before','elo_after','elo_change','expected','outcome','opponent_elo')})
+    return response({'player_id':pid,'name':player,'competition':c['title'],'matches':out})
+
+async def reset_match(req):
+    a=await actor(req);d=await body(req);mid=uid(req.match_info['mid'])
+    if d.get('confirm')!='ZURUECKSETZEN':raise web.HTTPBadRequest(text='Bestätigung erforderlich')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        m=await db.fetchrow(f'''SELECT id,competition_id,status,source,state,player1_id,player2_id FROM {SCHEMA}.matches
+            WHERE id=$1 FOR UPDATE''',mid)
+        if not m:raise web.HTTPNotFound()
+        await require_manager(db,a,m['competition_id'])
+        if m['status'] not in ('running','open','cancelled'):
+            raise web.HTTPConflict(text='Abgeschlossene Ergebnisse benötigen eine gesonderte Korrektur einschließlich ELO- und Tabellenneuberechnung')
+        if m['status']=='cancelled' and a['role']!='admin':raise web.HTTPForbidden(text='Nur Administratoren dürfen abgesagte Spiele reaktivieren')
+        await db.execute(f'''DELETE FROM {SCHEMA}.throws WHERE match_id=$1''',mid)
+        await db.execute(f'''DELETE FROM {SCHEMA}.match_legs WHERE match_id=$1''',mid)
+        await db.execute(f'''DELETE FROM {SCHEMA}.match_sets WHERE match_id=$1''',mid)
+        await db.execute(f'''DELETE FROM {SCHEMA}.match_claims WHERE match_id=$1''',mid)
+        await db.execute(f'''UPDATE {SCHEMA}.matches SET status='open',source=NULL,state='{{}}'::jsonb,
+           state_version=state_version+1,board_id=NULL,started_at=NULL,finished_at=NULL,winner_id=NULL,
+           legs1=NULL,legs2=NULL,sets1=NULL,sets2=NULL WHERE id=$1''',mid)
+        await db.execute(f'''INSERT INTO {SCHEMA}.match_revisions(match_id,actor_id,action,previous_state,new_state,reason)
+          VALUES($1,$2,'admin_reset',$3::jsonb,'{{}}'::jsonb,$4)''',mid,a['id'],json.dumps(as_json(m['state'])),str(d.get('reason','Neustart der Begegnung'))[:500])
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+          VALUES($1,'reset_match','match',$2,$3::jsonb)''',a['id'],str(mid),json.dumps({'previous_status':m['status']}))
+    return response({'ok':True,'status':'open'})
 
 async def match_state(req):
     a=await actor(req);mid=uid(req.match_info['mid'])
@@ -1006,17 +1135,47 @@ async def overview(req):
     if preview and a['role']!='admin':raise web.HTTPForbidden(text='Nur Admin darf Spieleransicht nutzen')
     viewed=uid(preview) if preview else a['player_id']
     async with pool(req).acquire() as db:
-        entries=await db.fetch(f'''SELECT c.id,c.title,c.kind,c.status,count(m.id) FILTER(WHERE m.status='open') AS open_games
-          FROM {SCHEMA}.competitions c LEFT JOIN {SCHEMA}.matches m ON m.competition_id=c.id
-          WHERE c.deleted_at IS NULL GROUP BY c.id ORDER BY c.created_at DESC LIMIT 30''')
-        own=[]
+        person=await db.fetchrow(f'''SELECT id,display_name FROM {SCHEMA}.players WHERE id=$1''',viewed) if viewed else None
+        entries=[];own=[];recent=[];ladder=[]; totals={'played':0,'wins':0,'draws':0,'losses':0}
         if viewed:
-            own=await db.fetch(f'''SELECT m.id,c.title,c.kind,p1.display_name AS player1,p2.display_name AS player2
+            entries=await db.fetch(f'''SELECT c.id,c.title,c.kind,c.status,c.starts_at,c.ends_at,
+               e.status AS entry_status,
+               (SELECT count(*) FROM {SCHEMA}.matches m WHERE m.competition_id=c.id
+                AND m.status IN ('open','running') AND (m.player1_id=$1 OR m.player2_id=$1)) AS open_games
+              FROM {SCHEMA}.entries e JOIN {SCHEMA}.competitions c ON c.id=e.competition_id
+              WHERE e.player_id=$1 AND c.deleted_at IS NULL AND c.status IN ('draft','active','finished')
+              ORDER BY CASE WHEN c.status='active' THEN 0 ELSE 1 END,c.created_at DESC LIMIT 50''',viewed)
+            own=await db.fetch(f'''SELECT m.id,m.status,c.id AS competition_id,c.title,c.kind,
+                p1.display_name AS player1,p2.display_name AS player2
                 FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
                 JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
-                WHERE c.deleted_at IS NULL AND m.status='open' AND (m.player1_id=$1 OR m.player2_id=$1)
-                LIMIT 30''',viewed)
-    return response({'competitions':list(map(dict,entries)),'own_open':list(map(dict,own)),'viewed_player_id':viewed,'preview':bool(preview)})
+                WHERE c.deleted_at IS NULL AND m.status IN ('open','running') AND (m.player1_id=$1 OR m.player2_id=$1)
+                ORDER BY CASE WHEN m.status='running' THEN 0 ELSE 1 END,m.created_at DESC LIMIT 40''',viewed)
+            recent=await db.fetch(f'''SELECT m.id,c.id AS competition_id,c.title,c.kind,m.finished_at,
+                m.player1_id,m.player2_id,m.legs1,m.legs2,m.sets1,m.sets2,
+                p1.display_name AS player1,p2.display_name AS player2
+                FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
+                JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
+                WHERE c.deleted_at IS NULL AND m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)
+                ORDER BY m.finished_at DESC NULLS LAST,m.created_at DESC LIMIT 12''',viewed)
+            ladder=await db.fetch(f'''SELECT r.competition_id,c.title,r.elo,r.played,r.wins,r.draws,r.losses,
+                 (SELECT count(*)+1 FROM {SCHEMA}.ladder_ratings z WHERE z.competition_id=r.competition_id
+                  AND z.played>0 AND z.elo>r.elo) AS position
+                FROM {SCHEMA}.ladder_ratings r JOIN {SCHEMA}.competitions c ON c.id=r.competition_id
+                WHERE r.player_id=$1 AND c.kind='ladder' AND c.deleted_at IS NULL
+                ORDER BY c.created_at DESC LIMIT 5''',viewed)
+            for m in recent:
+                left=m['player1_id']==viewed
+                score1=(m['sets1'] if (m['sets1'] or m['sets2']) else m['legs1']) or 0
+                score2=(m['sets2'] if (m['sets1'] or m['sets2']) else m['legs2']) or 0
+                own_score,opp_score=(score1,score2) if left else (score2,score1)
+                totals['played']+=1
+                totals['wins']+=int(own_score>opp_score)
+                totals['draws']+=int(own_score==opp_score)
+                totals['losses']+=int(own_score<opp_score)
+    return response({'competitions':list(map(dict,entries)),'own_open':list(map(dict,own)),
+        'recent':list(map(dict,recent)),'ladder':list(map(dict,ladder)),'recent_totals':totals,
+        'profile':dict(person) if person else None,'viewed_player_id':viewed,'preview':bool(preview)})
 
 async def register_startup(app):
     url=os.environ.get('STINGRAYS_DATABASE_URL')
@@ -1061,9 +1220,12 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/groups/{gid}/fixtures',generate_rounds),
       ('POST','/dart/v2/api/competitions/{cid}/matches',create_match),
       ('GET','/dart/v2/api/competitions/{cid}/standings',standings),
+      ('POST','/dart/v2/api/competitions/{cid}/ladder-conditions',update_ladder_conditions),
+      ('GET','/dart/v2/api/competitions/{cid}/players/{pid}/history',ladder_player_history),
       ('GET','/dart/v2/api/matches/{mid}',match_state),
       ('POST','/dart/v2/api/matches/{mid}/start',start_match),
       ('POST','/dart/v2/api/matches/{mid}/throw',throw),('POST','/dart/v2/api/matches/{mid}/undo',undo_visit),
+      ('POST','/dart/v2/api/matches/{mid}/reset',reset_match),
       ('POST','/dart/v2/api/matches/{mid}/manual',manual_result),
       ('POST','/dart/v2/api/competitions/{cid}/withdraw',withdraw),
       ('POST','/dart/v2/api/phases/{pid}/close',close_phase),
@@ -1080,7 +1242,7 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/training/tug',save_tug_session),
     ]
     for method,path,handler in routes:app.router.add_route(method,path,handler)
-    print('[STINGRAYS V2] release r20261022-ui-scoring-roles installed under /dart/v2/')
+    print('[STINGRAYS V2] dashboard-ladder-admin r20261023 installed under /dart/v2/')
 
 # The existing Google-Sheets League remains authoritative until an administrator
 # explicitly imports a checked copy. No old record is mutated by these routes.
