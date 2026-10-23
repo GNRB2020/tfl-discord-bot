@@ -422,10 +422,30 @@ async function createTraining(){
    if(cf.consolation_format==='groups'){const nc=await configure('Gruppenanzahl der Trostrunde',[{name:'consolation_group_count',label:'Anzahl Trostgruppen',type:'number',min:1,max:16,value:2,required:true}],'Weiter');if(!nc)return;Object.assign(next,nc)}
   }
  }}
+ if(next.follow==='yes' && ['single_ko','double_ko'].includes(next.follow_format)){
+  const third=await configure('Spiel um Platz 3',[{name:'third_place',label:'Spiel um Platz 3?',type:'select',options:[['no','Nein'],['yes','Ja']]}],'Weiter');
+  if(!third)return;next.third_place=third.third_place;
+ }
+ const roundLengths={};
+ if(m.mode==='legs'){
+  const lengthFields=[{name:'group',label:'Gruppenphase · Best of Legs (gerade erlaubt)',type:'number',value:m.max_legs,min:1,max:101,required:true}];
+  if(ko||next.follow==='yes'){
+   lengthFields.push({name:'quarterfinal',label:'Viertelfinale · Best of Legs (ungerade)',type:'number',value:5,min:1,max:101,required:true});
+   lengthFields.push({name:'semifinal',label:'Halbfinale · Best of Legs (ungerade)',type:'number',value:7,min:1,max:101,required:true});
+   if(next.third_place==='yes')lengthFields.push({name:'third_place',label:'Spiel um Platz 3 · Best of Legs (ungerade)',type:'number',value:5,min:1,max:101,required:true});
+   lengthFields.push({name:'final',label:'Finale · Best of Legs (ungerade)',type:'number',value:9,min:1,max:101,required:true});
+  }
+  const choices=await configure('Matchlängen nach Turnierphase',lengthFields,'Weiter');if(!choices)return;
+  for(const [key,value] of Object.entries(choices)){
+   const n=Number(value);if(!Number.isInteger(n)||n<1||n>101||(key!=='group'&&n%2===0))return notice('K.O.-Matchlängen müssen ungerade sein.',true);
+   roundLengths[key]=n;
+  }
+  m.max_legs=roundLengths.group;
+ }
  if(!await approve('Turnier anlegen',selection.members.length+' Spieler · '+stage.format+' · '+m.start_score+' Punkte · '+(isSets?'Best of '+m.best_of_sets+' Sets / '+m.best_of_legs_per_set+' Legs':'Best of '+m.max_legs+' Legs')+' · Spielplan wird automatisch erzeugt.'))return;
  try{
   const payload={title:title.title,player_ids:selection.members,format:stage.format,group_count:Number(settings.group_count||1),double_round:settings.rounds==='double',rules:m,
-   follow:next.follow==='yes',consolation:next.consolation==='yes',qualifiers:next.qualifiers||'1',best_third_count:Number(next.best_third_count||0),follow_format:next.follow_format||'single_ko',consolation_format:next.consolation_format||'single_ko',follow_group_count:Number(next.follow_group_count||1),consolation_group_count:Number(next.consolation_group_count||1)};
+   round_lengths:roundLengths,third_place:next.third_place==='yes',follow:next.follow==='yes',consolation:next.consolation==='yes',qualifiers:next.qualifiers||'1',best_third_count:Number(next.best_third_count||0),follow_format:next.follow_format||'single_ko',consolation_format:next.consolation_format||'single_ko',follow_group_count:Number(next.follow_group_count||1),consolation_group_count:Number(next.consolation_group_count||1)};
   const c=await api('/training/tournament/setup',payload);await show('training');await openCompetition(c.id);notice('Turnier mit '+c.created+' Begegnungen erstellt.');
  }catch(e){notice('Turnieranlage: '+e.message,true)}
 }

@@ -57,6 +57,14 @@
   document.getElementById('v2LegScore').textContent=(S.legs?.[0]||0)+' : '+(S.legs?.[1]||0);
   document.getElementById('v2SetScore').textContent='SETS '+(S.sets?.[0]||0)+' : '+(S.sets?.[1]||0);
   document.getElementById('v2MatchFormat').textContent=S.rules?.mode==='sets'?'Best of '+S.rules.best_of_sets+' Sets':'Best of '+S.rules?.max_legs+' Legs';
+  // Update visible averages from the entire persisted match history on every redraw.
+  for(let i=0;i<2;i++){
+    const visits=(S.history||[]).filter(v=>Number(v.player)===i);
+    const darts=visits.reduce((sum,v)=>sum+Number(v.darts??3),0);
+    const points=visits.reduce((sum,v)=>sum+(v.bust?0:Number(v.score||0)),0);
+    const field=document.getElementById('av'+i);
+    if(field)field.textContent=(darts?3*points/darts:0).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2});
+  }
   for(let i=0;i<2;i++){const target=document.getElementById('v2Recent'+i);target.replaceChildren();
     const last=(S.history||[]).filter(v=>v.player===i).slice(-3).reverse();
     if(!last.length){target.textContent='Noch keine Aufnahme';continue}

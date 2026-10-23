@@ -49,8 +49,22 @@ def validate_plan(d):
         try: value=int(d.get(key,1))
         except (ValueError,TypeError):raise web.HTTPBadRequest(text='Ungültige Gruppenanzahl in Folgerunde')
         if not 1<=value<=16:raise web.HTTPBadRequest(text='1–16 Folgegruppen zulässig')
+    # Round-specific match lengths; preliminary round may be drawn, KO cannot.
+    stages=('group','quarterfinal','semifinal','third_place','final')
+    round_lengths={}
+    for stage in stages:
+        value=d.get('round_lengths',{}).get(stage) if isinstance(d.get('round_lengths'),dict) else None
+        if value is None:continue
+        try:value=int(value)
+        except (TypeError,ValueError):raise web.HTTPBadRequest(text='Ungültige Matchlänge: '+stage)
+        if not 1<=value<=101:raise web.HTTPBadRequest(text='Best of X muss 1–101 sein')
+        if stage!='group' and value%2==0:raise web.HTTPBadRequest(text='K.O.-Matchlängen müssen ungerade sein')
+        round_lengths[stage]=value
+    third_place=bool(d.get('third_place',False))
+    if third_place and (not follow or nextfmt not in ('single_ko','double_ko')):
+        raise web.HTTPBadRequest(text='Spiel um Platz 3 benötigt eine KO-Finalrunde')
     return {'format':fmt,'ids':ids,'group_count':n,'rules':prelim,'double_round':bool(d.get('double_round',False)),
-            'follow':follow,'consolation':consolation,'qualifiers':q,'best_third_count':extra_thirds,'follow_format':nextfmt,'consolation_format':comfort,'follow_group_count':int(d.get('follow_group_count',1)), 'consolation_group_count':int(d.get('consolation_group_count',1))}
+            'follow':follow,'consolation':consolation,'round_lengths':round_lengths,'third_place':third_place,'qualifiers':q,'best_third_count':extra_thirds,'follow_format':nextfmt,'consolation_format':comfort,'follow_group_count':int(d.get('follow_group_count',1)), 'consolation_group_count':int(d.get('consolation_group_count',1))}
 
 async def setup(req):
     a=await actor(req);d=await body(req);title=str(d.get('title','')).strip()
@@ -58,8 +72,10 @@ async def setup(req):
     spec=validate_plan(d)
     if a['role']=='member' and a['player_id'] not in spec['ids']:
         raise web.HTTPForbidden(text='Mitglieder können nur eigene Trainingsturniere erstellen')
+    if spec['rules']['mode']=='legs' and spec['round_lengths'].get('group'):
+        spec['rules']={**spec['rules'],'max_legs':spec['round_lengths']['group'],'allow_draw':spec['round_lengths']['group']%2==0}
     config={'auto_tournament':True,'format':spec['format'],'training_match':spec['rules'],
-            'double_round':spec['double_round'],'follow':spec['follow'],'consolation':spec['consolation'],
+            'double_round':spec['double_round'],'follow':spec['follow'],'consolation':spec['consolation'],'round_lengths':spec['round_lengths'],'third_place':spec['third_place'],
             'qualifiers':spec['qualifiers'],'best_third_count':spec['best_third_count'],'follow_format':spec['follow_format'],
             'consolation_format':spec['consolation_format'], 'follow_group_count':spec['follow_group_count'],'consolation_group_count':spec['consolation_group_count']}
     async with pool(req).acquire() as db:
@@ -74,6 +90,8 @@ async def setup(req):
         phase=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
             VALUES($1,'Vorrunde',$2,1,'open',$3::jsonb) RETURNING id''',cid,kind,json.dumps({'stage':'preliminary','format':spec['format'],'participants':[str(x) for x in spec['ids']],'match_rules':spec['rules']}))
         created=0
+        if spec['rules']['mode']=='legs' and spec['round_lengths'].get('group'):
+            spec['rules']={**spec['rules'],'max_legs':spec['round_lengths']['group'],'allow_draw':spec['round_lengths']['group']%2==0}
         if kind in ('groups','league'):
             buckets=[[] for _ in range(spec['group_count'])]
             for i,pid in enumerate(spec['ids']):
@@ -90,6 +108,9 @@ async def setup(req):
                         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',cid,phase,gid,rnd,p1,p2,json.dumps(spec['rules']))
                     created+=1
         else:
+            if spec['rules']['mode']=='legs':
+                initial_key='final' if len(spec['ids'])<=2 else 'semifinal' if len(spec['ids'])<=4 else 'quarterfinal'
+                spec['rules']={**spec['rules'],'max_legs':int(spec['round_lengths'].get(initial_key,spec['rules']['max_legs']))}
             pairs=bracket_pairs(spec['ids'])
             byes=[p for x,y in pairs if not(x and y) for p in (x,y) if p]
             await db.execute(f'UPDATE {SCHEMA}.phases SET rules=rules || $2::jsonb WHERE id=$1',phase,json.dumps({'bye_players':[str(p) for p in byes]}))
@@ -204,7 +225,11 @@ async def progress(req,cid):
                     selected.extend(manual if manual else [x[0] for x in best[:extra]])
                     rest=[pid for pid in rest if pid not in additional]
                 if len(selected)<2:raise web.HTTPConflict(text='Weniger als zwei qualifizierte Spieler')
-                await _make_stage(db,cid,'final',selected,cfg.get('follow_format','single_ko'),cfg['training_match'],cfg.get('follow_group_count',1))
+                final_rules={**cfg['training_match']}
+                if final_rules.get('mode')=='legs':
+                    initial_key='final' if len(selected)<=2 else 'semifinal' if len(selected)<=4 else 'quarterfinal'
+                    final_rules['max_legs']=int(cfg.get('round_lengths',{}).get(initial_key,final_rules['max_legs']))
+                await _make_stage(db,cid,'final',selected,cfg.get('follow_format','single_ko'),final_rules,cfg.get('follow_group_count',1))
                 if cfg.get('consolation') and len(rest)>=2:
                     await _make_stage(db,cid,'consolation',rest,cfg.get('consolation_format','single_ko'),cfg['training_match'],cfg.get('consolation_group_count',1))
             elif cfg['format'] in ('league','groups'):
@@ -233,7 +258,23 @@ async def progress(req,cid):
             remaining=[p for p in remaining if p is not None]
             if len(remaining)<=1:
                 await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id']);continue
-            rules=pr.get('match_rules',cfg['training_match']);next_pairs=[(x,y) for x,y in bracket_pairs(remaining) if x and y]
+            rules={**pr.get('match_rules',cfg['training_match'])}
+            if pr.get('stage')=='final' and rules.get('mode')=='legs':
+                # Two remaining = final; previous two ties = semifinals.
+                key='final' if len(remaining)==2 else 'semifinal' if len(remaining)<=4 else 'quarterfinal'
+                value=cfg.get('round_lengths',{}).get(key)
+                if value is not None:rules['max_legs']=int(value)
+            if pr.get('stage')=='final' and cfg.get('third_place') and len(rows)==2 and len(remaining)==2 and fmt=='single_ko':
+                losers=[m['player2_id'] if winner(m)==m['player1_id'] else m['player1_id'] for m in rows]
+                existing=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.phases WHERE competition_id=$1 AND rules->>'stage'='third_place'",cid)
+                if not existing and len(set(losers))==2:
+                    tp={**cfg['training_match'],'allow_draw':False}
+                    if tp.get('mode')=='legs':
+                        tp['max_legs']=int(cfg.get('round_lengths',{}).get('third_place',5))
+                        if tp['max_legs']%2==0:tp['max_legs']+=1
+                    pid=await db.fetchval(f"INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules) VALUES($1,'Spiel um Platz 3','knockout',4,'open',$2::jsonb) RETURNING id",cid,json.dumps({'stage':'third_place','format':'single_ko','participants':[str(x) for x in losers],'match_rules':tp}))
+                    await db.execute(f"INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules) VALUES($1,$2,1,1,$3,$4,$5::jsonb)",cid,pid,losers[0],losers[1],json.dumps(tp))
+            next_pairs=[(x,y) for x,y in bracket_pairs(remaining) if x and y]
             if not next_pairs:continue
             for i,(p1,p2) in enumerate(next_pairs):
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
