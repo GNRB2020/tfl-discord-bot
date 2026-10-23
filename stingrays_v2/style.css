@@ -248,3 +248,12 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .data-table tr.tournament-qualified td:nth-child(2){color:#f5d37f;font-weight:800;}
 .data-table tr.tournament-cutoff td{border-bottom:3px dashed #eac36a!important;}
 .competition-content .scroll{max-width:100%;overflow-x:auto;}
+
+/* Trainingsturniere: alle Qualifikationsplätze, auch Platz 1 (leader), gleich markieren */
+.competition-content .data-table.polished tbody tr.tournament-qualified,
+.competition-content .data-table.polished tbody tr.tournament-qualified.leader {background:#383223!important;}
+.competition-content .data-table.polished tbody tr.tournament-qualified td {background:#383223!important;color:#f4deb0!important;}
+.competition-content .data-table.polished tbody tr.tournament-qualified td:first-child {border-left:4px solid #e8bf64!important;font-weight:800;}
+.competition-content .data-table.polished tbody tr.tournament-qualified td:nth-child(2) {font-weight:850;color:#ffdf83!important;}
+.competition-content .data-table.polished tbody tr.tournament-cutoff td {border-bottom:3px dashed #edc66f!important;}
+.competition-content .qualification-notice {border:1px solid #aa8745;background:#352d1f;color:#ffdd8b;border-radius:8px;padding:10px 14px;font-weight:750;margin:12px 0;}

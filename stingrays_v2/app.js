@@ -677,15 +677,16 @@ async function openCompetition(id){
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
       const rawRules=c.rules||{};
-      const qualifyCount=rawRules.follow? (rawRules.qualifiers==='all'?rows.length:Math.max(0,Number(rawRules.qualifiers)||0)) : 0;
+      const qualifierSetting=String(rawRules.qualifiers??'1').toLowerCase();
+      const qualifyCount=rawRules.follow? (qualifierSetting==='all'?rows.length:Math.min(rows.length,Math.max(0,Number(qualifierSetting)||0))) : 0;
       area.append(el('h3',g.name));
-      if(qualifyCount){area.append(el('p','Finalrunde: '+Math.min(qualifyCount,rows.length)+' von '+rows.length+' Spielern dieser Gruppe qualifizieren sich'+(rawRules.consolation?' · übrige Spieler: Trostrunde':''),'helper'))}
+      if(qualifyCount){area.append(el('p','Finalrunde: '+(qualifyCount===rows.length?'Alle '+rows.length+' Plätze':'Platz 1–'+qualifyCount)+' qualifizieren sich'+(rawRules.consolation?' · übrige Spieler: Trostrunde':''),'qualification-notice'))}
       const tableWrap=renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt'],rows.map(r=>[
           r.rank,{player_id:r.player_id,name:r.name+(withdrawals.has(r.player_id)?' · ausgetreten':'')},r.played,r.wins,r.draws,r.losses,
           String(r.legs_for)+':'+String(r.legs_against),signed(r.legs_for-r.legs_against),r.points
       ]),true);
       if(qualifyCount){const bodyRows=tableWrap.querySelectorAll('tbody tr');bodyRows.forEach((line,i)=>{
-         if(i<qualifyCount)line.classList.add('tournament-qualified');
+         if(i<qualifyCount){line.classList.add('tournament-qualified');line.title='Qualifiziert für die Finalrunde (vorläufig)';}
          if(i===qualifyCount-1&&qualifyCount<rows.length)line.classList.add('tournament-cutoff');
       })}
       area.append(tableWrap);
