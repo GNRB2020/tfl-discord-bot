@@ -952,7 +952,14 @@ async function openCompetition(id){
     },'primary'));box.append(panel);
     const status=picker([['active','Aktiv'],['finished','Beendet'],['archived','Archiviert']],c.status,async value=>{try{await api('/competitions/'+id+'/status',{status:value});await openCompetition(id)}catch(e){notice(e.message,true)}});
     const l=el('label','Ladder-Status');l.append(status);box.append(l);
-    if(c.rules?.final_competition_id){box.append(el('p','Die Ladder ist beendet und die Finalteilnehmer stehen fest.','helper'));box.append(action('Finalturnier öffnen',()=>openCompetition(c.rules.final_competition_id),'primary'));}
+    if(c.rules?.final_competition_id){
+      box.append(el('p','Zu dieser Ladder wurde bereits ein Finalturnier erzeugt. Das Zurücksetzen des Ladder-Status alleine gibt keine neue Finalerzeugung frei.','helper'));
+      box.append(action('Finalturnier öffnen',()=>openCompetition(c.rules.final_competition_id),'primary'));
+      box.append(action('Finalturnier für erneuten Test freigeben',async()=>{
+        if(!await approve('Finalturnier für Test neu erzeugen','Das bisherige Finalturnier wird inklusive seiner Ergebnisse archiviert und als vorheriger Testlauf gekennzeichnet. Die Ladder-Ergebnisse und ELO-Werte bleiben erhalten. Danach kannst du ein neues Finalturnier erzeugen. Wirklich fortfahren?'))return;
+        try{await api('/competitions/'+id+'/reset-ladder-final-test',{confirm:'FINALE NEU TESTEN'});await openCompetition(id);notice('Altes Finale archiviert. Du kannst die Ladder erneut abschließen und ein neues Finale erzeugen.');}catch(e){notice(e.message,true)}
+      },'danger'));
+    }
     else if(c.status==='active')box.append(action('Ladderphase jetzt abschließen und Finale erstellen',async()=>{
       const d=await configure('Ladder abschließen · Finalturnier',[
         {name:'group_count',label:'Anzahl Finalgruppen',type:'number',value:2,min:1,max:16,required:true},

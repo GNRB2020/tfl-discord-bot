@@ -1333,6 +1333,36 @@ async def end_ladder(req):
           VALUES($1,'ladder_final_created','competition',$2,$3::jsonb)''',a['id'],str(cid),json.dumps({'final_id':str(final_id),'qualified':[str(x) for x in finalists]}))
     return response({'elo_frozen':True,'final_competition_id':final_id,'qualified_count':len(finalists),'group_matches':count})
 
+async def reset_ladder_final_test(req):
+    # Admin-only retest: archive previous final and release source ladder.
+    a=await actor(req,'admin');cid=uid(req.match_info['cid']);d=await body(req)
+    if d.get('confirm')!='FINALE NEU TESTEN':
+        raise web.HTTPBadRequest(text='Bestätigung FINALE NEU TESTEN erforderlich')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        c=await db.fetchrow(f'''SELECT id,title,kind,status,rules FROM {SCHEMA}.competitions
+            WHERE id=$1 AND deleted_at IS NULL FOR UPDATE''',cid)
+        if not c or c['kind']!='ladder':raise web.HTTPBadRequest(text='Keine Ladder')
+        rules=as_json(c['rules'])
+        fid=rules.get('final_competition_id')
+        if not fid:raise web.HTTPConflict(text='Für diese Ladder wurde noch kein Finale erzeugt')
+        final_id=uid(fid)
+        final=await db.fetchrow(f'''SELECT id,title,kind,status,rules FROM {SCHEMA}.competitions
+            WHERE id=$1 AND deleted_at IS NULL FOR UPDATE''',final_id)
+        if not final or final['kind']!='final_tournament' or str(as_json(final['rules']).get('ladder_final_of'))!=str(cid):
+            raise web.HTTPConflict(text='Das verknüpfte Finale stimmt nicht mit dieser Ladder überein')
+        old_rules=as_json(final['rules'])
+        old_rules['superseded_ladder_test_final']=True
+        old_rules['superseded_by_ladder_retest_at']=datetime.now(timezone.utc).isoformat()
+        await db.execute(f'''UPDATE {SCHEMA}.competitions SET status='archived',rules=$2::jsonb,
+            title=$3 WHERE id=$1''',final_id,json.dumps(old_rules),final['title']+' (vorheriger Testlauf)' if '(vorheriger Testlauf)' not in final['title'] else final['title'])
+        for key in ('final_competition_id','qualified_player_ids','ladder_closed_early','final_group_count','final_advance_per_group'):
+            rules.pop(key,None)
+        await db.execute(f'''UPDATE {SCHEMA}.competitions SET status='active',rules=$2::jsonb WHERE id=$1''',cid,json.dumps(rules))
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+            VALUES($1,'ladder_final_test_reset','competition',$2,$3::jsonb)''',a['id'],str(cid),json.dumps({'archived_final_id':str(final_id)}))
+    return response({'reset':True,'archived_final_id':str(final_id),'ladder_id':str(cid)})
+
 async def competition_status(req):
     await actor(req,'admin');d=await body(req);cid=uid(req.match_info['cid'])
     status=d.get('status')
@@ -1805,6 +1835,7 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/phases/{pid}/bracket',bracket),
       ('POST','/dart/v2/api/phases/{pid}/advance',advance_knockout),
       ('POST','/dart/v2/api/competitions/{cid}/end-ladder',end_ladder),
+      ('POST','/dart/v2/api/competitions/{cid}/reset-ladder-final-test',reset_ladder_final_test),
       ('POST','/dart/v2/api/competitions/{cid}/status',competition_status),
       ('POST','/dart/v2/api/competitions/{cid}/delete',delete_competition),
       ('GET','/dart/v2/api/competitions/{cid}/export',export_open),
