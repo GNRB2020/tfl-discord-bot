@@ -676,14 +676,15 @@ async function openCompetition(id){
     async function fill(){clear(area);const g=selected.groups.find(g=>g.id===chosen.value);if(!g)return;
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
-      const rawRules=c.rules||{};
+      const rawRules=typeof c.rules==='string'?JSON.parse(c.rules||'{}'):(c.rules||{});
       const qualifierSetting=String(rawRules.qualifiers??'1').toLowerCase();
       const qualifyCount=rawRules.follow? (qualifierSetting==='all'?rows.length:Math.min(rows.length,Math.max(0,Number(qualifierSetting)||0))) : 0;
       area.append(el('h3',g.name));
       if(qualifyCount){area.append(el('p','Finalrunde: '+(qualifyCount===rows.length?'Alle '+rows.length+' Plätze':'Platz 1–'+qualifyCount)+' qualifizieren sich'+(rawRules.consolation?' · übrige Spieler: Trostrunde':''),'qualification-notice'))}
-      const tableWrap=renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt'],rows.map(r=>[
+      const tableWrap=renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt',...(qualifyCount?['Qualifikation']:[])],rows.map((r,i)=>[
           r.rank,{player_id:r.player_id,name:r.name+(withdrawals.has(r.player_id)?' · ausgetreten':'')},r.played,r.wins,r.draws,r.losses,
-          String(r.legs_for)+':'+String(r.legs_against),signed(r.legs_for-r.legs_against),r.points
+          String(r.legs_for)+':'+String(r.legs_against),signed(r.legs_for-r.legs_against),r.points,
+          ...(qualifyCount?[i<qualifyCount?'Finalrunde':'–']:[])
       ]),true);
       if(qualifyCount){const bodyRows=tableWrap.querySelectorAll('tbody tr');bodyRows.forEach((line,i)=>{
          if(i<qualifyCount){line.classList.add('tournament-qualified');line.title='Qualifiziert für die Finalrunde (vorläufig)';}
@@ -847,6 +848,54 @@ async function openCompetition(id){
   function showManagement(box){
     if(!amAdmin()&&!trainingOwner())return;
     if(c.kind==='ladder'){showLadderAdmin(box);return}
+    if(c.kind==='training_tournament'){
+      const r=typeof c.rules==='string'?JSON.parse(c.rules||'{}'):(c.rules||{});
+      const config=el('section',undefined,'manage-card');
+      config.append(el('h3','Final- und Trostrunde nachträglich ändern'),
+        el('p','Die Qualifikation lässt sich bis zur tatsächlichen Anlage der nächsten Phase korrigieren. Bereits laufende Finalrunden bleiben geschützt.','helper'));
+      config.append(el('p','Aktuell: '+(r.follow?'Finalrunde · '+(r.qualifiers==='all'?'Alle':(r.qualifiers||1)+' je Gruppe')+' · '+(r.follow_format||'single_ko'):'Keine Finalrunde')+(r.consolation?' · mit Trostrunde':''),'helper'));
+      config.append(action('Qualifikation und Folgerunden bearbeiten',async()=>{
+        const bool=[['no','Nein'],['yes','Ja']];
+        const first=await configure('Turnierregeln nachträglich bearbeiten',[
+          {name:'follow',label:'Finalrunde?',type:'select',options:bool,value:r.follow?'yes':'no'}
+        ],'Weiter');if(!first)return;
+        const payload={follow:first.follow==='yes',consolation:false,
+          qualifiers:String(r.qualifiers||'1'),follow_format:r.follow_format||'single_ko',
+          consolation_format:r.consolation_format||'single_ko',
+          follow_group_count:Number(r.follow_group_count||1),consolation_group_count:Number(r.consolation_group_count||1)};
+        if(payload.follow){
+          const second=await configure('Finalrunde konfigurieren',[
+            {name:'qualifiers',label:'Qualifikanten je Gruppe',type:'select',value:payload.qualifiers,
+             options:[['1','1'],['2','2'],['4','4'],['8','8'],['all','Alle']]},
+            {name:'follow_format',label:'Finalmodus',type:'select',value:payload.follow_format,
+             options:[['single_ko','Single KO'],['double_ko','Double KO'],['league','Liga'],['groups','Gruppenrunde']]}
+          ],'Weiter');if(!second)return;Object.assign(payload,second);
+          if(payload.follow_format==='groups'){
+            const groups=await configure('Gruppenanzahl der Finalrunde',[
+              {name:'follow_group_count',label:'Gruppenanzahl',type:'number',value:payload.follow_group_count,min:1,max:16,required:true}
+            ],'Weiter');if(!groups)return;Object.assign(payload,groups);
+          }
+          const third=await configure('Trostrunde',[
+            {name:'consolation',label:'Trostrunde für nicht Qualifizierte?',type:'select',options:bool,value:r.consolation?'yes':'no'}
+          ],'Weiter');if(!third)return;payload.consolation=third.consolation==='yes';
+          if(payload.consolation){
+            const fourth=await configure('Trostrunde konfigurieren',[
+              {name:'consolation_format',label:'Trostrundenmodus',type:'select',value:payload.consolation_format,
+               options:[['single_ko','Single KO'],['double_ko','Double KO'],['league','Liga'],['groups','Gruppenrunde']]}
+            ],'Weiter');if(!fourth)return;Object.assign(payload,fourth);
+            if(payload.consolation_format==='groups'){
+              const tg=await configure('Gruppenanzahl der Trostrunde',[
+                {name:'consolation_group_count',label:'Gruppenanzahl',type:'number',value:payload.consolation_group_count,min:1,max:16,required:true}
+              ],'Weiter');if(!tg)return;Object.assign(payload,tg);
+            }
+          }
+        }
+        if(!await approve('Turnierregeln aktualisieren','Die Tabellen- und Qualifikationsmarkierungen werden angepasst. Bereits absolvierte Vorrundenspiele bleiben bestehen.'))return;
+        try{await api('/competitions/'+id+'/tournament-settings',payload);await openCompetition(id);notice('Qualifikationsregeln gespeichert.')}
+        catch(e){notice(e.message,true)}
+      },'primary'));
+      box.append(config);
+    }
     const steps=el('div',undefined,'setup-steps');steps.append(el('b','1. Teilnehmer'),el('b','2. Phasen & Gruppen'),el('b','3. Spielplan'),el('b','4. Ergebnisse & Abschluss'));box.append(steps);
     const ad=el('p','Administrative Werkzeuge – Änderungen betreffen den Wettbewerb und seine Ergebnisse.','helper');box.append(ad);
     const management=el('div',undefined,'management-grid');box.append(management);

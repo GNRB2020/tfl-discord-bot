@@ -769,6 +769,42 @@ async def standings(req):
     for i,r in enumerate(ranks,1):r.update(rank=i,name=names.get(r['player_id']))
     return response(ranks)
 
+async def update_tournament_configuration(req):
+    """Update planned follow-up stages without modifying played matches."""
+    a=await actor(req);cid=uid(req.match_info['cid']);data=await body(req)
+    allowed={'follow','qualifiers','follow_format','follow_group_count','consolation','consolation_format','consolation_group_count'}
+    if not set(data).issubset(allowed):raise web.HTTPBadRequest(text='Unbekannte Turniereinstellung')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        await require_manager(db,a,cid)
+        c=await db.fetchrow(f"SELECT kind,status,rules FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",cid)
+        if not c or c['kind']!='training_tournament':raise web.HTTPBadRequest(text='Nur Trainingsturniere')
+        if c['status'] in ('finished','archived'):raise web.HTTPConflict(text='Abgeschlossenes Turnier ist gesperrt')
+        rules=as_json(c['rules']);fmt=rules.get('format','groups')
+        if not rules.get('auto_tournament'):raise web.HTTPConflict(text='Nur über den Turnierassistenten angelegte Turniere lassen sich hier ändern')
+        if fmt in ('single_ko','double_ko'):raise web.HTTPConflict(text='Nach einer KO-Vorrunde sind keine Folgerunden konfigurierbar')
+        stage_started=await db.fetchval(f"""SELECT EXISTS(SELECT 1 FROM {SCHEMA}.phases
+          WHERE competition_id=$1 AND phase_order>1)""",cid)
+        if stage_started:raise web.HTTPConflict(text='Final- oder Trostrunde wurde bereits angelegt; vorherige Regeln können nicht mehr geändert werden')
+        updated={**rules,**data}
+        if type(updated.get('follow')) is not bool or type(updated.get('consolation')) is not bool:
+            raise web.HTTPBadRequest(text='Folgerunde und Trostrunde: Ja oder Nein erforderlich')
+        if updated['consolation'] and not updated['follow']:
+            raise web.HTTPBadRequest(text='Trostrunde erfordert eine Finalrunde')
+        if str(updated.get('qualifiers')) not in ('1','2','4','8','all'):
+            raise web.HTTPBadRequest(text='Qualifikation: 1, 2, 4, 8 oder alle')
+        for key in ('follow_format','consolation_format'):
+            if updated.get(key) not in ('single_ko','double_ko','league','groups'):
+                raise web.HTTPBadRequest(text='Ungültiger Modus in '+key)
+        for key in ('follow_group_count','consolation_group_count'):
+            try:n=int(updated.get(key,1))
+            except (ValueError,TypeError):raise web.HTTPBadRequest(text='Ungültige Gruppenanzahl')
+            if not 1<=n<=16:raise web.HTTPBadRequest(text='Gruppenanzahl muss zwischen 1 und 16 liegen')
+            updated[key]=n
+        await db.execute(f'UPDATE {SCHEMA}.competitions SET rules=$2::jsonb WHERE id=$1',cid,json.dumps(updated))
+        await db.execute(f"INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details) VALUES($1,'training_tournament_rules_updated','competition',$2,$3::jsonb)",a['id'],str(cid),json.dumps({'before':{k:rules.get(k) for k in allowed},'after':{k:updated.get(k) for k in allowed}}))
+    return response({'updated':True,'rules':updated})
+
 async def update_ladder_conditions(req):
     a=await actor(req,'admin');d=await body(req);cid=uid(req.match_info['cid'])
     values={}
@@ -1640,6 +1676,7 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/groups/{gid}/fixtures',generate_rounds),
       ('POST','/dart/v2/api/competitions/{cid}/matches',create_match),
       ('GET','/dart/v2/api/competitions/{cid}/standings',standings),
+      ('POST','/dart/v2/api/competitions/{cid}/tournament-settings',update_tournament_configuration),
       ('POST','/dart/v2/api/competitions/{cid}/ladder-conditions',update_ladder_conditions),
       ('GET','/dart/v2/api/competitions/{cid}/players/{pid}/history',ladder_player_history),
       ('GET','/dart/v2/api/matches/{mid}',match_state),
