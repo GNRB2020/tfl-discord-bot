@@ -161,6 +161,19 @@
  const undo=document.createElement('button');undo.textContent='↶ LETZTE AUFNAHME ZURÜCK';undo.type='button';undo.style.cssText='background:#37495f;border:1px solid #c7a86a;color:white;font-weight:800';
  undo.onclick=async()=>{if(!S?.can_undo||!confirm('Letzte Aufnahme zurücknehmen?'))return;try{S=await api('undo',{});entry='';closeModal();showMatch()}catch(e){err(e.message)}};
  document.querySelector('#scorerView .columns .box')?.append(undo);
+ // A running match may be abandoned safely without leaving its board occupied.
+ if(!freeMode){
+   const abandon=document.createElement('button');abandon.type='button';abandon.textContent='SPIEL ABBRECHEN';
+   abandon.style.cssText='background:transparent;color:#efc56c;border:1px solid #a28b63;font-weight:700';
+   abandon.onclick=async()=>{
+     if(S?.done){err('Abgeschlossene Spiele können nicht abgebrochen werden.');return}
+     if(!window.confirm('Spiel wirklich abbrechen? Alle bisherigen Aufnahmen werden gelöscht und der Spielstatus wird auf OFFEN gesetzt.'))return;
+     try{await req('/abort',{mode:'reset',confirm:'ABBRECHEN',reason:'Spiel am Board abgebrochen'});back()}
+     catch(e){err(e.message)}
+   };
+   document.querySelector('#scorerView .columns .box')?.append(abandon);
+ }
+
  // Highlight the original keypad's 1/2/3 only if that dart count is a legal checkout.
  // A short tap remains the existing number input; a long press is handled above.
  const checkoutKeys=new Map();

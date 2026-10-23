@@ -106,7 +106,7 @@ async function dashboard(){
  if(!tournaments.children.length)tournaments.append(el('p','Keine laufenden Wettbewerbe eingetragen.','helper'));
  const list=$('myOpen');clear(list);
  for(const m of d.own_open){const x=el('div',undefined,'dash-match');const names=el('div',undefined,'dash-player-pair');names.append(participantName(m.player1_id,m.player1),el('span','–'),participantName(m.player2_id,m.player2));
-  const heading=el('div');heading.append(el('small',m.title),names);x.append(heading,el('span',m.status==='running'?'Laufend':'Offen','chip'));
+  const heading=el('div');heading.append(el('small',m.title),names);x.append(heading,el('span',m.status==='running'?'Laufend':m.status==='cancelled'?'Abgesagt':'Offen','chip'));
   x.append(action(previewId?'Spiel ansehen':'Scorer starten',()=>previewId?notice('Die Vorschau ist schreibgeschützt.',true):
    m.kind==='free_x01'?openGameWindow('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id)):openScorer(m.id),'primary'));list.append(x)}
  if(!d.own_open.length)list.append(el('p','Keine offenen Begegnungen','helper'));
@@ -286,7 +286,17 @@ $('auditRefresh').onclick=()=>loadAuditLog(true);
 $('auditMore').onclick=()=>loadAuditLog(false);
 async function loadCompetitions(){
  $('createCompetitionWizard').hidden=!amAdmin();competitions=await api('/competitions');const host=$('competitionsList');clear(host);for(const c of competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id))host.append(tile(c.title,(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)))}
-async function loadLadder(){const data=await api('/competitions'),host=$('ladderList');clear(host);const ladders=data.filter(c=>c.kind==='ladder');for(const c of ladders)host.append(tile(c.title,(c.status||'')+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)));if(!ladders.length)host.append(el('p','Noch keine Ladder-Saison angelegt. Administratoren können hier die erste Saison erstellen.'));$('ladderCreate').hidden=user.role!=='admin'}
+async function loadLadder(){
+ const data=await api('/competitions'),host=$('ladderList');clear(host);
+ const now=Date.now();const ladders=data.filter(c=>c.kind==='ladder');
+ const active=ladders.filter(c=>c.status==='active'&&(!c.starts_at||new Date(c.starts_at).getTime()<=now)&&(!c.ends_at||new Date(c.ends_at).getTime()>now));
+ const current=active[0]||ladders.find(c=>c.status==='active');
+ $('ladderCreate').hidden=true;
+ if(current){await openCompetition(current.id);return}
+ host.append(el('p','Aktuell läuft keine Ladder-Saison.','helper'));
+ if(ladders.length)for(const c of ladders)host.append(tile(c.title,c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)));
+ if(user.role==='admin'){host.append(action('Neue Ladder-Saison anlegen',()=>{$('ladderCreate').hidden=false;$('ladderCreate').scrollIntoView({block:'start'});},'primary'))}
+}
 async function createCompetitionWizard(){
  if(!amAdmin())return notice('Nur Administratoren dürfen Vereinswettbewerbe anlegen.',true);
  if(!players.length)players=await api('/players');
@@ -545,10 +555,10 @@ async function openCompetition(id){
   const content=el('div',undefined,'competition-content');
   host.append(tabs,content);
   async function view(tab){competitionTab=tab;clear(content);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===tab);
-    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='management')showManagement(content)}
+    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='rules')showLadderRules(content);if(tab==='management')showManagement(content)}
     catch(e){content.append(el('p',e.message,'error'))}
   }
-  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
+  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
     const b=action(name,()=>view(tab));b.dataset.tab=tab;tabs.append(b);
   }
   const names=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
@@ -624,6 +634,24 @@ async function openCompetition(id){
       statisticsPanels(dest,stats,head,c.kind);
     }));box.append(row);const out=el('div');out.id='currentStats';box.append(out);
   }
+  function showLadderRules(box){
+    const q=c.rules||{};const block=el('article',undefined,'panel ladder-rules');
+    block.append(el('h2','Regelwerk · '+c.title));
+    const list=[
+      ['Teilnahme','Alle aktiven Vereinsmitglieder nehmen automatisch teil. In der ELO-Rangliste erscheint ein Spieler erst nach dem ersten gewerteten Match.'],
+      ['Spielvereinbarung','Zwei Mitglieder vereinbaren ihre Partie am Board. Vor dem Start werden die Spieler und die Matchlänge (mindestens Best of 5 Legs) ausgewählt. Das Ergebnis wird über den integrierten Scorer erfasst.'],
+      ['Matchmodus','Die Matchlänge wird vor dem Spiel vereinbart. Bei gerader Leganzahl ist ein Unentschieden möglich.'],
+      ['ELO-Wertung','Jeder Spieler startet mit 1.000 ELO-Punkten. Der K-Faktor beträgt '+(q.k_factor??64)+'. Ein Sieg, eine Niederlage oder ein Unentschieden verändert die Wertung abhängig vom ELO-Abstand beider Spieler.'],
+      ['Wiederholungssperre','Dieselbe Paarung darf erst '+(q.rematch_cooldown_days??7)+' Tage nach dem letzten abgeschlossenen Ladder-Spiel erneut antreten. Gleichzeitig offene Doppelbegegnungen sind nicht zulässig.'],
+      ['Mindestqualifikation','Für die Finalrunde sind mindestens '+(q.min_games??5)+' gewertete Spiele gegen mindestens '+(q.min_opponents??3)+' unterschiedliche Gegner erforderlich.'],
+      ['Finalplätze','Aktuell sind '+(q.finalists??8)+' Finalplätze vorgesehen. Die Rangliste markiert die Qualifikationszone; nur Spieler mit erfüllten Mindestbedingungen sind dort qualifiziert. Bis Saisonende sind die Plätze vorläufig.'],
+      ['Saisonende','Nach dem Saisonende werden die qualifizierten Spieler anhand ihrer ELO-Platzierung festgestellt. Modus und Ansetzung der Finalrunde werden durch die Turnierleitung bekanntgegeben.'],
+      ['Spielabbruch','Ein versehentlich gestartetes, noch nicht abgeschlossenes Spiel kann auf OFFEN zurückgesetzt werden; sämtliche bis dahin eingegebenen Aufnahmen dieses Spiels werden verworfen. Abgeschlossene Ergebnisse bleiben bestehen.'],
+      ['Fair Play','Alle Spiele werden vor Ort am Dartboard ausgetragen. Beide Spieler prüfen das Ergebnis vor dem Spielabschluss. Streitfälle entscheidet die Vereins- bzw. Turnierleitung.']
+    ];
+    for(const [heading,txt] of list){const section=el('section',undefined,'ladder-rule-item');section.append(el('h3',heading),el('p',txt));block.append(section)}
+    box.append(block)
+  }
   function showSchedule(box){
     if(c.kind==='training_tournament'&&(amAdmin()||trainingOwner())){
       const panel=el('div',undefined,'panel ladder-create');panel.append(el('h3','Trainingsmatch anlegen'));
@@ -651,7 +679,7 @@ async function openCompetition(id){
     const filters=el('div',undefined,'schedule-controls');
     const g=picker([['','Alle Staffeln'],...selected.groups.map(x=>[x.id,x.name])],'',()=>reset());
     const p=picker([['','Alle Spieler'],...selected.entries.map(e=>[e.player_id,e.display_name])],'',()=>reset());
-    const status=picker([['','Alle Spiele'],['open','Offen'],['running','Laufend'],['finished','Beendet']],'',()=>reset());
+    const status=picker([['','Alle Spiele'],['open','Offen'],['running','Laufend'],['finished','Beendet'],['cancelled','Abgesagt']],'',()=>reset());
     for(const [caption,select] of [...(c.kind==='ladder'?[]:[['Staffel',g]]),['Spieler',p],['Status',status]]){const label=el('label',caption);label.append(select);filters.append(label)}
     const pages=el('div',undefined,'pagination');const list=el('div',undefined,'schedule-list schedule-grid');
     box.append(filters,list,pages);
@@ -666,7 +694,7 @@ async function openCompetition(id){
         const line=el('article',undefined,'fixture');const desc=el('div',undefined,'fixture-title');
         const group=selected.groups.find(g=>g.id===m.group_id)?.name||selected.phases.find(x=>x.id===m.phase_id)?.name||'Spiel';
         desc.append(el('small',group+(m.round_number?' · Runde '+m.round_number:'')));const namesLine=el('div',undefined,'fixture-players');namesLine.append(participantName(m.player1_id,names.get(m.player1_id)||'Spieler 1'),el('span','–'),participantName(m.player2_id,names.get(m.player2_id)||'Spieler 2'));desc.append(namesLine);
-        const score=m.status==='finished'?(m.sets1!==null&&m.sets1!==undefined?'Sets '+m.sets1+':'+m.sets2+' · ':'')+(m.legs1??0)+':'+(m.legs2??0):m.status==='running'?'Laufend':'Offen';
+        const score=m.status==='finished'?(m.sets1!==null&&m.sets1!==undefined?'Sets '+m.sets1+':'+m.sets2+' · ':'')+(m.legs1??0)+':'+(m.legs2??0):m.status==='running'?'Laufend':m.status==='cancelled'?'Abgesagt':'Offen';
         const actions=el('div',undefined,'fixture-actions');actions.append(el('span',score,'fixture-score'));
         if(m.source==='forfeit')actions.append(el('small','Wertung'));
         else if(m.source==='legacy')actions.append(el('small','Altbestand'));
@@ -678,6 +706,18 @@ async function openCompetition(id){
           if(!data||data.confirmation!=='yes')return;
           try{await api('/matches/'+m.id+'/reset',{reason:data.reason,confirm:'ZURUECKSETZEN'});await openCompetition(id);notice('Begegnung ist wieder OPEN.')}catch(e){notice(e.message,true)}
         },'danger'));
+        if(m.status==='running'&&(amAdmin()||user.role==='tournament'||trainingOwner()||[m.player1_id,m.player2_id].includes(user.player_id))){
+          actions.append(action('Spiel abbrechen',async()=>{
+            if(!await approve('Laufendes Spiel abbrechen','Alle bisherigen Aufnahmen verwerfen und diese Begegnung wieder auf OFFEN setzen?'))return;
+            try{await api('/matches/'+m.id+'/abort',{mode:'reset',confirm:'ABBRECHEN',reason:'Versehendlich gestartet'});await openCompetition(id);notice('Spiel abgebrochen – Status wieder OFFEN.')}catch(e){notice(e.message,true)}
+          },'subtle'));
+        }
+        if(amAdmin()&&['open','running'].includes(m.status)){
+          actions.append(action('Begegnung absagen',async()=>{
+            if(!await approve('Begegnung absagen','Begegnung auf ABGESAGT setzen? Noch nicht abgeschlossene Aufnahmen werden gelöscht; das Spiel zählt nicht für ELO und Tabellen.'))return;
+            try{await api('/matches/'+m.id+'/abort',{mode:'cancel',confirm:'ABBRECHEN',reason:'Durch Administrator abgesagt'});await openCompetition(id);notice('Begegnung abgesagt.')}catch(e){notice(e.message,true)}
+          },'danger'));
+        }
         if(user.role==='admin'&&m.status==='open')actions.append(action('Altes Ergebnis',async()=>{
           const d=await configure('Altes Ergebnis erfassen',[{name:'score',label:'Endstand (z.B. 4:2)',required:true}]);if(!d)return;const raw=d.score;
           const match=/^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(raw);if(!match){notice('Format: 4:2',true);return}

@@ -804,6 +804,38 @@ async def ladder_player_history(req):
                   'elo_before','elo_after','elo_change','expected','outcome','opponent_elo')})
     return response({'player_id':pid,'name':player,'competition':c['title'],'matches':out})
 
+async def abort_match(req):
+    # Abbruch: abgeschlossene Ergebnisse und ELO bleiben unberuehrt.
+    a=await actor(req);d=await body(req);mid=uid(req.match_info['mid'])
+    mode=str(d.get('mode','reset'))
+    if mode not in ('reset','cancel'):raise web.HTTPBadRequest(text='Ungültige Aktion')
+    if d.get('confirm')!='ABBRECHEN':raise web.HTTPBadRequest(text='Bestätigung erforderlich')
+    if mode=='cancel' and a['role']!='admin':raise web.HTTPForbidden(text='Nur Administratoren dürfen Begegnungen absagen')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        m=await db.fetchrow(f'''SELECT id,competition_id,status,state,player1_id,player2_id FROM {SCHEMA}.matches
+          WHERE id=$1 FOR UPDATE''',mid)
+        if not m:raise web.HTTPNotFound()
+        if m['status'] not in ('open','running'):raise web.HTTPConflict(text='Nur offene und laufende Begegnungen dürfen abgebrochen werden')
+        own=a['player_id'] in (m['player1_id'],m['player2_id'])
+        if mode=='reset':
+            if m['status']!='running':raise web.HTTPConflict(text='Nur laufende Spiele auf OPEN zurücksetzen')
+            if not (own or a['role'] in ('admin','tournament') or await allowed_to_manage(db,a,m['competition_id'])):
+                raise web.HTTPForbidden(text='Nur Spielbeteiligte oder Turnierleitung')
+        await db.execute(f'DELETE FROM {SCHEMA}.throws WHERE match_id=$1',mid)
+        await db.execute(f'DELETE FROM {SCHEMA}.match_legs WHERE match_id=$1',mid)
+        await db.execute(f'DELETE FROM {SCHEMA}.match_sets WHERE match_id=$1',mid)
+        await db.execute(f'DELETE FROM {SCHEMA}.match_claims WHERE match_id=$1',mid)
+        status='cancelled' if mode=='cancel' else 'open'
+        await db.execute(f'''UPDATE {SCHEMA}.matches SET status=$2,source=CASE WHEN $2='cancelled' THEN 'cancelled' ELSE NULL END,
+          state='{{}}'::jsonb,state_version=state_version+1,board_id=NULL,started_at=NULL,finished_at=NULL,
+          winner_id=NULL,legs1=NULL,legs2=NULL,sets1=NULL,sets2=NULL WHERE id=$1''',mid,status)
+        await db.execute(f'''INSERT INTO {SCHEMA}.match_revisions(match_id,actor_id,action,previous_state,new_state,reason)
+          VALUES($1,$2,$3,$4::jsonb,'{{}}'::jsonb,$5)''',mid,a['id'],'cancel_match' if mode=='cancel' else 'abort_match',json.dumps(as_json(m['state'])),str(d.get('reason','Spiel versehentlich gestartet'))[:500])
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+          VALUES($1,$2,'match',$3,$4::jsonb)''',a['id'],'cancel_match' if mode=='cancel' else 'abort_match',str(mid),json.dumps({'before':m['status'],'after':status}))
+    return response({'ok':True,'status':status})
+
 async def reset_match(req):
     a=await actor(req);d=await body(req);mid=uid(req.match_info['mid'])
     if d.get('confirm')!='ZURUECKSETZEN':raise web.HTTPBadRequest(text='Bestätigung erforderlich')
@@ -1504,6 +1536,7 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/matches/{mid}/start',start_match),
       ('POST','/dart/v2/api/matches/{mid}/throw',throw),('POST','/dart/v2/api/matches/{mid}/undo',undo_visit),
       ('POST','/dart/v2/api/matches/{mid}/reset',reset_match),
+      ('POST','/dart/v2/api/matches/{mid}/abort',abort_match),
       ('POST','/dart/v2/api/matches/{mid}/manual',manual_result),
       ('POST','/dart/v2/api/competitions/{cid}/withdraw',withdraw),
       ('POST','/dart/v2/api/phases/{pid}/close',close_phase),

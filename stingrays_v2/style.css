@@ -195,3 +195,9 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .live-game strong{color:#e7c579}.live-score{font-size:1.12rem;font-weight:800}.live-game button{align-self:flex-start}
 .report-grid{display:grid;gap:8px}.report-row{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #5b5140}
 @media(max-width:750px){.schedule-grid{grid-template-columns:1fr}.live-heading{flex-wrap:wrap}}
+
+/* Ladder rules & safe match cancellation */
+.ladder-rules{max-width:1100px;width:100%;margin:auto;padding:clamp(16px,3vw,32px)}
+.ladder-rule-item{padding:15px 0;border-bottom:1px solid rgba(218,180,100,.22)}
+.ladder-rule-item h3{color:#e9c977;margin:0 0 7px}.ladder-rule-item p{margin:0;line-height:1.65}
+.fixture-actions{flex-wrap:wrap}
