@@ -27,6 +27,12 @@ def validate_plan(d):
     if fmt in ('single_ko','double_ko') and (follow or consolation):
         raise web.HTTPBadRequest(text='Folgerunden nach K.O.-Vorrunde derzeit nicht unterstützt')
     q=str(d.get('qualifiers','1'))
+    try: extra_thirds=int(d.get('best_third_count',0))
+    except (ValueError,TypeError):raise web.HTTPBadRequest(text='Ungültige Anzahl bester Dritter')
+    if not 0<=extra_thirds<=16:raise web.HTTPBadRequest(text='Beste Dritte: 0–16 Spieler')
+    if extra_thirds and (fmt!='groups' or not follow or q=='all'):
+        raise web.HTTPBadRequest(text='Beste Dritte nur bei Gruppenvorrunde mit Finalrunde und begrenzter Grundqualifikation')
+    if extra_thirds and extra_thirds>n:raise web.HTTPBadRequest(text='Es gibt nicht genügend Gruppen für so viele beste Drittplatzierte')
     if follow and q not in ('1','2','4','8','all'):
         raise web.HTTPBadRequest(text='Qualifizierte je Gruppe: 1,2,4,8 oder alle')
     nextfmt=str(d.get('follow_format','single_ko'))
@@ -44,7 +50,7 @@ def validate_plan(d):
         except (ValueError,TypeError):raise web.HTTPBadRequest(text='Ungültige Gruppenanzahl in Folgerunde')
         if not 1<=value<=16:raise web.HTTPBadRequest(text='1–16 Folgegruppen zulässig')
     return {'format':fmt,'ids':ids,'group_count':n,'rules':prelim,'double_round':bool(d.get('double_round',False)),
-            'follow':follow,'consolation':consolation,'qualifiers':q,'follow_format':nextfmt,'consolation_format':comfort,'follow_group_count':int(d.get('follow_group_count',1)), 'consolation_group_count':int(d.get('consolation_group_count',1))}
+            'follow':follow,'consolation':consolation,'qualifiers':q,'best_third_count':extra_thirds,'follow_format':nextfmt,'consolation_format':comfort,'follow_group_count':int(d.get('follow_group_count',1)), 'consolation_group_count':int(d.get('consolation_group_count',1))}
 
 async def setup(req):
     a=await actor(req);d=await body(req);title=str(d.get('title','')).strip()
@@ -54,7 +60,7 @@ async def setup(req):
         raise web.HTTPForbidden(text='Mitglieder können nur eigene Trainingsturniere erstellen')
     config={'auto_tournament':True,'format':spec['format'],'training_match':spec['rules'],
             'double_round':spec['double_round'],'follow':spec['follow'],'consolation':spec['consolation'],
-            'qualifiers':spec['qualifiers'],'follow_format':spec['follow_format'],
+            'qualifiers':spec['qualifiers'],'best_third_count':spec['best_third_count'],'follow_format':spec['follow_format'],
             'consolation_format':spec['consolation_format'], 'follow_group_count':spec['follow_group_count'],'consolation_group_count':spec['consolation_group_count']}
     async with pool(req).acquire() as db:
       async with db.transaction():
@@ -134,6 +140,19 @@ async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=Fa
              VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,ph,i+1,p1,p2,json.dumps(match_rules));count+=1
     return count
 
+def rank_wildcards(candidates):
+    """Rank first eliminated player of each preliminary group fairly.
+
+    Normalize by matches played so unequal group sizes do not confer an advantage.
+    Caller provides (player_id, table_row, group_sort_order).
+    """
+    def metrics(item):
+        _,row,order=item
+        n=max(1,int(row['played']))
+        return (row['points']/n, (row['legs_for']-row['legs_against'])/n, row['legs_for']/n)
+    return sorted(candidates,key=lambda item:(-metrics(item)[0],-metrics(item)[1],-metrics(item)[2],item[2],str(item[0])))
+
+
 async def progress(req,cid):
     """Run after score commit, serialize by competition row. Idempotent across tablets."""
     async with pool(req).acquire() as db:
@@ -154,13 +173,36 @@ async def progress(req,cid):
             if cfg.get('follow'):
                 groups=await db.fetch(f'SELECT id FROM {SCHEMA}.groups WHERE phase_id=$1 ORDER BY sort_order',pre['id'])
                 q=cfg.get('qualifiers','1');n=99999 if q=='all' else int(q)
-                selected=[];rest=[]
-                for g in groups:
+                selected=[];rest=[];wildcards=[]
+                for order,g in enumerate(groups):
                     members=await db.fetch(f'''SELECT e.player_id FROM {SCHEMA}.group_members gm
                      JOIN {SCHEMA}.entries e ON e.id=gm.entry_id WHERE gm.group_id=$1''',g['id'])
                     ms=await db.fetch(f'''SELECT player1_id,player2_id,status,legs1,legs2,sets1,sets2 FROM {SCHEMA}.matches
                       WHERE group_id=$1''',g['id'])
-                    ranks=rank_rows([dict(m) for m in ms],[p['player_id'] for p in members]);selected.extend(p['player_id'] for p in ranks[:n]);rest.extend(p['player_id'] for p in ranks[n:])
+                    ranks=rank_rows([dict(m) for m in ms],[p['player_id'] for p in members])
+                    selected.extend(p['player_id'] for p in ranks[:n])
+                    rest.extend(p['player_id'] for p in ranks[n:])
+                    if len(ranks)>n:wildcards.append((ranks[n]['player_id'],ranks[n],order))
+                extra=int(cfg.get('best_third_count',0) or 0)
+                if extra:
+                    if extra>len(wildcards):raise web.HTTPConflict(text='Nicht genügend Drittplatzierte für die angegebene Wildcard-Anzahl')
+                    best=rank_wildcards(wildcards)
+                    manual=[UUID(str(x)) for x in cfg.get('best_third_manual_ids',[])]
+                    if manual:
+                        available={x[0] for x in wildcards}
+                        if len(manual)!=extra or len(set(manual))!=extra or not set(manual).issubset(available):
+                            raise web.HTTPConflict(text='Manuelle Nachrücker passen nicht zur abgeschlossenen Vorrunde')
+                    # Do not silently draw lots at a perfect statistical tie on the cutoff.
+                    if not manual and len(best)>extra:
+                        a=best[extra-1][1];b=best[extra][1]
+                        def key(row):
+                            count=max(1,row['played'])
+                            return (row['points']/count,(row['legs_for']-row['legs_against'])/count,row['legs_for']/count)
+                        if key(a)==key(b):
+                            raise web.HTTPConflict(text='Gleichstand der besten Drittplatzierten an der Qualifikationsgrenze – manuelle Entscheidung erforderlich')
+                    additional=set(manual) if manual else {x[0] for x in best[:extra]}
+                    selected.extend(manual if manual else [x[0] for x in best[:extra]])
+                    rest=[pid for pid in rest if pid not in additional]
                 if len(selected)<2:raise web.HTTPConflict(text='Weniger als zwei qualifizierte Spieler')
                 await _make_stage(db,cid,'final',selected,cfg.get('follow_format','single_ko'),cfg['training_match'],cfg.get('follow_group_count',1))
                 if cfg.get('consolation') and len(rest)>=2:

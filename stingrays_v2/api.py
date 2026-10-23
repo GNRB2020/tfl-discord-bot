@@ -559,7 +559,7 @@ async def competition_detail(req):
         membership=await db.fetch(f'''SELECT gm.group_id,gm.entry_id FROM {SCHEMA}.group_members gm
            JOIN {SCHEMA}.groups g ON g.id=gm.group_id JOIN {SCHEMA}.phases p ON p.id=g.phase_id
            WHERE p.competition_id=$1''',cid)
-        matches=await db.fetch(f'''SELECT m.id,m.phase_id,m.group_id,m.round_number,m.player1_id,m.player2_id,
+        matches=await db.fetch(f'''SELECT m.id,m.phase_id,m.group_id,m.round_number,m.bracket_position,m.player1_id,m.player2_id,
             m.status,m.source,m.legs1,m.legs2,m.sets1,m.sets2,m.board_id,m.rules,m.finished_at
            FROM {SCHEMA}.matches m WHERE m.competition_id=$1 ORDER BY m.created_at''',cid)
     return response({'competition':dict(comp),'phases':list(map(dict,phases)),'groups':list(map(dict,groups)),
@@ -772,7 +772,7 @@ async def standings(req):
 async def update_tournament_configuration(req):
     """Update planned follow-up stages without modifying played matches."""
     a=await actor(req);cid=uid(req.match_info['cid']);data=await body(req)
-    allowed={'follow','qualifiers','follow_format','follow_group_count','consolation','consolation_format','consolation_group_count'}
+    allowed={'follow','qualifiers','best_third_count','best_third_manual_ids','follow_format','follow_group_count','consolation','consolation_format','consolation_group_count'}
     if not set(data).issubset(allowed):raise web.HTTPBadRequest(text='Unbekannte Turniereinstellung')
     async with pool(req).acquire() as db:
       async with db.transaction():
@@ -793,6 +793,22 @@ async def update_tournament_configuration(req):
             raise web.HTTPBadRequest(text='Trostrunde erfordert eine Finalrunde')
         if str(updated.get('qualifiers')) not in ('1','2','4','8','all'):
             raise web.HTTPBadRequest(text='Qualifikation: 1, 2, 4, 8 oder alle')
+        try: extra=int(updated.get('best_third_count',0) or 0)
+        except (ValueError,TypeError):raise web.HTTPBadRequest(text='Beste Dritte: ungültiger Wert')
+        if not 0<=extra<=16:raise web.HTTPBadRequest(text='Beste Dritte: 0–16')
+        if extra and (fmt!='groups' or not updated['follow'] or updated.get('qualifiers')=='all'):
+            raise web.HTTPBadRequest(text='Beste Dritte benötigen eine Gruppen-Vorrunde mit begrenzter Finalqualifikation')
+        group_count=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.groups g JOIN {SCHEMA}.phases p ON p.id=g.phase_id
+            WHERE p.competition_id=$1 AND p.phase_order=1''',cid)
+        if extra>group_count:raise web.HTTPBadRequest(text='Mehr Wildcards als Gruppen')
+        updated['best_third_count']=extra
+        overrides=updated.get('best_third_manual_ids') or []
+        if not isinstance(overrides,list) or len(overrides)>16:
+            raise web.HTTPBadRequest(text='Ungültige manuelle Nachrücker')
+        overrides=[str(uid(x)) for x in overrides]
+        if len(set(overrides))!=len(overrides) or (overrides and len(overrides)!=extra):
+            raise web.HTTPBadRequest(text='Manuelle Nachrücker: Genau die eingestellte Anzahl unterschiedlicher Spieler wählen')
+        updated['best_third_manual_ids']=overrides if extra else []
         for key in ('follow_format','consolation_format'):
             if updated.get(key) not in ('single_ko','double_ko','league','groups'):
                 raise web.HTTPBadRequest(text='Ungültiger Modus in '+key)

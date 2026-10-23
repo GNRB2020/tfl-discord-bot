@@ -411,6 +411,10 @@ async function createTraining(){
   const q=await configure('Finalrunde',[{name:'qualifiers',label:'Wie viele je Gruppe qualifizieren sich?',type:'select',options:[['1','1'],['2','2'],['4','4'],['8','8'],['all','Alle']]},
    {name:'follow_format',label:'Wie wird weitergespielt?',type:'select',options:[['single_ko','Single KO'],['double_ko','Double KO'],['league','Liga'],['groups','Gruppenrunde']]}],'Weiter');if(!q)return;
   Object.assign(next,q);
+  if(grouped && q.qualifiers!=='all'){
+   const third=await configure('Beste Gruppennachrücker',[{name:'best_third_count',label:'Zusätzlich beste nächstplatzierte Spieler aus verschiedenen Gruppen',type:'number',min:0,max:Number(settings.group_count||2),value:0,required:true}], 'Weiter');
+   if(!third)return;Object.assign(next,third);
+  }
   if(q.follow_format==='groups'){const nc=await configure('Gruppenanzahl der Finalrunde',[{name:'follow_group_count',label:'Anzahl Finalgruppen',type:'number',min:1,max:16,value:2,required:true}],'Weiter');if(!nc)return;Object.assign(next,nc)}
   const co=await configure('Trostrunde',[{name:'consolation',label:'Ausgeschiedene in Trostrunde übernehmen?',type:'select',options:[['no','Nein'],['yes','Ja']]}],'Weiter');if(!co)return;
   next.consolation=co.consolation;
@@ -421,7 +425,7 @@ async function createTraining(){
  if(!await approve('Turnier anlegen',selection.members.length+' Spieler · '+stage.format+' · '+m.start_score+' Punkte · '+(isSets?'Best of '+m.best_of_sets+' Sets / '+m.best_of_legs_per_set+' Legs':'Best of '+m.max_legs+' Legs')+' · Spielplan wird automatisch erzeugt.'))return;
  try{
   const payload={title:title.title,player_ids:selection.members,format:stage.format,group_count:Number(settings.group_count||1),double_round:settings.rounds==='double',rules:m,
-   follow:next.follow==='yes',consolation:next.consolation==='yes',qualifiers:next.qualifiers||'1',follow_format:next.follow_format||'single_ko',consolation_format:next.consolation_format||'single_ko',follow_group_count:Number(next.follow_group_count||1),consolation_group_count:Number(next.consolation_group_count||1)};
+   follow:next.follow==='yes',consolation:next.consolation==='yes',qualifiers:next.qualifiers||'1',best_third_count:Number(next.best_third_count||0),follow_format:next.follow_format||'single_ko',consolation_format:next.consolation_format||'single_ko',follow_group_count:Number(next.follow_group_count||1),consolation_group_count:Number(next.consolation_group_count||1)};
   const c=await api('/training/tournament/setup',payload);await show('training');await openCompetition(c.id);notice('Turnier mit '+c.created+' Begegnungen erstellt.');
  }catch(e){notice('Turnieranlage: '+e.message,true)}
 }
@@ -605,13 +609,44 @@ async function openCompetition(id){
   const content=el('div',undefined,'competition-content');
   host.append(tabs,content);
   async function view(tab){competitionTab=tab;clear(content);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===tab);
-    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='rules')showLadderRules(content);if(tab==='management')showManagement(content);if(tab==='placements')await showPlacements(content)}
+    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='rules')showLadderRules(content);if(tab==='management')showManagement(content);if(tab==='placements')await showPlacements(content);if(tab==='bracket')showBracket(content)}
     catch(e){content.append(el('p',e.message,'error'))}
   }
-  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...(['finished','archived'].includes(c.status)&&c.kind!=='ladder'?[['placements','Platzierungen']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
+  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...((selected.phases||[]).some(p=>p.kind==='knockout')||(c.rules?.follow&&['single_ko','double_ko'].includes(c.rules?.follow_format))?[['bracket','Turnierbaum']]:[]),...(['finished','archived'].includes(c.status)&&c.kind!=='ladder'?[['placements','Platzierungen']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
     const b=action(name,()=>view(tab));b.dataset.tab=tab;tabs.append(b);
   }
   const names=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
+  function showBracket(box){
+    const allPhases=selected.phases||[];
+    const phases=allPhases.filter(p=>p.kind==='knockout');
+    const pending=(c.rules||{}).follow&&['single_ko','double_ko'].includes((c.rules||{}).follow_format);
+    if(!phases.length){box.append(el('p',pending?'Der KO-Baum wird nach Abschluss der Vorrunde automatisch erzeugt.':'Noch keine K.O.-Runde vorhanden.','helper'));return}
+    const selector=el('div',undefined,'bracket-stage-tabs');box.append(selector);
+    const stage=el('div',undefined,'bracket-content');box.append(stage);
+    function draw(phase){clear(stage);const phaseRules=typeof phase.rules==='string'?JSON.parse(phase.rules||'{}'):(phase.rules||{});
+      const matches=selected.matches.filter(m=>m.phase_id===phase.id);
+      const rounds=[...new Set(matches.map(m=>Number(m.round_number||1)))].sort((a,b)=>a-b);
+      const outer=el('div',undefined,'bracket-scroll'),board=el('div',undefined,'bracket-grid');outer.append(board);stage.append(outer);
+      if(phaseRules.format==='double_ko')stage.append(el('p','Double KO: Die aktuellen Begegnungen werden nach Spielrunde dargestellt. Ein separater Winner-/Loser-Baum ist noch nicht vollständig unterstützt.','helper'));
+      for(const rnd of rounds){const col=el('div',undefined,'bracket-round');
+        const list=matches.filter(m=>Number(m.round_number||1)===rnd).sort((a,b)=>(a.bracket_position||0)-(b.bracket_position||0));
+        const label=list.length===1?'Finale':list.length===2?'Halbfinale':list.length===4?'Viertelfinale':list.length===8?'Achtelfinale':'Runde '+rnd;
+        col.append(el('h3',label));
+        for(const m of list){const card=el('div',undefined,'bracket-match');
+          const score=(m.sets1||m.sets2)?[m.sets1,m.sets2]:[m.legs1,m.legs2];
+          const names=[namesMap.get(m.player1_id)||'Noch offen',namesMap.get(m.player2_id)||'Noch offen'];
+          for(let i=0;i<2;i++){const line=el('div',undefined,'bracket-player');line.append(el('span',names[i]),el('strong',m.status==='finished'?String(score[i]??0):'–'));card.append(line)}
+          const actions=el('div',undefined,'bracket-match-status');actions.append(el('span',m.status==='finished'?'Beendet':m.status==='running'?'Live':'Offen'));
+          if(['open','running'].includes(m.status))actions.append(action('Scorer',()=>openScorer(m.id),'subtle'));
+          card.append(actions);col.append(card)}board.append(col)}
+      if(!rounds.length)stage.append(el('p','Noch keine KO-Begegnungen.','helper'));
+      const byes=phaseRules.bye_players||[];if(byes.length){const note=el('p','Freilose: '+byes.map(pid=>namesMap.get(pid)||pid).join(', '),'helper');stage.append(note)}
+    }
+    const namesMap=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
+    const ordered=[...phases].sort((a,b)=>(a.phase_order||0)-(b.phase_order||0));
+    for(const p of ordered){const b=action(p.name||'K.O.',()=>{for(const x of selector.children)x.classList.toggle('selected',x===b);draw(p)});selector.append(b)}
+    selector.firstChild?.click();
+  }
   async function showPlacements(box){
    box.append(el('h3','Endplatzierungen · '+c.title));
    const intro=el('p','Die Platzierung richtet sich nach der erreichten Endrunde. Ohne Platzierungsspiel können Teilnehmer denselben Rang belegen.','helper');box.append(intro);
@@ -670,37 +705,21 @@ async function openCompetition(id){
       }draw();return;
     }
     if(!selected.groups.length){box.append(el('p','Noch keine Gruppen angelegt. Die Einteilung erfolgt unter Verwaltung.','empty'));return}
-    // Jede Gruppe ist ein eigener Tab; keine separate Dropdown-Auswahl.
-    const groupTabs=el('div',undefined,'group-standings-tabs');
-    groupTabs.setAttribute('role','tablist');
-    groupTabs.setAttribute('aria-label','Gruppentabellen');
-    let chosenGroupId=selected.groups[0].id;
-    const area=el('div',undefined,'group-standings-content');
-    for(const group of selected.groups){
-      const button=action(group.name,()=>{chosenGroupId=group.id;fill();},'group-standings-tab');
-      button.dataset.groupId=group.id;
-      button.setAttribute('role','tab');
-      groupTabs.append(button);
-    }
-    box.append(groupTabs,area);
-    async function fill(){
-      for(const button of groupTabs.children){
-        const active=button.dataset.groupId===chosenGroupId;
-        button.classList.toggle('selected',active);
-        button.setAttribute('aria-selected',String(active));
-      }
-      clear(area);const g=selected.groups.find(g=>g.id===chosenGroupId);if(!g)return;
+    const switcher=el('div',undefined,'filterline');switcher.append(el('span','Staffel anzeigen'));
+    const chosen=picker(selected.groups.map(g=>[g.id,g.name]),selected.groups[0].id,()=>fill());switcher.append(chosen);box.append(switcher);
+    const area=el('div');box.append(area);
+    async function fill(){clear(area);const g=selected.groups.find(g=>g.id===chosen.value);if(!g)return;
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
       const rawRules=typeof c.rules==='string'?JSON.parse(c.rules||'{}'):(c.rules||{});
       const qualifierSetting=String(rawRules.qualifiers??'1').toLowerCase();
       const qualifyCount=rawRules.follow? (qualifierSetting==='all'?rows.length:Math.min(rows.length,Math.max(0,Number(qualifierSetting)||0))) : 0;
       area.append(el('h3',g.name));
-      if(qualifyCount){area.append(el('p','Finalrunde: '+(qualifyCount===rows.length?'Alle '+rows.length+' Plätze':'Platz 1–'+qualifyCount)+' qualifizieren sich'+(rawRules.consolation?' · übrige Spieler: Trostrunde':''),'qualification-notice'))}
+      if(qualifyCount){area.append(el('p','Finalrunde: '+(qualifyCount===rows.length?'Alle '+rows.length+' Plätze':'Platz 1–'+qualifyCount)+' qualifizieren sich'+(Number(rawRules.best_third_count||0)?' · zusätzlich '+rawRules.best_third_count+' beste Nächstplatzierte im Gruppenvergleich':'')+(rawRules.consolation?' · übrige Spieler: Trostrunde':''),'qualification-notice'))}
       const tableWrap=renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt',...(qualifyCount?['Qualifikation']:[])],rows.map((r,i)=>[
           r.rank,{player_id:r.player_id,name:r.name+(withdrawals.has(r.player_id)?' · ausgetreten':'')},r.played,r.wins,r.draws,r.losses,
           String(r.legs_for)+':'+String(r.legs_against),signed(r.legs_for-r.legs_against),r.points,
-          ...(qualifyCount?[i<qualifyCount?'Finalrunde':'–']:[])
+          ...(qualifyCount?[i<qualifyCount?'Finalrunde':i===qualifyCount&&Number(rawRules.best_third_count||0)?'Drittenvergleich':'–']:[])
       ]),true);
       if(qualifyCount){const bodyRows=tableWrap.querySelectorAll('tbody tr');bodyRows.forEach((line,i)=>{
          if(i<qualifyCount){line.classList.add('tournament-qualified');line.title='Qualifiziert für die Finalrunde (vorläufig)';}
@@ -869,14 +888,14 @@ async function openCompetition(id){
       const config=el('section',undefined,'manage-card');
       config.append(el('h3','Final- und Trostrunde nachträglich ändern'),
         el('p','Die Qualifikation lässt sich bis zur tatsächlichen Anlage der nächsten Phase korrigieren. Bereits laufende Finalrunden bleiben geschützt.','helper'));
-      config.append(el('p','Aktuell: '+(r.follow?'Finalrunde · '+(r.qualifiers==='all'?'Alle':(r.qualifiers||1)+' je Gruppe')+' · '+(r.follow_format||'single_ko'):'Keine Finalrunde')+(r.consolation?' · mit Trostrunde':''),'helper'));
+      config.append(el('p','Aktuell: '+(r.follow?'Finalrunde · '+(r.qualifiers==='all'?'Alle':(r.qualifiers||1)+' je Gruppe')+(r.best_third_count?' + '+r.best_third_count+' beste Nächstplatzierte':'')+' · '+(r.follow_format||'single_ko'):'Keine Finalrunde')+(r.consolation?' · mit Trostrunde':''),'helper'));
       config.append(action('Qualifikation und Folgerunden bearbeiten',async()=>{
         const bool=[['no','Nein'],['yes','Ja']];
         const first=await configure('Turnierregeln nachträglich bearbeiten',[
           {name:'follow',label:'Finalrunde?',type:'select',options:bool,value:r.follow?'yes':'no'}
         ],'Weiter');if(!first)return;
         const payload={follow:first.follow==='yes',consolation:false,
-          qualifiers:String(r.qualifiers||'1'),follow_format:r.follow_format||'single_ko',
+          qualifiers:String(r.qualifiers||'1'),best_third_count:Number(r.best_third_count||0),best_third_manual_ids:[],follow_format:r.follow_format||'single_ko',
           consolation_format:r.consolation_format||'single_ko',
           follow_group_count:Number(r.follow_group_count||1),consolation_group_count:Number(r.consolation_group_count||1)};
         if(payload.follow){
@@ -886,6 +905,11 @@ async function openCompetition(id){
             {name:'follow_format',label:'Finalmodus',type:'select',value:payload.follow_format,
              options:[['single_ko','Single KO'],['double_ko','Double KO'],['league','Liga'],['groups','Gruppenrunde']]}
           ],'Weiter');if(!second)return;Object.assign(payload,second);
+          if(r.format==='groups' && payload.qualifiers!=='all'){
+            const third=await configure('Beste Gruppennachrücker',[
+             {name:'best_third_count',label:'Zusätzliche Qualifikanten aus verschiedenen Gruppen',type:'number',value:payload.best_third_count,min:0,max:selected.groups.filter(g=>selected.phases.find(p=>p.id===g.phase_id)?.phase_order===1).length||16,required:true}
+            ],'Weiter');if(!third)return;Object.assign(payload,third);
+          } else payload.best_third_count=0;
           if(payload.follow_format==='groups'){
             const groups=await configure('Gruppenanzahl der Finalrunde',[
               {name:'follow_group_count',label:'Gruppenanzahl',type:'number',value:payload.follow_group_count,min:1,max:16,required:true}
@@ -910,6 +934,27 @@ async function openCompetition(id){
         try{await api('/competitions/'+id+'/tournament-settings',payload);await openCompetition(id);notice('Qualifikationsregeln gespeichert.')}
         catch(e){notice(e.message,true)}
       },'primary'));
+      if(r.format==='groups' && r.follow && Number(r.best_third_count||0)>0){
+        config.append(action('Beste Nachrücker bei Gleichstand manuell auswählen',async()=>{
+          try{
+            const prelim=(selected.phases||[]).find(p=>p.phase_order===1);
+            if(!prelim)return notice('Vorrunde nicht gefunden.',true);
+            if((selected.phases||[]).some(p=>p.phase_order>1))return notice('Die Final- oder Trostrunde wurde bereits erzeugt.',true);
+            const n=r.qualifiers==='all'?0:Number(r.qualifiers||1),candidates=[];
+            for(const group of selected.groups.filter(g=>g.phase_id===prelim.id)){
+              const standing=await api('/competitions/'+id+'/standings?group_id='+group.id);
+              if(standing.length>n){const candidate=standing[n];candidates.push([candidate.player_id,group.name+' · '+candidate.name])}
+            }
+            if(!candidates.length)return notice('Keine nächstplatzierten Spieler verfügbar.',true);
+            const values=await configure('Manuelle Nachrücker-Auswahl',[
+              {name:'ids',label:'Bei gleichem Rang '+r.best_third_count+' Kandidaten auswählen',type:'multi',options:candidates,value:r.best_third_manual_ids||[]}
+            ],'Festlegen');if(!values)return;
+            if(values.ids.length!==Number(r.best_third_count))return notice('Bitte genau '+r.best_third_count+' Spieler wählen.',true);
+            await api('/competitions/'+id+'/tournament-settings',{best_third_manual_ids:values.ids});await openCompetition(id);
+            notice('Manuelle Auswahl für die Finalrunde gespeichert.');
+          }catch(e){notice(e.message,true)}
+        },'subtle'));
+      }
       box.append(config);
     }
     const steps=el('div',undefined,'setup-steps');steps.append(el('b','1. Teilnehmer'),el('b','2. Phasen & Gruppen'),el('b','3. Spielplan'),el('b','4. Ergebnisse & Abschluss'));box.append(steps);
