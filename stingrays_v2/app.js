@@ -615,6 +615,7 @@ let competitionTab='table',schedulePage=0;
 function action(text,fn,style=''){const b=btn(text,fn);if(style)b.className=style;return b}
 function picker(items,selectedValue,callback){const select=el('select');for(const [v,t] of items)select.append(new Option(t,v));select.value=selectedValue;select.onchange=()=>callback(select.value);return select}
 function labelFor(m,names){return (names.get(m.player1_id)||'Offen')+' – '+(names.get(m.player2_id)||'Offen')}
+const groupSelections=new Map();
 async function openCompetition(id){
   selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');$('competitionsList').hidden=true;
   const c=selected.competition,host=$('competitionDetail');host.hidden=false;clear(host);
@@ -725,10 +726,12 @@ async function openCompetition(id){
       }draw();return;
     }
     if(!selected.groups.length){box.append(el('p','Noch keine Gruppen angelegt. Die Einteilung erfolgt unter Verwaltung.','empty'));return}
-    const switcher=el('div',undefined,'filterline');switcher.append(el('span','Staffel anzeigen'));
-    const chosen=picker(selected.groups.map(g=>[g.id,g.name]),selected.groups[0].id,()=>fill());switcher.append(chosen);box.append(switcher);
-    const area=el('div');box.append(area);
-    async function fill(){clear(area);const g=selected.groups.find(g=>g.id===chosen.value);if(!g)return;
+    const switcher=el('div',undefined,'competition-group-tabs');
+    const savedGroup=groupSelections.get(id);
+    let currentGroup=selected.groups.some(g=>g.id===savedGroup)?savedGroup:selected.groups[0].id;
+    const area=el('div');box.append(switcher,area);
+    for(const g of selected.groups){const b=action(g.name,()=>{currentGroup=g.id;groupSelections.set(id,g.id);for(const tab of switcher.children)tab.classList.toggle('selected',tab===b);fill()},'subtle');b.classList.toggle('selected',g.id===currentGroup);switcher.append(b)}
+    async function fill(){clear(area);const g=selected.groups.find(g=>g.id===currentGroup);if(!g)return;
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
       const rawRules=typeof c.rules==='string'?JSON.parse(c.rules||'{}'):(c.rules||{});
@@ -790,6 +793,7 @@ async function openCompetition(id){
     for(const [heading,txt] of list){const section=el('section',undefined,'ladder-rule-item');section.append(el('h3',heading),el('p',txt));block.append(section)}
     box.append(block)
   }
+  function scheduleKey(){return 'stingrays_schedule_'+id}
   function showSchedule(box){
     if(c.kind==='training_tournament'&&(amAdmin()||trainingOwner())){
       const panel=el('div',undefined,'panel ladder-create');panel.append(el('h3','Trainingsmatch anlegen'));
@@ -814,14 +818,17 @@ async function openCompetition(id){
         try{const r=await api('/competitions/'+id+'/matches',{player1_id:first.value,player2_id:second.value,rules:{mode:mode.value,max_legs:Number(best.value),best_of_sets:Number(best.value),best_of_legs_per_set:3,allow_draw:mode.value==='legs'&&Number(best.value)%2===0}});await openCompetition(id);notice('Match angelegt – im Spielplan auf Scorer klicken.')}catch(e){notice(e.message,true)}
       },'primary'));box.append(add);
     }
+    let storedFilters={};try{storedFilters=JSON.parse(sessionStorage.getItem(scheduleKey())||'{}')}catch{}
     const filters=el('div',undefined,'schedule-controls');
     const g=picker([['','Alle Staffeln'],...selected.groups.map(x=>[x.id,x.name])],'',()=>reset());
     const p=picker([['','Alle Spieler'],...selected.entries.map(e=>[e.player_id,e.display_name])],'',()=>reset());
     const status=picker([['','Alle Spiele'],['open','Offen'],['running','Laufend'],['finished','Beendet'],['cancelled','Abgesagt']],'',()=>reset());
+    g.value=storedFilters.group||'';p.value=storedFilters.player||'';status.value=storedFilters.status||'';
     for(const [caption,select] of [...(c.kind==='ladder'?[]:[['Staffel',g]]),['Spieler',p],['Status',status]]){const label=el('label',caption);label.append(select);filters.append(label)}
+    filters.append(action('Filter zurücksetzen',()=>{g.value='';p.value='';status.value='';sessionStorage.removeItem(scheduleKey());schedulePage=0;draw()},'subtle'));
     const pages=el('div',undefined,'pagination');const list=el('div',undefined,'schedule-table-wrap');
     box.append(filters,list,pages);
-    function reset(){schedulePage=0;draw()}
+    function reset(){sessionStorage.setItem(scheduleKey(),JSON.stringify({group:g.value,player:p.value,status:status.value}));schedulePage=0;draw()}
     function draw(){clear(list);clear(pages);
       const matches=selected.matches.filter(m=>(!g.value||m.group_id===g.value)&&(!p.value||m.player1_id===p.value||m.player2_id===p.value)&&(!status.value||m.status===status.value));
       const pageCount=Math.max(1,Math.ceil(matches.length/12));schedulePage=Math.max(0,Math.min(schedulePage,pageCount-1));
@@ -865,10 +872,20 @@ async function openCompetition(id){
             try{await api('/matches/'+m.id+'/abort',{mode:'cancel',confirm:'ABBRECHEN',reason:'Durch Administrator abgesagt'});await openCompetition(id);notice('Begegnung abgesagt.')}catch(e){notice(e.message,true)}
           },'danger'));
         }
+        if(user.role==='admin'&&m.status==='finished'&&m.legs1===m.legs2&&selected.phases.some(ph=>ph.id===m.phase_id&&ph.kind==='knockout')){
+          actions.append(action('Fehlergebnis korrigieren',async()=>{
+            const d=await configure('K.O.-Fehlergebnis korrigieren',[{name:'score',label:'Korrigierter Endstand (z.B. 3:2)',required:true},{name:'reason',label:'Korrekturgrund',value:'Ungültiges Unentschieden im K.O.-Spiel',required:true}]);
+            if(!d)return;const match=/^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(d.score);
+            if(!match||Number(match[1])===Number(match[2]))return notice('K.O.-Spiele brauchen einen eindeutigen Sieger.',true);
+            try{await api('/matches/'+m.id+'/correct-ko',{legs1:Number(match[1]),legs2:Number(match[2]),reason:d.reason,confirm:'KORRIGIEREN'});await openCompetition(id);notice('Ergebnis korrigiert. K.O.-Runden wurden aktualisiert.')}catch(e){notice(e.message,true)}
+          },'danger'));
+        }
         if(user.role==='admin'&&m.status==='open')actions.append(action('Altes Ergebnis',async()=>{
           const d=await configure('Altes Ergebnis erfassen',[{name:'score',label:'Endstand (z.B. 4:2)',required:true}]);if(!d)return;const raw=d.score;
           const match=/^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(raw);if(!match){notice('Format: 4:2',true);return}
-          try{await api('/matches/'+m.id+'/manual',{legs1:Number(match[1]),legs2:Number(match[2])});await openCompetition(id)}catch(e){notice(e.message,true)}
+          const x=Number(match[1]),y=Number(match[2]);const phase=selected.phases.find(ph=>ph.id===m.phase_id);
+          if(phase?.kind==='knockout'&&x===y)return notice('In der K.O.-Runde ist ein Unentschieden nicht erlaubt.',true);
+          try{await api('/matches/'+m.id+'/manual',{legs1:x,legs2:y});await openCompetition(id)}catch(e){notice(e.message,true)}
         },'subtle'));
         const actionCell=el('td',undefined,'fixture-action-cell');actionCell.append(actions);line.append(actionCell);tbody.append(line);
       }

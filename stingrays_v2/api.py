@@ -559,7 +559,7 @@ async def competition_detail(req):
         membership=await db.fetch(f'''SELECT gm.group_id,gm.entry_id FROM {SCHEMA}.group_members gm
            JOIN {SCHEMA}.groups g ON g.id=gm.group_id JOIN {SCHEMA}.phases p ON p.id=g.phase_id
            WHERE p.competition_id=$1''',cid)
-        matches=await db.fetch(f'''SELECT m.id,m.phase_id,m.group_id,m.round_number,m.bracket_position,m.player1_id,m.player2_id,
+        matches=await db.fetch(f'''SELECT m.id,m.phase_id,m.group_id,m.round_number,m.player1_id,m.player2_id,
             m.status,m.source,m.legs1,m.legs2,m.sets1,m.sets2,m.board_id,m.rules,m.finished_at
            FROM {SCHEMA}.matches m WHERE m.competition_id=$1 ORDER BY m.created_at''',cid)
     return response({'competition':dict(comp),'phases':list(map(dict,phases)),'groups':list(map(dict,groups)),
@@ -772,7 +772,7 @@ async def standings(req):
 async def update_tournament_configuration(req):
     """Update planned follow-up stages without modifying played matches."""
     a=await actor(req);cid=uid(req.match_info['cid']);data=await body(req)
-    allowed={'follow','qualifiers','best_third_count','best_third_manual_ids','follow_format','follow_group_count','consolation','consolation_format','consolation_group_count'}
+    allowed={'follow','qualifiers','follow_format','follow_group_count','consolation','consolation_format','consolation_group_count'}
     if not set(data).issubset(allowed):raise web.HTTPBadRequest(text='Unbekannte Turniereinstellung')
     async with pool(req).acquire() as db:
       async with db.transaction():
@@ -793,22 +793,6 @@ async def update_tournament_configuration(req):
             raise web.HTTPBadRequest(text='Trostrunde erfordert eine Finalrunde')
         if str(updated.get('qualifiers')) not in ('1','2','4','8','all'):
             raise web.HTTPBadRequest(text='Qualifikation: 1, 2, 4, 8 oder alle')
-        try: extra=int(updated.get('best_third_count',0) or 0)
-        except (ValueError,TypeError):raise web.HTTPBadRequest(text='Beste Dritte: ungültiger Wert')
-        if not 0<=extra<=16:raise web.HTTPBadRequest(text='Beste Dritte: 0–16')
-        if extra and (fmt!='groups' or not updated['follow'] or updated.get('qualifiers')=='all'):
-            raise web.HTTPBadRequest(text='Beste Dritte benötigen eine Gruppen-Vorrunde mit begrenzter Finalqualifikation')
-        group_count=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.groups g JOIN {SCHEMA}.phases p ON p.id=g.phase_id
-            WHERE p.competition_id=$1 AND p.phase_order=1''',cid)
-        if extra>group_count:raise web.HTTPBadRequest(text='Mehr Wildcards als Gruppen')
-        updated['best_third_count']=extra
-        overrides=updated.get('best_third_manual_ids') or []
-        if not isinstance(overrides,list) or len(overrides)>16:
-            raise web.HTTPBadRequest(text='Ungültige manuelle Nachrücker')
-        overrides=[str(uid(x)) for x in overrides]
-        if len(set(overrides))!=len(overrides) or (overrides and len(overrides)!=extra):
-            raise web.HTTPBadRequest(text='Manuelle Nachrücker: Genau die eingestellte Anzahl unterschiedlicher Spieler wählen')
-        updated['best_third_manual_ids']=overrides if extra else []
         for key in ('follow_format','consolation_format'):
             if updated.get(key) not in ('single_ko','double_ko','league','groups'):
                 raise web.HTTPBadRequest(text='Ungültiger Modus in '+key)
@@ -1129,6 +1113,15 @@ async def manual_result(req):
         if not m or m['status']!='open':raise web.HTTPConflict(text='Nur offene Matches können als Altdaten erfasst werden')
         if await db.fetchval(f"SELECT kind FROM {SCHEMA}.competitions WHERE id=$1",m['competition_id'])=='ladder':
             raise web.HTTPForbidden(text='Ladder wertet nur gescorte Matches')
+        phase=await db.fetchrow(f'SELECT kind FROM {SCHEMA}.phases WHERE id=$1',m['phase_id']) if m['phase_id'] else None
+        if phase and phase['kind']=='knockout':
+            if x==y:raise web.HTTPBadRequest(text='K.O.-Spiele benötigen einen eindeutigen Sieger')
+            rules=as_json(m['rules']);mode=rules.get('mode','legs')
+            if mode=='legs':
+                target=int(rules.get('max_legs',5))//2+1
+                if max(x,y)!=target or min(x,y)>=target:raise web.HTTPBadRequest(text=f'K.O.-Match muss mit {target} gewonnenen Legs enden (Best of {rules.get("max_legs",5)})')
+            # Set matches require their own result endpoint; do not misinterpret sets as legs.
+            if mode=='sets':raise web.HTTPBadRequest(text='Setmodus: Bitte ein vollständiges Set-Ergebnis erfassen, kein reines Leg-Ergebnis')
         await db.execute(f'''UPDATE {SCHEMA}.matches SET status='finished',source='legacy',legs1=$2,legs2=$3,
            finished_at=now() WHERE id=$1''',mid,x,y)
         await db.execute(f"INSERT INTO {SCHEMA}.match_revisions(match_id,actor_id,action,new_state) VALUES($1,$2,'manual_result',$3::jsonb)",mid,a['id'],json.dumps({'legs1':x,'legs2':y}))
@@ -1138,6 +1131,44 @@ async def manual_result(req):
     except Exception:
         import logging
         logging.exception('Trainingsturnier: Rundenwechsel nach manueller Wertung fehlgeschlagen')
+    return response({'ok':True})
+
+async def correct_invalid_ko(req):
+    # Correct legacy KO draws and rebuild only downstream unstarted matches in same phase.
+    a=await actor(req,'admin');d=await body(req);mid=uid(req.match_info['mid'])
+    if d.get('confirm')!='KORRIGIEREN':raise web.HTTPBadRequest(text='Bestätigung erforderlich')
+    try:x,y=int(d['legs1']),int(d['legs2'])
+    except (KeyError,TypeError,ValueError):raise web.HTTPBadRequest(text='Ergebnis ungültig')
+    if x<0 or y<0 or x==y:raise web.HTTPBadRequest(text='K.O.-Spiele benötigen einen eindeutigen Sieger')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        m=await db.fetchrow(f'SELECT * FROM {SCHEMA}.matches WHERE id=$1 FOR UPDATE',mid)
+        if not m:raise web.HTTPNotFound()
+        phase=await db.fetchrow(f'SELECT kind,rules FROM {SCHEMA}.phases WHERE id=$1',m['phase_id'])
+        if not phase or phase['kind']!='knockout' or m['status']!='finished' or m['legs1']!=m['legs2'] or m['source']!='legacy':
+            raise web.HTTPConflict(text='Nur ungültige, manuell eingetragene K.O.-Unentschieden können so korrigiert werden')
+        rules=as_json(m['rules'])
+        if rules.get('mode','legs')!='legs':raise web.HTTPConflict(text='Setmodus muss gesondert korrigiert werden')
+        target=int(rules.get('max_legs',5))//2+1
+        if max(x,y)!=target or min(x,y)>=target:raise web.HTTPBadRequest(text=f'Best of {rules.get("max_legs",5)} braucht {target} Gewinnlegs')
+        downstream=await db.fetch(f'SELECT id,status FROM {SCHEMA}.matches WHERE phase_id=$1 AND round_number>$2 FOR UPDATE',m['phase_id'],m['round_number'])
+        if any(row['status']!='open' for row in downstream):raise web.HTTPConflict(text='Folgerunden wurden bereits gespielt. Eine automatische Korrektur ist nicht mehr sicher.')
+        for row in downstream:
+            await db.execute(f'DELETE FROM {SCHEMA}.match_claims WHERE match_id=$1',row['id'])
+            await db.execute(f'DELETE FROM {SCHEMA}.matches WHERE id=$1',row['id'])
+        before={'legs1':m['legs1'],'legs2':m['legs2'],'status':m['status']}
+        await db.execute(f'''UPDATE {SCHEMA}.matches SET legs1=$2,legs2=$3,winner_id=$4 WHERE id=$1''',mid,x,y,m['player1_id'] if x>y else m['player2_id'])
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+          VALUES($1,'correct_invalid_ko','match',$2,$3::jsonb)''',a['id'],str(mid),json.dumps({'before':before,'after':[x,y],'reason':str(d.get('reason',''))[:300]}))
+        await db.execute(f'''INSERT INTO {SCHEMA}.match_revisions(match_id,actor_id,action,reason)
+          VALUES($1,$2,'correct_invalid_ko',$3)''',mid,a['id'],str(d.get('reason',''))[:300])
+    try:
+        from .tournament_automation import progress
+        await progress(req,m['competition_id'])
+    except Exception:
+        import logging
+        logging.exception('KO-Fehlerkorrektur: Turnierfortschreibung fehlgeschlagen')
+        raise web.HTTPInternalServerError(text='Ergebnis korrigiert, aber automatische Rundenfortschreibung fehlgeschlagen. Bitte Admin-Protokoll prüfen.')
     return response({'ok':True})
 
 async def withdraw(req):
@@ -1701,6 +1732,7 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/matches/{mid}/reset',reset_match),
       ('POST','/dart/v2/api/matches/{mid}/abort',abort_match),
       ('POST','/dart/v2/api/matches/{mid}/manual',manual_result),
+      ('POST','/dart/v2/api/matches/{mid}/correct-ko',correct_invalid_ko),
       ('POST','/dart/v2/api/competitions/{cid}/withdraw',withdraw),
       ('POST','/dart/v2/api/phases/{pid}/close',close_phase),
       ('POST','/dart/v2/api/phases/{pid}/bracket',bracket),

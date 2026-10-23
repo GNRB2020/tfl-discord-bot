@@ -243,6 +243,10 @@ async def progress(req,cid):
             if mx is None:continue
             rows=await db.fetch(f'SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1 AND round_number=$2 ORDER BY bracket_position',ph['id'],mx)
             if not rows or any(m['status']!='finished' for m in rows):continue
+            if any(m['legs1']==m['legs2'] and not (m['sets1'] or m['sets2']) for m in rows):
+                import logging
+                logging.error('K.O.-Runde mit Unentschieden kann nicht fortgeschrieben werden: phase=%s round=%s',ph['id'],mx)
+                continue
             allrows=await db.fetch(f'SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1 ORDER BY round_number,bracket_position',ph['id'])
             participants=[UUID(p) for p in pr.get('participants',[])]
             if fmt=='single_ko':
