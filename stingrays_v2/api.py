@@ -323,15 +323,27 @@ async def create_account(req):
 async def reset_account(req):
     a=await actor(req,'admin');d=await body(req);target=uid(req.match_info['aid'])
     async with pool(req).acquire() as db:
+      async with db.transaction():
         if 'is_enabled' in d:
-            if a['id']==target and not d['is_enabled']:raise web.HTTPBadRequest(text='Eigenes Admin-Konto nicht deaktivieren')
-            await db.execute(f'UPDATE {SCHEMA}.accounts SET is_enabled=$2 WHERE id=$1',target,bool(d['is_enabled']))
-            await db.execute(f'UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE account_id=$1',target)
+            enabled=d['is_enabled']
+            if not isinstance(enabled,bool):raise web.HTTPBadRequest(text='Ungültiger Kontostatus')
+            if a['id']==target and not enabled:raise web.HTTPConflict(text='Eigenes Administratorkonto nicht deaktivieren')
+            await db.execute('SELECT pg_advisory_xact_lock(778191924)')
+            old=await db.fetchrow(f'SELECT username,role,is_enabled FROM {SCHEMA}.accounts WHERE id=$1 FOR UPDATE',target)
+            if not old:raise web.HTTPNotFound(text='Konto nicht gefunden')
+            if old['role']=='admin' and old['is_enabled'] and not enabled:
+                others=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.accounts WHERE role='admin' AND is_enabled=true AND id<>$1",target)
+                if not others:raise web.HTTPConflict(text='Letzten Administrator nicht deaktivieren')
+            await db.execute(f'UPDATE {SCHEMA}.accounts SET is_enabled=$2 WHERE id=$1',target,enabled)
+            if not enabled:await db.execute(f'UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE account_id=$1',target)
+            await db.execute(f"""INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+              VALUES($1,$2,'account',$3,$4::jsonb)""",a['id'],'enable_account' if enabled else 'disable_account',str(target),json.dumps({'username':old['username']}))
         if 'initial_password' in d:
             try:pw=hash_password(str(d['initial_password']))
             except ValueError as e:raise web.HTTPBadRequest(text=str(e))
             await db.execute(f'UPDATE {SCHEMA}.accounts SET password_hash=$2,must_change_password=true WHERE id=$1',target,pw)
             await db.execute(f'UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE account_id=$1',target)
+            await db.execute(f"INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id) VALUES($1,'reset_password','account',$2)",a['id'],str(target))
     return response({'ok':True})
 
 
@@ -1307,6 +1319,104 @@ async def stats(req):
         'training_bobs_best':max([int(x.get('points',0)) for x in bobs_results],default=None),
         'missing_throw_stats_matches':sum(m['source']!='scorer' for m in games)})
 
+async def tournament_statistics(req):
+    await actor(req);cid=uid(req.match_info['cid'])
+    async with pool(req).acquire() as db:
+        c=await db.fetchrow(f'SELECT kind,title FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL',cid)
+        if not c or c['kind']=='ladder':raise web.HTTPNotFound(text='Turnier nicht gefunden')
+        people=await db.fetch(f"""SELECT p.id,p.display_name FROM {SCHEMA}.entries e
+            JOIN {SCHEMA}.players p ON p.id=e.player_id WHERE e.competition_id=$1 ORDER BY p.display_name""",cid)
+        matches=await db.fetch(f"""SELECT player1_id,player2_id,legs1,legs2,sets1,sets2,state,source
+            FROM {SCHEMA}.matches WHERE competition_id=$1 AND status='finished' """,cid)
+    result={r['id']:{'player_id':r['id'],'name':r['display_name'],'games':0,'wins':0,'draws':0,'losses':0,
+        'legs_for':0,'legs_against':0,'points':0,'darts':0,'first9_points':0,'first9_darts':0,
+        '95plus':0,'100plus':0,'133plus':0,'140plus':0,'171plus':0,'180':0,'exact133':0,
+        'highfinish':None,'lowdart':None,'bullfinishes':0,'scored_games':0} for r in people}
+    for m in matches:
+        raw=as_json(m['state']);visits=raw.get('visits') or []
+        for idx,pid in enumerate((m['player1_id'],m['player2_id'])):
+            if pid not in result:continue
+            r=result[pid];r['games']+=1
+            l1=int(m['legs1'] or 0);l2=int(m['legs2'] or 0)
+            r['legs_for']+=l1 if idx==0 else l2;r['legs_against']+=l2 if idx==0 else l1
+            x,y=((m['sets1'],m['sets2']) if (m['sets1'] or m['sets2']) else (m['legs1'],m['legs2']))
+            x,y=(int(x or 0),int(y or 0)) if idx==0 else (int(y or 0),int(x or 0))
+            r['wins']+=int(x>y);r['draws']+=int(x==y);r['losses']+=int(x<y)
+            if m['source']!='scorer' or not visits:continue
+            r['scored_games']+=1
+            legs={}
+            for v in visits:
+                if int(v.get('player',-1))!=idx:continue
+                legs.setdefault(v.get('leg_index',0),[]).append(v)
+                score=0 if v.get('bust') else int(v.get('score',0) or 0)
+                darts=int(v.get('darts',3) or 3)
+                r['points']+=score;r['darts']+=darts
+                if not v.get('bust'):
+                    for threshold,key in ((95,'95plus'),(100,'100plus'),(133,'133plus'),(140,'140plus'),(171,'171plus')):
+                        if score>=threshold:r[key]+=1
+                    r['180']+=int(score==180);r['exact133']+=int(score==133)
+                if v.get('checkout'):
+                    r['highfinish']=max(r['highfinish'] or 0,score)
+                    r['bullfinishes']+=int(bool(v.get('bullfinish')))
+            for group in legs.values():
+                dcount=0;sumscore=0
+                for v in group:
+                    nd=int(v.get('darts',3) or 3)
+                    if dcount+nd<=9:
+                        dcount+=nd;sumscore+=0 if v.get('bust') else int(v.get('score',0) or 0)
+                r['first9_darts']+=dcount;r['first9_points']+=sumscore
+                if group and group[-1].get('checkout'):
+                    used=sum(int(v.get('darts',3) or 3) for v in group)
+                    r['lowdart']=min(r['lowdart'] or used,used)
+    out=[]
+    for r in result.values():
+        r['average']=round(3*r['points']/r['darts'],2) if r['darts'] else None
+        r['first9']=round(3*r['first9_points']/r['first9_darts'],2) if r['first9_darts'] else None
+        out.append(r)
+    return response({'competition':c['title'],'players':out})
+
+async def tournament_podiums(req):
+    await actor(req);pid=uid(req.match_info['pid'])
+    async with pool(req).acquire() as db:
+        comps=await db.fetch(f"""SELECT c.id,c.title,c.kind FROM {SCHEMA}.competitions c
+           JOIN {SCHEMA}.entries e ON e.competition_id=c.id WHERE e.player_id=$1
+           AND c.status IN ('finished','archived') AND c.kind <> 'ladder' AND c.deleted_at IS NULL""",pid)
+        podium={'wins':0,'second':0,'third':0,'tournaments':[]}
+        # Use the same ranking engine as the finished tournament's report.
+        from .tournament_automation import report as final_report
+        from types import SimpleNamespace
+        # No new request is forged: placement computation runs through shared DB data below.
+        for c in comps:
+            phase=await db.fetch(f"""SELECT ph.id,ph.name,ph.kind,ph.phase_order,ph.rules
+                FROM {SCHEMA}.phases ph WHERE ph.competition_id=$1 ORDER BY ph.phase_order DESC""",c['id'])
+            if not phase:continue
+            finals=[p for p in phase if as_json(p['rules']).get('stage')=='final' or 'final' in p['name'].lower()]
+            ko=finals or [p for p in phase if p['kind']=='knockout']
+            if not ko:continue
+            stage=ko[0]
+            matches=await db.fetch(f"""SELECT player1_id,player2_id,legs1,legs2,sets1,sets2,round_number
+               FROM {SCHEMA}.matches WHERE phase_id=$1 AND status='finished' ORDER BY round_number DESC""",stage['id'])
+            if not matches:continue
+            last=max(int(m['round_number'] or 1) for m in matches)
+            final=[m for m in matches if int(m['round_number'] or 1)==last]
+            if len(final)!=1:continue
+            m=final[0];x,y=(m['sets1'],m['sets2']) if (m['sets1'] or m['sets2']) else (m['legs1'],m['legs2'])
+            if x is None or y is None or x==y:continue
+            champion=m['player1_id'] if x>y else m['player2_id']
+            runner=m['player2_id'] if x>y else m['player1_id']
+            semis=[q for q in matches if int(q['round_number'] or 1)==last-1]
+            third=set()
+            if len(semis)==2:
+                for q in semis:
+                    sx,sy=(q['sets1'],q['sets2']) if (q['sets1'] or q['sets2']) else (q['legs1'],q['legs2'])
+                    if sx is not None and sy is not None and sx!=sy:
+                        third.add(q['player2_id'] if sx>sy else q['player1_id'])
+            rank=1 if pid==champion else 2 if pid==runner else 3 if pid in third else None
+            if rank:
+                podium[{1:'wins',2:'second',3:'third'}[rank]]+=1
+                podium['tournaments'].append({'id':c['id'],'title':c['title'],'place':rank})
+    return response(podium)
+
 async def save_solo_session(req):
     a=await actor(req);d=await body(req)
     kind=d.get('kind');result=d.get('result')
@@ -1547,6 +1657,8 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/competitions/{cid}/delete',delete_competition),
       ('GET','/dart/v2/api/competitions/{cid}/export',export_open),
       ('GET','/dart/v2/api/competitions/{cid}/elo-history',elo_history),
+      ('GET','/dart/v2/api/competitions/{cid}/statistics',tournament_statistics),
+      ('GET','/dart/v2/api/players/{pid}/podiums',tournament_podiums),
       ('GET','/dart/v2/api/players/{pid}/stats',stats),
       ('GET','/dart/v2/api/players/{pid}/h2h',head_to_head),
       ('POST','/dart/v2/api/training/sessions',save_solo_session),

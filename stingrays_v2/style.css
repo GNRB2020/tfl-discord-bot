@@ -242,3 +242,9 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .competition-status.running{color:#a6e4b9;background:#22382b}
 .competition-status.completed{color:#edcc81;background:#3d3525}
 @media(max-width:680px){.competition-directory-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}.competition-directory-tabs button{font-size:12px;padding:10px 4px}}
+
+/* Qualification zone in group standings */
+.data-table tr.tournament-qualified td{background:rgba(194,159,78,.11);}
+.data-table tr.tournament-qualified td:nth-child(2){color:#f5d37f;font-weight:800;}
+.data-table tr.tournament-cutoff td{border-bottom:3px dashed #eac36a!important;}
+.competition-content .scroll{max-width:100%;overflow-x:auto;}
