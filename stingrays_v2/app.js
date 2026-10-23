@@ -670,10 +670,26 @@ async function openCompetition(id){
       }draw();return;
     }
     if(!selected.groups.length){box.append(el('p','Noch keine Gruppen angelegt. Die Einteilung erfolgt unter Verwaltung.','empty'));return}
-    const switcher=el('div',undefined,'filterline');switcher.append(el('span','Staffel anzeigen'));
-    const chosen=picker(selected.groups.map(g=>[g.id,g.name]),selected.groups[0].id,()=>fill());switcher.append(chosen);box.append(switcher);
-    const area=el('div');box.append(area);
-    async function fill(){clear(area);const g=selected.groups.find(g=>g.id===chosen.value);if(!g)return;
+    // Jede Gruppe ist ein eigener Tab; keine separate Dropdown-Auswahl.
+    const groupTabs=el('div',undefined,'group-standings-tabs');
+    groupTabs.setAttribute('role','tablist');
+    groupTabs.setAttribute('aria-label','Gruppentabellen');
+    let chosenGroupId=selected.groups[0].id;
+    const area=el('div',undefined,'group-standings-content');
+    for(const group of selected.groups){
+      const button=action(group.name,()=>{chosenGroupId=group.id;fill();},'group-standings-tab');
+      button.dataset.groupId=group.id;
+      button.setAttribute('role','tab');
+      groupTabs.append(button);
+    }
+    box.append(groupTabs,area);
+    async function fill(){
+      for(const button of groupTabs.children){
+        const active=button.dataset.groupId===chosenGroupId;
+        button.classList.toggle('selected',active);
+        button.setAttribute('aria-selected',String(active));
+      }
+      clear(area);const g=selected.groups.find(g=>g.id===chosenGroupId);if(!g)return;
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
       const rawRules=typeof c.rules==='string'?JSON.parse(c.rules||'{}'):(c.rules||{});

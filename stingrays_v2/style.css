@@ -263,3 +263,10 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .competition-content .data-table.polished tbody tr.tournament-qualified td:nth-child(2){font-weight:800}
 .competition-content .data-table.polished tbody tr.tournament-cutoff td {border-bottom:3px dashed #edc774!important}
 .competition-content .qualification-notice{display:block;margin:12px 0;background:#3d311b;color:#ffe0a0;border:1px solid #b28a40;padding:12px 16px;border-radius:9px;font-weight:800}
+
+/* Gruppentabellen: gleich große, horizontal scrollbare Tabs statt Dropdown */
+.group-standings-tabs{display:flex;gap:8px;overflow-x:auto;max-width:100%;padding:3px 2px 12px;margin:6px 0 16px;scrollbar-width:thin}
+.group-standings-tabs .group-standings-tab{flex:0 0 auto;min-width:125px;max-width:220px;white-space:nowrap;padding:12px 20px;border:1px solid #62583e;border-radius:9px;background:#272728;color:#eee;cursor:pointer;font-weight:700;text-align:center}
+.group-standings-tabs .group-standings-tab.selected{background:#66502c;color:#fff0bd;border-color:#e5bc67;box-shadow:inset 0 -3px 0 #f4cd79}
+.group-standings-tabs .group-standings-tab:focus-visible{outline:2px solid #e5bc67;outline-offset:2px}
+@media(max-width:640px){.group-standings-tabs .group-standings-tab{min-width:105px;padding:10px 14px}}
