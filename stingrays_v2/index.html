@@ -31,4 +31,33 @@
 <div class="panel"><div class="admin-heading"><div><h2>Änderungsprotokoll</h2><p>Nur Administratoren · wer hat wann was getan?</p></div><button type="button" id="auditRefresh" class="subtle">Aktualisieren</button></div><div id="auditLog"></div><button id="auditMore" type="button" class="subtle" hidden>Weitere Einträge laden</button></div>
 </div><div class="panel"><h2>Neuen Wettbewerb konfigurieren</h2><p>Geführte Anlage mit Wettbewerb, Laufzeit, Teilnehmern und Qualifikationsregeln.</p><button id="createCompetitionAdmin" type="button">Konfigurationsassistent starten</button></div><div class="panel"><h2>Spieleransicht prüfen (nur lesen)</h2><p>Dashboard eines Mitglieds anzeigen, ohne dessen Zugangsdaten zu verwenden oder Spiele in seinem Namen zu werten.</p><select id="previewPlayer"></select><button id="previewOpen">Als Mitglied anzeigen</button><button id="previewExit">Zur eigenen Ansicht zurück</button></div><div class="grid"><div class="panel"><h2>Mitglied anlegen</h2><form id="memberForm"><label>Name<input name="display_name" required></label><label>Bestehende Profil-ID (optional)<input name="legacy_profile_id" placeholder="STR-0001"></label><button>Mitglied erstellen</button></form></div><div class="panel"><h2>Benutzerkonto anlegen</h2><form id="accountForm"><label>Spieler<select id="accountPlayer" name="player_id"><option value="">Turnierkonto ohne Spieler</option></select></label><label>Benutzername<input name="username" required></label><label>Erstpasswort<input name="initial_password" type="password" minlength="12" required></label><label>Rolle<select name="role"><option value="member">Mitglied</option><option value="tournament">Turnierleitung</option><option value="admin">Administrator</option></select></label><button>Konto erstellen</button></form></div></div><p class="hint">Bestehende Google-Sheets-Ergebnisse werden nicht automatisch überschrieben. Historische Daten müssen vor Umschaltung gezielt geprüft und importiert werden.</p></section>
 <section id="scorer" hidden><div class="toolbar"><button id="backToCompetition">← Wettbewerb</button><span id="scoreStatus"></span></div><div class="scoregrid"><article class="scorecard"><h2 id="playerOne"></h2><strong id="remainOne">501</strong><small id="resultOne"></small></article><article class="scorecard"><h2 id="playerTwo"></h2><strong id="remainTwo">501</strong><small id="resultTwo"></small></article></div><form id="throwForm" class="panel compact"><h2 id="toThrow">Aufnahme</h2><label>Punkte<input name="points" type="number" min="0" max="180" required autofocus></label><label>Darts<input name="darts" type="number" min="1" max="3" value="3" required></label><label><input type="checkbox" name="checkout"> Checkout</label><label><input type="checkbox" name="bullfinish"> Bullfinish</label><button>Aufnahme speichern</button></form><details class="panel"><summary>Aufnahmen</summary><div id="visits"></div></details></section>
-</main><div class="build-stamp">Stingrays V2 · Konten, Admin-Protokoll und Ladder-Finalplätze 2026-10-23</div><script src="/dart/v2/assets/app.js" defer></script></body></html>
+</main><div class="build-stamp">Stingrays V2 · Konten, Admin-Protokoll und Ladder-Finalplätze 2026-10-23</div><script src="/dart/v2/assets/app.js" defer></script>
+<style id="v2-admin-tab-fix">
+#admin .v2-admin-nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 18px;border-bottom:1px solid #665332;padding-bottom:12px}
+#admin .v2-admin-nav button{background:#292827;color:#e9ddc3;border:1px solid #80683b;border-radius:9px;padding:11px 14px;font-weight:700;cursor:pointer}
+#admin .v2-admin-nav button[aria-selected="true"]{background:#80612b;color:white;border-color:#d3ac5d}
+#admin .v2-admin-pane[hidden]{display:none!important}
+#admin .v2-admin-pane{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,350px),1fr));gap:15px;align-items:start}
+#admin .v2-admin-pane>.panel,#admin .v2-admin-pane>.grid{min-width:0;width:100%;margin:0}
+#admin .v2-admin-pane>.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:15px}
+@media(max-width:650px){#admin .v2-admin-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}#admin .v2-admin-nav button{font-size:12px;padding:10px 6px}}
+</style>
+<script id="v2-admin-tab-fix-script">
+document.addEventListener('DOMContentLoaded',()=>{
+ const admin=document.getElementById('admin');if(!admin||admin.querySelector('.v2-admin-nav'))return;
+ const nav=document.createElement('div');nav.className='v2-admin-nav';nav.setAttribute('role','tablist');nav.setAttribute('aria-label','Adminverwaltung');
+ const defs=[['accounts','Benutzer & Rollen'],['members','Mitglieder'],['boards','Boards'],['competitions','Wettbewerbe'],['sessions','Angemeldete Benutzer'],['audit','Änderungsprotokoll']];
+ const panes={};let active='accounts';
+ for(const [id,label] of defs){const button=document.createElement('button');button.type='button';button.textContent=label;button.setAttribute('role','tab');button.setAttribute('aria-selected','false');button.id='v2-admin-tab-'+id;const pane=document.createElement('div');pane.className='v2-admin-pane';pane.id='v2-admin-pane-'+id;pane.setAttribute('role','tabpanel');pane.setAttribute('aria-labelledby',button.id);pane.hidden=true;button.onclick=()=>activate(id);nav.append(button);panes[id]=pane;}
+ function activate(id){active=id;for(const [key] of defs){panes[key].hidden=key!==id;document.getElementById('v2-admin-tab-'+key).setAttribute('aria-selected',String(key===id));}}
+ const target=(id,part)=>{const elem=admin.querySelector(id);if(!elem)return;const panel=elem.closest('.panel');if(panel)panes[part].append(panel)};
+ target('#onlineSessions','sessions');target('#auditLog','audit');target('#createCompetitionAdmin','competitions');target('#previewPlayer','accounts');target('#memberForm','members');target('#accountForm','accounts');
+ // Later admin features (e.g. migration) should remain visible.
+ const oversight=admin.querySelector('.admin-oversight');if(oversight)oversight.remove();
+ for(const node of [...admin.children]){if(node.tagName==='H1'||node===nav||node.classList.contains('v2-admin-pane'))continue;if(node.classList.contains('grid')&&!node.querySelector('.panel')){node.remove();continue}if(node.classList.contains('grid')&&node.children.length===0){node.remove();continue}if(node.classList.contains('panel'))panes.competitions.append(node);else if(node.classList.contains('grid')){for(const child of [...node.children])panes.competitions.append(child);node.remove()}else panes.competitions.append(node)}
+ admin.querySelector('h1')?.after(nav);for(const [id] of defs)admin.append(panes[id]);
+ const openBoards=document.createElement('button');openBoards.type='button';openBoards.textContent='Boardverwaltung öffnen';openBoards.onclick=()=>document.querySelector('nav [data-view="boards"]')?.click();panes.boards.append(openBoards);
+ activate(active);
+});
+</script>
+</body></html>

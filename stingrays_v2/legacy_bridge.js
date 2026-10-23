@@ -10,7 +10,7 @@
    const state=typeof raw.state==='string'?JSON.parse(raw.state||'{}'):(raw.state||{}),rules=state.rules||(typeof meta.rules==='string'?JSON.parse(meta.rules):meta.rules)||{},rest=state.remaining||[rules.start_score||501,rules.start_score||501],visits=state.visits||[];
    version=raw.state_version??raw.version??version;
    const current=state.current||0;
-   const stats=[0,1].map(i=>{const items=visits.filter(v=>v.player===i&&!v.bust),d=items.reduce((v,x)=>v+(x.darts||3),0);return {average:d?items.reduce((v,x)=>v+(x.score||0),0)*3/d:0}});
+   const stats=[0,1].map(i=>{const items=visits.filter(v=>v.player===i),d=items.reduce((v,x)=>v+(x.darts||3),0);return {average:d?items.reduce((v,x)=>v+(v.bust?0:(v.score||0)),0)*3/d:0}});
    return {...state,kind:'x01',names:state.names||[meta.player1,meta.player2],rules,remaining:rest,current,
       legs:state.legs||[raw.legs1||0,raw.legs2||0],sets:state.sets||[raw.sets1||0,raw.sets2||0],
       done:!!state.done||raw.status==='finished',can_checkout:state.done?[]:possible(rest[current]),
@@ -60,7 +60,7 @@
   for(let i=0;i<2;i++){const target=document.getElementById('v2Recent'+i);target.replaceChildren();
     const last=(S.history||[]).filter(v=>v.player===i).slice(-3).reverse();
     if(!last.length){target.textContent='Noch keine Aufnahme';continue}
-    for(const v of last){const pill=document.createElement('span');pill.className='v2-visit';pill.textContent=v.score+(v.checkout?' ✓':'');target.appendChild(pill)}
+    for(const v of last){const pill=document.createElement('span');pill.className='v2-visit';pill.textContent=(v.bust?'0 · Bust':v.score)+(v.checkout?' ✓':'');target.appendChild(pill)}
   }
  }
  // Checkout: one choice, one booking. No redundant second dart-count dialog.
