@@ -50,7 +50,7 @@ const amAdmin=()=>user?.role==='admin';
 const trainingOwner=()=>selected?.competition?.kind==='training_tournament'&&selected?.competition?.created_by===user?.id;
 function section(name){for(const id of ['setup','login','changePassword','dashboard','settings','training','ladder','competitions','boards','members','statistics','admin','scorer'])$(id).hidden=id!==name;$('nav').hidden=!user||['login','setup','changePassword'].includes(name);for(const b of document.querySelectorAll('nav [data-view]')){b.classList.toggle('active',b.dataset.view===name);b.style.display=b.classList.contains('admin')&&!amAdmin()?'none':(b.dataset.view==='boards'&&user?.role==='member'?'none':'')}notice('')}
 async function session(){try{user=await api('/me');if(user.must_change_password){section('changePassword');return}section('dashboard');await show('dashboard')}catch{user=null;section('login')}}
-async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false)}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false)}}catch(e){notice(e.message,true)}}
+async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false)}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false);await Promise.all([loadOnlineSessions(),loadAuditLog(true)])}}catch(e){notice(e.message,true)}}
 for(const b of document.querySelectorAll('nav [data-view]'))b.onclick=()=>show(b.dataset.view);
 $('firstAdmin').onclick=()=>section('setup');
 $('setupForm').onsubmit=async e=>{e.preventDefault();try{await api('/bootstrap',formData(e.target));section('login');notice('Administrator erstellt. Bitte anmelden.')}catch(err){notice(err.message,true)}};
@@ -123,7 +123,7 @@ async function quickLadder(){
 async function loadSettings(){
  if(previewId){await show('dashboard');return notice('Die Vorschau ist schreibgeschützt.',true)}
  const data=await api('/profile');const form=$('settingsForm');if(data.has_avatar)avatarPlayers.add(String(user.player_id));
- for(const key of ['first_name','last_name','nickname','email'])form.elements[key].value=data[key]||'';
+ for(const key of ['first_name','last_name','nickname','email','username'])form.elements[key].value=data[key]||'';
  form.elements.old_password.value='';form.elements.new_password.value='';form.elements.avatar.value='';
  const wrap=$('settingsWidgets');clear(wrap);
  for(const [key,label] of Object.entries(widgetLabels)){const l=el('label',undefined,'widget-choice'),i=document.createElement('input');i.type='checkbox';i.value=key;i.name='widgets';i.checked=(data.widgets||defaultDashboardWidgets).includes(key);l.append(i,el('span',label));wrap.append(l)}
@@ -157,12 +157,28 @@ $('settingsForm').onsubmit=async e=>{
     nickname:form.elements.nickname.value,email:form.elements.email.value,
     widgets:[...form.querySelectorAll('input[name="widgets"]:checked')].map(x=>x.value)};
   await api('/profile',settings);
+  const nextUsername=form.elements.username.value.trim();
+  if(nextUsername!==user.username){const result=await api('/profile/username',{username:nextUsername});user.username=result.username;}
   if(photo){const res=await fetch('/dart/v2/api/profile/avatar',{method:'POST',credentials:'same-origin',headers:{'Content-Type':photo.type},body:photo});
    if(!res.ok)throw Error('Profilbild: '+(await res.text()).slice(0,200));avatarPlayers.add(String(user.player_id));}
   if(newPass)await api('/password',{old_password:old,new_password:newPass});
   await show('dashboard');notice('Persönliche Einstellungen gespeichert.');
  }catch(error){notice('Speichern nicht vollständig abgeschlossen: '+error.message,true)}
 };
+async function editMemberRole(player){
+ if(!amAdmin()||!player.account_id)return notice('Dieses Mitglied hat noch kein Konto.',true);
+ if(player.account_id===user.id)return notice('Die eigene Adminrolle kann hier nicht geändert werden.',true);
+ const options=[['member','Mitglied – eigene Spiele und Training'],['tournament','Turnieraccount – alle Boards'],['admin','Administrator – volle Rechte']];
+ const d=await configure('Berechtigung ändern · '+player.display_name,[
+   {name:'role',label:'Neue Rolle',type:'select',value:player.role,options}
+ ],'Weiter');if(!d||d.role===player.role)return;
+ const previous=options.find(x=>x[0]===player.role)?.[1]||player.role;
+ const target=options.find(x=>x[0]===d.role)?.[1]||d.role;
+ if(!await approve('Rollenwechsel bestätigen',player.display_name+': '+previous+' → '+target+'. Das Konto muss sich anschließend neu anmelden.'))return;
+ try{await api('/accounts/'+player.account_id+'/role',{role:d.role});await loadPlayers();
+   notice('Rolle von '+player.display_name+' auf '+target+' geändert. Alle Sitzungen dieses Kontos wurden beendet.');}
+ catch(e){notice(e.message,true)}
+}
 async function loadPlayers(){players=await api('/players');setAvatarMetadata(players);renderPlayers()}
 async function newAccountForPlayer(player){
  if(!amAdmin())return notice('Nur Administratoren dürfen Konten vergeben.',true);
@@ -184,12 +200,75 @@ function renderPlayers(){
  for(const p of players.filter(p=>p.display_name.toLocaleLowerCase('de').includes(q))){
   const t=el('article',undefined,'member-tile');t.append(el('strong',p.display_name),el('small',p.username?'Konto: '+p.username+' · '+p.role:'Ohne Benutzerkonto'));
   const foot=el('div',undefined,'member-actions');if(amAdmin()&&!p.username)foot.append(action('Zugang erstellen',()=>newAccountForPlayer(p),'primary'));
-  if(amAdmin()&&p.username)foot.append(el('span',p.is_enabled?'Zugang aktiv':'Zugang gesperrt','helper'));
+  if(amAdmin()&&p.username){foot.append(action('Berechtigung ändern',()=>editMemberRole(p),'subtle'));
+    foot.append(el('span',p.is_enabled?'Zugang aktiv':'Zugang gesperrt','helper'));
+  }
   t.append(foot);host.append(t)
  }
 }
 $('memberSearch').oninput=renderPlayers;
 function fillPlayerSelect(id,blank){const host=$(id);clear(host);if(blank)host.append(new Option('Turnierkonto ohne Spieler',''));for(const p of players)host.append(new Option(p.display_name,p.id))}
+const roleLabels={member:'Mitglied',tournament:'Turnieraccount',admin:'Administrator'};
+let auditOffset=0;
+function formatWhen(value){return value?new Date(value).toLocaleString('de-DE',{dateStyle:'short',timeStyle:'short'}):'Noch keine Aktivität'}
+function auditDescription(item){
+ const d=item.details||{};
+ if(item.action==='login')return 'Anmeldung';
+ if(item.action==='logout')return 'Abmeldung';
+ if(item.action==='change_role')return 'Rolle: '+(roleLabels[d.old_role]||d.old_role)+' → '+(roleLabels[d.new_role]||d.new_role)+' · '+(d.username||'Konto');
+ if(item.action==='change_username')return 'Benutzername: '+(d.old_username||'–')+' → '+(d.new_username||'–');
+ if(item.action==='create_account')return 'Benutzerkonto angelegt';
+ if(item.action==='soft_delete')return 'Wettbewerb gelöscht / ausgeblendet: '+(d.title||'');
+ if(item.action==='link_player_profile')return 'Vereinsprofil verknüpft';
+ if(item.action==='api_change'){
+  const p=d.path||item.target_id||'';
+  if(/\/matches\/[^/]+\/throw$/.test(p))return 'Aufnahme im Scorer gebucht';
+  if(/\/matches\/[^/]+\/undo$/.test(p))return 'Aufnahme zurückgenommen';
+  if(/\/matches\/[^/]+\/reset$/.test(p))return 'Match zurückgesetzt';
+  if(/\/matches\/[^/]+\/start$/.test(p))return 'Match gestartet';
+  if(/\/matches\/[^/]+\/manual$/.test(p))return 'Ergebnis manuell erfasst';
+  if(/\/competitions\/[^/]+\/matches$/.test(p))return 'Begegnung angelegt';
+  if(/\/competitions\/[^/]+\/ladder-conditions$/.test(p))return 'Ladder-Qualifikation konfiguriert';
+  if(/\/competitions\/[^/]+\/delete$/.test(p))return 'Wettbewerb ausgeblendet';
+  if(/\/accounts\/[^/]+\/role$/.test(p))return 'Benutzerrolle geändert';
+  if(p.endsWith('/profile/username'))return 'Benutzername geändert';
+  if(p.endsWith('/profile/avatar'))return 'Profilbild geändert';
+  if(p.endsWith('/profile'))return 'Profil und Dashboard-Einstellungen bearbeitet';
+  if(p.endsWith('/password'))return 'Passwort geändert';
+  if(p.endsWith('/accounts'))return 'Benutzerkonto angelegt';
+  if(p.endsWith('/players'))return 'Mitglied angelegt';
+  if(p.includes('/training/'))return 'Trainingsspiel bearbeitet';
+  if(p.includes('/boards/'))return 'Board konfiguriert';
+  if(p.includes('/competitions/'))return 'Wettbewerb bearbeitet';
+  return 'Änderung: '+p.replace('/dart/v2/api/','');
+ }
+ return ({bootstrap:'Administrator eingerichtet',create_account:'Benutzerkonto angelegt'}[item.action])||item.action;
+}
+async function loadOnlineSessions(){
+ const host=$('onlineSessions');clear(host);host.append(el('p','Sitzungen werden geladen…','helper'));
+ try{const data=await api('/admin/sessions');clear(host);
+  const active=data.sessions.filter(s=>s.active_now).length;
+  host.append(el('p',active+' gerade aktiv · '+data.sessions.length+' gültige Anmeldungen. Aktiv bedeutet eine Anfrage in den letzten '+data.active_minutes+' Minuten.','helper'));
+  if(!data.sessions.length){host.append(el('p','Derzeit keine gültigen Sitzungen.','empty'));return}
+  const wrap=el('div',undefined,'admin-table-scroll'),table=el('table',undefined,'data-table polished admin-small-table');
+  const hd=el('tr');for(const h of ['Benutzer','Rolle','Status','Letzte Aktivität','Sitzung bis'])hd.append(el('th',h));const thead=el('thead');thead.append(hd);table.append(thead);
+  const body=el('tbody');for(const s of data.sessions){const tr=el('tr');
+   const vals=[s.username+(s.display_name?' · '+s.display_name:''),roleLabels[s.role]||s.role,s.active_now?'Aktiv':'Angemeldet',formatWhen(s.last_seen_at),formatWhen(s.expires_at)];
+   for(let i=0;i<vals.length;i++){const td=el('td',vals[i]);if(i===2)td.className=s.active_now?'session-active':'session-idle';tr.append(td)}body.append(tr)}table.append(body);wrap.append(table);host.append(wrap)
+ }catch(e){clear(host);host.append(el('p',e.message,'error'))}
+}
+async function loadAuditLog(reset=true){
+ const host=$('auditLog');if(reset){auditOffset=0;clear(host)}
+ try{const data=await api('/admin/audit?limit=75&offset='+auditOffset);
+  if(reset&&!data.items.length)host.append(el('p','Noch keine protokollierten Aktionen.','empty'));
+  for(const x of data.items){const line=el('article',undefined,'audit-entry');line.append(el('time',formatWhen(x.created_at)),el('strong',x.actor_name),el('span',auditDescription(x)));
+    if(x.target_id&&x.action!=='api_change'){line.append(el('small','Objekt: '+x.target_type+' · '+x.target_id))}host.append(line)}
+  auditOffset+=data.items.length;$('auditMore').hidden=!data.more;
+ }catch(e){host.append(el('p',e.message,'error'));$('auditMore').hidden=true}
+}
+$('onlineRefresh').onclick=loadOnlineSessions;
+$('auditRefresh').onclick=()=>loadAuditLog(true);
+$('auditMore').onclick=()=>loadAuditLog(false);
 async function loadCompetitions(){
  $('createCompetitionWizard').hidden=!amAdmin();competitions=await api('/competitions');const host=$('competitionsList');clear(host);for(const c of competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id))host.append(tile(c.title,(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)))}
 async function loadLadder(){const data=await api('/competitions'),host=$('ladderList');clear(host);const ladders=data.filter(c=>c.kind==='ladder');for(const c of ladders)host.append(tile(c.title,(c.status||'')+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)));if(!ladders.length)host.append(el('p','Noch keine Ladder-Saison angelegt. Administratoren können hier die erste Saison erstellen.'));$('ladderCreate').hidden=user.role!=='admin'}
@@ -455,10 +534,19 @@ async function openCompetition(id){
        for(const h of ['PL','Name','Sp.','S','U','N','Legs','Diff','ELO','Siegquote','Ø ELO Gegner','Ø Average','Ø Average Gegner','Gegner'])hr.append(el('th',h));head.append(hr);table.append(head);
        const body=el('tbody');for(const [i,r] of rows.entries()){
         const tr=el('tr');if(r.qualified)tr.className='final-place';else if(r.eligible)tr.className='qualifying-ready';
+        const rank=data.rows.indexOf(r)+1;
+        if((filter.value==='all'&&rank===Number(rules.finalists)) ||
+           (filter.value!=='all'&&i===Math.min(Number(rules.finalists),rows.length)-1))tr.classList.add('ladder-cutoff');
         const cells=[data.rows.indexOf(r)+1,null,r.played,r.wins,r.draws,r.losses,r.legs_for+':'+r.legs_against,signed(r.legs_for-r.legs_against),Number(r.elo).toFixed(1),(r.win_percent??0)+' %',r.average_opponent_elo??'–',r.own_average??'–',r.opponent_average??'–',r.distinct_opponents];
         for(const cell of cells){const td=el('td');if(cell===null){const link=action('',()=>showPlayerHistory(r),'ladder-name');link.append(participantName(r.player_id,r.display_name));td.append(link)}else td.textContent=String(cell);tr.append(td)}body.append(tr)
-       }table.append(body);host.append(table);area.append(host);
-       area.append(el('p','Gold = aktuell innerhalb der Finalplätze und Mindestbedingungen erfüllt. Die eigene Ansicht zeigt bei Bedarf nur berechtigte Spieler.','helper'));
+       }
+       if(rows.length<Number(rules.finalists)&&filter.value==='all'){
+         const remaining=Number(rules.finalists)-rows.length;
+         const tr=el('tr',undefined,'ladder-open-slots'),td=el('td','Noch '+remaining+' mögliche Finalplätze bis Top '+rules.finalists);
+         td.colSpan=14;tr.append(td);body.append(tr);
+       }
+       table.append(body);host.append(table);area.append(host);
+       area.append(el('p','Gestrichelte goldene Linie = Grenze der Top '+rules.finalists+' (direkt aus den Ladder-Regeln). Goldener Name = aktuelle Finalqualifikation nach Mindestspielen und verschiedenen Gegnern.','helper'));
       }draw();return;
     }
     if(!selected.groups.length){box.append(el('p','Noch keine Gruppen angelegt. Die Einteilung erfolgt unter Verwaltung.','empty'));return}

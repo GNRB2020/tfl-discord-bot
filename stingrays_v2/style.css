@@ -153,3 +153,25 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .ladder-name .participant-name{display:inline-flex}.ladder-name .player-portrait{width:29px;height:29px;min-width:29px}.member-tile .participant-name{font-size:1.08rem}
 @media(max-width:780px){.dash-hero{padding:17px}.dash-portrait{width:96px;height:96px}.dash-hero-actions button{flex:1 1 170px}.dash-columns{grid-template-columns:1fr}.settings-fields{grid-template-columns:1fr}}
 @media(max-width:520px){.dash-hero{padding:12px;gap:10px}.dash-portrait{height:72px;width:72px;border-radius:12px}.dash-hero-actions{margin-top:12px}.dash-hero-actions button{flex:1 1 100%}.dash-hero h1{font-size:1.4rem}.dash-person-name,.dash-date{font-size:.86rem}.dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.dash-kpi{padding:11px 8px;min-height:85px}.dash-kpi span{font-size:.74rem}.dash-kpi strong{font-size:1.34rem}.dash-match{grid-template-columns:1fr}.dash-match button,.dash-match .chip{grid-column:1;grid-row:auto}.dash-portrait .player-portrait{height:100%;width:100%}.settings-avatar-row{align-items:flex-start;gap:12px}.settings-widget-grid{grid-template-columns:1fr}}
+
+/* Account control, session display and audit UI – 2026-10-23 */
+.admin-oversight{display:grid;gap:16px;margin:18px 0 24px}
+.admin-heading{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+.admin-heading h2{margin:0 0 4px;color:#efd084}.admin-heading p{margin:0;font-size:.87rem;color:#beb8ae}
+.admin-table-scroll{max-width:100%;overflow-x:auto;border:1px solid #62543a;border-radius:10px}
+.admin-small-table{min-width:670px!important}.admin-small-table td{font-size:.9rem}
+.session-active{color:#bce9b2;font-weight:800}.session-idle{color:#dec78d}
+.audit-entry{display:grid;grid-template-columns:minmax(110px,150px) minmax(130px,190px) minmax(0,1fr);gap:8px 14px;align-items:center;border-bottom:1px solid #51483a;padding:12px 9px}
+.audit-entry time{color:#d4c6ac;font-variant-numeric:tabular-nums;font-size:.88rem}.audit-entry strong{overflow-wrap:anywhere;color:#efd084}
+.audit-entry span{overflow-wrap:anywhere}.audit-entry small{grid-column:3;color:#aca397;overflow-wrap:anywhere}
+@media(max-width:750px){.audit-entry{grid-template-columns:1fr 1fr}.audit-entry span{grid-column:1/-1}.audit-entry small{grid-column:1/-1}}
+/* Unified ladder table: PL and Name share regular table background. */
+.ladder-table th:first-child,.ladder-table td:first-child,.ladder-table th:nth-child(2),.ladder-table td:nth-child(2){position:static!important;left:auto!important;z-index:auto!important;min-width:0;background:inherit!important}
+.ladder-table th:first-child,.ladder-table th:nth-child(2){background:#4b3e2a!important}
+.ladder-table th:nth-child(2),.ladder-table td:nth-child(2){min-width:160px}
+.ladder-table tr.final-place td{background:rgba(189,147,55,.14)!important}
+.ladder-table tr.qualifying-ready td{background:rgba(189,147,55,.035)!important}
+.ladder-table tr.ladder-cutoff td{border-bottom:3px dashed #f2c45a!important}
+.ladder-table .ladder-name{display:inline-flex;align-items:center;border:0!important;background:transparent!important;box-shadow:none!important;min-height:30px;padding:1px 0!important;font:inherit;cursor:pointer;text-decoration:underline;text-decoration-color:#8d7947;color:#e8dcc4!important}
+.ladder-table tr.final-place .ladder-name,.ladder-table tr.final-place .ladder-name .participant-name{color:#f7d15a!important;font-weight:900!important}
+.ladder-table tr.ladder-open-slots td{color:#f2d086;border-bottom:2px dashed #cda753;text-align:center;background:#2c291e!important;font-weight:700}

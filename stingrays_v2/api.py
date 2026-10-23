@@ -62,10 +62,17 @@ async def actor(req,minimum=None,allow_change=False):
     token=req.cookies.get(COOKIE,'')
     if not token:raise web.HTTPUnauthorized(text='Bitte anmelden')
     async with pool(req).acquire() as db:
-        a=await db.fetchrow(f'''SELECT a.id,a.player_id,a.username,a.role,a.must_change_password,a.is_enabled
+        a=await db.fetchrow(f'''SELECT a.id,a.player_id,a.username,a.role,a.must_change_password,a.is_enabled,s.last_seen_at
           FROM {SCHEMA}.sessions s JOIN {SCHEMA}.accounts a ON a.id=s.account_id
           WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now()''',token_digest(token))
     if not a or not a['is_enabled']:raise web.HTTPUnauthorized(text='Sitzung ungültig')
+    # The existing authentication SELECT carries activity time; no polling or
+    # unnecessary database write for each throw. Only refresh after 60 seconds.
+    seen=a['last_seen_at']
+    if seen is None or seen<datetime.now(timezone.utc)-timedelta(seconds=60):
+        async with pool(req).acquire() as db:
+            await db.execute(f'''UPDATE {SCHEMA}.sessions SET last_seen_at=now()
+                WHERE token_hash=$1 AND (last_seen_at IS NULL OR last_seen_at<now()-interval '60 seconds')''', token_digest(token))
     if a['must_change_password'] and not allow_change:raise web.HTTPForbidden(text='Passwortwechsel erforderlich')
     if minimum=='admin' and a['role']!='admin':raise web.HTTPForbidden(text='Nur Administratoren')
     if minimum=='tournament' and a['role'] not in ('admin','tournament'):raise web.HTTPForbidden(text='Nur Turnierleitung')
@@ -149,8 +156,10 @@ async def login(req):
         if not ok:
             await asyncio.sleep(.45);raise web.HTTPUnauthorized(text='Anmeldung fehlgeschlagen')
         raw,th=token_pair()
-        await db.execute(f'''INSERT INTO {SCHEMA}.sessions(account_id,token_hash,expires_at)
-              VALUES($1,$2,now()+interval '12 hours')''',a['id'],th)
+        await db.execute(f'''INSERT INTO {SCHEMA}.sessions(account_id,token_hash,expires_at,last_seen_at)
+              VALUES($1,$2,now()+interval '12 hours',now())''',a['id'],th)
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id)
+              VALUES($1,'login','account',$2)''',a['id'],str(a['id']))
     result=response({'username':a['username'],'role':a['role'],'must_change_password':a['must_change_password']})
     result.set_cookie(COOKIE,raw,httponly=True,secure=True,samesite='Strict',max_age=43200,path='/dart/v2')
     return result
@@ -160,6 +169,11 @@ async def logout(req):
     token=req.cookies.get(COOKIE,'')
     if token:
         async with pool(req).acquire() as db:
+            owner=await db.fetchval(f'''SELECT account_id FROM {SCHEMA}.sessions
+                 WHERE token_hash=$1 AND revoked_at IS NULL''',token_digest(token))
+            if owner:
+                await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id)
+                  VALUES($1,'logout','account',$2)''',owner,str(owner))
             await db.execute(f'UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE token_hash=$1',token_digest(token))
     result=response({'ok':True});result.del_cookie(COOKIE,path='/dart/v2');return result
 
@@ -192,6 +206,7 @@ async def profile_settings(req):
           (pp.avatar IS NOT NULL) AS has_avatar FROM {SCHEMA}.players p
           LEFT JOIN {SCHEMA}.player_preferences pp ON pp.player_id=p.id WHERE p.id=$1''',a['player_id'])
     data=dict(p)
+    data['username']=a['username']
     if not data.get('first_name') and not data.get('last_name') and ' ' in data['display_name']:
         data['first_name'],data['last_name']=data['display_name'].split(' ',1)
     if not data.get('nickname'):data['nickname']=a['username']
@@ -269,7 +284,7 @@ async def members(req):
     await actor(req)
     async with pool(req).acquire() as db:
         rows=await db.fetch(f'''SELECT p.id,p.legacy_profile_id,p.display_name,p.is_active,p.is_member,
-          a.username,a.role,a.is_enabled,pp.avatar IS NOT NULL AS has_avatar FROM {SCHEMA}.players p LEFT JOIN {SCHEMA}.accounts a ON a.player_id=p.id LEFT JOIN {SCHEMA}.player_preferences pp ON pp.player_id=p.id
+          a.id AS account_id,a.username,a.role,a.is_enabled,pp.avatar IS NOT NULL AS has_avatar FROM {SCHEMA}.players p LEFT JOIN {SCHEMA}.accounts a ON a.player_id=p.id LEFT JOIN {SCHEMA}.player_preferences pp ON pp.player_id=p.id
           ORDER BY p.display_name''')
     return response(list(map(dict,rows)))
 
@@ -318,6 +333,115 @@ async def reset_account(req):
             await db.execute(f'UPDATE {SCHEMA}.accounts SET password_hash=$2,must_change_password=true WHERE id=$1',target,pw)
             await db.execute(f'UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE account_id=$1',target)
     return response({'ok':True})
+
+
+# All account changes are restricted at the API layer, not only hidden in the UI.
+async def update_account_role(req):
+    a=await actor(req,'admin');d=await body(req);target=uid(req.match_info['aid'])
+    role=str(d.get('role','')).strip()
+    if role not in ('member','tournament','admin'):
+        raise web.HTTPBadRequest(text='Ungültige Rolle')
+    if target==a['id']:
+        raise web.HTTPConflict(text='Eigene Adminrolle kann nicht geändert werden. Bitte einen zweiten Administrator verwenden.')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        # Serializes simultaneous demotions; the last enabled admin is protected.
+        await db.execute('SELECT pg_advisory_xact_lock(778191924)')
+        old=await db.fetchrow(f'''SELECT id,username,role FROM {SCHEMA}.accounts
+                                  WHERE id=$1 FOR UPDATE''',target)
+        if not old:raise web.HTTPNotFound(text='Konto nicht gefunden')
+        if old['role']==role:return response({'ok':True,'role':role,'unchanged':True})
+        if old['role']=='admin' and role!='admin':
+            others=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.accounts
+                WHERE role='admin' AND is_enabled=true AND id<>$1''',target)
+            if not others:raise web.HTTPConflict(text='Der letzte aktive Administrator darf nicht entfernt werden')
+        await db.execute(f'UPDATE {SCHEMA}.accounts SET role=$2 WHERE id=$1',target,role)
+        await db.execute(f'UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE account_id=$1',target)
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+          VALUES($1,'change_role','account',$2,$3::jsonb)''',a['id'],str(target),json.dumps({
+             'username':old['username'],'old_role':old['role'],'new_role':role}))
+    return response({'ok':True,'role':role,'relogin_required':True})
+
+async def change_my_username(req):
+    a=await actor(req);d=await body(req)
+    name=str(d.get('username','')).strip()
+    import re
+    if not re.fullmatch(r'[\w.\-]{3,80}',name,re.UNICODE):
+        raise web.HTTPBadRequest(text='Benutzername: 3–80 Zeichen; Buchstaben, Zahlen, Punkt, _ oder -')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        old=await db.fetchrow(f'SELECT username FROM {SCHEMA}.accounts WHERE id=$1 FOR UPDATE',a['id'])
+        if old['username']==name:return response({'ok':True,'username':name,'unchanged':True})
+        try:
+            await db.execute(f'UPDATE {SCHEMA}.accounts SET username=$2 WHERE id=$1',a['id'],name)
+        except Exception as exc:
+            if getattr(exc,'sqlstate',None)=='23505':
+                raise web.HTTPConflict(text='Dieser Benutzername ist bereits vergeben')
+            raise
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+          VALUES($1,'change_username','account',$2,$3::jsonb)''',a['id'],str(a['id']),json.dumps({
+              'old_username':old['username'],'new_username':name}))
+    return response({'ok':True,'username':name})
+
+async def admin_sessions(req):
+    await actor(req,'admin')
+    async with pool(req).acquire() as db:
+        rows=await db.fetch(f'''SELECT s.id,a.username,a.role,p.display_name,s.last_seen_at,s.expires_at,
+             (s.last_seen_at IS NOT NULL AND s.last_seen_at>=now()-interval '5 minutes') AS active_now
+             FROM {SCHEMA}.sessions s JOIN {SCHEMA}.accounts a ON a.id=s.account_id
+             LEFT JOIN {SCHEMA}.players p ON p.id=a.player_id
+             WHERE s.revoked_at IS NULL AND s.expires_at>now() AND a.is_enabled
+             ORDER BY s.last_seen_at DESC NULLS LAST,a.username LIMIT 200''')
+    return response({'sessions':list(map(dict,rows)),'active_minutes':5,'max_rows':200})
+
+async def admin_audit(req):
+    await actor(req,'admin')
+    try:
+        limit=max(1,min(150,int(req.query.get('limit','75'))))
+        offset=max(0,min(10000,int(req.query.get('offset','0'))))
+    except ValueError:raise web.HTTPBadRequest(text='Ungültige Seiteneinteilung')
+    async with pool(req).acquire() as db:
+        rows=await db.fetch(f'''SELECT l.id,l.created_at,l.action,l.target_type,l.target_id,l.details,
+          coalesce(a.username,'Konto gelöscht / System') AS actor_name,
+          p.display_name AS actor_player
+          FROM {SCHEMA}.audit_log l LEFT JOIN {SCHEMA}.accounts a ON a.id=l.actor_id
+          LEFT JOIN {SCHEMA}.players p ON p.id=a.player_id
+          ORDER BY l.created_at DESC,l.id DESC LIMIT $1 OFFSET $2''',limit,offset)
+    return response({'items':list(map(dict,rows)),'offset':offset,'limit':limit,'more':len(rows)==limit})
+
+# A single audit hook records every successful V2 change, including match scores,
+# without storing passwords, request bodies, cookies, IP addresses or image content.
+# Existing detailed events (e.g. change_role) are retained separately.
+@web.middleware
+async def stingrays_v2_change_audit(req,handler):
+    tracked=req.method in ('POST','PATCH','PUT','DELETE') and req.path.startswith('/dart/v2/')
+    skip=('/dart/v2/api/login','/dart/v2/api/logout','/dart/v2/api/bootstrap')
+    owner=None
+    detailed=(req.path.endswith('/profile/username') or req.path.endswith('/delete') or
+              (req.path.startswith('/dart/v2/api/accounts/') and req.path.endswith('/role')))
+    if tracked and req.path not in skip and not detailed:
+        token=req.cookies.get(COOKIE,'')
+        if token:
+            try:
+                async with pool(req).acquire() as db:
+                    owner=await db.fetchval(f'''SELECT a.id FROM {SCHEMA}.sessions s
+                      JOIN {SCHEMA}.accounts a ON a.id=s.account_id
+                      WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now()
+                        AND a.is_enabled''',token_digest(token))
+            except Exception:
+                # Logging must never stop a valid scoring action.
+                pass
+    result=await handler(req)
+    if owner and result.status<400:
+        try:
+            async with pool(req).acquire() as db:
+                await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+                  VALUES($1,'api_change','request',$2,$3::jsonb)''',owner,req.path,
+                  json.dumps({'path':req.path,'method':req.method}))
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('V2 action audit could not be saved')
+    return result
 
 async def board_list(req):
     await actor(req)
@@ -1315,6 +1439,7 @@ def register_stingrays_v2(app):
     from . import training_original
     training_original.register(app)
     app.on_startup.append(register_startup);app.on_cleanup.append(register_cleanup)
+    app.middlewares.append(stingrays_v2_change_audit)
     from .free_training import register as register_free_training
     register_free_training(app)
     routes=[
@@ -1331,6 +1456,10 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/players',members),
       ('POST','/dart/v2/api/players',create_member),('POST','/dart/v2/api/accounts',create_account),
       ('POST','/dart/v2/api/accounts/{aid}',reset_account),
+      ('POST','/dart/v2/api/accounts/{aid}/role',update_account_role),
+      ('POST','/dart/v2/api/profile/username',change_my_username),
+      ('GET','/dart/v2/api/admin/sessions',admin_sessions),
+      ('GET','/dart/v2/api/admin/audit',admin_audit),
       ('GET','/dart/v2/api/boards',board_list),('POST','/dart/v2/api/boards/{bid}',edit_board),
       ('GET','/dart/v2/api/competitions',competition_list),('POST','/dart/v2/api/competitions',create_competition),
       ('GET','/dart/v2/api/competitions/{cid}',competition_detail),
