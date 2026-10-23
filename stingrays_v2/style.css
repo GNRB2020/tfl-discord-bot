@@ -224,3 +224,21 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .fixture-table .fixture-actions{justify-content:flex-start;gap:5px;flex-wrap:wrap}.fixture-table .fixture-actions button{font-size:12px;padding:7px 10px;white-space:nowrap;min-height:32px}
 .fixture-action-cell{overflow:visible!important}
 @media(max-width:650px){.live-grid{grid-template-columns:1fr!important}.live-game{min-height:160px}.fixture-table{min-width:830px}}
+
+/* Wettbewerbsübersicht – einheitliche Liste */
+.competition-directory{display:block;max-width:100%}
+.competition-directory-tabs{display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid #63543a;padding-bottom:10px;margin:16px 0 8px}
+.competition-directory-tabs button{background:#282829;color:#f0e4cf;border:1px solid #514834;border-radius:8px;font-weight:700;padding:11px 17px}
+.competition-directory-tabs button.selected{background:#5a4725;border-color:#d8b56a;color:#fff1c8}
+.competition-directory-info{margin:12px 0}
+.competition-directory-table{min-width:690px;width:100%;table-layout:auto}
+.competition-directory-table td{vertical-align:middle;height:58px}
+.competition-directory-table td:first-child{font-weight:700;min-width:190px}
+.competition-directory-name{border:0;background:transparent;padding:4px 0;color:#e9c576;text-align:left;font-weight:750;font-size:15px}
+.competition-directory-name:hover{text-decoration:underline;filter:none}
+.competition-directory-table td:last-child{text-align:right}
+.competition-status{display:inline-block;border-radius:30px;padding:5px 12px;font-size:12px;font-weight:700;border:1px solid #635c48}
+.competition-status.planned{color:#d5c6a6;background:#33312f}
+.competition-status.running{color:#a6e4b9;background:#22382b}
+.competition-status.completed{color:#edcc81;background:#3d3525}
+@media(max-width:680px){.competition-directory-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}.competition-directory-tabs button{font-size:12px;padding:10px 4px}}

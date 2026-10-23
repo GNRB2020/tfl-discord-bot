@@ -299,8 +299,38 @@ async function loadAuditLog(reset=true){
 $('onlineRefresh').onclick=loadOnlineSessions;
 $('auditRefresh').onclick=()=>loadAuditLog(true);
 $('auditMore').onclick=()=>loadAuditLog(false);
+let competitionListTab='running';
 async function loadCompetitions(){
- $('createCompetitionWizard').hidden=!amAdmin();competitions=await api('/competitions');const host=$('competitionsList');clear(host);for(const c of competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id))host.append(tile(c.title,(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)))}
+ $('createCompetitionWizard').hidden=!amAdmin();
+ competitions=await api('/competitions');const host=$('competitionsList');clear(host);
+ const detail=$('competitionDetail');detail.hidden=true;
+ host.className='competition-directory';host.hidden=false;
+ const allowed=competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id);
+ const groups=[['planned','Geplante'],['running','Laufende'],['completed','Abgeschlossene']];
+ const bucket=c=>['finished','archived','cancelled'].includes(c.status)?'completed':
+   ['draft','planned','scheduled'].includes(c.status)?'planned':'running';
+ const tabs=el('div',undefined,'competition-directory-tabs'),info=el('div',undefined,'competition-directory-info'),body=el('div',undefined,'competition-directory-body');
+ host.append(tabs,info,body);
+ const labels={draft:'Geplant',planned:'Geplant',scheduled:'Geplant',active:'Laufend',running:'Laufend',finished:'Abgeschlossen',archived:'Archiviert',cancelled:'Abgesagt'};
+ function draw(){clear(body);clear(info);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===competitionListTab);
+  const rows=allowed.filter(c=>bucket(c)===competitionListTab).sort((a,b)=>{
+   const aTime=a.starts_at||a.created_at||'',bTime=b.starts_at||b.created_at||'';
+   return competitionListTab==='completed'?bTime.localeCompare(aTime):aTime.localeCompare(bTime);
+  });
+  info.append(el('p',rows.length+' Wettbewerbe · '+groups.find(x=>x[0]===competitionListTab)[1],'helper'));
+  if(!rows.length){body.append(el('p','Keine Wettbewerbe in diesem Bereich.','empty'));return}
+  const frame=el('div',undefined,'scroll competition-directory-scroll');const table=el('table',undefined,'data-table polished competition-directory-table');
+  const thead=el('thead'),tr=el('tr');for(const title of ['Wettbewerb','Art','Teilnehmer','Beginn','Status',''])tr.append(el('th',title));thead.append(tr);table.append(thead);
+  const tbody=el('tbody');for(const c of rows){const line=el('tr');
+   const name=el('td');name.append(action(c.title,()=>openCompetition(c.id),'competition-directory-name'));line.append(name);
+   line.append(el('td',kindNames[c.kind]||c.kind),el('td',String(c.players??0)),el('td',c.starts_at?new Date(c.starts_at).toLocaleDateString('de-DE'):'–'));
+   const state=el('td');state.append(el('span',labels[c.status]||c.status,'competition-status '+bucket(c)));line.append(state);
+   const controls=el('td');controls.append(action('Öffnen',()=>openCompetition(c.id),'subtle'));line.append(controls);tbody.append(line);
+  }table.append(tbody);frame.append(table);body.append(frame);
+ }
+ for(const [key,label] of groups){const b=action(label+' ('+allowed.filter(c=>bucket(c)===key).length+')',()=>{competitionListTab=key;draw()},'subtle');b.dataset.tab=key;tabs.append(b)}
+ draw();
+}
 async function loadLadder(){
  const data=await api('/competitions'),host=$('ladderList');clear(host);
  const now=Date.now();const ladders=data.filter(c=>c.kind==='ladder');
@@ -557,7 +587,7 @@ function action(text,fn,style=''){const b=btn(text,fn);if(style)b.className=styl
 function picker(items,selectedValue,callback){const select=el('select');for(const [v,t] of items)select.append(new Option(t,v));select.value=selectedValue;select.onchange=()=>callback(select.value);return select}
 function labelFor(m,names){return (names.get(m.player1_id)||'Offen')+' – '+(names.get(m.player2_id)||'Offen')}
 async function openCompetition(id){
-  selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');
+  selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');$('competitionsList').hidden=true;
   const c=selected.competition,host=$('competitionDetail');host.hidden=false;clear(host);
   host.className='competition-view';
   const header=el('div',undefined,'competition-header');
@@ -570,13 +600,22 @@ async function openCompetition(id){
   const content=el('div',undefined,'competition-content');
   host.append(tabs,content);
   async function view(tab){competitionTab=tab;clear(content);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===tab);
-    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='rules')showLadderRules(content);if(tab==='management')showManagement(content)}
+    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='rules')showLadderRules(content);if(tab==='management')showManagement(content);if(tab==='placements')await showPlacements(content)}
     catch(e){content.append(el('p',e.message,'error'))}
   }
-  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
+  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...(['finished','archived'].includes(c.status)&&c.kind!=='ladder'?[['placements','Platzierungen']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
     const b=action(name,()=>view(tab));b.dataset.tab=tab;tabs.append(b);
   }
   const names=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
+  async function showPlacements(box){
+   box.append(el('h3','Endplatzierungen · '+c.title));
+   const intro=el('p','Die Platzierung richtet sich nach der erreichten Endrunde. Ohne Platzierungsspiel können Teilnehmer denselben Rang belegen.','helper');box.append(intro);
+   const data=await api('/competitions/'+id+'/final-report');
+   if(!data.placements?.length){box.append(el('p','Noch keine gewerteten Spiele.','empty'));return}
+   const rows=data.placements.map(p=>[String(p.place)+(p.tied?' (geteilt)':''),{player_id:p.player_id,name:p.name},p.reached||'–',p.wins,p.losses,p.average===null?'–':Number(p.average).toFixed(2)]);
+   box.append(renderTable(['Platz','Spieler','Erreichte Runde','Siege','Niederlagen','Ø Turnieraverage'],rows));
+   if(data.provisional)box.append(el('p','Hinweis: Bei unvollständigen oder nicht eindeutig zuordenbaren Phasen sind einzelne Platzierungen vorläufig.','helper'));
+  }
   async function showTables(box){
     if(c.kind==='ladder'){
       const data=await api('/competitions/'+id+'/standings');const rules=data.conditions;
@@ -847,12 +886,12 @@ async function openCompetition(id){
     result.append(el('h2','Turnier abgeschlossen: '+report.title));
     const grid=el('div',undefined,'report-grid');for(const p of report.placements){const row=el('div',undefined,'report-row');
      row.append(el('strong',p.place+'. '+p.name),el('span',p.wins+' Siege · Turnieraverage: '+(p.average??'–')));grid.append(row)}
-    result.append(grid,el('p','Platzierung ist vorläufig und wird aus der Turnierwertung berechnet.','helper'));
+    result.append(grid);
     const shade=el('div',undefined,'sheet-shade'),modal=el('section',undefined,'config-sheet');
     modal.append(el('h2','Turnier abgeschlossen · '+report.title));
     const grid2=el('div',undefined,'report-grid');for(const p of report.placements){const line=el('div',undefined,'report-row');
        line.append(el('strong',p.place+'. '+p.name),el('span','S '+p.wins+' · N '+p.losses+' · Ø '+(p.average??'–')));grid2.append(line)}
-    modal.append(grid2,el('p','Reihenfolge aus erfassten Ergebnissen – bei Gleichstand oder Trostrunden vorläufig.','helper'));
+    modal.append(grid2,action('Platzierungen dauerhaft anzeigen',()=>{shade.remove();view('placements')},'subtle'));
     const close=action('Schließen',()=>shade.remove(),'primary');modal.append(close);shade.append(modal);document.body.append(shade);
    }catch(e){console.warn('Turnierbericht',e)}
   }

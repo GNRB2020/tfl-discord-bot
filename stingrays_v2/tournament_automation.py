@@ -221,7 +221,7 @@ async def live_games(req):
         for visit in state.get('visits',[]):
             idx=visit.get('player')
             if idx not in (0,1):continue
-            totals[idx][0]+=0 if visit.get('bust') else int(visit.get('score',0) or 0)
+            totals[idx][0]+=int(visit.get('score',0) or 0)
             totals[idx][1]+=int(visit.get('darts',3) or 3)
         averages=[round(3*points/darts,2) if darts else None for points,darts in totals]
         out.append({'id':r['id'],'competition_id':r['competition_id'],'title':r['title'],
@@ -231,25 +231,90 @@ async def live_games(req):
     return response(out)
 
 async def report(req):
-    await actor(req);cid=uid(req.match_info['cid'])
+    # Placement priority: final phase > KO round > preliminary group performance.
+    await actor(req)
+    cid=uid(req.match_info['cid'])
     async with pool(req).acquire() as db:
-        c=await db.fetchrow(f'SELECT title,kind,status FROM {SCHEMA}.competitions WHERE id=$1',cid)
-        if not c or c['kind']!='training_tournament':raise web.HTTPNotFound()
-        matches=await db.fetch(f'''SELECT m.*,ph.phase_order FROM {SCHEMA}.matches m JOIN {SCHEMA}.phases ph ON ph.id=m.phase_id
-          WHERE m.competition_id=$1 AND m.status='finished' ORDER BY ph.phase_order DESC,m.round_number DESC''',cid)
+        c=await db.fetchrow(f'SELECT title,kind,status FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL',cid)
+        if not c or c['kind']=='ladder':raise web.HTTPNotFound()
+        phases=await db.fetch(f'SELECT id,name,kind,phase_order,rules FROM {SCHEMA}.phases WHERE competition_id=$1 ORDER BY phase_order',cid)
+        matches=await db.fetch(f'''SELECT m.*,p.phase_order,p.kind AS phase_kind,p.name AS phase_name,p.rules AS phase_rules
+          FROM {SCHEMA}.matches m JOIN {SCHEMA}.phases p ON p.id=m.phase_id
+          WHERE m.competition_id=$1 AND m.status='finished' ORDER BY p.phase_order,m.round_number''',cid)
         players=await db.fetch(f'''SELECT p.id,p.display_name FROM {SCHEMA}.entries e JOIN {SCHEMA}.players p ON p.id=e.player_id
           WHERE e.competition_id=$1''',cid)
-    score={p['id']:{'player_id':p['id'],'name':p['display_name'],'wins':0,'losses':0,'points':0,'darts':0,'rank_score':0} for p in players}
+    records={p['id']:{'player_id':p['id'],'name':p['display_name'],'wins':0,'losses':0,
+        'points':0,'darts':0,'stage':-1,'round':-1,'reached':'Vorrunde','is_winner':False,'rank_group':0,
+        'rank_key':(-1,-1,-1)} for p in players}
+    if not records:return response({'title':c['title'],'finished':c['status']=='finished','placements':[],'provisional':True})
+    # Phase order alone cannot be used as merit: consolation often has a higher phase_order than finals.
+    stage_type={}
+    for ph in phases:
+        rules=as_json(ph['rules']);stage=rules.get('stage') or ('consolation' if 'trost' in ph['name'].lower() else 'final' if ph['phase_order']>1 and ('final' in ph['name'].lower() or ph['kind']=='knockout') else 'preliminary')
+        stage_type[ph['id']]=stage
+        participants=[UUID(x) for x in rules.get('participants',[]) if x]
+        merit={'preliminary':1,'consolation':2,'final':3}.get(stage,1)
+        for pid in participants:
+            if pid in records and merit>records[pid]['stage']:
+                records[pid].update(stage=merit,round=0,reached={'preliminary':'Vorrunde','final':'Finalrunde','consolation':'Trostrunde'}.get(stage,ph['name']))
+    knockout_phases={p['id'] for p in phases if p['kind']=='knockout'}
+    by_phase={}
     for m in matches:
+        by_phase.setdefault(m['phase_id'],[]).append(m)
+        stage=stage_type.get(m['phase_id'],'preliminary')
+        merit={'preliminary':1,'consolation':2,'final':3}.get(stage,1)
+        round_num=int(m['round_number'] or 1)
         w=winner(m)
-        for idx,p in enumerate((m['player1_id'],m['player2_id'])):
-            if p not in score:continue
-            d=score[p];d['wins']+=int(w==p);d['losses']+=int(w is not None and w!=p)
-            state=as_json(m['state'])
-            for v in state.get('visits',[]):
+        for idx,pid in enumerate((m['player1_id'],m['player2_id'])):
+            if pid not in records:continue
+            r=records[pid];r['wins']+=int(w==pid);r['losses']+=int(w is not None and w!=pid)
+            visits=as_json(m['state']).get('visits',[])
+            for v in visits:
                 if v.get('player')==idx:
-                    d['points']+=0 if v.get('bust') else int(v.get('score',0));d['darts']+=int(v.get('darts',3))
-            if w==p:d['rank_score']+=1000*int(m['phase_order'] or 1)+int(m['round_number'] or 1)
-    results=sorted(score.values(),key=lambda r:(-r['rank_score'],-r['wins'],r['losses'],r['name']))
-    for i,r in enumerate(results,1):r['place']=i;r['average']=round(3*r['points']/r['darts'],2) if r['darts'] else None
-    return response({'title':c['title'],'finished':c['status']=='finished','placements':results,'provisional':True})
+                    r['points']+=0 if v.get('bust') else int(v.get('score',0) or 0)
+                    r['darts']+=int(v.get('darts',3) or 3)
+            if merit>r['stage'] or (merit==r['stage'] and round_num>=r['round']):
+                r['stage']=merit;r['round']=round_num;r['is_winner']=bool(w==pid)
+                r['reached']=('Finalrunde' if stage=='final' else 'Trostrunde' if stage=='consolation' else 'Vorrunde')
+    # KO matches: elimination round outranks all earlier rounds; winner of the last final is champion.
+    for ph in phases:
+        ms=by_phase.get(ph['id'],[])
+        if not ms:continue
+        stage=stage_type.get(ph['id'],'preliminary');merit={'preliminary':1,'consolation':2,'final':3}.get(stage,1)
+        if ph['id'] in knockout_phases:
+            last=max(int(m['round_number'] or 1) for m in ms)
+            for m in ms:
+                rnd=int(m['round_number'] or 1);w=winner(m)
+                for pid in (m['player1_id'],m['player2_id']):
+                    if pid not in records:continue
+                    r=records[pid]
+                    # A round winner who advances must not be ranked merely by prior wins.
+                    # Players eliminated in the same semifinal receive the same rank key.
+                    if r['stage']==merit and r['round']==rnd:
+                        r['rank_key']=(merit,rnd,1 if w==pid and rnd==last else 0)
+                        if rnd==last and len([x for x in ms if int(x['round_number'] or 1)==last])==1:
+                            r['reached']='Finale'
+                        elif rnd==last-1 and len([x for x in ms if int(x['round_number'] or 1)==rnd])==2:
+                            r['reached']='Halbfinale'
+                        else:r['reached']='KO-Runde '+str(rnd)
+        else:
+            # League/group-only stage: rank according to wins, then leg differential.
+            for r in records.values():
+                if r['stage']!=merit:continue
+                own=[m for m in ms if r['player_id'] in (m['player1_id'],m['player2_id'])]
+                wins=sum(winner(m)==r['player_id'] for m in own)
+                legdiff=sum((int(m['legs1'] or 0)-int(m['legs2'] or 0))*(1 if m['player1_id']==r['player_id'] else -1) for m in own)
+                if r['rank_key'][0]<merit:r['rank_key']=(merit,0,wins*1000+legdiff)
+    for r in records.values():
+        if r['rank_key'][0]<0:r['rank_key']=(r['stage'],r['round'],int(r['is_winner']))
+    # Rank keys preserve ties where no placement match was played.
+    ordered=sorted(records.values(),key=lambda x:(-x['rank_key'][0],-x['rank_key'][1],-x['rank_key'][2],x['name'].casefold()))
+    last_key=None;place=0
+    for idx,r in enumerate(ordered,1):
+        if r['rank_key']!=last_key:place=idx;last_key=r['rank_key']
+        r['place']=place;r['average']=round(3*r['points']/r['darts'],2) if r['darts'] else None
+        r['tied']=False
+    counts={}
+    for r in ordered:counts[r['place']]=counts.get(r['place'],0)+1
+    for r in ordered:r['tied']=counts[r['place']]>1
+    return response({'title':c['title'],'finished':c['status']=='finished','placements':ordered,'provisional':c['status']!='finished'})
