@@ -1277,7 +1277,7 @@ async def end_ladder(req):
         ratings=await db.fetch(f'''SELECT r.player_id,r.played,r.elo,r.wins FROM {SCHEMA}.ladder_ratings r
             WHERE r.competition_id=$1 AND r.played>0 ORDER BY r.elo DESC,r.played DESC,r.wins DESC,r.player_id''',cid)
         meetings=await db.fetch(f'''SELECT player1_id,player2_id FROM {SCHEMA}.matches
-            WHERE competition_id=$1 AND status='finished' AND source='scorer' AND phase_id IS NULL''',cid)
+            WHERE competition_id=$1 AND status='finished' AND source='scorer' ''',cid)
         opponents={}
         for m in meetings:
             opponents.setdefault(m['player1_id'],set()).add(m['player2_id'])
