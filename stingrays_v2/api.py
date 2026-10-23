@@ -590,23 +590,33 @@ async def create_group(req):
 async def assign_group(req):
     a=await actor(req);d=await body(req);gid=uid(req.match_info['gid']);ids=d.get('entry_ids',[])
     if not isinstance(ids,list):raise web.HTTPBadRequest()
+    requested=[uid(e) for e in ids]
+    if len(requested)!=len(set(requested)):
+        raise web.HTTPBadRequest(text='Teilnehmer doppelt ausgewählt')
     async with pool(req).acquire() as db:
+      async with db.transaction():
         group=await db.fetchrow(f'''SELECT g.phase_id,p.competition_id,p.status FROM {SCHEMA}.groups g
           JOIN {SCHEMA}.phases p ON p.id=g.phase_id WHERE g.id=$1''',gid)
         if not group:raise web.HTTPNotFound()
         await require_manager(db,a,group['competition_id'])
+        # A phase-level lock serializes edits on two tablets to different groups.
+        await db.fetchrow(f'SELECT id FROM {SCHEMA}.phases WHERE id=$1 FOR UPDATE',group['phase_id'])
         if group['status']=='closed':raise web.HTTPConflict(text='Phase geschlossen')
         if await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches WHERE group_id=$1 AND status IN ('running','finished'))''',gid):
             raise web.HTTPConflict(text='Gruppe hat bereits gestartete oder abgeschlossene Spiele')
-        async with db.transaction():
-            await db.execute(f'DELETE FROM {SCHEMA}.group_members WHERE group_id=$1',gid)
-            for e in ids:
-                eid=uid(e)
-                owner=await db.fetchval(f'SELECT competition_id FROM {SCHEMA}.entries WHERE id=$1',eid)
-                if owner!=group['competition_id']:raise web.HTTPBadRequest(text='Teilnehmer gehört nicht zum Wettbewerb')
-                await db.execute(f'DELETE FROM {SCHEMA}.group_members WHERE entry_id=$1 AND group_id IN (SELECT g.id FROM {SCHEMA}.groups g WHERE g.phase_id=$2)',eid,group['phase_id'])
-                await db.execute(f'INSERT INTO {SCHEMA}.group_members(group_id,entry_id) VALUES($1,$2)',gid,eid)
-    return response({'assigned':len(ids)})
+        if await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches WHERE group_id=$1)''',gid):
+            raise web.HTTPConflict(text='Spielplan bereits erstellt; bitte zuerst die Spiele bearbeiten')
+        for eid in requested:
+            owner=await db.fetchval(f'SELECT competition_id FROM {SCHEMA}.entries WHERE id=$1',eid)
+            if owner!=group['competition_id']:raise web.HTTPBadRequest(text='Teilnehmer gehört nicht zum Wettbewerb')
+            existing=await db.fetchrow(f'''SELECT g.name FROM {SCHEMA}.group_members gm
+               JOIN {SCHEMA}.groups g ON g.id=gm.group_id
+               WHERE gm.entry_id=$1 AND g.phase_id=$2 AND g.id<>$3 LIMIT 1''',eid,group['phase_id'],gid)
+            if existing:raise web.HTTPConflict(text='Teilnehmer bereits in '+existing['name']+' eingeteilt')
+        await db.execute(f'DELETE FROM {SCHEMA}.group_members WHERE group_id=$1',gid)
+        for eid in requested:
+            await db.execute(f'INSERT INTO {SCHEMA}.group_members(group_id,entry_id) VALUES($1,$2)',gid,eid)
+    return response({'assigned':len(requested)})
 
 async def generate_rounds(req):
     a=await actor(req);d=await body(req);gid=uid(req.match_info['gid'])
@@ -623,7 +633,12 @@ async def generate_rounds(req):
             ids=await db.fetch(f'''SELECT e.player_id FROM {SCHEMA}.group_members gm
                JOIN {SCHEMA}.entries e ON e.id=gm.entry_id WHERE gm.group_id=$1 ORDER BY gm.seed NULLS LAST,e.seed NULLS LAST, e.id''',gid)
             fixture=round_robin([r['player_id'] for r in ids],bool(d.get('double_round',False)))
-            rules=mode_rules(g['kind'],g['phase_kind'],overrides=d.get('rules') or {})
+            if g['kind']=='training_tournament':
+                from .tournament_extensions import validate_training_rules
+                c_rules=await db.fetchval(f'SELECT rules FROM {SCHEMA}.competitions WHERE id=$1',g['competition_id'])
+                saved=as_json(c_rules).get('training_match') or {}
+                rules=validate_training_rules(d.get('rules') or saved)
+            else:rules=mode_rules(g['kind'],g['phase_kind'],overrides=d.get('rules') or {})
             for rnd,x,y in fixture:
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,group_id,round_number,player1_id,player2_id,rules)
                  VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',g['competition_id'],g['phase_id'],gid,rnd,x,y,json.dumps(rules))
@@ -1491,6 +1506,18 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/training/sessions',save_solo_session),
       ('POST','/dart/v2/api/training/tug',save_tug_session),
     ]
+    from . import tournament_extensions as training_stages
+    # Training tournament follow-up phases are implemented separately from V2's old League/Cup.
+    routes += [
+      ('POST','/dart/v2/api/competitions/{cid}/training-rules',training_stages.update_training_rules),
+      ('GET','/dart/v2/api/competitions/{cid}/training-preview',training_stages.stage_preview),
+      ('POST','/dart/v2/api/competitions/{cid}/training-stages',training_stages.create_training_stage),
+      ('POST','/dart/v2/api/matches/{mid}/training-pairing',training_stages.edit_stage_pairing),
+      ('POST','/dart/v2/api/phases/{pid}/training-pairings',training_stages.add_stage_pairing),
+      ('POST','/dart/v2/api/matches/{mid}/remove-training-pairing',training_stages.remove_stage_pairing),
+    ]
+    routes = [(m,p,training_stages.advance_training_or_original if p=='/dart/v2/api/phases/{pid}/advance' else h)
+              for m,p,h in routes]
     for method,path,handler in routes:app.router.add_route(method,path,handler)
     print('[STINGRAYS V2] dashboard-ladder-admin r20261023 installed under /dart/v2/')
 
