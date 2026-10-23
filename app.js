@@ -28,11 +28,26 @@ function launchTrainingWindow(kind){
 async function refreshLive(){
  const liveArea=$('dashboardLive');if(liveArea){clear(liveArea);
   try{const live=await api('/live-games');const head=el('div',undefined,'live-heading');head.append(el('h3','Gerade live · '+live.length+' Spiele'),action('Aktualisieren',()=>dashboard(),'subtle'));liveArea.append(head);
-   const grid=el('div',undefined,'live-grid');for(const m of live){const card=el('article',undefined,'live-game');card.append(el('strong',m.title+' · '+m.kind));
-    card.append(el('div',m.player1+'  '+(m.sets?.some(x=>x)?m.sets.join(' : ')+' Sets · ':'')+m.legs.join(' : ')+'  '+m.player2,'live-score'));
-    if(m.remaining?.length)card.append(el('small','Rest: '+m.remaining.join(' / ')));
-    card.append(action('Zum Scorer',()=>openGameWindow('/dart/v2/spiel/?match='+encodeURIComponent(m.id)+'&competition='+encodeURIComponent(m.competition_id)),'subtle'));grid.append(card)}
-   if(!live.length)grid.append(el('p','Momentan wird keine Begegnung gespielt.','helper'));liveArea.append(grid);
+   const grid=el('div',undefined,'live-grid');for(const m of live){
+    const card=el('article',undefined,'live-game');
+    const subtitle=el('div',undefined,'live-game-caption');
+    subtitle.append(el('span',m.title+' · '+({ladder:'Ladder',league:'Liga',training_tournament:'Trainingsturnier',cup:'Cup',vm:'Vereinsmeisterschaft'}[m.kind]||m.kind||'Wettbewerb')));
+    const status=el('span','LIVE','live-indicator');subtitle.append(status);card.append(subtitle);
+    const score=el('div',undefined,'live-scoreboard');
+    const left=el('div',undefined,'live-team');left.append(el('strong',m.player1));
+    const result=el('div',undefined,'live-result');const sets=Array.isArray(m.sets)&&m.sets.some(Number);
+    result.append(el('span',(sets?m.sets:m.legs||[0,0]).map(x=>Number(x)||0).join(' : '),'live-score-digits'));
+    if(sets)result.append(el('small','Sets · Legs '+(m.legs||[0,0]).join(' : ')));
+    const right=el('div',undefined,'live-team live-team-right');right.append(el('strong',m.player2));
+    score.append(left,result,right);card.append(score);
+    const averages=el('div',undefined,'live-averages');
+    averages.append(el('span','Ø '+(m.averages?.[0]===null||m.averages?.[0]===undefined?'–':Number(m.averages[0]).toFixed(2))));
+    averages.append(el('small','MATCH-AVERAGE'));
+    averages.append(el('span','Ø '+(m.averages?.[1]===null||m.averages?.[1]===undefined?'–':Number(m.averages[1]).toFixed(2))));
+    card.append(averages);grid.append(card);
+   }
+   if(!live.length)grid.append(el('p','Momentan wird keine Begegnung gespielt.','helper'));
+   liveArea.append(grid);
   }catch(e){liveArea.append(el('small','Live-Spiele derzeit nicht verfügbar.'))}
  }
 
@@ -106,7 +121,7 @@ async function dashboard(){
  if(!tournaments.children.length)tournaments.append(el('p','Keine laufenden Wettbewerbe eingetragen.','helper'));
  const list=$('myOpen');clear(list);
  for(const m of d.own_open){const x=el('div',undefined,'dash-match');const names=el('div',undefined,'dash-player-pair');names.append(participantName(m.player1_id,m.player1),el('span','–'),participantName(m.player2_id,m.player2));
-  const heading=el('div');heading.append(el('small',m.title),names);x.append(heading,el('span',m.status==='running'?'Laufend':'Offen','chip'));
+  const heading=el('div');heading.append(el('small',m.title),names);x.append(heading,el('span',m.status==='running'?'Laufend':m.status==='cancelled'?'Abgesagt':'Offen','chip'));
   x.append(action(previewId?'Spiel ansehen':'Scorer starten',()=>previewId?notice('Die Vorschau ist schreibgeschützt.',true):
    m.kind==='free_x01'?openGameWindow('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id)):openScorer(m.id),'primary'));list.append(x)}
  if(!d.own_open.length)list.append(el('p','Keine offenen Begegnungen','helper'));
@@ -217,6 +232,11 @@ function renderPlayers(){
   const foot=el('div',undefined,'member-actions');if(amAdmin()&&!p.username)foot.append(action('Zugang erstellen',()=>newAccountForPlayer(p),'primary'));
   if(amAdmin()&&p.username){foot.append(action('Berechtigung ändern',()=>editMemberRole(p),'subtle'));
     foot.append(el('span',p.is_enabled?'Zugang aktiv':'Zugang gesperrt','helper'));
+    foot.append(action(p.is_enabled?'Zugang deaktivieren':'Zugang reaktivieren',async()=>{
+      const desired=!p.is_enabled;
+      if(!await approve('Kontozugang ändern',(desired?'Zugang von ':'Zugang für ')+p.display_name+(desired?' wieder aktivieren?':' deaktivieren? Das Mitglied wird auf allen Geräten abgemeldet.')))return;
+      try{await api('/accounts/'+p.account_id,{is_enabled:desired});await loadPlayers();notice('Kontostatus geändert.')}catch(e){notice(e.message,true)}
+    },'subtle'));
   }
   t.append(foot);host.append(t)
  }
@@ -284,9 +304,49 @@ async function loadAuditLog(reset=true){
 $('onlineRefresh').onclick=loadOnlineSessions;
 $('auditRefresh').onclick=()=>loadAuditLog(true);
 $('auditMore').onclick=()=>loadAuditLog(false);
+let competitionListTab='running';
 async function loadCompetitions(){
- $('createCompetitionWizard').hidden=!amAdmin();competitions=await api('/competitions');const host=$('competitionsList');clear(host);for(const c of competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id))host.append(tile(c.title,(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)))}
-async function loadLadder(){const data=await api('/competitions'),host=$('ladderList');clear(host);const ladders=data.filter(c=>c.kind==='ladder');for(const c of ladders)host.append(tile(c.title,(c.status||'')+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)));if(!ladders.length)host.append(el('p','Noch keine Ladder-Saison angelegt. Administratoren können hier die erste Saison erstellen.'));$('ladderCreate').hidden=user.role!=='admin'}
+ $('createCompetitionWizard').hidden=!amAdmin();
+ competitions=await api('/competitions');const host=$('competitionsList');clear(host);
+ const detail=$('competitionDetail');detail.hidden=true;
+ host.className='competition-directory';host.hidden=false;
+ const allowed=competitions.filter(x=>x.kind!=='training_tournament'||amAdmin()||x.created_by===user.id||x.owner===user.id);
+ const groups=[['planned','Geplante'],['running','Laufende'],['completed','Abgeschlossene']];
+ const bucket=c=>['finished','archived','cancelled'].includes(c.status)?'completed':
+   ['draft','planned','scheduled'].includes(c.status)?'planned':'running';
+ const tabs=el('div',undefined,'competition-directory-tabs'),info=el('div',undefined,'competition-directory-info'),body=el('div',undefined,'competition-directory-body');
+ host.append(tabs,info,body);
+ const labels={draft:'Geplant',planned:'Geplant',scheduled:'Geplant',active:'Laufend',running:'Laufend',finished:'Abgeschlossen',archived:'Archiviert',cancelled:'Abgesagt'};
+ function draw(){clear(body);clear(info);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===competitionListTab);
+  const rows=allowed.filter(c=>bucket(c)===competitionListTab).sort((a,b)=>{
+   const aTime=a.starts_at||a.created_at||'',bTime=b.starts_at||b.created_at||'';
+   return competitionListTab==='completed'?bTime.localeCompare(aTime):aTime.localeCompare(bTime);
+  });
+  info.append(el('p',rows.length+' Wettbewerbe · '+groups.find(x=>x[0]===competitionListTab)[1],'helper'));
+  if(!rows.length){body.append(el('p','Keine Wettbewerbe in diesem Bereich.','empty'));return}
+  const frame=el('div',undefined,'scroll competition-directory-scroll');const table=el('table',undefined,'data-table polished competition-directory-table');
+  const thead=el('thead'),tr=el('tr');for(const title of ['Wettbewerb','Art','Teilnehmer','Beginn','Status',''])tr.append(el('th',title));thead.append(tr);table.append(thead);
+  const tbody=el('tbody');for(const c of rows){const line=el('tr');
+   const name=el('td');name.append(action(c.title,()=>openCompetition(c.id),'competition-directory-name'));line.append(name);
+   line.append(el('td',kindNames[c.kind]||c.kind),el('td',String(c.players??0)),el('td',c.starts_at?new Date(c.starts_at).toLocaleDateString('de-DE'):'–'));
+   const state=el('td');state.append(el('span',labels[c.status]||c.status,'competition-status '+bucket(c)));line.append(state);
+   const controls=el('td');controls.append(action('Öffnen',()=>openCompetition(c.id),'subtle'));line.append(controls);tbody.append(line);
+  }table.append(tbody);frame.append(table);body.append(frame);
+ }
+ for(const [key,label] of groups){const b=action(label+' ('+allowed.filter(c=>bucket(c)===key).length+')',()=>{competitionListTab=key;draw()},'subtle');b.dataset.tab=key;tabs.append(b)}
+ draw();
+}
+async function loadLadder(){
+ const data=await api('/competitions'),host=$('ladderList');clear(host);
+ const now=Date.now();const ladders=data.filter(c=>c.kind==='ladder');
+ const active=ladders.filter(c=>c.status==='active'&&(!c.starts_at||new Date(c.starts_at).getTime()<=now)&&(!c.ends_at||new Date(c.ends_at).getTime()>now));
+ const current=active[0]||ladders.find(c=>c.status==='active');
+ $('ladderCreate').hidden=true;
+ if(current){await openCompetition(current.id);return}
+ host.append(el('p','Aktuell läuft keine Ladder-Saison.','helper'));
+ if(ladders.length)for(const c of ladders)host.append(tile(c.title,c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)));
+ if(user.role==='admin'){host.append(action('Neue Ladder-Saison anlegen',()=>{$('ladderCreate').hidden=false;$('ladderCreate').scrollIntoView({block:'start'});},'primary'))}
+}
 async function createCompetitionWizard(){
  if(!amAdmin())return notice('Nur Administratoren dürfen Vereinswettbewerbe anlegen.',true);
  if(!players.length)players=await api('/players');
@@ -532,7 +592,7 @@ function action(text,fn,style=''){const b=btn(text,fn);if(style)b.className=styl
 function picker(items,selectedValue,callback){const select=el('select');for(const [v,t] of items)select.append(new Option(t,v));select.value=selectedValue;select.onchange=()=>callback(select.value);return select}
 function labelFor(m,names){return (names.get(m.player1_id)||'Offen')+' – '+(names.get(m.player2_id)||'Offen')}
 async function openCompetition(id){
-  selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');
+  selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');$('competitionsList').hidden=true;
   const c=selected.competition,host=$('competitionDetail');host.hidden=false;clear(host);
   host.className='competition-view';
   const header=el('div',undefined,'competition-header');
@@ -545,13 +605,22 @@ async function openCompetition(id){
   const content=el('div',undefined,'competition-content');
   host.append(tabs,content);
   async function view(tab){competitionTab=tab;clear(content);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===tab);
-    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='management')showManagement(content)}
+    try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='rules')showLadderRules(content);if(tab==='management')showManagement(content);if(tab==='placements')await showPlacements(content)}
     catch(e){content.append(el('p',e.message,'error'))}
   }
-  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
+  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...(['finished','archived'].includes(c.status)&&c.kind!=='ladder'?[['placements','Platzierungen']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
     const b=action(name,()=>view(tab));b.dataset.tab=tab;tabs.append(b);
   }
   const names=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
+  async function showPlacements(box){
+   box.append(el('h3','Endplatzierungen · '+c.title));
+   const intro=el('p','Die Platzierung richtet sich nach der erreichten Endrunde. Ohne Platzierungsspiel können Teilnehmer denselben Rang belegen.','helper');box.append(intro);
+   const data=await api('/competitions/'+id+'/final-report');
+   if(!data.placements?.length){box.append(el('p','Noch keine gewerteten Spiele.','empty'));return}
+   const rows=data.placements.map(p=>[String(p.place)+(p.tied?' (geteilt)':''),{player_id:p.player_id,name:p.name},p.reached||'–',p.wins,p.losses,p.average===null?'–':Number(p.average).toFixed(2)]);
+   box.append(renderTable(['Platz','Spieler','Erreichte Runde','Siege','Niederlagen','Ø Turnieraverage'],rows));
+   if(data.provisional)box.append(el('p','Hinweis: Bei unvollständigen oder nicht eindeutig zuordenbaren Phasen sind einzelne Platzierungen vorläufig.','helper'));
+  }
   async function showTables(box){
     if(c.kind==='ladder'){
       const data=await api('/competitions/'+id+'/standings');const rules=data.conditions;
@@ -607,10 +676,19 @@ async function openCompetition(id){
     async function fill(){clear(area);const g=selected.groups.find(g=>g.id===chosen.value);if(!g)return;
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
-      area.append(el('h3',g.name),renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt'],rows.map(r=>[
+      const rawRules=c.rules||{};
+      const qualifyCount=rawRules.follow? (rawRules.qualifiers==='all'?rows.length:Math.max(0,Number(rawRules.qualifiers)||0)) : 0;
+      area.append(el('h3',g.name));
+      if(qualifyCount){area.append(el('p','Finalrunde: '+Math.min(qualifyCount,rows.length)+' von '+rows.length+' Spielern dieser Gruppe qualifizieren sich'+(rawRules.consolation?' · übrige Spieler: Trostrunde':''),'helper'))}
+      const tableWrap=renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt'],rows.map(r=>[
           r.rank,{player_id:r.player_id,name:r.name+(withdrawals.has(r.player_id)?' · ausgetreten':'')},r.played,r.wins,r.draws,r.losses,
           String(r.legs_for)+':'+String(r.legs_against),signed(r.legs_for-r.legs_against),r.points
-      ]),true));
+      ]),true);
+      if(qualifyCount){const bodyRows=tableWrap.querySelectorAll('tbody tr');bodyRows.forEach((line,i)=>{
+         if(i<qualifyCount)line.classList.add('tournament-qualified');
+         if(i===qualifyCount-1&&qualifyCount<rows.length)line.classList.add('tournament-cutoff');
+      })}
+      area.append(tableWrap);
       const games=selected.matches.filter(m=>m.group_id===g.id&&m.status==='finished').length;
       area.append(el('p',games+' gewertete Spiele in dieser Staffel','helper'));
       if(games&&!rows.some(r=>r.played))area.append(el('p','Die Spiele sind gespeichert, aber nicht den Tabellenmitgliedern zugeordnet. Bitte die Gruppenzuordnung unter Verwaltung prüfen.','error'));
@@ -618,11 +696,42 @@ async function openCompetition(id){
     await fill();
   }
   async function showRecords(box){
-    const row=el('div',undefined,'filterline');box.append(el('p','Matchstatistiken werden nur aus tatsächlich erfassten Aufnahmen berechnet. Importierte Altdaten enthalten keine erfundenen Wurfwerte.','helper'));
-    const who=picker([['','Spieler wählen'],...selected.entries.map(e=>[e.player_id,e.display_name])],'',()=>{});
-    row.append(who,action('Auswerten',async()=>{if(!who.value)return;const stats=await api('/players/'+who.value+'/stats?kind='+c.kind+'&competition_id='+encodeURIComponent(id));const head=await api('/players/'+who.value+'/h2h?kind='+c.kind+'&competition_id='+encodeURIComponent(id));const dest=$('currentStats');clear(dest);
-      statisticsPanels(dest,stats,head,c.kind);
-    }));box.append(row);const out=el('div');out.id='currentStats';box.append(out);
+    box.append(el('p','Alle Teilnehmer dieses Wettbewerbs. Nur abgeschlossene Spiele zählen; Averages nur aus aufgezeichneten Aufnahmen.','helper'));
+    const data=await api('/competitions/'+id+'/statistics');
+    if(!data.players?.length){box.append(el('p','Noch keine Turnierdaten vorhanden.','empty'));return}
+    const ranked=[...data.players].sort((a,b)=>(b.average??-1)-(a.average??-1));
+    const fmt=x=>x===null||x===undefined?'–':Number(x).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const tabs=el('div',undefined,'competition-tabs');const output=el('div');box.append(tabs,output);
+    const views=[['stats','Statistiken'],['best','Bestleistungen']];
+    function draw(view){clear(output);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===view);
+      if(view==='stats')output.append(renderTable(['Spieler','Sp.','S','U','N','Legs','Ø Average','First 9'],ranked.map(r=>[
+         {player_id:r.player_id,name:r.name},r.games,r.wins,r.draws,r.losses,r.legs_for+':'+r.legs_against,fmt(r.average),fmt(r.first9)
+      ])));
+      else output.append(renderTable(['Spieler','95+','100+','133+','exakt 133','140+','171+','180','HF','LD','BF'],ranked.map(r=>[
+         {player_id:r.player_id,name:r.name},r['95plus'],r['100plus'],r['133plus'],r.exact133,r['140plus'],r['171plus'],r['180'],r.highfinish??'–',r.lowdart??'–',r.bullfinishes
+      ])));
+    }
+    for(const [key,title] of views){const b=action(title,()=>draw(key));b.dataset.tab=key;tabs.append(b)}
+    draw('stats');
+  }
+
+  function showLadderRules(box){
+    const q=c.rules||{};const block=el('article',undefined,'panel ladder-rules');
+    block.append(el('h2','Regelwerk · '+c.title));
+    const list=[
+      ['Teilnahme','Alle aktiven Vereinsmitglieder nehmen automatisch teil. In der ELO-Rangliste erscheint ein Spieler erst nach dem ersten gewerteten Match.'],
+      ['Spielvereinbarung','Zwei Mitglieder vereinbaren ihre Partie am Board. Vor dem Start werden die Spieler und die Matchlänge (mindestens Best of 5 Legs) ausgewählt. Das Ergebnis wird über den integrierten Scorer erfasst.'],
+      ['Matchmodus','Die Matchlänge wird vor dem Spiel vereinbart. Bei gerader Leganzahl ist ein Unentschieden möglich.'],
+      ['ELO-Wertung','Jeder Spieler startet mit 1.000 ELO-Punkten. Der K-Faktor beträgt '+(q.k_factor??64)+'. Ein Sieg, eine Niederlage oder ein Unentschieden verändert die Wertung abhängig vom ELO-Abstand beider Spieler.'],
+      ['Wiederholungssperre','Dieselbe Paarung darf erst '+(q.rematch_cooldown_days??7)+' Tage nach dem letzten abgeschlossenen Ladder-Spiel erneut antreten. Gleichzeitig offene Doppelbegegnungen sind nicht zulässig.'],
+      ['Mindestqualifikation','Für die Finalrunde sind mindestens '+(q.min_games??5)+' gewertete Spiele gegen mindestens '+(q.min_opponents??3)+' unterschiedliche Gegner erforderlich.'],
+      ['Finalplätze','Aktuell sind '+(q.finalists??8)+' Finalplätze vorgesehen. Die Rangliste markiert die Qualifikationszone; nur Spieler mit erfüllten Mindestbedingungen sind dort qualifiziert. Bis Saisonende sind die Plätze vorläufig.'],
+      ['Saisonende','Nach dem Saisonende werden die qualifizierten Spieler anhand ihrer ELO-Platzierung festgestellt. Modus und Ansetzung der Finalrunde werden durch die Turnierleitung bekanntgegeben.'],
+      ['Spielabbruch','Ein versehentlich gestartetes, noch nicht abgeschlossenes Spiel kann auf OFFEN zurückgesetzt werden; sämtliche bis dahin eingegebenen Aufnahmen dieses Spiels werden verworfen. Abgeschlossene Ergebnisse bleiben bestehen.'],
+      ['Fair Play','Alle Spiele werden vor Ort am Dartboard ausgetragen. Beide Spieler prüfen das Ergebnis vor dem Spielabschluss. Streitfälle entscheidet die Vereins- bzw. Turnierleitung.']
+    ];
+    for(const [heading,txt] of list){const section=el('section',undefined,'ladder-rule-item');section.append(el('h3',heading),el('p',txt));block.append(section)}
+    box.append(block)
   }
   function showSchedule(box){
     if(c.kind==='training_tournament'&&(amAdmin()||trainingOwner())){
@@ -651,23 +760,32 @@ async function openCompetition(id){
     const filters=el('div',undefined,'schedule-controls');
     const g=picker([['','Alle Staffeln'],...selected.groups.map(x=>[x.id,x.name])],'',()=>reset());
     const p=picker([['','Alle Spieler'],...selected.entries.map(e=>[e.player_id,e.display_name])],'',()=>reset());
-    const status=picker([['','Alle Spiele'],['open','Offen'],['running','Laufend'],['finished','Beendet']],'',()=>reset());
+    const status=picker([['','Alle Spiele'],['open','Offen'],['running','Laufend'],['finished','Beendet'],['cancelled','Abgesagt']],'',()=>reset());
     for(const [caption,select] of [...(c.kind==='ladder'?[]:[['Staffel',g]]),['Spieler',p],['Status',status]]){const label=el('label',caption);label.append(select);filters.append(label)}
-    const pages=el('div',undefined,'pagination');const list=el('div',undefined,'schedule-list schedule-grid');
+    const pages=el('div',undefined,'pagination');const list=el('div',undefined,'schedule-table-wrap');
     box.append(filters,list,pages);
     function reset(){schedulePage=0;draw()}
     function draw(){clear(list);clear(pages);
       const matches=selected.matches.filter(m=>(!g.value||m.group_id===g.value)&&(!p.value||m.player1_id===p.value||m.player2_id===p.value)&&(!status.value||m.status===status.value));
       const pageCount=Math.max(1,Math.ceil(matches.length/12));schedulePage=Math.max(0,Math.min(schedulePage,pageCount-1));
       box.querySelector('.schedule-controls').setAttribute('data-total',String(matches.length));
-      list.append(el('p',matches.length+' Begegnungen','helper'));
+      const sorted=matches.slice().sort((a,b)=>{
+        const groupName=m=>selected.groups.find(g=>g.id===m.group_id)?.name||selected.phases.find(x=>x.id===m.phase_id)?.name||'Spiel';
+        return groupName(a).localeCompare(groupName(b),'de',{numeric:true})||(Number(a.round_number)||0)-(Number(b.round_number)||0);
+      });
+      const count=el('div',matches.length+' Begegnungen','schedule-count');list.append(count);
       if(!matches.length)list.append(el('p','Keine Spiele mit diesen Filtern','empty'));
-      for(const m of matches.slice(schedulePage*12,(schedulePage+1)*12)){
-        const line=el('article',undefined,'fixture');const desc=el('div',undefined,'fixture-title');
-        const group=selected.groups.find(g=>g.id===m.group_id)?.name||selected.phases.find(x=>x.id===m.phase_id)?.name||'Spiel';
-        desc.append(el('small',group+(m.round_number?' · Runde '+m.round_number:'')));const namesLine=el('div',undefined,'fixture-players');namesLine.append(participantName(m.player1_id,names.get(m.player1_id)||'Spieler 1'),el('span','–'),participantName(m.player2_id,names.get(m.player2_id)||'Spieler 2'));desc.append(namesLine);
-        const score=m.status==='finished'?(m.sets1!==null&&m.sets1!==undefined?'Sets '+m.sets1+':'+m.sets2+' · ':'')+(m.legs1??0)+':'+(m.legs2??0):m.status==='running'?'Laufend':'Offen';
-        const actions=el('div',undefined,'fixture-actions');actions.append(el('span',score,'fixture-score'));
+      const table=el('table',undefined,'fixture-table');const head=el('thead');const heading=el('tr');
+      for(const label of ['Gruppe / Phase','Runde','Spieler 1','Spieler 2','Ergebnis / Status','Aktionen'])heading.append(el('th',label));
+      head.append(heading);table.append(head);const tbody=el('tbody');table.append(tbody);if(matches.length)list.append(table);
+      for(const m of sorted.slice(schedulePage*12,(schedulePage+1)*12)){
+        const line=el('tr',undefined,'fixture-row '+m.status);const group=selected.groups.find(g=>g.id===m.group_id)?.name||selected.phases.find(x=>x.id===m.phase_id)?.name||'Spiel';
+        line.append(el('td',group),el('td',m.round_number?'Runde '+m.round_number:'–'));
+        const first=el('td');first.append(participantName(m.player1_id,names.get(m.player1_id)||'Spieler 1'));
+        const second=el('td');second.append(participantName(m.player2_id,names.get(m.player2_id)||'Spieler 2'));
+        line.append(first,second);
+        const score=m.status==='finished'?(m.sets1!==null&&m.sets1!==undefined?'Sets '+m.sets1+':'+m.sets2+' · ':'')+(m.legs1??0)+':'+(m.legs2??0):m.status==='running'?'Laufend':m.status==='cancelled'?'Abgesagt':'Offen';
+        const actions=el('div',undefined,'fixture-actions');const result=el('td');result.append(el('span',score,'fixture-status '+m.status));line.append(result);
         if(m.source==='forfeit')actions.append(el('small','Wertung'));
         else if(m.source==='legacy')actions.append(el('small','Altbestand'));
         else if(m.status==='finished'||amAdmin()||user.role==='tournament'||[m.player1_id,m.player2_id].includes(user.player_id))actions.append(action(m.status==='finished'?'Spiel ansehen':'Scorer',()=>openScorer(m.id),'primary'));
@@ -678,12 +796,24 @@ async function openCompetition(id){
           if(!data||data.confirmation!=='yes')return;
           try{await api('/matches/'+m.id+'/reset',{reason:data.reason,confirm:'ZURUECKSETZEN'});await openCompetition(id);notice('Begegnung ist wieder OPEN.')}catch(e){notice(e.message,true)}
         },'danger'));
+        if(m.status==='running'&&(amAdmin()||user.role==='tournament'||trainingOwner()||[m.player1_id,m.player2_id].includes(user.player_id))){
+          actions.append(action('Spiel abbrechen',async()=>{
+            if(!await approve('Laufendes Spiel abbrechen','Alle bisherigen Aufnahmen verwerfen und diese Begegnung wieder auf OFFEN setzen?'))return;
+            try{await api('/matches/'+m.id+'/abort',{mode:'reset',confirm:'ABBRECHEN',reason:'Versehendlich gestartet'});await openCompetition(id);notice('Spiel abgebrochen – Status wieder OFFEN.')}catch(e){notice(e.message,true)}
+          },'subtle'));
+        }
+        if(amAdmin()&&['open','running'].includes(m.status)){
+          actions.append(action('Begegnung absagen',async()=>{
+            if(!await approve('Begegnung absagen','Begegnung auf ABGESAGT setzen? Noch nicht abgeschlossene Aufnahmen werden gelöscht; das Spiel zählt nicht für ELO und Tabellen.'))return;
+            try{await api('/matches/'+m.id+'/abort',{mode:'cancel',confirm:'ABBRECHEN',reason:'Durch Administrator abgesagt'});await openCompetition(id);notice('Begegnung abgesagt.')}catch(e){notice(e.message,true)}
+          },'danger'));
+        }
         if(user.role==='admin'&&m.status==='open')actions.append(action('Altes Ergebnis',async()=>{
           const d=await configure('Altes Ergebnis erfassen',[{name:'score',label:'Endstand (z.B. 4:2)',required:true}]);if(!d)return;const raw=d.score;
           const match=/^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(raw);if(!match){notice('Format: 4:2',true);return}
           try{await api('/matches/'+m.id+'/manual',{legs1:Number(match[1]),legs2:Number(match[2])});await openCompetition(id)}catch(e){notice(e.message,true)}
         },'subtle'));
-        line.append(desc,actions);list.append(line);
+        const actionCell=el('td',undefined,'fixture-action-cell');actionCell.append(actions);line.append(actionCell);tbody.append(line);
       }
       pages.append(action('← Vorherige',()=>{schedulePage--;draw()},'subtle'),el('span','Seite '+(schedulePage+1)+' / '+pageCount),action('Nächste →',()=>{schedulePage++;draw()},'subtle'));
       pages.firstChild.disabled=schedulePage===0;pages.lastChild.disabled=schedulePage>=pageCount-1;
@@ -783,12 +913,12 @@ async function openCompetition(id){
     result.append(el('h2','Turnier abgeschlossen: '+report.title));
     const grid=el('div',undefined,'report-grid');for(const p of report.placements){const row=el('div',undefined,'report-row');
      row.append(el('strong',p.place+'. '+p.name),el('span',p.wins+' Siege · Turnieraverage: '+(p.average??'–')));grid.append(row)}
-    result.append(grid,el('p','Platzierung ist vorläufig und wird aus der Turnierwertung berechnet.','helper'));
+    result.append(grid);
     const shade=el('div',undefined,'sheet-shade'),modal=el('section',undefined,'config-sheet');
     modal.append(el('h2','Turnier abgeschlossen · '+report.title));
     const grid2=el('div',undefined,'report-grid');for(const p of report.placements){const line=el('div',undefined,'report-row');
        line.append(el('strong',p.place+'. '+p.name),el('span','S '+p.wins+' · N '+p.losses+' · Ø '+(p.average??'–')));grid2.append(line)}
-    modal.append(grid2,el('p','Reihenfolge aus erfassten Ergebnissen – bei Gleichstand oder Trostrunden vorläufig.','helper'));
+    modal.append(grid2,action('Platzierungen dauerhaft anzeigen',()=>{shade.remove();view('placements')},'subtle'));
     const close=action('Schließen',()=>shade.remove(),'primary');modal.append(close);shade.append(modal);document.body.append(shade);
    }catch(e){console.warn('Turnierbericht',e)}
   }
@@ -808,7 +938,7 @@ async function openScorer(id){
 function drawScore(){if(!playing)return;const s=playing.state||{},names=s.names||[playing.player1,playing.player2],rest=s.remaining||[501,501];$('playerOne').textContent=names[0];$('playerTwo').textContent=names[1];$('remainOne').textContent=rest[0];$('remainTwo').textContent=rest[1];$('resultOne').textContent='Legs '+(s.legs?.[0]??playing.legs1??0)+' · Sets '+(s.sets?.[0]??0);$('resultTwo').textContent='Legs '+(s.legs?.[1]??playing.legs2??0)+' · Sets '+(s.sets?.[1]??0);for(let i=0;i<2;i++)document.querySelectorAll('.scorecard')[i].classList.toggle('current',s.current===i&&!s.done);$('toThrow').textContent=s.done?'Spiel beendet':names[s.current??0]+' wirft';$('throwForm').hidden=s.done||playing.status==='finished'||!playing.can_score;$('scoreStatus').textContent='Version '+playing.state_version;const host=$('visits');clear(host);for(const v of (s.visits||[]).slice().reverse())host.append(el('p',names[v.player]+': '+v.score+' / '+v.darts+' Darts'+(v.checkout?' · Checkout':'')+(v.bust?' · Bust':'')))}
 $('throwForm').onsubmit=async e=>{e.preventDefault();const d=formData(e.target);try{const r=await api('/matches/'+playing.id+'/throw',{points:Number(d.points),darts:Number(d.darts),checkout:!!d.checkout,bullfinish:!!d.bullfinish,version:playing.state_version});playing.state=r.state;playing.state_version=r.version;e.target.reset();e.target.elements.darts.value=3;drawScore()}catch(err){notice(err.message,true)}};
 $('backToCompetition').onclick=()=>selected?openCompetition(selected.competition.id):show('dashboard');
-const statsLabels={matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','100plus':'100+','140plus':'140+','171plus':'171+','95plus':'95+','133plus':'133+','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
+const statsLabels={tournament_wins:'Turniersiege',tournament_seconds:'2. Plätze',tournament_thirds:'3. Plätze',matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','100plus':'100+','140plus':'140+','171plus':'171+','95plus':'95+','133plus':'133+','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
 function multiplicities(values){const counts=new Map();for(const x of values||[])counts.set(String(x),(counts.get(String(x))||0)+1);return [...counts.entries()].sort((a,b)=>Number(b[0])-Number(a[0])).map(([value,n])=>n+'× '+value).join(' · ')||'–'}
 function statValue(k,v){if(Array.isArray(v))return multiplicities(v);if(v===null||v===undefined)return '–';if(typeof v==='number')return String(v).replace('.',',');return String(v)}
 function statisticsPanels(host,stats,h2h,scope){
@@ -825,11 +955,14 @@ function statisticsPanels(host,stats,h2h,scope){
  for(const [label,k] of [['Highfinishes','highfinish_details'],['Lowdarts','lowdart_details'],['Bullfinishes','bullfinish_details'],['Highscores','highscores']]){
   if(!show(k))continue;const row=el('div',undefined,'stat-detail-row');row.append(el('b',label),el('span',multiplicities(stats[k])));best.append(row)}
  if(scope==='overall'||scope==='training_tournament')cards(panel('Training','stat-wide'),['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions']);
+ if(stats.podiums){const p=panel('Turniererfolge','stat-wide');cards(p,['tournament_wins','tournament_seconds','tournament_thirds']);}
  const h=panel('Head to Head','stat-wide');
  if(!h2h.length)h.append(el('p','Noch keine direkten Duelle in diesem Bereich.'));
  else{const list=el('div',undefined,'h2h-rows');for(const o of h2h){const row=el('div',undefined,'h2h-row');row.append(el('b',o.opponent),el('span',o.played+' Spiele'),el('span',o.wins+' S · '+o.draws+' U · '+o.losses+' N'),el('span',o.legs_for+':'+o.legs_against+' Legs'));list.append(row)}h.append(list)}
 }
-$('statsLoad').onclick=async()=>{try{const pid=$('statPlayer').value,kind=$('statKind').value,s=await api('/players/'+pid+'/stats?kind='+kind),h=await api('/players/'+pid+'/h2h?kind='+kind);statisticsPanels($('statsResult'),s,h,kind)}catch(e){notice(e.message,true)}};
+$('statsLoad').onclick=async()=>{try{const pid=$('statPlayer').value,kind=$('statKind').value,s=await api('/players/'+pid+'/stats?kind='+kind),h=await api('/players/'+pid+'/h2h?kind='+kind);
+ if(kind==='overall'){const podium=await api('/players/'+pid+'/podiums');s.podiums=podium;s.tournament_wins=podium.wins;s.tournament_seconds=podium.second;s.tournament_thirds=podium.third;}
+ statisticsPanels($('statsResult'),s,h,kind)}catch(e){notice(e.message,true)}};
 $('memberForm').onsubmit=async e=>{e.preventDefault();if(!amAdmin())return;try{await api('/players',formData(e.target));e.target.reset();await loadPlayers();notice('Mitglied erstellt')}catch(err){notice(err.message,true)}};
 $('accountForm').onsubmit=async e=>{e.preventDefault();try{await api('/accounts',formData(e.target));e.target.reset();notice('Konto erstellt. Erstpasswort nur direkt an die betreffende Person weitergeben.')}catch(err){notice(err.message,true)}};
 const migrationPanel=el('div',undefined,'panel');migrationPanel.append(el('h2','Vorhandene League und Profile übernehmen'),el('p','Übernahme erfolgt ausdrücklich als Kopie nach Neon. Die alte League bleibt unverändert.'));migrationPanel.append(btn('Aktive Google-Sheets-Profile nach Neon kopieren',async()=>{if(!await approve('Profile importieren','Aktive Profile nach Neon kopieren?'))return;try{const result=await api('/legacy/sync-profiles',{});notice(result.synced_active_profiles+' Profile kopiert');await loadPlayers()}catch(e){notice(e.message,true)}}));migrationPanel.append(btn('League-Migration: Vorschau',async()=>{try{const result=await api('/legacy/preview');if(!result.leagues.length){notice('Keine alten Liga-Snapshots gefunden');return}const d=await configure('League-Kopie nach Neon',[{name:'legacy_id',label:'Quellliga',type:'select',required:true,options:result.leagues.map(l=>[l.legacy_id,l.name+' ('+l.completed+'/'+l.fixtures+' gespielt)'])}],'Kopie prüfen');if(!d)return;
