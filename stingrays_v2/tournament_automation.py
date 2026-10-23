@@ -216,10 +216,18 @@ async def live_games(req):
            WHERE m.status='running' ORDER BY m.started_at DESC LIMIT 16''')
     out=[]
     for r in rows:
-        state=as_json(r['state']);out.append({'id':r['id'],'competition_id':r['competition_id'],'title':r['title'],
+        state=as_json(r['state'])
+        totals=[[0,0],[0,0]]
+        for visit in state.get('visits',[]):
+            idx=visit.get('player')
+            if idx not in (0,1):continue
+            totals[idx][0]+=int(visit.get('score',0) or 0)
+            totals[idx][1]+=int(visit.get('darts',3) or 3)
+        averages=[round(3*points/darts,2) if darts else None for points,darts in totals]
+        out.append({'id':r['id'],'competition_id':r['competition_id'],'title':r['title'],
           'kind':r['kind'],'player1':r['player1'],'player2':r['player2'],
           'legs':state.get('legs',[r['legs1'] or 0,r['legs2'] or 0]),'sets':state.get('sets',[r['sets1'] or 0,r['sets2'] or 0]),
-          'remaining':state.get('remaining',[]),'started_at':r['started_at']})
+          'remaining':state.get('remaining',[]),'averages':averages,'started_at':r['started_at']})
     return response(out)
 
 async def report(req):
