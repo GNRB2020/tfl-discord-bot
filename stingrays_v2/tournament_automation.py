@@ -251,13 +251,14 @@ async def progress(req,cid):
             if cfg.get('follow'):
                 groups=await db.fetch(f'SELECT id FROM {SCHEMA}.groups WHERE phase_id=$1 ORDER BY sort_order',pre['id'])
                 q=cfg.get('qualifiers','1');n=99999 if q=='all' else int(q)
-                selected=[];rest=[];wildcards=[]
+                selected=[];rest=[];wildcards=[];ranked_groups=[]
                 for order,g in enumerate(groups):
                     members=await db.fetch(f'''SELECT e.player_id FROM {SCHEMA}.group_members gm
                      JOIN {SCHEMA}.entries e ON e.id=gm.entry_id WHERE gm.group_id=$1''',g['id'])
                     ms=await db.fetch(f'''SELECT player1_id,player2_id,status,legs1,legs2,sets1,sets2 FROM {SCHEMA}.matches
                       WHERE group_id=$1''',g['id'])
                     ranks=rank_rows([dict(m) for m in ms],[p['player_id'] for p in members])
+                    ranked_groups.append([p['player_id'] for p in ranks[:n]])
                     selected.extend(p['player_id'] for p in ranks[:n])
                     rest.extend(p['player_id'] for p in ranks[n:])
                     if len(ranks)>n:wildcards.append((ranks[n]['player_id'],ranks[n],order))
@@ -282,11 +283,31 @@ async def progress(req,cid):
                     selected.extend(manual if manual else [x[0] for x in best[:extra]])
                     rest=[pid for pid in rest if pid not in additional]
                 if len(selected)<2:raise web.HTTPConflict(text='Weniger als zwei qualifizierte Spieler')
+                # Ladder final: the group winners receive semifinal byes when 3 per group qualify.
+                special_ladder_six=(cfg.get('ladder_final_of') and len(ranked_groups)==2 and
+                    all(len(g)==3 for g in ranked_groups) and not extra)
+                if special_ladder_six:
+                    a,b=ranked_groups
+                    # Preliminary matches A2 vs B3, B2 vs A3, with A1/B1 waiting.
+                    selected=[a[1],b[2],b[1],a[2],a[0],b[0]]
+
                 final_rules={**cfg['training_match']}
                 if final_rules.get('mode')=='legs':
                     initial_key='final' if len(selected)<=2 else 'semifinal' if len(selected)<=4 else 'quarterfinal'
                     final_rules['max_legs']=int(cfg.get('round_lengths',{}).get(initial_key,final_rules['max_legs']))
-                await _make_stage(db,cid,'final',selected,cfg.get('follow_format','single_ko'),final_rules,cfg.get('follow_group_count',1))
+                if special_ladder_six:
+                    # The first round is explicitly crossed; do not create fake bye matches.
+                    pids=selected
+                    ph=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
+                        VALUES($1,'Finalrunde','knockout',2,'open',$2::jsonb) RETURNING id''',cid,json.dumps({
+                        'stage':'final','format':'single_ko','participants':[str(x) for x in pids],
+                        'bye_players':[str(pids[4]),str(pids[5])],
+                        'ladder_six_crossed':True,'match_rules':final_rules}))
+                    for i,(p1,p2) in enumerate(((pids[0],pids[1]),(pids[2],pids[3])),1):
+                        await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
+                            VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,ph,i,p1,p2,json.dumps(final_rules))
+                else:
+                    await _make_stage(db,cid,'final',selected,cfg.get('follow_format','single_ko'),final_rules,cfg.get('follow_group_count',1))
                 if cfg.get('consolation') and len(rest)>=2:
                     await _make_stage(db,cid,'consolation',rest,cfg.get('consolation_format','single_ko'),cfg['training_match'],cfg.get('consolation_group_count',1))
             elif cfg['format'] in ('league','groups'):
@@ -308,7 +329,12 @@ async def progress(req,cid):
             participants=[UUID(p) for p in pr.get('participants',[])]
             if fmt=='single_ko':
                 remaining=[winner(m) for m in rows]
-                if mx==1:remaining+= [UUID(x) for x in pr.get('bye_players',[])]
+                if mx==1:
+                    byes=[UUID(x) for x in pr.get('bye_players',[])]
+                    if pr.get('ladder_six_crossed') and len(remaining)==2 and len(byes)==2:
+                        # Semi 1: A1 vs winner(B2/A3), semi 2: B1 vs winner(A2/B3).
+                        remaining=[byes[0],remaining[1],byes[1],remaining[0]]
+                    else:remaining+=byes
             else:
                 try:
                     double_pairs=double_ko_next_matches(participants,allrows)
@@ -348,7 +374,10 @@ async def progress(req,cid):
                         if tp['max_legs']%2==0:tp['max_legs']+=1
                     pid=await db.fetchval(f"INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules) VALUES($1,'Spiel um Platz 3','knockout',4,'open',$2::jsonb) RETURNING id",cid,json.dumps({'stage':'third_place','format':'single_ko','participants':[str(x) for x in losers],'match_rules':tp}))
                     await db.execute(f"INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules) VALUES($1,$2,1,1,$3,$4,$5::jsonb)",cid,pid,losers[0],losers[1],json.dumps(tp))
-            next_pairs=[(x,y) for x,y in bracket_pairs(remaining) if x and y]
+            if pr.get('ladder_six_crossed') and mx==1 and len(remaining)==4:
+                next_pairs=[(remaining[0],remaining[1]),(remaining[2],remaining[3])]
+            else:
+                next_pairs=[(x,y) for x,y in bracket_pairs(remaining) if x and y]
             if not next_pairs:continue
             for i,(p1,p2) in enumerate(next_pairs):
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
@@ -474,4 +503,17 @@ async def report(req):
     counts={}
     for r in ordered:counts[r['place']]=counts.get(r['place'],0)+1
     for r in ordered:r['tied']=counts[r['place']]>1
+    # A completed bronze match decides places three and four, independently of phase order.
+    bronze=[m for m in matches if stage_type.get(m['phase_id'])=='third_place' and winner(m)]
+    if bronze:
+        last_bronze=bronze[-1];bronze_win=winner(last_bronze)
+        bronze_lose=last_bronze['player2_id'] if bronze_win==last_bronze['player1_id'] else last_bronze['player1_id']
+        champion=next((r for r in ordered if r['place']==1),None)
+        runner=next((r for r in ordered if r['place']==2),None)
+        if champion and runner and champion['player_id'] not in (bronze_win,bronze_lose) and runner['player_id'] not in (bronze_win,bronze_lose):
+            front=[champion,runner,records[bronze_win],records[bronze_lose]]
+            ordered=front+[r for r in ordered if r['player_id'] not in {x['player_id'] for x in front}]
+            for i,r in enumerate(ordered,1):
+                if i<=4:r['place']=i;r['tied']=False
+                elif r['place']<=4:r['place']=i
     return response({'title':c['title'],'finished':c['status']=='finished','placements':ordered,'provisional':c['status']!='finished'})

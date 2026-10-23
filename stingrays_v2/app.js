@@ -958,7 +958,12 @@ async function openCompetition(id){
         {name:'group_count',label:'Anzahl Finalgruppen',type:'number',value:2,min:1,max:16,required:true},
         {name:'advance_per_group',label:'Qualifikanten pro Gruppe für die KO-Runde',type:'number',value:2,min:1,max:8,required:true},
         {name:'group_legs',label:'Gruppenphase · Best of X Legs',type:'number',value:4,min:1,max:101,required:true},
-        {name:'ko_legs',label:'KO-Runde · Best of X Legs (ungerade)',type:'number',value:5,min:1,max:101,required:true}
+        {name:'ko_legs',label:'KO-Vorrunde · Best of X Legs',type:'number',value:5,min:1,max:101,step:2,required:true},
+        {name:'quarter_legs',label:'Viertelfinale · Best of X Legs',type:'number',value:5,min:1,max:101,step:2,required:true},
+        {name:'semi_legs',label:'Halbfinale · Best of X Legs',type:'number',value:7,min:1,max:101,step:2,required:true},
+        {name:'final_legs',label:'Finale · Best of X Legs',type:'number',value:9,min:1,max:101,step:2,required:true},
+        {name:'third_place',label:'Spiel um Platz 3',type:'select',options:[['false','Nein'],['true','Ja']],value:'true',required:true},
+        {name:'third_legs',label:'Spiel um Platz 3 · Best of X Legs',type:'number',value:5,min:1,max:101,step:2,required:true}
       ],'Qualifikation prüfen und abschließen');if(!d)return;
       if(!await approve('Ladder endgültig abschließen','Die aktuell qualifizierten Top-Spieler werden eingefroren, offene Ladder-Spiele abgebrochen und das Finalturnier erzeugt. Dieser Schritt ist nicht rückgängig zu machen. Fortfahren?'))return;
       try{const result=await api('/competitions/'+id+'/end-ladder',d);await openCompetition(result.final_competition_id);notice(result.qualified_count+' qualifizierte Spieler ins Finalturnier übernommen.');}catch(e){notice(e.message,true)}
@@ -1106,7 +1111,7 @@ async function openCompetition(id){
   const allowedTabs=[...tabs.children].map(b=>b.dataset.tab);
   const requestedTab=competitionTab==='management'&&user.role!=='admin'?'table':competitionTab;
   await view(allowedTabs.includes(requestedTab)?requestedTab:(allowedTabs.includes('bracket')?'bracket':allowedTabs[0]));
-  if(c.kind==='training_tournament'&&c.status==='finished'&&!sessionStorage.getItem('tournament-report-'+id)){
+  if(['training_tournament','final_tournament'].includes(c.kind)&&c.status==='finished'&&!sessionStorage.getItem('tournament-report-'+id)){
    sessionStorage.setItem('tournament-report-'+id,'seen');
    try{const report=await api('/competitions/'+id+'/final-report');const result=el('div',undefined,'tournament-end-report');
     result.append(el('h2','Turnier abgeschlossen: '+report.title));

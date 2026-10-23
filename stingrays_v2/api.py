@@ -1261,8 +1261,13 @@ async def end_ladder(req):
         advance=int(data.get('advance_per_group',2))
         group_legs=int(data.get('group_legs',4))
         ko_legs=int(data.get('ko_legs',5))
+        quarter_legs=int(data.get('quarter_legs',ko_legs))
+        semi_legs=int(data.get('semi_legs',ko_legs))
+        final_legs=int(data.get('final_legs',ko_legs))
+        third_legs=int(data.get('third_legs',ko_legs))
+        third_place=str(data.get('third_place','false')).lower() in ('true','1','yes','on')
     except (ValueError,TypeError):raise web.HTTPBadRequest(text='Ungültige Finaleinstellungen')
-    if not 1<=group_count<=16 or not 1<=advance<=8 or not 1<=group_legs<=101 or not 1<=ko_legs<=101 or ko_legs%2!=1:
+    if not 1<=group_count<=16 or not 1<=advance<=8 or not 1<=group_legs<=101 or not 1<=ko_legs<=101 or ko_legs%2!=1 or any(x<1 or x>101 or x%2==0 for x in (quarter_legs,semi_legs,final_legs,third_legs)):
         raise web.HTTPBadRequest(text='Gruppen 1–16, Qualifikanten je Gruppe 1–8, Gruppenlegs 1–101, KO-Legs ungerade 1–101')
     from .rules import round_robin
     async with pool(req).acquire() as db:
@@ -1295,7 +1300,7 @@ async def end_ladder(req):
             raise web.HTTPConflict(text='Gleichstand an der Qualifikationsgrenze: Entscheidung vor Abschluss erforderlich')
         await db.execute(f"UPDATE {SCHEMA}.matches SET status='cancelled' WHERE competition_id=$1 AND status IN ('open','running')",cid)
         final_rules={'auto_tournament':True,'format':'groups','training_match':{'mode':'legs','start_score':501,'double_out':True,'max_legs':group_legs,'allow_draw':group_legs%2==0,'best_of_sets':3,'best_of_legs_per_set':3},
-          'double_round':False,'follow':True,'consolation':False,'round_lengths':{'group':group_legs,'quarterfinal':ko_legs,'semifinal':ko_legs,'final':ko_legs},'third_place':False,
+          'double_round':False,'follow':True,'consolation':False,'round_lengths':{'group':group_legs,'quarterfinal':quarter_legs,'semifinal':semi_legs,'final':final_legs,'third_place':third_legs},'third_place':third_place,
           'qualifiers':str(advance),'best_third_count':0,'follow_format':'single_ko','follow_group_count':1,'consolation_group_count':1,
           'ladder_final_of':str(cid),'seed_player_ids':[str(x) for x in finalists]}
         final_id=await db.fetchval(f'''INSERT INTO {SCHEMA}.competitions(title,kind,status,rules,created_by)
