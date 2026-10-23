@@ -625,6 +625,7 @@ async function openCompetition(id){
   const summary=el('div',undefined,'competition-chips');
   const played=selected.matches.filter(m=>m.status==='finished').length;
   for(const x of [selected.entries.length+' Teilnehmer',played+' / '+selected.matches.length+' gespielt',c.status])summary.append(el('span',x,'chip'));
+  if(c.kind==='ladder'&&c.rules?.final_competition_id){h.append(action('Finalturnier öffnen',()=>openCompetition(c.rules.final_competition_id),'primary'));}
   h.append(summary);header.append(h,action('← Alle Wettbewerbe',()=>{$('competitionDetail').hidden=true;loadCompetitions()},'subtle'));host.append(header);
   const tabs=el('div',undefined,'competition-tabs');
   const content=el('div',undefined,'competition-content');
@@ -824,7 +825,7 @@ async function openCompetition(id){
       ['Wiederholungssperre','Dieselbe Paarung darf erst '+(q.rematch_cooldown_days??7)+' Tage nach dem letzten abgeschlossenen Ladder-Spiel erneut antreten. Gleichzeitig offene Doppelbegegnungen sind nicht zulässig.'],
       ['Mindestqualifikation','Für die Finalrunde sind mindestens '+(q.min_games??5)+' gewertete Spiele gegen mindestens '+(q.min_opponents??3)+' unterschiedliche Gegner erforderlich.'],
       ['Finalplätze','Aktuell sind '+(q.finalists??8)+' Finalplätze vorgesehen. Die Rangliste markiert die Qualifikationszone; nur Spieler mit erfüllten Mindestbedingungen sind dort qualifiziert. Bis Saisonende sind die Plätze vorläufig.'],
-      ['Saisonende','Nach dem Saisonende werden die qualifizierten Spieler anhand ihrer ELO-Platzierung festgestellt. Modus und Ansetzung der Finalrunde werden durch die Turnierleitung bekanntgegeben.'],
+      ['Saisonende','Die Turnierleitung kann die Ladder auch vor dem Enddatum abschließen. Die qualifizierten Spieler ziehen dann in ein eigenes Finalturnier mit Gruppenphase und anschließender K.O.-Runde ein.'],
       ['Spielabbruch','Ein versehentlich gestartetes, noch nicht abgeschlossenes Spiel kann auf OFFEN zurückgesetzt werden; sämtliche bis dahin eingegebenen Aufnahmen dieses Spiels werden verworfen. Abgeschlossene Ergebnisse bleiben bestehen.'],
       ['Fair Play','Alle Spiele werden vor Ort am Dartboard ausgetragen. Beide Spieler prüfen das Ergebnis vor dem Spielabschluss. Streitfälle entscheidet die Vereins- bzw. Turnierleitung.']
     ];
@@ -951,7 +952,17 @@ async function openCompetition(id){
     },'primary'));box.append(panel);
     const status=picker([['active','Aktiv'],['finished','Beendet'],['archived','Archiviert']],c.status,async value=>{try{await api('/competitions/'+id+'/status',{status:value});await openCompetition(id)}catch(e){notice(e.message,true)}});
     const l=el('label','Ladder-Status');l.append(status);box.append(l);
-    box.append(action('Ladder nach Saisonende abschließen',async()=>{if(!await approve('Ladder abschließen','Offene Matches nach Saisonende abbrechen und ELO einfrieren?'))return;try{await api('/competitions/'+id+'/end-ladder',{});await openCompetition(id)}catch(e){notice(e.message,true)}},'danger'));
+    if(c.rules?.final_competition_id){box.append(el('p','Die Ladder ist beendet und die Finalteilnehmer stehen fest.','helper'));box.append(action('Finalturnier öffnen',()=>openCompetition(c.rules.final_competition_id),'primary'));}
+    else if(c.status==='active')box.append(action('Ladderphase jetzt abschließen und Finale erstellen',async()=>{
+      const d=await configure('Ladder abschließen · Finalturnier',[
+        {name:'group_count',label:'Anzahl Finalgruppen',type:'number',value:2,min:1,max:16,required:true},
+        {name:'advance_per_group',label:'Qualifikanten pro Gruppe für die KO-Runde',type:'number',value:2,min:1,max:8,required:true},
+        {name:'group_legs',label:'Gruppenphase · Best of X Legs',type:'number',value:4,min:1,max:101,required:true},
+        {name:'ko_legs',label:'KO-Runde · Best of X Legs (ungerade)',type:'number',value:5,min:1,max:101,required:true}
+      ],'Qualifikation prüfen und abschließen');if(!d)return;
+      if(!await approve('Ladder endgültig abschließen','Die aktuell qualifizierten Top-Spieler werden eingefroren, offene Ladder-Spiele abgebrochen und das Finalturnier erzeugt. Dieser Schritt ist nicht rückgängig zu machen. Fortfahren?'))return;
+      try{const result=await api('/competitions/'+id+'/end-ladder',d);await openCompetition(result.final_competition_id);notice(result.qualified_count+' qualifizierte Spieler ins Finalturnier übernommen.');}catch(e){notice(e.message,true)}
+    },'danger'));
     box.append(action('Wettbewerb archivieren',async()=>{if(!await approve('Ladder archivieren','Saison aus der aktiven Übersicht ins Archiv verschieben?'))return;try{await api('/competitions/'+id+'/status',{status:'archived'});await openCompetition(id)}catch(e){notice(e.message,true)}}));
     box.append(action('Testwettbewerb löschen',async()=>{if(!await approve('Ladder ausblenden','Achtung: Dieser Wettbewerb wird aus der Statistik entfernt.'))return;try{await api('/competitions/'+id+'/delete',{confirm:'DAUERHAFT AUSBLENDEN'});$('competitionDetail').hidden=true;await loadCompetitions()}catch(e){notice(e.message,true)}},'danger'));
   }
@@ -1088,7 +1099,7 @@ async function openCompetition(id){
     }
     if(c.kind==='ladder'){
       const ladder=panel('Ladder','Laufzeit und Matchabschluss verwalten.');
-      ladder.append(action('Ladder abschließen',async()=>{if(!await approve('Ladder beenden','Offene Spiele nach Saisonende abbrechen?'))return;try{await api('/competitions/'+id+'/end-ladder',{});await openCompetition(id)}catch(e){notice(e.message,true)}},'danger'));
+      ladder.append(el('p','Abschluss und Finalturnier über den Tab Verwaltung konfigurieren.','helper'));
     }
   }
   if(c.kind==='ladder'&&user.role!=='admin'){};

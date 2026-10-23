@@ -1036,14 +1036,14 @@ async def throw(req):
         # There is one revision per valid throw; append-only history supports proper recovery and review.
         await db.execute(f"UPDATE {SCHEMA}.match_claims SET lease_until=now()+interval '45 minutes',released_at=CASE WHEN $2 THEN now() ELSE NULL END WHERE match_id=$1",mid,g.done)
         if g.done and m['kind']=='ladder':await apply_elo(db,m,[total_one,total_two],g.sets)
-    if g.done and m['kind']=='training_tournament':
+    if g.done and m['kind'] in ('training_tournament','final_tournament'):
         try:
             from .tournament_automation import progress
             await progress(req,m['competition_id'])
         except Exception:
             import logging
             logging.exception('Trainingsturnier: automatischer Rundenwechsel fehlgeschlagen')
-    if g.done and m['kind']=='training_tournament':
+    if g.done and m['kind'] in ('training_tournament','final_tournament'):
         try:
             from .tournament_automation import progress
             await progress(req,m['competition_id'])
@@ -1254,17 +1254,79 @@ async def advance_knockout(req):
     return response({'created':len(winners)//2,'round':mx+1})
 
 async def end_ladder(req):
-    await actor(req,'admin');cid=uid(req.match_info['cid']);await body(req)
+    # Freeze ladder and build ELO-neutral final event.
+    a=await actor(req,'admin');cid=uid(req.match_info['cid']);data=await body(req)
+    try:
+        group_count=int(data.get('group_count',2))
+        advance=int(data.get('advance_per_group',2))
+        group_legs=int(data.get('group_legs',4))
+        ko_legs=int(data.get('ko_legs',5))
+    except (ValueError,TypeError):raise web.HTTPBadRequest(text='Ungültige Finaleinstellungen')
+    if not 1<=group_count<=16 or not 1<=advance<=8 or not 1<=group_legs<=101 or not 1<=ko_legs<=101 or ko_legs%2!=1:
+        raise web.HTTPBadRequest(text='Gruppen 1–16, Qualifikanten je Gruppe 1–8, Gruppenlegs 1–101, KO-Legs ungerade 1–101')
+    from .rules import round_robin
     async with pool(req).acquire() as db:
       async with db.transaction():
-        c=await db.fetchrow(f'SELECT kind,ends_at FROM {SCHEMA}.competitions WHERE id=$1 FOR UPDATE',cid)
+        c=await db.fetchrow(f'''SELECT id,title,kind,status,rules FROM {SCHEMA}.competitions
+             WHERE id=$1 AND deleted_at IS NULL FOR UPDATE''',cid)
         if not c or c['kind']!='ladder':raise web.HTTPBadRequest(text='Keine Ladder')
-        if not c['ends_at'] or datetime.now(timezone.utc)<c['ends_at']:
-            raise web.HTTPConflict(text='Das Saisonende ist noch nicht erreicht')
-        count=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.matches WHERE competition_id=$1 AND status IN ('open','running')",cid)
+        if c['status']!='active':raise web.HTTPConflict(text='Ladder bereits abgeschlossen oder nicht aktiv')
+        existing=as_json(c['rules']).get('final_competition_id')
+        if existing:raise web.HTTPConflict(text='Finalturnier bereits erzeugt')
+        rules=as_json(c['rules'])
+        ratings=await db.fetch(f'''SELECT r.player_id,r.played,r.elo,r.wins FROM {SCHEMA}.ladder_ratings r
+            WHERE r.competition_id=$1 AND r.played>0 ORDER BY r.elo DESC,r.played DESC,r.wins DESC,r.player_id''',cid)
+        meetings=await db.fetch(f'''SELECT player1_id,player2_id FROM {SCHEMA}.matches
+            WHERE competition_id=$1 AND status='finished' AND source='scorer' AND phase_id IS NULL''',cid)
+        opponents={}
+        for m in meetings:
+            opponents.setdefault(m['player1_id'],set()).add(m['player2_id'])
+            opponents.setdefault(m['player2_id'],set()).add(m['player1_id'])
+        qualified,settings=ladder_qualification(ratings,{k:len(v) for k,v in opponents.items()},rules)
+        finalists=[r['player_id'] for r in qualified if r['qualified']]
+        if len(finalists)<4:raise web.HTTPConflict(text='Mindestens vier Spieler müssen die Qualifikationsregeln erfüllen')
+        if group_count>len(finalists)//2 or advance*group_count>len(finalists):
+            raise web.HTTPBadRequest(text='Zu viele Gruppen oder Qualifikanten für die vorhandenen Finalisten')
+        if advance*group_count<2:raise web.HTTPBadRequest(text='Mindestens zwei Spieler müssen in die KO-Runde einziehen')
+        # Prevent a tie in the ELO cutoff from being decided by an arbitrary database row order.
+        eligible=[r for r in qualified if r['eligible']]
+        limit=settings['finalists']
+        if len(eligible)>limit and float(eligible[limit-1]['elo'])==float(eligible[limit]['elo']) and eligible[limit-1]['played']==eligible[limit]['played'] and eligible[limit-1]['wins']==eligible[limit]['wins']:
+            raise web.HTTPConflict(text='Gleichstand an der Qualifikationsgrenze: Entscheidung vor Abschluss erforderlich')
         await db.execute(f"UPDATE {SCHEMA}.matches SET status='cancelled' WHERE competition_id=$1 AND status IN ('open','running')",cid)
-        await db.execute(f"UPDATE {SCHEMA}.competitions SET status='finished' WHERE id=$1",cid)
-    return response({'cancelled_unscored':count,'elo_frozen':True})
+        final_rules={'auto_tournament':True,'format':'groups','training_match':{'mode':'legs','start_score':501,'double_out':True,'max_legs':group_legs,'allow_draw':group_legs%2==0,'best_of_sets':3,'best_of_legs_per_set':3},
+          'double_round':False,'follow':True,'consolation':False,'round_lengths':{'group':group_legs,'quarterfinal':ko_legs,'semifinal':ko_legs,'final':ko_legs},'third_place':False,
+          'qualifiers':str(advance),'best_third_count':0,'follow_format':'single_ko','follow_group_count':1,'consolation_group_count':1,
+          'ladder_final_of':str(cid),'seed_player_ids':[str(x) for x in finalists]}
+        final_id=await db.fetchval(f'''INSERT INTO {SCHEMA}.competitions(title,kind,status,rules,created_by)
+          VALUES($1,'final_tournament','active',$2::jsonb,$3) RETURNING id''',c['title']+' – Finalturnier',json.dumps(final_rules),a['id'])
+        for pid in finalists:
+            await db.execute(f'INSERT INTO {SCHEMA}.entries(competition_id,player_id) VALUES($1,$2)',final_id,pid)
+        phase=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
+          VALUES($1,'Finalturnier · Gruppenphase','groups',1,'open',$2::jsonb) RETURNING id''',final_id,
+          json.dumps({'stage':'preliminary','format':'groups','participants':[str(x) for x in finalists],'match_rules':final_rules['training_match']}))
+        # Snake seeding keeps the strongest players distributed across groups.
+        buckets=[[] for _ in range(group_count)]
+        for i,pid in enumerate(finalists):
+            block=i//group_count;j=i%group_count
+            buckets[j if block%2==0 else group_count-1-j].append(pid)
+        count=0
+        for j,people in enumerate(buckets):
+            gid=await db.fetchval(f'''INSERT INTO {SCHEMA}.groups(phase_id,name,sort_order)
+              VALUES($1,$2,$3) RETURNING id''',phase,'Gruppe '+chr(65+j) if j<26 else 'Gruppe '+str(j+1),j+1)
+            for pid in people:
+                await db.execute(f'''INSERT INTO {SCHEMA}.group_members(group_id,entry_id)
+                  SELECT $1,id FROM {SCHEMA}.entries WHERE competition_id=$2 AND player_id=$3''',gid,final_id,pid)
+            for rnd,p1,p2 in round_robin(people):
+                await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,group_id,round_number,player1_id,player2_id,rules)
+                  VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',final_id,phase,gid,rnd,p1,p2,json.dumps(final_rules['training_match']))
+                count+=1
+        rules.update({'final_competition_id':str(final_id),'qualified_player_ids':[str(x) for x in finalists],
+          'ladder_closed_early':True,'final_group_count':group_count,'final_advance_per_group':advance})
+        await db.execute(f"UPDATE {SCHEMA}.competitions SET status='finished',rules=$2::jsonb WHERE id=$1",cid,json.dumps(rules))
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+          VALUES($1,'ladder_final_created','competition',$2,$3::jsonb)''',a['id'],str(cid),json.dumps({'final_id':str(final_id),'qualified':[str(x) for x in finalists]}))
+    return response({'elo_frozen':True,'final_competition_id':final_id,'qualified_count':len(finalists),'group_matches':count})
 
 async def competition_status(req):
     await actor(req,'admin');d=await body(req);cid=uid(req.match_info['cid'])

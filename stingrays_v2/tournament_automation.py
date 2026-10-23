@@ -236,7 +236,7 @@ async def progress(req,cid):
     async with pool(req).acquire() as db:
       async with db.transaction():
         c=await db.fetchrow(f'''SELECT id,rules,status FROM {SCHEMA}.competitions
-          WHERE id=$1 AND kind='training_tournament' AND deleted_at IS NULL FOR UPDATE''',cid)
+          WHERE id=$1 AND kind IN ('training_tournament','final_tournament') AND deleted_at IS NULL FOR UPDATE''',cid)
         if not c or c['status'] not in ('active','draft'):return
         cfg=as_json(c['rules']);
         if not cfg.get('auto_tournament'):return
