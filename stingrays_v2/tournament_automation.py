@@ -221,7 +221,7 @@ async def live_games(req):
         for visit in state.get('visits',[]):
             idx=visit.get('player')
             if idx not in (0,1):continue
-            totals[idx][0]+=int(visit.get('score',0) or 0)
+            totals[idx][0]+=0 if visit.get('bust') else int(visit.get('score',0) or 0)
             totals[idx][1]+=int(visit.get('darts',3) or 3)
         averages=[round(3*points/darts,2) if darts else None for points,darts in totals]
         out.append({'id':r['id'],'competition_id':r['competition_id'],'title':r['title'],
@@ -248,7 +248,7 @@ async def report(req):
             state=as_json(m['state'])
             for v in state.get('visits',[]):
                 if v.get('player')==idx:
-                    d['points']+=int(v.get('score',0));d['darts']+=int(v.get('darts',3))
+                    d['points']+=0 if v.get('bust') else int(v.get('score',0));d['darts']+=int(v.get('darts',3))
             if w==p:d['rank_score']+=1000*int(m['phase_order'] or 1)+int(m['round_number'] or 1)
     results=sorted(score.values(),key=lambda r:(-r['rank_score'],-r['wins'],r['losses'],r['name']))
     for i,r in enumerate(results,1):r['place']=i;r['average']=round(3*r['points']/r['darts'],2) if r['darts'] else None
