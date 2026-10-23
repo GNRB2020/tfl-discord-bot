@@ -38,7 +38,9 @@ async def create(req):
 
 
 async def get_row(db,mid,lock=False):
-    row=await db.fetchrow('''SELECT m.*,p1.display_name AS player1,p2.display_name AS player2
+    row=await db.fetchrow('''SELECT m.*,p1.display_name AS player1,p2.display_name AS player2,
+      EXISTS(SELECT 1 FROM stingrays_app.player_preferences a1 WHERE a1.player_id=m.player1_id AND a1.avatar IS NOT NULL) AS has_avatar1,
+      EXISTS(SELECT 1 FROM stingrays_app.player_preferences a2 WHERE a2.player_id=m.player2_id AND a2.avatar IS NOT NULL) AS has_avatar2
       FROM stingrays_app.free_x01_matches m JOIN stingrays_app.players p1 ON p1.id=m.player1_id
       JOIN stingrays_app.players p2 ON p2.id=m.player2_id WHERE m.id=$1'''+(' FOR UPDATE OF m' if lock else ''),mid)
     if not row:raise web.HTTPNotFound(text='Training nicht gefunden')

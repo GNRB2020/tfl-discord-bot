@@ -179,11 +179,97 @@ async def password(req):
             await db.execute(f'UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE account_id=$1 AND token_hash<>$2',a['id'],token_digest(req.cookies.get(COOKIE,'')))
     return response({'ok':True})
 
+
+# Profiles and personal dashboard settings are private to the account owner.
+DASH_WIDGETS=('open_matches','last10','ladder_rank','elo','competitions','average','first9','180','95plus')
+DEFAULT_DASH_WIDGETS=('open_matches','last10','ladder_rank','elo')
+
+async def profile_settings(req):
+    a=await actor(req)
+    if not a['player_id']:raise web.HTTPConflict(text='Kein Spielerprofil mit dem Konto verknüpft')
+    async with pool(req).acquire() as db:
+        p=await db.fetchrow(f'''SELECT p.display_name,p.id,pp.first_name,pp.last_name,pp.nickname,pp.email,pp.widgets,
+          (pp.avatar IS NOT NULL) AS has_avatar FROM {SCHEMA}.players p
+          LEFT JOIN {SCHEMA}.player_preferences pp ON pp.player_id=p.id WHERE p.id=$1''',a['player_id'])
+    data=dict(p)
+    if not data.get('first_name') and not data.get('last_name') and ' ' in data['display_name']:
+        data['first_name'],data['last_name']=data['display_name'].split(' ',1)
+    if not data.get('nickname'):data['nickname']=a['username']
+    data['widgets']=as_json(data['widgets']) if data['widgets'] is not None else list(DEFAULT_DASH_WIDGETS)
+    return response(data)
+
+async def save_profile_settings(req):
+    a=await actor(req);d=await body(req)
+    if not a['player_id']:raise web.HTTPConflict(text='Kein Spielerprofil vorhanden')
+    values={k:str(d.get(k,'')).strip() for k in ('first_name','last_name','nickname','email')}
+    if any(len(values[k])>100 for k in ('first_name','last_name','nickname')) or len(values['email'])>254:
+        raise web.HTTPBadRequest(text='Profilfeld zu lang')
+    email=values['email']
+    if email and ('@' not in email or any(ch.isspace() for ch in email) or '.' not in email.rsplit('@',1)[-1]):
+        raise web.HTTPBadRequest(text='E-Mail-Adresse ungültig')
+    widgets=d.get('widgets',list(DEFAULT_DASH_WIDGETS))
+    if not isinstance(widgets,list) or len(widgets)>len(DASH_WIDGETS) or any(x not in DASH_WIDGETS for x in widgets):
+        raise web.HTTPBadRequest(text='Ungültige Dashboard-Auswahl')
+    widgets=list(dict.fromkeys(widgets))
+    async with pool(req).acquire() as db:
+        await db.execute(f'''INSERT INTO {SCHEMA}.player_preferences(player_id,first_name,last_name,nickname,email,widgets)
+          VALUES($1,$2,$3,$4,$5,$6::jsonb)
+          ON CONFLICT(player_id) DO UPDATE SET first_name=$2,last_name=$3,nickname=$4,email=$5,widgets=$6::jsonb,updated_at=now()''',
+          a['player_id'],values['first_name'],values['last_name'],values['nickname'],email,json.dumps(widgets))
+    return response({'ok':True,'widgets':widgets})
+
+async def save_avatar(req):
+    a=await actor(req)
+    if not a['player_id']:raise web.HTTPConflict(text='Kein Spielerprofil vorhanden')
+    require_same_origin(req)
+    if req.content_length is not None and req.content_length>1_000_000:
+        raise web.HTTPRequestEntityTooLarge(max_size=1_000_000,actual_size=req.content_length)
+    buf=bytearray()
+    async for part in req.content.iter_chunked(65536):
+        buf.extend(part)
+        if len(buf)>1_000_000:raise web.HTTPRequestEntityTooLarge(max_size=1_000_000,actual_size=len(buf))
+    raw=bytes(buf)
+    if raw.startswith(b'\x89PNG\r\n\x1a\n'):typ='image/png'
+    elif raw.startswith(b'\xff\xd8\xff'):typ='image/jpeg'
+    elif raw[:4]==b'RIFF' and raw[8:12]==b'WEBP':typ='image/webp'
+    else:raise web.HTTPBadRequest(text='Nur PNG, JPG oder WebP erlaubt')
+    async with pool(req).acquire() as db:
+        await db.execute(f'''INSERT INTO {SCHEMA}.player_preferences(player_id,avatar,avatar_type)
+          VALUES($1,$2,$3) ON CONFLICT(player_id) DO UPDATE SET avatar=$2,avatar_type=$3,updated_at=now()''',
+          a['player_id'],raw,typ)
+    return response({'ok':True,'bytes':len(raw)})
+
+async def player_avatar(req):
+    await actor(req);pid=uid(req.match_info['pid'])
+    async with pool(req).acquire() as db:
+        row=await db.fetchrow(f'SELECT avatar,avatar_type FROM {SCHEMA}.player_preferences WHERE player_id=$1',pid)
+    if not row or not row['avatar']:raise web.HTTPNotFound(text='Kein Profilbild')
+    return web.Response(body=bytes(row['avatar']),content_type=row['avatar_type'],headers={'Cache-Control':'private,max-age=60','X-Content-Type-Options':'nosniff'})
+
+async def link_my_member_profile(req):
+    a=await actor(req,'admin');d=await body(req)
+    target=uid(d.get('player_id'))
+    if not a['player_id']:raise web.HTTPConflict(text='Aktuelles Profil fehlt')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        current=await db.fetchrow(f'SELECT display_name FROM {SCHEMA}.players WHERE id=$1',a['player_id'])
+        player=await db.fetchrow(f'''SELECT id,display_name FROM {SCHEMA}.players
+                  WHERE id=$1 AND is_active=true AND is_member=true''',target)
+        if not player:raise web.HTTPBadRequest(text='Nur aktives Vereinsprofil wählen')
+        conflict=await db.fetchval(f'SELECT id FROM {SCHEMA}.accounts WHERE player_id=$1 AND id<>$2',target,a['id'])
+        if conflict:raise web.HTTPConflict(text='Dieses Spielerprofil ist bereits einem anderen Konto zugeordnet')
+        if target!=a['player_id']:
+            await db.execute(f'UPDATE {SCHEMA}.accounts SET player_id=$2 WHERE id=$1',a['id'],target)
+            await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+              VALUES($1,'link_player_profile','account',$2,$3::jsonb)''',a['id'],str(a['id']),json.dumps({'old_profile':str(a['player_id']),'new_profile':str(target)}))
+    return response({'ok':True,'player_id':target,'display_name':player['display_name'],
+                     'note':'Die Verbindung ist aktualisiert. Historische Testspiele unter dem alten Profil bleiben unverändert.'})
+
 async def members(req):
     await actor(req)
     async with pool(req).acquire() as db:
         rows=await db.fetch(f'''SELECT p.id,p.legacy_profile_id,p.display_name,p.is_active,p.is_member,
-          a.username,a.role,a.is_enabled FROM {SCHEMA}.players p LEFT JOIN {SCHEMA}.accounts a ON a.player_id=p.id
+          a.username,a.role,a.is_enabled,pp.avatar IS NOT NULL AS has_avatar FROM {SCHEMA}.players p LEFT JOIN {SCHEMA}.accounts a ON a.player_id=p.id LEFT JOIN {SCHEMA}.player_preferences pp ON pp.player_id=p.id
           ORDER BY p.display_name''')
     return response(list(map(dict,rows)))
 
@@ -622,7 +708,10 @@ async def reset_match(req):
 async def match_state(req):
     a=await actor(req);mid=uid(req.match_info['mid'])
     async with pool(req).acquire() as db:
-        m=await db.fetchrow(f'''SELECT m.*,p1.display_name AS player1,p2.display_name AS player2,c.kind,c.status AS competition_status
+        m=await db.fetchrow(f'''SELECT m.*,p1.display_name AS player1,p2.display_name AS player2,
+          EXISTS(SELECT 1 FROM {SCHEMA}.player_preferences a1 WHERE a1.player_id=m.player1_id AND a1.avatar IS NOT NULL) AS has_avatar1,
+          EXISTS(SELECT 1 FROM {SCHEMA}.player_preferences a2 WHERE a2.player_id=m.player2_id AND a2.avatar IS NOT NULL) AS has_avatar2,
+          c.kind,c.status AS competition_status
           FROM {SCHEMA}.matches m JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id
           JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
           JOIN {SCHEMA}.competitions c ON c.id=m.competition_id WHERE m.id=$1 AND c.deleted_at IS NULL''',mid)
@@ -957,7 +1046,7 @@ async def stats(req):
     if kind!='overall':scored=[s for s in scored if s['kind']==kind]
     if selected_competition:scored=[s for s in scored if s['competition_id']==selected_competition]
     games=list(games);scored=list(scored)
-    if kind in ('overall','training_tournament') and not selected_competition:
+    if kind=='overall' and not selected_competition:
         # Standalone X01 practice lives in its own table and never affects league/cup/ladder.
         async with pool(req).acquire() as db:
             free_games=await db.fetch(f'''SELECT player1_id,player2_id,state,status
@@ -1094,7 +1183,7 @@ async def head_to_head(req):
          (m.player1_id=$1 OR m.player2_id=$1) AND ($2::uuid IS NULL OR m.competition_id=$2)
          ORDER BY m.finished_at DESC''',pid,selected_competition)
     rows=list(rows)
-    if kind in ('overall','training_tournament') and not selected_competition:
+    if kind=='overall' and not selected_competition:
         async with pool(req).acquire() as db:
             free=await db.fetch(f'''SELECT m.player1_id,m.player2_id,m.state,
               p1.display_name AS name1,p2.display_name AS name2
@@ -1135,8 +1224,10 @@ async def overview(req):
     if preview and a['role']!='admin':raise web.HTTPForbidden(text='Nur Admin darf Spieleransicht nutzen')
     viewed=uid(preview) if preview else a['player_id']
     async with pool(req).acquire() as db:
-        person=await db.fetchrow(f'''SELECT id,display_name FROM {SCHEMA}.players WHERE id=$1''',viewed) if viewed else None
-        entries=[];own=[];recent=[];ladder=[]; totals={'played':0,'wins':0,'draws':0,'losses':0}
+        person=await db.fetchrow(f'''SELECT p.id,p.display_name,pp.first_name,pp.last_name,pp.nickname,pp.widgets,
+             pp.avatar IS NOT NULL AS has_avatar FROM {SCHEMA}.players p
+             LEFT JOIN {SCHEMA}.player_preferences pp ON pp.player_id=p.id WHERE p.id=$1''',viewed) if viewed else None
+        entries=[];own=[];regular=[];free=[];ladder=[]
         if viewed:
             entries=await db.fetch(f'''SELECT c.id,c.title,c.kind,c.status,c.starts_at,c.ends_at,
                e.status AS entry_status,
@@ -1146,36 +1237,63 @@ async def overview(req):
               WHERE e.player_id=$1 AND c.deleted_at IS NULL AND c.status IN ('draft','active','finished')
               ORDER BY CASE WHEN c.status='active' THEN 0 ELSE 1 END,c.created_at DESC LIMIT 50''',viewed)
             own=await db.fetch(f'''SELECT m.id,m.status,c.id AS competition_id,c.title,c.kind,
-                p1.display_name AS player1,p2.display_name AS player2
+                p1.display_name AS player1,p2.display_name AS player2,
+                p1.id AS player1_id,p2.id AS player2_id
                 FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
                 JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
                 WHERE c.deleted_at IS NULL AND m.status IN ('open','running') AND (m.player1_id=$1 OR m.player2_id=$1)
-                ORDER BY CASE WHEN m.status='running' THEN 0 ELSE 1 END,m.created_at DESC LIMIT 40''',viewed)
-            recent=await db.fetch(f'''SELECT m.id,c.id AS competition_id,c.title,c.kind,m.finished_at,
+                ORDER BY CASE WHEN m.status='running' THEN 0 ELSE 1 END,m.created_at DESC LIMIT 50''',viewed)
+            regular=await db.fetch(f'''SELECT m.id,c.id AS competition_id,c.title,c.kind,m.finished_at,m.created_at,
                 m.player1_id,m.player2_id,m.legs1,m.legs2,m.sets1,m.sets2,
                 p1.display_name AS player1,p2.display_name AS player2
                 FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
                 JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
                 WHERE c.deleted_at IS NULL AND m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)
-                ORDER BY m.finished_at DESC NULLS LAST,m.created_at DESC LIMIT 12''',viewed)
+                ORDER BY m.finished_at DESC NULLS LAST,m.created_at DESC LIMIT 20''',viewed)
+            free=await db.fetch(f'''SELECT m.id,m.status,m.finished_at,m.created_at,m.player1_id,m.player2_id,m.state,
+                p1.display_name AS player1,p2.display_name AS player2 FROM {SCHEMA}.free_x01_matches m
+                JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
+                WHERE (m.player1_id=$1 OR m.player2_id=$1) AND m.status IN ('finished','running','open')
+                ORDER BY m.created_at DESC LIMIT 30''',viewed)
             ladder=await db.fetch(f'''SELECT r.competition_id,c.title,r.elo,r.played,r.wins,r.draws,r.losses,
-                 (SELECT count(*)+1 FROM {SCHEMA}.ladder_ratings z WHERE z.competition_id=r.competition_id
-                  AND z.played>0 AND z.elo>r.elo) AS position
+                 CASE WHEN r.played>0 THEN (SELECT count(*)+1 FROM {SCHEMA}.ladder_ratings z
+                    WHERE z.competition_id=r.competition_id AND z.played>0 AND z.elo>r.elo) ELSE NULL END AS position
                 FROM {SCHEMA}.ladder_ratings r JOIN {SCHEMA}.competitions c ON c.id=r.competition_id
                 WHERE r.player_id=$1 AND c.kind='ladder' AND c.deleted_at IS NULL
-                ORDER BY c.created_at DESC LIMIT 5''',viewed)
-            for m in recent:
-                left=m['player1_id']==viewed
-                score1=(m['sets1'] if (m['sets1'] or m['sets2']) else m['legs1']) or 0
-                score2=(m['sets2'] if (m['sets1'] or m['sets2']) else m['legs2']) or 0
-                own_score,opp_score=(score1,score2) if left else (score2,score1)
-                totals['played']+=1
-                totals['wins']+=int(own_score>opp_score)
-                totals['draws']+=int(own_score==opp_score)
-                totals['losses']+=int(own_score<opp_score)
+                ORDER BY CASE WHEN c.status='active' THEN 0 ELSE 1 END,c.created_at DESC LIMIT 5''',viewed)
+    matches=[dict(row) for row in regular]
+    for m in free:
+        if m['status']!='finished':
+            own.append({'id':m['id'],'status':m['status'],'competition_id':None,'title':'Freies X01',
+               'kind':'free_x01','player1':m['player1'],'player2':m['player2'],
+               'player1_id':m['player1_id'],'player2_id':m['player2_id']})
+            continue
+        raw=as_json(m['state']);legs=raw.get('legs') or [0,0];sets=raw.get('sets') or [0,0]
+        matches.append({'id':m['id'],'competition_id':None,'title':'Freies X01','kind':'free_x01',
+          'finished_at':m['finished_at'] or m['created_at'],'player1_id':m['player1_id'],
+          'player2_id':m['player2_id'],'legs1':legs[0],'legs2':legs[1],'sets1':sets[0],'sets2':sets[1],
+          'player1':m['player1'],'player2':m['player2']})
+    def when(m):
+        value=m.get('finished_at') or m.get('created_at')
+        return value or datetime.min.replace(tzinfo=timezone.utc)
+    matches.sort(key=when,reverse=True)
+    recent=matches[:5]
+    last10=matches[:10]
+    totals={'played':len(last10),'wins':0,'draws':0,'losses':0}
+    for m in last10:
+        if m['player1_id'] is None or m['player2_id'] is None:continue
+        left=m['player1_id']==viewed
+        score1=(m['sets1'] if (m['sets1'] or m['sets2']) else m['legs1']) or 0
+        score2=(m['sets2'] if (m['sets1'] or m['sets2']) else m['legs2']) or 0
+        own_score,opp_score=(score1,score2) if left else (score2,score1)
+        totals['wins']+=int(own_score>opp_score)
+        totals['draws']+=int(own_score==opp_score)
+        totals['losses']+=int(own_score<opp_score)
+    profile=dict(person) if person else None
+    if profile:profile['widgets']=as_json(profile['widgets']) if profile['widgets'] is not None else list(DEFAULT_DASH_WIDGETS)
     return response({'competitions':list(map(dict,entries)),'own_open':list(map(dict,own)),
-        'recent':list(map(dict,recent)),'ladder':list(map(dict,ladder)),'recent_totals':totals,
-        'profile':dict(person) if person else None,'viewed_player_id':viewed,'preview':bool(preview)})
+        'recent':recent,'ladder':list(map(dict,ladder)),'recent_totals':totals,
+        'profile':profile,'viewed_player_id':viewed,'preview':bool(preview)})
 
 async def register_startup(app):
     url=os.environ.get('STINGRAYS_DATABASE_URL')
@@ -1207,7 +1325,10 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/legacy/import',import_legacy),('POST','/dart/v2/api/bootstrap',bootstrap),
       ('POST','/dart/v2/api/login',login),('POST','/dart/v2/api/logout',logout),
       ('GET','/dart/v2/api/me',me),('POST','/dart/v2/api/password',password),
-      ('GET','/dart/v2/api/dashboard',overview),('GET','/dart/v2/api/players',members),
+      ('GET','/dart/v2/api/dashboard',overview),('GET','/dart/v2/api/profile',profile_settings),
+      ('POST','/dart/v2/api/profile',save_profile_settings),('POST','/dart/v2/api/profile/avatar',save_avatar),
+      ('POST','/dart/v2/api/profile/link',link_my_member_profile),('GET','/dart/v2/api/players/{pid}/avatar',player_avatar),
+      ('GET','/dart/v2/api/players',members),
       ('POST','/dart/v2/api/players',create_member),('POST','/dart/v2/api/accounts',create_account),
       ('POST','/dart/v2/api/accounts/{aid}',reset_account),
       ('GET','/dart/v2/api/boards',board_list),('POST','/dart/v2/api/boards/{bid}',edit_board),

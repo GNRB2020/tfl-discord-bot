@@ -26,6 +26,7 @@
    throw Error('Bitte den Wettbewerb über die V2-Übersicht verwalten.');
  };
  // The original scorer remains untouched; add a match header and per-player history.
+ const avatarStyle=document.createElement('style');avatarStyle.textContent='.v2-player-photo{width:clamp(36px,5vw,62px);height:clamp(36px,5vw,62px);object-fit:cover;border-radius:10px;border:2px solid #c9a751;flex-shrink:0;margin-right:6px}#scorerView .players .player{display:flex;align-items:center;gap:8px}';document.head.append(avatarStyle);
  const playersRow=document.querySelector('#scorerView .players');
  const middle=document.createElement('aside');middle.id='v2Central';middle.className='v2-central';
  middle.innerHTML='<span class="v2-sub">SPIELSTAND</span><strong id="v2LegScore">0 : 0</strong><span id="v2SetScore">SETS 0 : 0</span><small id="v2MatchFormat"></small>';
@@ -202,6 +203,13 @@
        });
      }
      const r=await req('/start',{starter});m={...m,state:r.state,state_version:r.version,status:'running'};
+   }
+   // Only request avatars for players who actually uploaded one.
+   for(const [i,pid,enabled] of [[0,m.player1_id,m.has_avatar1],[1,m.player2_id,m.has_avatar2]]){
+     if(!pid||!enabled)continue;
+     const panel=document.getElementById('p'+i);if(!panel||panel.querySelector('.v2-player-photo'))continue;
+     const img=document.createElement('img');img.className='v2-player-photo';img.alt='Spielerfoto';
+     img.src='/dart/v2/api/players/'+encodeURIComponent(pid)+'/avatar';panel.prepend(img);
    }
    S=normalize(m);entry='';showMatch();
  }).catch(e=>{oldScreen('loginView');err(e.message+' – Bitte zur Wettbewerbsübersicht zurückkehren.');});

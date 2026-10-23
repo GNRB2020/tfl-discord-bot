@@ -1,5 +1,6 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);let user=null,players=[],competitions=[],selected=null,playing=null,previewId=null;
+const avatarPlayers=new Set();function setAvatarMetadata(rows){for(const r of rows)if(r.has_avatar)avatarPlayers.add(String(r.id));}
 function notice(text,error=false){$('message').textContent=text||'';$('message').className=error?'error':'';if(error)window.scrollTo(0,0)}
 async function api(path,data){const options={credentials:'same-origin',headers:{'Accept':'application/json'}};if(data!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.body=JSON.stringify(data)}const res=await fetch('/dart/v2/api'+path,options);const txt=await res.text();let j={};try{j=JSON.parse(txt)}catch{}if(!res.ok)throw Error(j.error||txt||'HTTP '+res.status);return j}
 function formData(form){return Object.fromEntries(new FormData(form).entries())}
@@ -7,6 +8,14 @@ function clear(node){node.replaceChildren()}
 function el(tag,text,cls){const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(cls)x.className=cls;return x}
 function btn(label,fn){const x=el('button',label);x.type='button';x.onclick=fn;return x}
 function tile(title,sub,fn){const x=btn('',fn);x.className='tile';x.append(el('strong',title),el('small',sub));return x}
+const defaultDashboardWidgets=['open_matches','last10','ladder_rank','elo'];
+const widgetLabels={open_matches:'Offene Begegnungen',last10:'Bilanz letzte 10 Spiele',ladder_rank:'Platzierung Ladder',elo:'Aktueller ELO-Wert',competitions:'Aktive Wettbewerbe',average:'Ø Average',first9:'Ø First 9','180':'180er','95plus':'95+'};
+function portrait(playerId,large=false){const shell=el('span',undefined,'player-portrait'+(large?' portrait-large':''));
+ if(!playerId||!avatarPlayers.has(String(playerId))){shell.textContent='◈';return shell}
+ const img=document.createElement('img');img.loading='lazy';img.alt='Profilbild';img.src='/dart/v2/api/players/'+encodeURIComponent(playerId)+'/avatar';
+ img.onerror=()=>{img.remove();shell.textContent='◈'};shell.append(img);return shell;
+}
+function participantName(id,name){const row=el('span',undefined,'participant-name');row.append(portrait(id),el('span',name||'Spieler'));return row}
 // Jede Partie bekommt die gesamte aktuelle Browseransicht – KEIN zweiter Tab.
 // Zur Verwaltung gelangt man über den Zurück-Link des Scorers.
 function openGameWindow(url){window.location.assign(url);return true}
@@ -39,9 +48,9 @@ function configure(title,fields,submitText='Speichern'){
 async function approve(title,text){return !!await configure(title,[{name:'ack',label:text,type:'select',options:[['','Bitte wählen'],['yes','Ja, ausführen']],required:true}],'Bestätigen').then(x=>x?.ack==='yes')}
 const amAdmin=()=>user?.role==='admin';
 const trainingOwner=()=>selected?.competition?.kind==='training_tournament'&&selected?.competition?.created_by===user?.id;
-function section(name){for(const id of ['setup','login','changePassword','dashboard','training','ladder','competitions','boards','members','statistics','admin','scorer'])$(id).hidden=id!==name;$('nav').hidden=!user||['login','setup','changePassword'].includes(name);for(const b of document.querySelectorAll('nav [data-view]')){b.classList.toggle('active',b.dataset.view===name);b.style.display=b.classList.contains('admin')&&!amAdmin()?'none':(b.dataset.view==='boards'&&user?.role==='member'?'none':'')}notice('')}
+function section(name){for(const id of ['setup','login','changePassword','dashboard','settings','training','ladder','competitions','boards','members','statistics','admin','scorer'])$(id).hidden=id!==name;$('nav').hidden=!user||['login','setup','changePassword'].includes(name);for(const b of document.querySelectorAll('nav [data-view]')){b.classList.toggle('active',b.dataset.view===name);b.style.display=b.classList.contains('admin')&&!amAdmin()?'none':(b.dataset.view==='boards'&&user?.role==='member'?'none':'')}notice('')}
 async function session(){try{user=await api('/me');if(user.must_change_password){section('changePassword');return}section('dashboard');await show('dashboard')}catch{user=null;section('login')}}
-async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false)}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false)}}catch(e){notice(e.message,true)}}
+async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false)}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false)}}catch(e){notice(e.message,true)}}
 for(const b of document.querySelectorAll('nav [data-view]'))b.onclick=()=>show(b.dataset.view);
 $('firstAdmin').onclick=()=>section('setup');
 $('setupForm').onsubmit=async e=>{e.preventDefault();try{await api('/bootstrap',formData(e.target));section('login');notice('Administrator erstellt. Bitte anmelden.')}catch(err){notice(err.message,true)}};
@@ -50,34 +59,111 @@ $('passwordForm').onsubmit=async e=>{e.preventDefault();try{await api('/password
 $('logout').onclick=async()=>{try{await api('/logout',{})}catch{}user=null;section('login')};
 async function dashboard(){
  const d=await api('/dashboard'+(previewId?'?player_id='+encodeURIComponent(previewId):''));
+ if(!players.length){try{players=await api('/players');setAvatarMetadata(players)}catch(e){console.warn('Profilbilder nicht geladen',e)}}
+ if(d.profile?.has_avatar)avatarPlayers.add(String(d.viewed_player_id));
+ const profile=d.profile||{},nickname=profile.nickname||user.username||profile.display_name||'Mitglied';
  const label=$('previewLabel');label.hidden=!previewId;$('previewBack').hidden=!previewId;
- if(previewId)label.textContent='SCHREIBGESCHÜTZTE VORSCHAU: '+(d.profile?.display_name||'Spieler')+' – keine Spiele im Namen dieses Mitglieds starten.';
- $('dashboardGreeting').textContent=d.profile?'Dein Dashboard · '+d.profile.display_name:'Dashboard · '+user.username;
+ if(previewId)label.textContent='SCHREIBGESCHÜTZTE VORSCHAU: '+(profile.display_name||'Spieler')+' – keine Spiele im Namen dieses Mitglieds starten.';
+ $('dashboardGreeting').textContent='Hallo '+nickname+', willkommen in deinem Dashboard.';
+ $('dashFullName').textContent=[profile.first_name,profile.nickname,profile.last_name].filter(Boolean).join(' · ')||(profile.display_name||'');
+ const clock=()=>{$('dashboardDate').textContent=new Intl.DateTimeFormat('de-DE',{dateStyle:'full',timeStyle:'short'}).format(new Date())};clock();
+ clear($('dashPortrait'));$('dashPortrait').append(portrait(d.viewed_player_id,true));
+ $('dashSettings').hidden=!!previewId;$('dashQuickLadder').hidden=!!previewId;
+ const selectedWidgets=new Set(Array.isArray(profile.widgets)?profile.widgets:defaultDashboardWidgets);
+ $('dashOpenGroup').hidden=!selectedWidgets.has('open_matches');
+ $('dashLadderGroup').hidden=!(selectedWidgets.has('ladder_rank')||selectedWidgets.has('elo'));
  const summary=$('summary');clear(summary);
  let performance={};if(d.viewed_player_id){try{performance=await api('/players/'+d.viewed_player_id+'/stats?kind=overall')}catch(e){console.warn('Dashboard-Statistik nicht abrufbar',e)}}
- const tiles=[['Aktive Wettbewerbe',d.competitions.filter(c=>c.status==='active').length],
-  ['Offene Begegnungen',d.own_open.length],['Letzte 12 · Siege',d.recent_totals.wins],
-  ['Letzte 12 · Bilanz',d.recent_totals.wins+' / '+d.recent_totals.draws+' / '+d.recent_totals.losses],
-  ['Ø Average',performance.average??'–'],['Ø First 9',performance.first9??'–'],
-  ['180er',performance['180']??'–'],['95+',performance['95plus']??'–']];
- for(const [title,value] of tiles){const x=el('article',undefined,'dash-kpi');x.append(el('span',title),el('strong',String(value)));summary.append(x)}
+ const l=d.ladder.find(x=>x.played>0)||d.ladder[0];
+ const stats={open_matches:d.own_open.length,last10:d.recent_totals.wins+' S / '+d.recent_totals.draws+' U / '+d.recent_totals.losses+' N',
+  ladder_rank:l&&l.played?l.position:'–',elo:l?Number(l.elo).toFixed(1):'–',
+  competitions:d.competitions.filter(c=>c.status==='active').length,average:performance.average??'–',first9:performance.first9??'–',
+  '180':performance['180']??'–','95plus':performance['95plus']??'–'};
+ for(const key of Object.keys(widgetLabels)){if(!selectedWidgets.has(key))continue;
+  const x=el('article',undefined,'dash-kpi');x.append(el('span',widgetLabels[key]),el('strong',String(stats[key])));summary.append(x)}
+ if(!summary.children.length)summary.append(el('p','Du hast noch keine Kennzahlen ausgewählt. Unter Persönliche Einstellungen kannst du sie aktivieren.','helper'));
  const ladders=$('dashboardLadder');clear(ladders);
- for(const l of d.ladder){const card=el('article',undefined,'dash-ladder-card');card.append(el('strong',l.title),el('b',l.played?Number(l.elo).toFixed(1)+' ELO · Platz '+l.position:'1000 ELO · Noch kein Spiel'),el('small',l.played+' Spiele · '+l.wins+' S / '+l.draws+' U / '+l.losses+' N'));card.append(action('Rangliste',()=>openCompetition(l.competition_id),'subtle'));ladders.append(card)}
- if(!d.ladder.length)ladders.append(el('p','Keine aktive Ladder-Teilnahme vorhanden.','helper'));
+ for(const l of d.ladder){const card=el('article',undefined,'dash-ladder-card');const ladderValue=[selectedWidgets.has('elo')?Number(l.elo).toFixed(1)+' ELO':null,selectedWidgets.has('ladder_rank')?(l.played?'Platz '+l.position:'Noch nicht platziert'):null].filter(Boolean).join(' · ');card.append(el('strong',l.title),el('b',ladderValue));card.append(action('Rangliste',()=>openCompetition(l.competition_id),'subtle'));ladders.append(card)}
+ if(!d.ladder.length)ladders.append(el('p','Keine Ladder-Teilnahme vorhanden.','helper'));
  const tournaments=$('dashboardCompetitions');clear(tournaments);
- for(const c of d.competitions){const x=el('article',undefined,'dash-competition');x.append(el('strong',c.title),el('small',(kindNames[c.kind]||c.kind)+' · '+c.status+' · '+c.open_games+' eigene offene Spiele'));
- x.append(action('Öffnen',()=>openCompetition(c.id),'subtle'));tournaments.append(x)}
- if(!d.competitions.length)tournaments.append(el('p','Noch keine Wettbewerbe eingetragen.','helper'));
+ for(const c of d.competitions.filter(c=>c.status==='active'||c.open_games>0)){const x=el('article',undefined,'dash-competition');x.append(el('strong',c.title),el('small',(kindNames[c.kind]||c.kind)+' · '+c.open_games+' offene Spiele'));
+  x.append(action('Öffnen',()=>openCompetition(c.id),'subtle'));tournaments.append(x)}
+ if(!tournaments.children.length)tournaments.append(el('p','Keine laufenden Wettbewerbe eingetragen.','helper'));
  const list=$('myOpen');clear(list);
- for(const m of d.own_open){const x=el('div',undefined,'dash-match');x.append(el('div',m.title+' · '+m.player1+' – '+m.player2),el('span',m.status==='running'?'Laufend':'Offen','chip'));
- x.append(action(previewId?'Spiel ansehen':'Scorer starten',()=>previewId?notice('Die Vorschau ist schreibgeschützt.',true):openScorer(m.id),'primary'));list.append(x)}
+ for(const m of d.own_open){const x=el('div',undefined,'dash-match');const names=el('div',undefined,'dash-player-pair');names.append(participantName(m.player1_id,m.player1),el('span','–'),participantName(m.player2_id,m.player2));
+  const heading=el('div');heading.append(el('small',m.title),names);x.append(heading,el('span',m.status==='running'?'Laufend':'Offen','chip'));
+  x.append(action(previewId?'Spiel ansehen':'Scorer starten',()=>previewId?notice('Die Vorschau ist schreibgeschützt.',true):
+   m.kind==='free_x01'?openGameWindow('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id)):openScorer(m.id),'primary'));list.append(x)}
  if(!d.own_open.length)list.append(el('p','Keine offenen Begegnungen','helper'));
  const recent=$('dashboardRecent');clear(recent);
- for(const m of d.recent){const ownLeft=m.player1_id===d.viewed_player_id;const score=((m.sets1||m.sets2)?m.sets1:m.legs1)+':'+((m.sets1||m.sets2)?m.sets2:m.legs2);
- const x=el('article',undefined,'dash-result');x.append(el('div',m.player1+' – '+m.player2+' · '+m.title),el('strong',score),el('small',m.finished_at?new Date(m.finished_at).toLocaleDateString('de-DE'):'Abgeschlossen'));recent.append(x)}
- if(!d.recent.length)recent.append(el('p','Noch keine abgeschlossenen Wettbewerbsspiele.','helper'));
+ for(const m of d.recent){const left=m.player1_id===d.viewed_player_id;const value1=(m.sets1||m.sets2)?m.sets1:m.legs1,value2=(m.sets1||m.sets2)?m.sets2:m.legs2;
+  const win=left?value1>value2:value2>value1,draw=value1===value2;
+  const x=el('article',undefined,'dash-result'),names=el('div',undefined,'dash-result-players');names.append(participantName(m.player1_id,m.player1),el('span','–'),participantName(m.player2_id,m.player2));
+  const outcome=el('strong',(value1??0)+':'+(value2??0)+(draw?' · U':win?' · S':' · N'));outcome.classList.add(win?'result-win':draw?'result-draw':'result-loss');
+  x.append(names,outcome,el('small',m.title+' · '+(m.finished_at?new Date(m.finished_at).toLocaleDateString('de-DE'):'Abgeschlossen')));recent.append(x)}
+ if(!d.recent.length)recent.append(el('p','Noch keine abgeschlossenen Spiele.','helper'));
 }
-async function loadPlayers(){players=await api('/players');renderPlayers()}
+async function quickLadder(){
+ if(!user?.player_id)return notice('Bitte zuerst ein aktives Vereinsprofil mit deinem Account verbinden.',true);
+ try{const all=await api('/competitions');const now=Date.now();const ladders=all.filter(c=>c.kind==='ladder'&&c.status==='active'&&(!c.starts_at||new Date(c.starts_at).getTime()<=now)&&(!c.ends_at||new Date(c.ends_at).getTime()>now));
+  if(!ladders.length)return notice('Keine aktuell aktive Ladder vorhanden.',true);
+  const season=ladders[0],detail=await api('/competitions/'+season.id);
+  const other=detail.entries.filter(x=>x.player_id!==user.player_id&&x.status==='active');
+  if(!detail.entries.some(x=>x.player_id===user.player_id&&x.status==='active'))return notice('Dein Vereinsprofil ist in dieser Ladder nicht angemeldet. Bitte die Profilverknüpfung prüfen.',true);
+  if(!other.length)return notice('Keine Gegner in dieser Ladder vorhanden.',true);
+  const fields=[{name:'opponent',label:'Gegner',type:'select',options:other.map(x=>[x.player_id,x.display_name]),required:true},
+    {name:'best',label:'Best of X Legs (mindestens 5)',type:'number',value:5,min:5,max:101,required:true}];
+  let d=await configure('Schnelles Ladderspiel',fields,'Scorer starten');if(!d)return;
+  const n=Number(d.best);if(!Number.isInteger(n)||n<5||n>101)return notice('Best of X muss eine ganze Zahl ab 5 sein.',true);
+  const seasonId=season.id;
+  const match=await api('/competitions/'+seasonId+'/matches',{player1_id:user.player_id,player2_id:d.opponent,rules:{mode:'legs',max_legs:n,allow_draw:n%2===0}});
+  location.assign('/dart/v2/spiel/?match='+encodeURIComponent(match.id)+'&competition='+encodeURIComponent(seasonId));
+ }catch(err){notice('Ladderspiel konnte nicht gestartet werden: '+err.message,true)}
+}
+async function loadSettings(){
+ if(previewId){await show('dashboard');return notice('Die Vorschau ist schreibgeschützt.',true)}
+ const data=await api('/profile');const form=$('settingsForm');if(data.has_avatar)avatarPlayers.add(String(user.player_id));
+ for(const key of ['first_name','last_name','nickname','email'])form.elements[key].value=data[key]||'';
+ form.elements.old_password.value='';form.elements.new_password.value='';form.elements.avatar.value='';
+ const wrap=$('settingsWidgets');clear(wrap);
+ for(const [key,label] of Object.entries(widgetLabels)){const l=el('label',undefined,'widget-choice'),i=document.createElement('input');i.type='checkbox';i.value=key;i.name='widgets';i.checked=(data.widgets||defaultDashboardWidgets).includes(key);l.append(i,el('span',label));wrap.append(l)}
+ const av=$('settingsAvatar');clear(av);av.append(portrait(user.player_id,true));
+ const link=$('profileLinkPanel');link.hidden=!amAdmin();
+ if(amAdmin()){
+  const list=await api('/players'),select=$('settingsLinkPlayer');clear(select);
+  for(const player of list.filter(p=>p.is_active&&p.is_member&&(!p.username||p.id===user.player_id))){select.append(new Option(player.display_name,player.id))}
+  select.value=user.player_id;
+ }
+}
+$('dashQuickLadder').onclick=quickLadder;
+$('dashSettings').onclick=()=>show('settings');
+$('settingsBack').onclick=()=>show('dashboard');
+$('settingsLinkAction').onclick=async()=>{
+ const target=$('settingsLinkPlayer').value;
+ if(!target||target===user.player_id)return notice('Dieses Profil ist bereits verbunden.',true);
+ const text='Dieses Konto künftig mit dem gewählten Vereinsprofil verbinden? Alte Testspiele werden nicht automatisch umgeschrieben.';
+ if(!await approve('Vereinsprofil ändern',text))return;
+ try{await api('/profile/link',{player_id:target});user=await api('/me');await show('dashboard');notice('Vereinsprofil verknüpft. Alte Trainingsdaten bleiben unverändert.')}catch(e){notice(e.message,true)}
+};
+$('settingsForm').onsubmit=async e=>{
+ e.preventDefault();if(previewId)return notice('Die Vorschau ist schreibgeschützt.',true);
+ const form=e.target,photo=form.elements.avatar.files?.[0],old=form.elements.old_password.value,newPass=form.elements.new_password.value;
+ if(photo&&photo.size>1000000)return notice('Das Profilbild darf höchstens 1 MB groß sein.',true);
+ if((!!old)!=(!!newPass))return notice('Zum Passwortwechsel müssen altes und neues Kennwort ausgefüllt sein.',true);
+ if(newPass&&newPass.length<12)return notice('Das neue Kennwort benötigt mindestens 12 Zeichen.',true);
+ if(!await approve('Persönliche Einstellungen übernehmen','Angaben, Dashboard-Auswahl, Bild und gegebenenfalls Passwort speichern?'))return;
+ try{
+  const settings={first_name:form.elements.first_name.value,last_name:form.elements.last_name.value,
+    nickname:form.elements.nickname.value,email:form.elements.email.value,
+    widgets:[...form.querySelectorAll('input[name="widgets"]:checked')].map(x=>x.value)};
+  await api('/profile',settings);
+  if(photo){const res=await fetch('/dart/v2/api/profile/avatar',{method:'POST',credentials:'same-origin',headers:{'Content-Type':photo.type},body:photo});
+   if(!res.ok)throw Error('Profilbild: '+(await res.text()).slice(0,200));avatarPlayers.add(String(user.player_id));}
+  if(newPass)await api('/password',{old_password:old,new_password:newPass});
+  await show('dashboard');notice('Persönliche Einstellungen gespeichert.');
+ }catch(error){notice('Speichern nicht vollständig abgeschlossen: '+error.message,true)}
+};
+async function loadPlayers(){players=await api('/players');setAvatarMetadata(players);renderPlayers()}
 async function newAccountForPlayer(player){
  if(!amAdmin())return notice('Nur Administratoren dürfen Konten vergeben.',true);
  if(player.username)return notice('Dieses Mitglied besitzt bereits ein Konto.',true);
@@ -316,7 +402,7 @@ function action(text,fn,style=''){const b=btn(text,fn);if(style)b.className=styl
 function picker(items,selectedValue,callback){const select=el('select');for(const [v,t] of items)select.append(new Option(t,v));select.value=selectedValue;select.onchange=()=>callback(select.value);return select}
 function labelFor(m,names){return (names.get(m.player1_id)||'Offen')+' – '+(names.get(m.player2_id)||'Offen')}
 async function openCompetition(id){
-  selected=await api('/competitions/'+id);if(amAdmin()||trainingOwner())players=await api('/players');section('competitions');
+  selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');
   const c=selected.competition,host=$('competitionDetail');host.hidden=false;clear(host);
   host.className='competition-view';
   const header=el('div',undefined,'competition-header');
@@ -370,7 +456,7 @@ async function openCompetition(id){
        const body=el('tbody');for(const [i,r] of rows.entries()){
         const tr=el('tr');if(r.qualified)tr.className='final-place';else if(r.eligible)tr.className='qualifying-ready';
         const cells=[data.rows.indexOf(r)+1,null,r.played,r.wins,r.draws,r.losses,r.legs_for+':'+r.legs_against,signed(r.legs_for-r.legs_against),Number(r.elo).toFixed(1),(r.win_percent??0)+' %',r.average_opponent_elo??'–',r.own_average??'–',r.opponent_average??'–',r.distinct_opponents];
-        for(const cell of cells){const td=el('td');if(cell===null){const link=action(r.display_name,()=>showPlayerHistory(r),'ladder-name');td.append(link)}else td.textContent=String(cell);tr.append(td)}body.append(tr)
+        for(const cell of cells){const td=el('td');if(cell===null){const link=action('',()=>showPlayerHistory(r),'ladder-name');link.append(participantName(r.player_id,r.display_name));td.append(link)}else td.textContent=String(cell);tr.append(td)}body.append(tr)
        }table.append(body);host.append(table);area.append(host);
        area.append(el('p','Gold = aktuell innerhalb der Finalplätze und Mindestbedingungen erfüllt. Die eigene Ansicht zeigt bei Bedarf nur berechtigte Spieler.','helper'));
       }draw();return;
@@ -383,7 +469,7 @@ async function openCompetition(id){
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
       area.append(el('h3',g.name),renderTable(['Platz','Name','Ges.','S','U','N','Legs','Dif.','Pkt'],rows.map(r=>[
-          r.rank,r.name+(withdrawals.has(r.player_id)?' · ausgetreten':''),r.played,r.wins,r.draws,r.losses,
+          r.rank,{player_id:r.player_id,name:r.name+(withdrawals.has(r.player_id)?' · ausgetreten':'')},r.played,r.wins,r.draws,r.losses,
           String(r.legs_for)+':'+String(r.legs_against),signed(r.legs_for-r.legs_against),r.points
       ]),true));
       const games=selected.matches.filter(m=>m.group_id===g.id&&m.status==='finished').length;
@@ -440,7 +526,7 @@ async function openCompetition(id){
       for(const m of matches.slice(schedulePage*12,(schedulePage+1)*12)){
         const line=el('article',undefined,'fixture');const desc=el('div',undefined,'fixture-title');
         const group=selected.groups.find(g=>g.id===m.group_id)?.name||selected.phases.find(x=>x.id===m.phase_id)?.name||'Spiel';
-        desc.append(el('small',group+(m.round_number?' · Runde '+m.round_number:'')),el('strong',labelFor(m,names)));
+        desc.append(el('small',group+(m.round_number?' · Runde '+m.round_number:'')));const namesLine=el('div',undefined,'fixture-players');namesLine.append(participantName(m.player1_id,names.get(m.player1_id)||'Spieler 1'),el('span','–'),participantName(m.player2_id,names.get(m.player2_id)||'Spieler 2'));desc.append(namesLine);
         const score=m.status==='finished'?(m.sets1!==null&&m.sets1!==undefined?'Sets '+m.sets1+':'+m.sets2+' · ':'')+(m.legs1??0)+':'+(m.legs2??0):m.status==='running'?'Laufend':'Offen';
         const actions=el('div',undefined,'fixture-actions');actions.append(el('span',score,'fixture-score'));
         if(m.source==='forfeit')actions.append(el('small','Wertung'));
@@ -467,7 +553,7 @@ async function openCompetition(id){
   }
   function showParticipants(box){
     const grid=el('div',undefined,'members-grid');
-    for(const entry of selected.entries){const item=el('article',undefined,'member-tile');item.append(el('strong',entry.display_name),el('small',entry.status==='withdrawn'?'Ausgetreten':'Aktiv'));grid.append(item)}
+    for(const entry of selected.entries){const item=el('article',undefined,'member-tile');item.append(participantName(entry.player_id,entry.display_name),el('small',entry.status==='withdrawn'?'Ausgetreten':'Aktiv'));grid.append(item)}
     box.append(grid);
   }
   function showLadderAdmin(box){
@@ -557,7 +643,7 @@ function signed(n){return n>0?'+'+n:String(n)}
 function renderTable(headers,rows,emphasize=false){
  const outer=el('div',undefined,'scroll table-frame'),t=el('table',undefined,'data-table polished'),thead=el('thead'),tr=el('tr');
  for(const h of headers)tr.append(el('th',h));thead.append(tr);t.append(thead);
- const tbody=el('tbody');for(const row of rows){const tr=el('tr');if(emphasize&&row[0]===1)tr.className='leader';for(const cell of row)tr.append(el('td',String(cell??'–')));tbody.append(tr)}
+ const tbody=el('tbody');for(const row of rows){const tr=el('tr');if(emphasize&&row[0]===1)tr.className='leader';for(const cell of row){const td=el('td');if(cell&&typeof cell==='object'&&cell.player_id)td.append(participantName(cell.player_id,cell.name));else td.textContent=String(cell??'–');tr.append(td)}tbody.append(tr)}
  t.append(tbody);outer.append(t);return outer;
 }
 
