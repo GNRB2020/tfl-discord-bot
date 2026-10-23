@@ -176,5 +176,22 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .ladder-table tr.final-place .ladder-name,.ladder-table tr.final-place .ladder-name .participant-name{color:#f7d15a!important;font-weight:900!important}
 .ladder-table tr.ladder-open-slots td{color:#f2d086;border-bottom:2px dashed #cda753;text-align:center;background:#2c291e!important;font-weight:700}
 
-/* Training and administration tabbed configuration */
-.management-tabs{display:flex;gap:8px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid #74643d;margin-bottom:16px}.management-tabs button{font-weight:700;background:#25272b;color:#eee;border:1px solid #555;padding:10px 13px;border-radius:7px}.management-tabs button.selected{background:#c6a15b;color:#151515;border-color:#e2c67e}.training-manage-pane{display:grid;gap:12px;min-width:0}.training-manage-pane .manage-card{padding:14px;border:1px solid #63563b;border-radius:10px}.stage-match-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:9px;border-bottom:1px solid #5c5137}.assigned-elsewhere{opacity:.5;cursor:not-allowed}.management-member{padding:7px 12px;border-bottom:1px solid #4b483e}.admin-tab-pane[hidden]{display:none!important}@media(max-width:650px){.management-tabs{flex-wrap:nowrap;overflow-x:auto}.management-tabs button{white-space:nowrap}.stage-match-row{display:grid}}
+/* Kompakte Spielplan-Karten und Live-Spiele auf dem Dashboard */
+.schedule-grid,.live-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;align-items:start}
+.schedule-grid>.fixture{margin:0;min-width:0;padding:12px}
+.dashboard-live{margin:12px 0 20px}.live-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.live-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr))}
+.live-game{background:#181d24;border:1px solid #8b7446;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.live-game strong{color:#e7c579}.live-score{font-size:1.12rem;font-weight:800}.live-game button{align-self:flex-start}
+.report-grid{display:grid;gap:8px}.report-row{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #5b5140}
+@media(max-width:750px){.schedule-grid{grid-template-columns:1fr}.live-heading{flex-wrap:wrap}}
+
+/* Kompakte Spielplan-Karten und Live-Spiele auf dem Dashboard */
+.schedule-grid,.live-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;align-items:start}
+.schedule-grid>.fixture{margin:0;min-width:0;padding:12px}
+.dashboard-live{margin:12px 0 20px}.live-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.live-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr))}
+.live-game{background:#181d24;border:1px solid #8b7446;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.live-game strong{color:#e7c579}.live-score{font-size:1.12rem;font-weight:800}.live-game button{align-self:flex-start}
+.report-grid{display:grid;gap:8px}.report-row{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #5b5140}
+@media(max-width:750px){.schedule-grid{grid-template-columns:1fr}.live-heading{flex-wrap:wrap}}
