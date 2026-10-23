@@ -428,7 +428,7 @@ async function createTraining(){
  }
  const roundLengths={};
  if(m.mode==='legs'){
-  const lengthFields=[{name:'group',label:'Gruppenphase · Best of Legs (gerade erlaubt)',type:'number',value:m.max_legs,min:1,max:101,required:true}];
+  const lengthFields=rounds?[{name:'group',label:(grouped?'Gruppenphase':'Ligaphase')+' · Best of Legs (gerade erlaubt)',type:'number',value:m.max_legs,min:1,max:101,required:true}]:[];
   if(ko||next.follow==='yes'){
    lengthFields.push({name:'quarterfinal',label:'Viertelfinale · Best of Legs (ungerade)',type:'number',value:5,min:1,max:101,required:true});
    lengthFields.push({name:'semifinal',label:'Halbfinale · Best of Legs (ungerade)',type:'number',value:7,min:1,max:101,required:true});
@@ -440,7 +440,7 @@ async function createTraining(){
    const n=Number(value);if(!Number.isInteger(n)||n<1||n>101||(key!=='group'&&n%2===0))return notice('K.O.-Matchlängen müssen ungerade sein.',true);
    roundLengths[key]=n;
   }
-  m.max_legs=roundLengths.group;
+  if(rounds)m.max_legs=roundLengths.group;
  }
  if(!await approve('Turnier anlegen',selection.members.length+' Spieler · '+stage.format+' · '+m.start_score+' Punkte · '+(isSets?'Best of '+m.best_of_sets+' Sets / '+m.best_of_legs_per_set+' Legs':'Best of '+m.max_legs+' Legs')+' · Spielplan wird automatisch erzeugt.'))return;
  try{
@@ -633,7 +633,8 @@ async function openCompetition(id){
     try{if(tab==='table')await showTables(content);if(tab==='schedule')showSchedule(content);if(tab==='participants')showParticipants(content);if(tab==='records')showRecords(content);if(tab==='rules')showLadderRules(content);if(tab==='management')showManagement(content);if(tab==='placements')await showPlacements(content);if(tab==='bracket')showBracket(content)}
     catch(e){content.append(el('p',e.message,'error'))}
   }
-  for(const [tab,name] of [['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen'],['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...((selected.phases||[]).some(p=>p.kind==='knockout')||(c.rules?.follow&&['single_ko','double_ko'].includes(c.rules?.follow_format))?[['bracket','Turnierbaum']]:[]),...(['finished','archived'].includes(c.status)&&c.kind!=='ladder'?[['placements','Platzierungen']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
+  const hasTable=c.kind==='ladder'||(selected.phases||[]).some(p=>p.kind==='groups'||p.kind==='league');
+  for(const [tab,name] of [...(hasTable?[['table',c.kind==='ladder'?'ELO-Rangliste':'Tabellen']]:[]),['schedule','Spielplan'],['participants','Teilnehmer'],['records','Bestleistungen & Statistik'],...(c.kind==='ladder'?[['rules','Regelwerk']]:[]),...((selected.phases||[]).some(p=>p.kind==='knockout')||(c.rules?.follow&&['single_ko','double_ko'].includes(c.rules?.follow_format))?[['bracket','Turnierbaum']]:[]),...(['finished','archived'].includes(c.status)&&c.kind!=='ladder'?[['placements','Platzierungen']]:[]),...((amAdmin()||trainingOwner())?[['management','Verwaltung']]:[])]){
     const b=action(name,()=>view(tab));b.dataset.tab=tab;tabs.append(b);
   }
   const names=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
@@ -1091,7 +1092,9 @@ async function openCompetition(id){
     }
   }
   if(c.kind==='ladder'&&user.role!=='admin'){};
-  await view(competitionTab==='management'&&user.role!=='admin'?'table':competitionTab);
+  const allowedTabs=[...tabs.children].map(b=>b.dataset.tab);
+  const requestedTab=competitionTab==='management'&&user.role!=='admin'?'table':competitionTab;
+  await view(allowedTabs.includes(requestedTab)?requestedTab:(allowedTabs.includes('bracket')?'bracket':allowedTabs[0]));
   if(c.kind==='training_tournament'&&c.status==='finished'&&!sessionStorage.getItem('tournament-report-'+id)){
    sessionStorage.setItem('tournament-report-'+id,'seen');
    try{const report=await api('/competitions/'+id+'/final-report');const result=el('div',undefined,'tournament-end-report');
