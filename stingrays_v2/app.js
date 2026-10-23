@@ -638,34 +638,70 @@ async function openCompetition(id){
   }
   const names=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
   function showBracket(box){
-    const allPhases=selected.phases||[];
-    const phases=allPhases.filter(p=>p.kind==='knockout');
-    const pending=(c.rules||{}).follow&&['single_ko','double_ko'].includes((c.rules||{}).follow_format);
-    if(!phases.length){box.append(el('p',pending?'Der KO-Baum wird nach Abschluss der Vorrunde automatisch erzeugt.':'Noch keine K.O.-Runde vorhanden.','helper'));return}
-    const selector=el('div',undefined,'bracket-stage-tabs');box.append(selector);
+    const phases=(selected.phases||[]).filter(p=>p.kind==='knockout');
+    const pending=c.rules?.follow&&['single_ko','double_ko'].includes(c.rules?.follow_format);
+    if(!phases.length){box.append(el('p',pending?'Der KO-Baum wird nach der Vorrunde erzeugt.':'Noch keine K.O.-Runde vorhanden.','helper'));return}
+    const namesMap=new Map(selected.entries.map(e=>[String(e.player_id),e.display_name]));
+    const selector=el('div',undefined,'bracket-stage-tabs competition-group-tabs');box.append(selector);
     const stage=el('div',undefined,'bracket-content');box.append(stage);
-    function draw(phase){clear(stage);const phaseRules=typeof phase.rules==='string'?JSON.parse(phase.rules||'{}'):(phase.rules||{});
-      const matches=selected.matches.filter(m=>m.phase_id===phase.id);
-      const rounds=[...new Set(matches.map(m=>Number(m.round_number||1)))].sort((a,b)=>a-b);
-      const outer=el('div',undefined,'bracket-scroll'),board=el('div',undefined,'bracket-grid');outer.append(board);stage.append(outer);
-      if(phaseRules.format==='double_ko')stage.append(el('p','Double KO: Die aktuellen Begegnungen werden nach Spielrunde dargestellt. Ein separater Winner-/Loser-Baum ist noch nicht vollständig unterstützt.','helper'));
-      for(const rnd of rounds){const col=el('div',undefined,'bracket-round');
-        const list=matches.filter(m=>Number(m.round_number||1)===rnd).sort((a,b)=>(a.bracket_position||0)-(b.bracket_position||0));
-        const label=list.length===1?'Finale':list.length===2?'Halbfinale':list.length===4?'Viertelfinale':list.length===8?'Achtelfinale':'Runde '+rnd;
-        col.append(el('h3',label));
-        for(const m of list){const card=el('div',undefined,'bracket-match');
-          const score=(m.sets1||m.sets2)?[m.sets1,m.sets2]:[m.legs1,m.legs2];
-          const names=[namesMap.get(m.player1_id)||'Noch offen',namesMap.get(m.player2_id)||'Noch offen'];
-          for(let i=0;i<2;i++){const line=el('div',undefined,'bracket-player');line.append(el('span',names[i]),el('strong',m.status==='finished'?String(score[i]??0):'–'));card.append(line)}
-          const actions=el('div',undefined,'bracket-match-status');actions.append(el('span',m.status==='finished'?'Beendet':m.status==='running'?'Live':'Offen'));
-          if(['open','running'].includes(m.status))actions.append(action('Scorer',()=>openScorer(m.id),'subtle'));
-          card.append(actions);col.append(card)}board.append(col)}
-      if(!rounds.length)stage.append(el('p','Noch keine KO-Begegnungen.','helper'));
-      const byes=phaseRules.bye_players||[];if(byes.length){const note=el('p','Freilose: '+byes.map(pid=>namesMap.get(pid)||pid).join(', '),'helper');stage.append(note)}
+    const scoreOf=m=>(Number(m.sets1||0)||Number(m.sets2||0))?[m.sets1,m.sets2]:[m.legs1,m.legs2];
+    const won=m=>{if(m.status!=='finished')return null;const [x,y]=scoreOf(m).map(Number);return x===y?null:String(x>y?m.player1_id:m.player2_id)};
+    const other=(m,p)=>String(m.player1_id)===p?String(m.player2_id):String(m.player1_id);
+    function draw(phase){
+      clear(stage);
+      let rules={};try{rules=typeof phase.rules==='string'?JSON.parse(phase.rules||'{}'):(phase.rules||{})}catch{}
+      const matches=selected.matches.filter(m=>String(m.phase_id)===String(phase.id)).sort((a,b)=>Number(a.round_number||1)-Number(b.round_number||1)||Number(a.bracket_position||0)-Number(b.bracket_position||0));
+      if(!matches.length){stage.append(el('p','Noch keine KO-Begegnungen.','helper'));return}
+      const isDouble=rules.format==='double_ko';
+      const loss=new Map();const groups={winner:[],loser:[],crossover:[],final:[]};
+      // Die bestehende DB speichert keinen Bracket-Typ. Die Einordnung basiert auf
+      // den Niederlagen VOR jeder Begegnung, nicht auf ihrem Endergebnis.
+      const perRound=new Map();for(const m of matches){const r=Number(m.round_number||1);if(!perRound.has(r))perRound.set(r,[]);perRound.get(r).push(m)}
+      for(const [round,ms] of [...perRound].sort((a,b)=>a[0]-b[0])){
+        for(const m of ms){const l1=loss.get(String(m.player1_id))||0,l2=loss.get(String(m.player2_id))||0;
+          m._bracketGroup=!isDouble?'winner':l1===0&&l2===0?'winner':l1===1&&l2===1?'loser':'crossover';
+          groups[m._bracketGroup].push(m);
+        }
+        for(const m of ms){const w=won(m);if(w){const loser=other(m,w);loss.set(loser,(loss.get(loser)||0)+1)}}
+      }
+      const hasCross=groups.crossover.length>0;
+      if(isDouble){const message=el('p','Doppel-KO: Winner- und Loser-Partien sind nach bisheriger Niederlagenzahl gruppiert. Begegnungen zwischen beiden Bereichen stehen unter „Final- / Übergangsspiele“. Die bestehende Turnierlogik speichert noch keine festen Bracket-Pfade.','bracket-explanation');stage.append(message)}
+      function renderSection(list,title,kind){if(!list.length)return;
+        const head=el('h3',title,'bracket-section-title');stage.append(head);
+        const scroll=el('div',undefined,'bracket-scroll');const canvas=el('div',undefined,'sting-bracket-canvas');const wires=document.createElementNS('http://www.w3.org/2000/svg','svg');wires.setAttribute('class','sting-bracket-wires');wires.setAttribute('aria-hidden','true');canvas.append(wires);
+        const rounds=[...new Set(list.map(m=>Number(m.round_number||1)))].sort((a,b)=>a-b);
+        const grouped=rounds.map(r=>list.filter(m=>Number(m.round_number||1)===r).sort((a,b)=>Number(a.bracket_position||0)-Number(b.bracket_position||0)));
+        const maxMatches=Math.max(...grouped.map(v=>v.length));const unit=94;const height=Math.max(160,maxMatches*unit+40);
+        canvas.style.height=height+'px';canvas.style.width=(rounds.length*258+24)+'px';const nodeMap=new Map();
+        grouped.forEach((ms,colIndex)=>{
+          const col=el('div',undefined,'sting-bracket-column');col.style.left=(colIndex*258+12)+'px';col.style.height=height+'px';
+          const label=(!isDouble&&ms.length===1?'Finale':!isDouble&&ms.length===2?'Halbfinale':!isDouble&&ms.length===4?'Viertelfinale':!isDouble&&ms.length===8?'Achtelfinale':'Runde '+rounds[colIndex]);
+          col.append(el('h4',label,'sting-bracket-round-title'));
+          ms.forEach((m,index)=>{
+            const top=50+(index+.5)*((height-90)/ms.length)-35;
+            const card=el('button',undefined,'sting-bracket-card '+(m.status==='finished'?'completed':m.status==='running'?'live':'open'));card.type='button';card.style.top=top+'px';card.title='Begegnung öffnen';card.onclick=()=>openScorer(m.id);card.setAttribute('aria-label','Begegnung '+(namesMap.get(String(m.player1_id))||'Offen')+' gegen '+(namesMap.get(String(m.player2_id))||'Offen'));
+            const [v1,v2]=scoreOf(m);const winner=won(m);
+            [[m.player1_id,v1],[m.player2_id,v2]].forEach(([pid,value])=>{const row=el('div',undefined,'sting-bracket-player'+(winner===String(pid)?' winner':''));row.append(el('span',namesMap.get(String(pid))||'Noch offen'),el('strong',m.status==='finished'?String(value??0):'–'));card.append(row)});
+            const meta=el('div',undefined,'sting-bracket-meta');meta.append(el('span',m.status==='finished'?'Beendet':m.status==='running'?'Live':'Offen'),el('span','Spiel öffnen ›'));card.append(meta);col.append(card);nodeMap.set(String(m.id),{card,m,colIndex});
+          });canvas.append(col)
+        });
+        function lines(){const existing=wires.querySelectorAll('path');existing.forEach(x=>x.remove());
+          const width=rounds.length*258+24;wires.setAttribute('viewBox',`0 0 ${width} ${height}`);wires.setAttribute('width',String(width));wires.setAttribute('height',String(height));
+          // Nur reale, aus den Datensätzen belegbare Spielerpfade verbinden.
+          for(const {card,m,colIndex} of nodeMap.values()){
+            const w=won(m);if(!w)continue;
+            const next=[...nodeMap.values()].filter(n=>n.colIndex>colIndex&&[String(n.m.player1_id),String(n.m.player2_id)].includes(w)).sort((a,b)=>a.colIndex-b.colIndex)[0];
+            if(!next)continue;const x1=12+colIndex*258+226,y1=card.offsetTop+35,x2=12+next.colIndex*258,y2=next.card.offsetTop+35,mid=x1+(x2-x1)/2;
+            const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d',`M${x1},${y1} H${mid} V${y2} H${x2}`);path.setAttribute('class','sting-bracket-path');wires.append(path)
+          }
+        }
+        lines();scroll.append(canvas);stage.append(scroll);
+      }
+      if(isDouble){renderSection(groups.winner,'Winner-Bracket','winner');renderSection(groups.loser,'Loser-Bracket','loser');renderSection(groups.crossover,'Final- / Übergangsspiele','crossover');}
+      else renderSection(matches,'K.O.-Turnierbaum','winner');
+      if(rules.bye_players?.length)stage.append(el('p','Freilose: '+rules.bye_players.map(id=>namesMap.get(String(id))||String(id)).join(', '),'helper'));
     }
-    const namesMap=new Map(selected.entries.map(e=>[e.player_id,e.display_name]));
-    const ordered=[...phases].sort((a,b)=>(a.phase_order||0)-(b.phase_order||0));
-    for(const p of ordered){const b=action(p.name||'K.O.',()=>{for(const x of selector.children)x.classList.toggle('selected',x===b);draw(p)});selector.append(b)}
+    for(const p of [...phases].sort((a,b)=>Number(a.phase_order||0)-Number(b.phase_order||0))){const b=action(p.name||'K.O.',()=>{for(const x of selector.children)x.classList.toggle('selected',x===b);draw(p)});selector.append(b)}
     selector.firstChild?.click();
   }
   async function showPlacements(box){

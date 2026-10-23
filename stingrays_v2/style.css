@@ -276,3 +276,15 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .competition-group-tabs button{border:1px solid #7b694b;border-radius:7px 7px 0 0;padding:11px 19px;background:#292725;color:#eee;font-weight:650}
 .competition-group-tabs button.selected{background:#5d4b24;color:#ffe1a0;border-color:#b9964c;box-shadow:inset 0 -3px #f1cb77}
 @media(max-width:680px){.competition-group-tabs{flex-wrap:nowrap;overflow-x:auto}.competition-group-tabs button{flex:0 0 auto}}
+
+/* Grafischer Turnierbaum – getrennte Winner-/Loser-Ansichten */
+.bracket-content{min-width:0}.bracket-section-title{font-size:1.16rem;margin:22px 0 12px;color:#f0ce83}
+.bracket-explanation{border:1px solid #675436;border-radius:10px;padding:12px 14px;color:#e6d7b8;background:#302c25;line-height:1.5}
+.bracket-scroll{overflow-x:auto;overflow-y:hidden;max-width:100%;border:1px solid #504a3c;border-radius:14px;background:linear-gradient(145deg,#242527,#1b1c1f);scrollbar-width:thin;margin-bottom:18px}
+.sting-bracket-canvas{position:relative;min-width:100%}.sting-bracket-wires{position:absolute;inset:0;pointer-events:none;overflow:visible;z-index:0}.sting-bracket-path{fill:none;stroke:#b29457;stroke-width:2;opacity:.8}
+.sting-bracket-column{position:absolute;top:0;width:226px;z-index:1}.sting-bracket-round-title{margin:13px 0 0;text-align:center;color:#f1d39b;font-size:13px;font-weight:800;letter-spacing:.03em}
+.sting-bracket-card{box-sizing:border-box;position:absolute;left:0;width:226px;height:71px;padding:0!important;background:#303236;color:#eee;border:1px solid #676a6b;border-radius:9px;text-align:left;cursor:pointer;overflow:hidden;box-shadow:0 4px 11px #0005;display:block!important}
+.sting-bracket-card:hover,.sting-bracket-card:focus-visible{border-color:#f4ca73;outline:1px solid #f4ca73;z-index:3;background:#383a3e}.sting-bracket-card.completed{border-left:4px solid #78a68a}.sting-bracket-card.live{border-left:4px solid #e4b850}
+.sting-bracket-player{height:23px;display:flex;align-items:center;justify-content:space-between;gap:7px;padding:2px 9px;font-size:12px;white-space:nowrap;border-bottom:1px solid #ffffff12}.sting-bracket-player span{overflow:hidden;text-overflow:ellipsis}.sting-bracket-player strong{min-width:20px;text-align:right}.sting-bracket-player.winner{font-weight:800;color:#f8dc9e}
+.sting-bracket-meta{padding:3px 8px;display:flex;justify-content:space-between;color:#adafb1;font-size:10px}
+@media(max-width:650px){.bracket-scroll{border-radius:8px}.sting-bracket-card{touch-action:pan-x}}
