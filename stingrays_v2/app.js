@@ -598,6 +598,39 @@ $('tugTraining').onclick=()=>launchTrainingWindow('tug');
 $('quickTraining').onclick=()=>launchTrainingWindow('x01');
 
 
+// V2 mini games: use profiles and the existing session login; X01 stats remain untouched.
+async function startMiniTraining(kind){
+ try{
+  if(!window.StingrayMiniGames)throw Error('Trainingsmodul konnte nicht geladen werden');
+  if(!user?.player_id)throw Error('Bitte zuerst ein Spielerprofil mit deinem Konto verknüpfen');
+  if(!players.length){players=await api('/players');setAvatarMetadata(players)}
+  const me=players.find(p=>String(p.id)===String(user.player_id));
+  if(!me)throw Error('Eigenes Spielerprofil nicht gefunden');
+  const others=players.filter(p=>p.id!==user.player_id&&p.is_member!==false&&p.is_active!==false);
+  if(kind!=='minigolf'&&!others.length)throw Error('Kein Gegnerprofil verfügbar');
+  const fields=[];
+  if(kind==='minigolf')fields.push({name:'holes',label:'Bahnen',type:'select',value:'9',options:[['9','9 Bahnen'],['18','18 Bahnen']]});
+  if(kind==='football')fields.push({name:'goals',label:'Tore zum Sieg',type:'select',value:'5',options:[['3','3 Tore'],['5','5 Tore'],['10','10 Tore']]});
+  fields.push({name:'opponent',label:'Gegner',type:'select',options:kind==='minigolf'?[['','Alleine'],...others.map(p=>[p.id,p.display_name])]:others.map(p=>[p.id,p.display_name])});
+  fields.push({name:'first',label:'Wer beginnt?',type:'select',value:'me',options:[['me','Ich'],['opponent','Gegner (falls vorhanden)'],['random','Zufall']]});
+  const choice=await configure(window.StingrayMiniGames.games[kind],fields,'Spiel starten');if(!choice)return;
+  const opp=others.find(p=>p.id===choice.opponent);
+  if(kind!=='minigolf'&&!opp)throw Error('Bitte Gegner auswählen');
+  const ids=[me.id,...(opp?[opp.id]:[])],names=[me.display_name,...(opp?[opp.display_name]:[])];
+  if(opp&&(choice.first==='opponent'||(choice.first==='random'&&Math.random()<0.5))){ids.reverse();names.reverse()}
+  const settings={...(kind==='football'?{goals:Number(choice.goals)}:{}),...(kind==='minigolf'?{holes:Number(choice.holes)}:{})};
+  const host=$('trainingMode');host.hidden=false;
+  clear(host);
+  const back=action('← Zurück zum Training',()=>location.assign('/dart/v2/?view=training'),'subtle');back.className='training-back';host.append(back);
+  const board=el('section');host.append(board);
+  await window.StingrayMiniGames.mount({host:board,kind,settings,ids,names,save:data=>api('/training/minigames',{kind,players:ids,result:data})});
+  // The back link belongs outside the game renderer and survives re-renders.
+ }catch(e){notice(e.message,true)}
+}
+for(const kind of ['football','minigolf','tictactoe','connect4']){
+ const target=$(kind+'Training');if(target)target.onclick=()=>launchTrainingWindow(kind);
+}
+
 async function loadTraining(){
  const host=$('trainingList');clear(host);const data=await api('/competitions');
  for(const c of data.filter(x=>x.kind==='training_tournament'&&(amAdmin()||x.created_by===user.id)))host.append(tile(c.title,c.players+' Teilnehmer · '+c.status,()=>openCompetition(c.id)));
@@ -806,9 +839,17 @@ async function openCompetition(id){
       if(view==='stats')output.append(renderTable(['Spieler','Sp.','S','U','N','Legs','Ø Average','First 9'],ranked.map(r=>[
          {player_id:r.player_id,name:r.name},r.games,r.wins,r.draws,r.losses,r.legs_for+':'+r.legs_against,fmt(r.average),fmt(r.first9)
       ])));
-      else output.append(renderTable(['Spieler','95+','100+','133+','exakt 133','140+','171+','180','HF','LD','BF'],ranked.map(r=>[
-         {player_id:r.player_id,name:r.name},r['95plus'],r['100plus'],r['133plus'],r.exact133,r['140plus'],r['171plus'],r['180'],r.highfinish??'–',r.lowdart??'–',r.bullfinishes
-      ])));
+      else {
+        output.append(el('h3','Scoring & Specials'));
+        output.append(renderTable(['Spieler','95+','100+','133+','exakt 133','140+','171+','180','BF gesamt'],ranked.map(r=>[
+          {player_id:r.player_id,name:r.name},r['95plus'],r['100plus'],r['133plus'],r.exact133,r['140plus'],r['171plus'],r['180'],r.bullfinishes
+        ])));
+        output.append(el('h3','Bestleistungen im Detail'));
+        output.append(el('p','Alle Leistungen aus abgeschlossenen Scorer-Spielen. Identische Werte werden zusammengezählt (z. B. 2×141 oder 3×18).','helper'));
+        output.append(renderTable(['Spieler','Highfinishes (100+)','Lowdarts (9–18)','Bullfinishes','Highscores (171+)'],ranked.map(r=>[
+          {player_id:r.player_id,name:r.name},multiplicities(r.highfinish_details),multiplicities(r.lowdart_details,true),multiplicities(r.bullfinish_details),multiplicities(r.highscores)
+        ])));
+      }
     }
     for(const [key,title] of views){const b=action(title,()=>draw(key));b.dataset.tab=key;tabs.append(b)}
     draw('stats');
@@ -1149,8 +1190,8 @@ async function openScorer(id){
 function drawScore(){if(!playing)return;const s=playing.state||{},names=s.names||[playing.player1,playing.player2],rest=s.remaining||[501,501];$('playerOne').textContent=names[0];$('playerTwo').textContent=names[1];$('remainOne').textContent=rest[0];$('remainTwo').textContent=rest[1];$('resultOne').textContent='Legs '+(s.legs?.[0]??playing.legs1??0)+' · Sets '+(s.sets?.[0]??0);$('resultTwo').textContent='Legs '+(s.legs?.[1]??playing.legs2??0)+' · Sets '+(s.sets?.[1]??0);for(let i=0;i<2;i++)document.querySelectorAll('.scorecard')[i].classList.toggle('current',s.current===i&&!s.done);$('toThrow').textContent=s.done?'Spiel beendet':names[s.current??0]+' wirft';$('throwForm').hidden=s.done||playing.status==='finished'||!playing.can_score;$('scoreStatus').textContent='Version '+playing.state_version;const host=$('visits');clear(host);for(const v of (s.visits||[]).slice().reverse())host.append(el('p',names[v.player]+': '+v.score+' / '+v.darts+' Darts'+(v.checkout?' · Checkout':'')+(v.bust?' · Bust':'')))}
 $('throwForm').onsubmit=async e=>{e.preventDefault();const d=formData(e.target);try{const r=await api('/matches/'+playing.id+'/throw',{points:Number(d.points),darts:Number(d.darts),checkout:!!d.checkout,bullfinish:!!d.bullfinish,version:playing.state_version});playing.state=r.state;playing.state_version=r.version;e.target.reset();e.target.elements.darts.value=3;drawScore()}catch(err){notice(err.message,true)}};
 $('backToCompetition').onclick=()=>selected?openCompetition(selected.competition.id):show('dashboard');
-const statsLabels={tournament_wins:'Turniersiege',tournament_seconds:'2. Plätze',tournament_thirds:'3. Plätze',matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','100plus':'100+','140plus':'140+','171plus':'171+','95plus':'95+','133plus':'133+','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
-function multiplicities(values){const counts=new Map();for(const x of values||[])counts.set(String(x),(counts.get(String(x))||0)+1);return [...counts.entries()].sort((a,b)=>Number(b[0])-Number(a[0])).map(([value,n])=>n+'× '+value).join(' · ')||'–'}
+const statsLabels={tournament_wins:'Turniersiege',tournament_seconds:'2. Plätze',tournament_thirds:'3. Plätze',matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_football_sessions:'Fußball',training_minigolf_sessions:'Minigolf',training_tictactoe_sessions:'Tic Tac Toe',training_connect4_sessions:'Vier gewinnt',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','100plus':'100+','140plus':'140+','171plus':'171+','95plus':'95+','133plus':'133+','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
+function multiplicities(values,ascending=false){const counts=new Map();for(const x of values||[])counts.set(String(x),(counts.get(String(x))||0)+1);return [...counts.entries()].sort((a,b)=>ascending?Number(a[0])-Number(b[0]):Number(b[0])-Number(a[0])).map(([value,n])=>n+'×'+value).join(' · ')||'–'}
 function statValue(k,v){if(Array.isArray(v))return multiplicities(v);if(v===null||v===undefined)return '–';if(typeof v==='number')return String(v).replace('.',',');return String(v)}
 function statisticsPanels(host,stats,h2h,scope){
  clear(host);host.className='stats-dashboard';
@@ -1165,7 +1206,7 @@ function statisticsPanels(host,stats,h2h,scope){
  const best=panel('Bestleistungen im Detail','stat-wide');
  for(const [label,k] of [['Highfinishes','highfinish_details'],['Lowdarts','lowdart_details'],['Bullfinishes','bullfinish_details'],['Highscores','highscores']]){
   if(!show(k))continue;const row=el('div',undefined,'stat-detail-row');row.append(el('b',label),el('span',multiplicities(stats[k])));best.append(row)}
- if(scope==='overall'||scope==='training_tournament')cards(panel('Training','stat-wide'),['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions']);
+ if(scope==='overall'||scope==='training_tournament')cards(panel('Training','stat-wide'),['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions','training_football_sessions','training_minigolf_sessions','training_tictactoe_sessions','training_connect4_sessions']);
  if(stats.podiums){const p=panel('Turniererfolge','stat-wide');cards(p,['tournament_wins','tournament_seconds','tournament_thirds']);}
  const h=panel('Head to Head','stat-wide');
  if(!h2h.length)h.append(el('p','Noch keine direkten Duelle in diesem Bereich.'));
@@ -1188,6 +1229,7 @@ session().then(async()=>{
    await show('training');
    $('trainingList').hidden=true;
    if(['sau','tug','bobs'].includes(training)){launchTrainingWindow(training);return}
+   if(['football','minigolf','tictactoe','connect4'].includes(training)){await startMiniTraining(training);return}
    if(training==='x01')await quickTraining();
    else if(training==='tug')await startTug();
    else if(training==='sau'||training==='bobs')startSolo(training);

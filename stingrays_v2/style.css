@@ -288,3 +288,26 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .sting-bracket-player{height:23px;display:flex;align-items:center;justify-content:space-between;gap:7px;padding:2px 9px;font-size:12px;white-space:nowrap;border-bottom:1px solid #ffffff12}.sting-bracket-player span{overflow:hidden;text-overflow:ellipsis}.sting-bracket-player strong{min-width:20px;text-align:right}.sting-bracket-player.winner{font-weight:800;color:#f8dc9e}
 .sting-bracket-meta{padding:3px 8px;display:flex;justify-content:space-between;color:#adafb1;font-size:10px}
 @media(max-width:650px){.bracket-scroll{border-radius:8px}.sting-bracket-card{touch-action:pan-x}}
+
+/* Training: Dart-Fußball, Minigolf, Tic Tac Toe und Vier gewinnt */
+.mini-host{display:grid;gap:15px;max-width:100%;min-width:0}
+.mini-top h2{margin:4px 0;color:#f2d28a}.mini-lead{margin:0;color:#ded5bf}
+.mini-players{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.mini-player{border:1px solid #5b5548;padding:12px 15px;border-radius:11px;background:#292b2e;display:flex;justify-content:space-between;gap:8px;align-items:center}
+.mini-player.on-turn{border-color:#e5c274;background:#3b3528}
+.mini-player strong{color:#f4e1b5}.mini-player span{font-weight:800}
+.mini-hint{border-left:3px solid #d9b96d;background:#302b24;padding:12px 15px;margin:0;border-radius:7px}
+.mini-controls{display:flex;flex-wrap:wrap;gap:10px}.mini-controls button{min-height:47px;flex:1 1 140px;font-size:15px;font-weight:700}
+.mini-controls button:disabled,.mini-cell:disabled{opacity:.62;cursor:default}
+.mini-grid-tic{width:min(100%,390px);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.mini-grid-four{max-width:610px;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px}
+.mini-cell{padding:8px 3px!important;min-height:64px!important;min-width:0!important;background:#292e30!important;border:2px solid #5f6261!important;color:#f3e7d0!important;border-radius:9px!important;font-weight:750;white-space:pre-line}
+.mini-grid-tic .mini-cell{min-height:90px!important;font-size:23px}
+.mini-grid-four .mini-cell{font-size:15px}
+.mini-cell.selected{border-color:#f0c875!important;box-shadow:0 0 0 2px #eac66d55}
+.mini-cell.owner-0{background:#4a3629!important;color:#ffe1b1!important}
+.mini-cell.owner-1{background:#263d43!important;color:#aeedf1!important}
+.mini-footer{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 0}.mini-winner{font-size:19px;color:#f0d08c}.mini-save{font-weight:700;color:#9bd8ac}
+.mini-log{border-top:1px solid #555;padding-top:10px}.mini-log h3{margin:0 0 8px}.mini-log p{margin:5px 0;color:#cfc5b4;font-size:13px}
+.mini-scroll{max-height:340px;overflow:auto;max-width:100%}.mini-scorecard{border-collapse:collapse;width:100%;min-width:320px}.mini-scorecard td,.mini-scorecard th{padding:7px 15px;border-bottom:1px solid #4e4d47;text-align:left}
+@media(max-width:550px){.mini-player{min-width:0}.mini-grid-four{gap:2px}.mini-grid-four .mini-cell{min-height:43px!important;font-size:11px;border-radius:5px!important;padding:4px 0!important}.mini-controls button{flex:1 1 43%}}

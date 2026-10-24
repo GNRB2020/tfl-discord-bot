@@ -114,7 +114,7 @@ async def spa(req):
 
 async def assets(req):
     which=req.match_info['filename']
-    if which not in ('app.js','style.css','legacy_bridge.js','scorer_theme.css','brand.png','training_original.js','training_original.css'):raise web.HTTPNotFound()
+    if which not in ('app.js','style.css','legacy_bridge.js','scorer_theme.css','brand.png','training_original.js','training_original.css','training_minigames.js'):raise web.HTTPNotFound()
     return web.FileResponse(HERE/which,headers={'Cache-Control':'no-store'})
 
 async def legacy_scorer_page(req):
@@ -1472,6 +1472,7 @@ async def stats(req):
         highscores.extend(int(v.get('score',0)) for v in own if int(v.get('score',0))>=171 and not v.get('bust'))
     sau_results=[as_json(v['result']) for v in solo if v['kind']=='sau']
     bobs_results=[as_json(v['result']) for v in solo if v['kind']=='bobs27']
+    mini_counts={key:sum(v['kind']==key for v in solo) for key in ('football','minigolf','tictactoe','connect4')}
     tug_count=0
     if kind in ('overall','training_tournament') and not selected_competition:
         async with pool(req).acquire() as db:
@@ -1483,7 +1484,7 @@ async def stats(req):
         'first9':round(3*first9_score/first9_darts,2) if first9_darts else None,
         'lowdarts':len(lowdarts),'lowdart_details':sorted(lowdarts),
         'highfinishes':len(highfinishes),'highfinish_details':sorted(highfinishes,reverse=True),
-        'bullfinish_details':bull_finishes,'highscores':highscores[:30],
+        'bullfinish_details':bull_finishes,'highscores':sorted(highscores,reverse=True),
         '180':sum(s['points']==180 and not s['is_bust'] for s in scored),
         '140plus':sum(s['points']>=140 and not s['is_bust'] for s in scored),
         '171plus':sum(s['points']>=171 and not s['is_bust'] for s in scored),
@@ -1494,6 +1495,10 @@ async def stats(req):
         'bullfinishes':sum(bool(s['is_bullfinish']) for s in scored),
         'training_sau_sessions':len(sau_results),'training_bobs_sessions':len(bobs_results),
         'training_tug_sessions':tug_count,
+        'training_football_sessions':mini_counts['football'],
+        'training_minigolf_sessions':mini_counts['minigolf'],
+        'training_tictactoe_sessions':mini_counts['tictactoe'],
+        'training_connect4_sessions':mini_counts['connect4'],
         'training_sau_success':sum(int(x.get('checkouts',0)) for x in sau_results),
         'training_sau_marks':sum(int(x.get('sau',0)) for x in sau_results),
         'training_bobs_best':max([int(x.get('points',0)) for x in bobs_results],default=None),
@@ -1511,7 +1516,9 @@ async def tournament_statistics(req):
     result={r['id']:{'player_id':r['id'],'name':r['display_name'],'games':0,'wins':0,'draws':0,'losses':0,
         'legs_for':0,'legs_against':0,'points':0,'darts':0,'first9_points':0,'first9_darts':0,
         '95plus':0,'100plus':0,'133plus':0,'140plus':0,'171plus':0,'180':0,'exact133':0,
-        'highfinish':None,'lowdart':None,'bullfinishes':0,'scored_games':0} for r in people}
+        'highfinish':None,'lowdart':None,'bullfinishes':0,'scored_games':0,
+        'highfinish_details':[],'lowdart_details':[],'bullfinish_details':[],
+        'highscores':[]} for r in people}
     for m in matches:
         raw=as_json(m['state']);visits=raw.get('visits') or []
         for idx,pid in enumerate((m['player1_id'],m['player2_id'])):
@@ -1535,9 +1542,17 @@ async def tournament_statistics(req):
                     for threshold,key in ((95,'95plus'),(100,'100plus'),(133,'133plus'),(140,'140plus'),(171,'171plus')):
                         if score>=threshold:r[key]+=1
                     r['180']+=int(score==180);r['exact133']+=int(score==133)
-                if v.get('checkout'):
-                    r['highfinish']=max(r['highfinish'] or 0,score)
-                    r['bullfinishes']+=int(bool(v.get('bullfinish')))
+                # Keep every special, including repeated identical finishes.
+                # Highfinish means checkout >= 100, not simply the best checkout.
+                if not v.get('bust') and score>=171:
+                    r['highscores'].append(score)
+                if v.get('checkout') and not v.get('bust'):
+                    if score>=100:
+                        r['highfinish_details'].append(score)
+                        r['highfinish']=max(r['highfinish'] or 0,score)
+                    if v.get('bullfinish'):
+                        r['bullfinish_details'].append(score)
+                        r['bullfinishes']+=1
             for group in legs.values():
                 dcount=0;sumscore=0
                 for v in group:
@@ -1547,9 +1562,15 @@ async def tournament_statistics(req):
                 r['first9_darts']+=dcount;r['first9_points']+=sumscore
                 if group and group[-1].get('checkout'):
                     used=sum(int(v.get('darts',3) or 3) for v in group)
-                    r['lowdart']=min(r['lowdart'] or used,used)
+                    if 9<=used<=18:
+                        r['lowdart_details'].append(used)
+                        r['lowdart']=min(r['lowdart'] or used,used)
     out=[]
     for r in result.values():
+        r['highfinish_details'].sort(reverse=True)
+        r['lowdart_details'].sort()
+        r['bullfinish_details'].sort(reverse=True)
+        r['highscores'].sort(reverse=True)
         r['average']=round(3*r['points']/r['darts'],2) if r['darts'] else None
         r['first9']=round(3*r['first9_points']/r['first9_darts'],2) if r['first9_darts'] else None
         out.append(r)
@@ -1623,6 +1644,53 @@ async def save_solo_session(req):
                    VALUES($1,$2,$3::jsonb) RETURNING id,created_at''',pid,kind,json.dumps(result))
                 created.append(dict(row))
     return response({'saved_profiles':len(created),'sessions':created},201)
+
+async def save_minigame_session(req):
+    '''Save a finished local training game once per participant.
+
+    The player identity comes from the session, never from the submitted winner.
+    A result is shared with the selected partner; it is not counted as X01 scoring.
+    Requires the included, one-time training_sessions_kind_check migration.
+    '''
+    a=await actor(req);d=await body(req)
+    kind=d.get('kind')
+    if kind not in ('football','minigolf','tictactoe','connect4'):
+        raise web.HTTPBadRequest(text='Trainingsmodus unbekannt')
+    raw=d.get('players',[])
+    if not isinstance(raw,list) or len(raw) not in (1,2):
+        raise web.HTTPBadRequest(text='Ein oder zwei Spieler erforderlich')
+    if kind!='minigolf' and len(raw)!=2:
+        raise web.HTTPBadRequest(text='Zwei Spieler erforderlich')
+    ids=[uid(x) for x in raw]
+    if len(set(ids))!=len(ids) or a['player_id'] not in ids:
+        raise web.HTTPForbidden(text='Spielerprofil muss am Training teilnehmen')
+    result=d.get('result')
+    if not isinstance(result,dict) or result.get('kind')!=kind or not isinstance(result.get('state'),dict):
+        raise web.HTTPBadRequest(text='Ungültiges Trainingsergebnis')
+    state=result['state']
+    if not state.get('done') or state.get('ids')!=[str(x) for x in ids]:
+        raise web.HTTPBadRequest(text='Trainingsspiel muss abgeschlossen sein')
+    if len(json.dumps(result))>48_000 or not isinstance(state.get('throws'),list) or len(state['throws'])>400:
+        raise web.HTTPBadRequest(text='Trainingsdaten zu groß oder ungültig')
+    winner=result.get('winner_id')
+    if winner is not None and uid(winner) not in ids:
+        raise web.HTTPBadRequest(text='Sieger ist kein Teilnehmer')
+    session_id=str(result.get('session_id',''))
+    if not (8<=len(session_id)<=100 and all(c.isalnum() or c in '-_' for c in session_id)):
+        raise web.HTTPBadRequest(text='Ungültige Spielkennung')
+    # Keep one copy per participating profile so personal training stats work.
+    async with pool(req).acquire() as db:
+        async with db.transaction():
+            valid=await db.fetch(f'''SELECT id FROM {SCHEMA}.players
+                 WHERE id=ANY($1::uuid[]) AND is_active=true AND is_member=true''',ids)
+            if len(valid)!=len(ids):raise web.HTTPBadRequest(text='Teilnehmerprofil nicht aktiv')
+            existing=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.training_sessions
+                 WHERE player_id=$1 AND kind=$2 AND result->>'session_id'=$3''',a['player_id'],kind,session_id)
+            if existing:return response({'saved':True,'already_saved':True})
+            for pid in ids:
+                await db.execute(f'''INSERT INTO {SCHEMA}.training_sessions(player_id,kind,result)
+                     VALUES($1,$2,$3::jsonb)''',pid,kind,json.dumps(result,ensure_ascii=False))
+    return response({'saved':True,'participants':len(ids)},201)
 
 async def save_tug_session(req):
     a=await actor(req);d=await body(req)
@@ -1846,6 +1914,7 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/players/{pid}/h2h',head_to_head),
       ('POST','/dart/v2/api/training/sessions',save_solo_session),
       ('POST','/dart/v2/api/training/tug',save_tug_session),
+      ('POST','/dart/v2/api/training/minigames',save_minigame_session),
     ]
     for method,path,handler in routes:app.router.add_route(method,path,handler)
     print('[STINGRAYS V2] dashboard-ladder-admin r20261023 installed under /dart/v2/')
