@@ -7,6 +7,8 @@ function formData(form){return Object.fromEntries(new FormData(form).entries())}
 function clear(node){node.replaceChildren()}
 function el(tag,text,cls){const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(cls)x.className=cls;return x}
 function btn(label,fn){const x=el('button',label);x.type='button';x.onclick=fn;return x}
+// Every popup is dismissed only by its own explicit controls, never its backdrop.
+function popupCloseButton(onClose){const x=btn('×',onClose);x.className='sheet-close';x.setAttribute('aria-label','Fenster schließen');x.title='Fenster schließen';return x}
 function tile(title,sub,fn){const x=btn('',fn);x.className='tile';x.append(el('strong',title),el('small',sub));return x}
 const defaultDashboardWidgets=['open_matches','last10','ladder_rank','elo'];
 const widgetLabels={open_matches:'Offene Begegnungen',last10:'Bilanz letzte 10 Spiele',ladder_rank:'Platzierung Ladder',elo:'Aktueller ELO-Wert',competitions:'Aktive Wettbewerbe',average:'Ø Average',first9:'Ø First 9','180':'180er','95plus':'95+'};
@@ -67,9 +69,13 @@ function configure(title,fields,submitText='Speichern'){
    if(f.readonly)control.readOnly=true;
    label.append(control);form.append(label)}
   const foot=el('div',undefined,'sheet-actions'),cancel=btn('Abbrechen',()=>finish(null)),ok=document.createElement('button');ok.type='submit';ok.textContent=submitText;
-  foot.append(cancel,ok);form.append(foot);panel.append(form);shade.append(panel);document.body.append(shade);
-  const finish=data=>{shade.remove();resolve(data)};
-  shade.onclick=e=>{if(e.target===shade)finish(null)};
+  const previousFocus=document.activeElement;
+  const finish=data=>{shade.remove();if(previousFocus?.isConnected)previousFocus.focus();resolve(data)};
+  panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.setAttribute('aria-label',title);
+  foot.append(cancel,ok);form.append(foot);panel.append(popupCloseButton(()=>finish(null)),form);
+  shade.append(panel);document.body.append(shade);
+  // Clicks on the shaded area or Escape must not discard a multi-step form.
+  shade.addEventListener('click',e=>{if(e.target===shade)e.stopPropagation()});
   form.onsubmit=e=>{e.preventDefault();const result=Object.fromEntries(new FormData(form).entries());for(const f of fields)if(f.type==='multi')result[f.name]=[...form.querySelectorAll('input[name="'+f.name+'"]:checked')].map(x=>x.value);finish(result)};
   form.querySelector('input,select,textarea')?.focus();
  })
@@ -1177,7 +1183,8 @@ async function openCompetition(id){
      row.append(el('strong',p.place+'. '+p.name),el('span',p.wins+' Siege · Turnieraverage: '+(p.average??'–')));grid.append(row)}
     result.append(grid);
     const shade=el('div',undefined,'sheet-shade'),modal=el('section',undefined,'config-sheet');
-    modal.append(el('h2','Turnier abgeschlossen · '+report.title));
+    modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');
+    modal.append(popupCloseButton(()=>shade.remove()),el('h2','Turnier abgeschlossen · '+report.title));
     const grid2=el('div',undefined,'report-grid');for(const p of report.placements){const line=el('div',undefined,'report-row');
        line.append(el('strong',p.place+'. '+p.name),el('span','S '+p.wins+' · N '+p.losses+' · Ø '+(p.average??'–')));grid2.append(line)}
     modal.append(grid2,action('Platzierungen dauerhaft anzeigen',()=>{shade.remove();view('placements')},'subtle'));
