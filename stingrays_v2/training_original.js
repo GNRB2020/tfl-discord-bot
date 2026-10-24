@@ -64,11 +64,33 @@ $('sau').onclick=()=>choose('sau');
 // Bobs 27 was not implemented in the old normal scorer: provide a dedicated,
 // full-screen scorer, not a generic admin-form replacement.
 const bobs=document.createElement('section');bobs.id='bobs27View';bobs.className='screen hide';
-bobs.innerHTML='<div class="v2-bobs-top"><h2>BOBS 27</h2><strong id="bobsName"></strong><div class="v2-bobs-total" id="bobsScore">27</div><small id="bobsTarget">Doppel 1</small></div><div class="v2-bobs-grid" id="bobsGrid"></div><div class="v2-bobs-actions"><button type="button" data-hits="0">0 TREFFER</button><button type="button" data-hits="1">1 TREFFER</button><button type="button" data-hits="2">2 TREFFER</button><button type="button" data-hits="3">3 TREFFER</button></div><button type="button" id="bobsUndo">LETZTE AUFNAHME ZURÜCK</button>';
+bobs.innerHTML='<div class="v2-bobs-top"><h2>BOBS 27</h2><strong id="bobsName"></strong><div class="v2-bobs-total" id="bobsScore">27</div><small id="bobsTarget">Doppel 1</small></div><div class="v2-bobs-grid" id="bobsGrid"></div><div class="v2-bobs-actions"><button type="button" data-hits="0">0 TREFFER</button><button type="button" data-hits="1">1 TREFFER</button><button type="button" data-hits="2">2 TREFFER</button><button type="button" data-hits="3">3 TREFFER</button></div><button type="button" id="bobsUndo">LETZTE AUFNAHME ZURÜCK</button><button type="button" id="bobsNew" hidden>NEUES BOBS-27-TRAINING</button><section class="v2-arcade"><h3>BOBS 27 · HIGH SCORES</h3><div id="v2BobsLeaders">Lade Bestenliste …</div></section>';
 document.querySelector('.root').append(bobs);
 async function bobsScore(hits){try{const r=await request('/'+currentId+'/throw',{hits});display(r)}catch(e){err(e.message)}}
 bobs.querySelectorAll('[data-hits]').forEach(b=>b.onclick=()=>bobsScore(Number(b.dataset.hits)));
 $('bobsUndo').onclick=async()=>{try{display(await request('/'+currentId+'/undo',{}))}catch(e){err(e.message)}};
+$('bobsNew').onclick=()=>{sessionStorage.removeItem(storageKey);currentId=null;choose('bobs27')};
+let bobsLeaderLoaded=false,lastBobsFinished=false;
+async function bobsLeaderboard(){
+ try{const list=await http('/dart/v2/api/training/highscores?kind=bobs27');
+  const host=$('v2BobsLeaders');host.replaceChildren();
+  if(!list.length){host.textContent='Noch kein Ergebnis gespeichert';return}
+  const table=document.createElement('table');table.className='v2-arcade-table';
+  list.slice(0,10).forEach((row,i)=>{const tr=document.createElement('tr');
+   for(const value of [String(i+1).padStart(2,'0'),row.name,row.score]){const td=document.createElement('td');td.textContent=value;tr.append(td)}table.append(tr)});host.append(table);
+ }catch(e){$('v2BobsLeaders').textContent='Bestenliste nicht verfügbar: '+e.message}
+}
+// Existing Phase 11 scorer stores precisely one shared position.
+// Both users score against that same position: player 1 subtracts, player 2 adds.
+const tugScreen=document.getElementById('tugView');
+if(tugScreen){const first=tugScreen.querySelector('#tp0 .tugscore');
+ if(first){const shared=document.createElement('div');shared.id='v2SharedTugScore';shared.className='v2-shared-tug';
+  shared.textContent='GEMEINSAMER SCORE: 181';tugScreen.querySelector('h2').after(shared);
+  tugScreen.querySelectorAll('.tugscore').forEach(x=>x.style.display='none');
+  const update=()=>{shared.textContent='GEMEINSAMER SCORE: '+first.textContent};
+  new MutationObserver(update).observe(first,{childList:true,characterData:true,subtree:true});update();
+ }
+}
 function renderBobs(){screen('bobs27View');$('bobsName').textContent=S.name;$('bobsScore').textContent=S.score;
  const doubles=[...Array.from({length:20},(_,i)=>i+1),25];
  $('bobsTarget').textContent=S.finished?'TRAINING BEENDET':'JETZT: '+(doubles[S.target_index]===25?'BULL': 'DOPPEL '+doubles[S.target_index]);
@@ -77,7 +99,10 @@ function renderBobs(){screen('bobs27View');$('bobsName').textContent=S.name;$('b
   x.textContent=(doubles[i]===25?'BULL':'D'+doubles[i])+' · '+(S.visits[i]?S.visits[i].hits+' Treffer':'–');grid.append(x);
  }
  bobs.querySelectorAll('[data-hits]').forEach(b=>b.disabled=S.finished);
- $('bobsUndo').disabled=!S.can_undo;
+  $('bobsUndo').disabled=!S.can_undo;
+ $('bobsNew').hidden=!S.finished;
+ if(!bobsLeaderLoaded||S.finished&&!lastBobsFinished){bobsLeaderLoaded=true;bobsLeaderboard()}
+ lastBobsFinished=!!S.finished;
 }
 // Reuse current training after accidental refresh; all visits live in Neon.
 (async()=>{try{

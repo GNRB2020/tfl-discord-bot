@@ -311,3 +311,15 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .mini-log{border-top:1px solid #555;padding-top:10px}.mini-log h3{margin:0 0 8px}.mini-log p{margin:5px 0;color:#cfc5b4;font-size:13px}
 .mini-scroll{max-height:340px;overflow:auto;max-width:100%}.mini-scorecard{border-collapse:collapse;width:100%;min-width:320px}.mini-scorecard td,.mini-scorecard th{padding:7px 15px;border-bottom:1px solid #4e4d47;text-align:left}
 @media(max-width:550px){.mini-player{min-width:0}.mini-grid-four{gap:2px}.mini-grid-four .mini-cell{min-height:43px!important;font-size:11px;border-radius:5px!important;padding:4px 0!important}.mini-controls button{flex:1 1 43%}}
+/* Trainingsspiele: eindeutige Zielmarkierungen und Arcade-Bestenliste */
+.mini-grid-tic .mini-cell.owner-0,.mini-grid-four .mini-cell.owner-0{background:#682b36!important;color:#ffe9ed!important;border-color:#d66378!important}
+.mini-grid-tic .mini-cell.owner-1,.mini-grid-four .mini-cell.owner-1{background:#234a79!important;color:#e3f2ff!important;border-color:#66aafa!important}
+.mini-target-track{display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:6px}
+.mini-target{background:#292f35;border:1px solid #69717a;border-radius:6px;padding:7px;text-align:center;font-weight:700;color:#cdd5df}
+.mini-target.taken{background:#194a3b;color:#bcf3dd;border-color:#388c6b}
+.mini-target.current{background:#5a4623;color:#ffe2a9;border:2px solid #f0c875}
+.mini-highscores{border:1px solid #bda067;background:#18212b;border-radius:10px;padding:12px;max-width:850px}
+.mini-highscores h3{color:#f2d28a;margin:0 0 10px}
+.mini-highscores .mini-scorecard td:last-child{color:#91e0b6;font-weight:800}
+.mini-highscores tr.mini-preview{background:#3a3626}
+@media(max-width:550px){.mini-target-track{grid-template-columns:repeat(auto-fill,minmax(54px,1fr))}.mini-target{padding:6px 3px;font-size:12px}}

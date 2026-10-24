@@ -15,3 +15,14 @@
 .v2-bobs-actions button{background:#215c4b;color:#fff;font-size:clamp(13px,2.5vh,23px);font-weight:900;border:1px solid #93d9bd}
 #bobsUndo{align-self:center;background:#4a515e;color:white}
 @media(max-width:640px){.v2-bobs-grid{grid-template-columns:repeat(7,minmax(0,1fr))}.v2-bobs-actions{min-height:64px}}
+
+/* Arcade high scores and one shared tug position. */
+#bobs27View{overflow-y:auto;height:auto;min-height:calc(100dvh - 92px)}
+#bobs27View .v2-bobs-grid{min-height:180px;flex:auto;grid-template-rows:repeat(3,minmax(50px,1fr))}
+.v2-arcade{background:#101c23;border:1px solid #bda067;border-radius:12px;padding:12px;max-width:760px;width:100%;margin:5px auto}
+.v2-arcade h3{color:#f3cf74;text-align:center;letter-spacing:.14em;margin:0 0 10px;font-size:15px}
+.v2-arcade-table{width:100%;border-collapse:collapse;font-family:ui-monospace,monospace;font-size:clamp(12px,2vw,18px);color:#f8e5b5}
+.v2-arcade-table td{border-bottom:1px solid #44515b;padding:5px 10px}.v2-arcade-table td:first-child{width:43px;color:#b8c6d3}
+.v2-arcade-table td:last-child{text-align:right;color:#a2e6c8;font-weight:900}
+.v2-shared-tug{font-weight:900;font-size:clamp(26px,5vw,53px);color:#f1ce79;text-align:center;padding:10px;background:#101f30;border:2px solid #e1bb62;border-radius:12px}
+#bobsNew{align-self:center;background:#20694f;color:white;border:1px solid #8de6bb;font-weight:800;padding:12px;border-radius:8px}

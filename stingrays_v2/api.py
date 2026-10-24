@@ -1670,7 +1670,7 @@ async def save_minigame_session(req):
     state=result['state']
     if not state.get('done') or state.get('ids')!=[str(x) for x in ids]:
         raise web.HTTPBadRequest(text='Trainingsspiel muss abgeschlossen sein')
-    if len(json.dumps(result))>48_000 or not isinstance(state.get('throws'),list) or len(state['throws'])>400:
+    if len(json.dumps(result))>250_000 or not isinstance(state.get('throws'),list) or len(state['throws'])>1500:
         raise web.HTTPBadRequest(text='Trainingsdaten zu groß oder ungültig')
     winner=result.get('winner_id')
     if winner is not None and uid(winner) not in ids:
@@ -1691,6 +1691,48 @@ async def save_minigame_session(req):
                 await db.execute(f'''INSERT INTO {SCHEMA}.training_sessions(player_id,kind,result)
                      VALUES($1,$2,$3::jsonb)''',pid,kind,json.dumps(result,ensure_ascii=False))
     return response({'saved':True,'participants':len(ids)},201)
+
+async def training_highscores(req):
+    """Authenticated read-only arcade leaderboard; no duplicate minigolf session rows."""
+    await actor(req)
+    kind=req.query.get('kind','')
+    if kind not in ('bobs27','minigolf'):
+        raise web.HTTPBadRequest(text='Unbekannte Bestenliste')
+    async with pool(req).acquire() as db:
+        if kind=='bobs27':
+            rows=await db.fetch(f'''SELECT g.state,p.display_name FROM {SCHEMA}.training_games g
+              LEFT JOIN {SCHEMA}.players p ON p.id::text=g.state->'player_ids'->>0
+              WHERE g.kind='bobs27' AND g.finished=true ORDER BY g.updated_at DESC LIMIT 5000''')
+        else:
+            rows=await db.fetch(f'''SELECT t.player_id,t.result,p.display_name FROM {SCHEMA}.training_sessions t
+              JOIN {SCHEMA}.players p ON p.id=t.player_id
+              WHERE t.kind='minigolf' AND t.result->'settings'->>'format'='doubles21'
+              ORDER BY t.created_at DESC LIMIT 5000''')
+    scores=[]
+    for r in rows:
+        item=r['state'] if kind=='bobs27' else r['result']
+        if isinstance(item,str):
+            try:item=json.loads(item)
+            except (ValueError,TypeError):continue
+        if not isinstance(item,dict):continue
+        if kind=='bobs27':
+            score=item.get('score')
+            name=r['display_name'] or item.get('name') or 'Spieler'
+        else:
+            state=item.get('state') or {}
+            ids=state.get('ids') or []
+            try:i=ids.index(str(r['player_id']))
+            except ValueError:continue
+            amounts=item.get('score') or []
+            if not isinstance(amounts,list) or i>=len(amounts):continue
+            golf_scores=state.get('golfScores') or []
+            if i>=len(golf_scores) or len(golf_scores[i])!=21:continue
+            score=amounts[i]
+            name=r['display_name']
+        if isinstance(score,bool) or not isinstance(score,(int,float)) or not -10000<=score<=2000:continue
+        scores.append({'name':name,'score':int(score)})
+    scores.sort(key=lambda x:(x['score'] if kind=='minigolf' else -x['score'],x['name'].casefold()))
+    return response(scores[:25])
 
 async def save_tug_session(req):
     a=await actor(req);d=await body(req)
@@ -1915,6 +1957,7 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/training/sessions',save_solo_session),
       ('POST','/dart/v2/api/training/tug',save_tug_session),
       ('POST','/dart/v2/api/training/minigames',save_minigame_session),
+      ('GET','/dart/v2/api/training/highscores',training_highscores),
     ]
     for method,path,handler in routes:app.router.add_route(method,path,handler)
     print('[STINGRAYS V2] dashboard-ladder-admin r20261023 installed under /dart/v2/')

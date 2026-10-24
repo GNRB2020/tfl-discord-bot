@@ -609,8 +609,12 @@ async function startMiniTraining(kind){
   const others=players.filter(p=>p.id!==user.player_id&&p.is_member!==false&&p.is_active!==false);
   if(kind!=='minigolf'&&!others.length)throw Error('Kein Gegnerprofil verfügbar');
   const fields=[];
-  if(kind==='minigolf')fields.push({name:'holes',label:'Bahnen',type:'select',value:'9',options:[['9','9 Bahnen'],['18','18 Bahnen']]});
-  if(kind==='football')fields.push({name:'goals',label:'Tore zum Sieg',type:'select',value:'5',options:[['3','3 Tore'],['5','5 Tore'],['10','10 Tore']]});
+  if(kind==='minigolf')fields.push({name:'returnMode',label:'Phase 2 – Rückweg (optional)',type:'select',value:'none',options:[['none','Ohne Rückweg – nur Phase 1'],['final','Endscore checken'],['all','Alle Zwischenscores checken (rückwärts)']]});
+  if(kind==='tictactoe')fields.push({name:'variant',label:'Spielvariante',type:'select',value:'doubles',options:[['doubles','Variante A – 9 zufällige Doppel'],['checks','Variante B – 9 unterschiedliche Checks']]});
+  if(kind==='tictactoe'||kind==='connect4'){
+   fields.push({name:'low',label:'Checkbereich von (für Doppelvariante ignoriert)',type:'number',value:kind==='connect4'?58:40,min:2,max:170,required:true});
+   fields.push({name:'high',label:'Checkbereich bis (für Doppelvariante ignoriert)',type:'number',value:kind==='connect4'?100:80,min:2,max:170,required:true});
+  }
   fields.push({name:'opponent',label:'Gegner',type:'select',options:kind==='minigolf'?[['','Alleine'],...others.map(p=>[p.id,p.display_name])]:others.map(p=>[p.id,p.display_name])});
   fields.push({name:'first',label:'Wer beginnt?',type:'select',value:'me',options:[['me','Ich'],['opponent','Gegner (falls vorhanden)'],['random','Zufall']]});
   const choice=await configure(window.StingrayMiniGames.games[kind],fields,'Spiel starten');if(!choice)return;
@@ -618,12 +622,18 @@ async function startMiniTraining(kind){
   if(kind!=='minigolf'&&!opp)throw Error('Bitte Gegner auswählen');
   const ids=[me.id,...(opp?[opp.id]:[])],names=[me.display_name,...(opp?[opp.display_name]:[])];
   if(opp&&(choice.first==='opponent'||(choice.first==='random'&&Math.random()<0.5))){ids.reverse();names.reverse()}
-  const settings={...(kind==='football'?{goals:Number(choice.goals)}:{}),...(kind==='minigolf'?{holes:Number(choice.holes)}:{})};
+  const settings={};
+  if(kind==='minigolf'){settings.returnMode=choice.returnMode;settings.format='doubles21'}
+  if(kind==='tictactoe')settings.variant=choice.variant;
+  if(kind==='connect4'||kind==='tictactoe'&&choice.variant==='checks'){
+   settings.low=Number(choice.low);settings.high=Number(choice.high);
+   window.StingrayMiniGames.engine.validRange(settings.low,settings.high,kind==='connect4'?42:9,kind);
+  }
   const host=$('trainingMode');host.hidden=false;
   clear(host);
   const back=action('← Zurück zum Training',()=>location.assign('/dart/v2/?view=training'),'subtle');back.className='training-back';host.append(back);
   const board=el('section');host.append(board);
-  await window.StingrayMiniGames.mount({host:board,kind,settings,ids,names,save:data=>api('/training/minigames',{kind,players:ids,result:data})});
+  await window.StingrayMiniGames.mount({host:board,kind,settings,ids,names,save:data=>api('/training/minigames',{kind,players:ids,result:data}),loadScores:mode=>api('/training/highscores?kind='+encodeURIComponent(mode))});
   // The back link belongs outside the game renderer and survives re-renders.
  }catch(e){notice(e.message,true)}
 }
