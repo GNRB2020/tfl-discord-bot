@@ -1393,12 +1393,107 @@ async def export_open(req):
     for r in data:w.writerow([r.get(k) for k in ('id','gruppe','runde','spieler1','spieler2','status')])
     return web.Response(body=('\ufeff'+stream.getvalue()).encode('utf-8'),headers={'Content-Disposition':'attachment; filename="offene-spiele.csv"'},content_type='text/csv; charset=utf-8')
 
+
+# Profile statistics are projections of completed results. Exclusions and a
+# reset boundary hide older results without mutating tournament scores or Elo.
+STAT_FORMATS={
+    'league':'Stingray League / Liga', 'cup':'Stingray Cup / Cup',
+    'ladder':'Stingray Ladder', 'vm':'Vereinsmeisterschaft',
+    'training_tournament':'Trainingsturniere', 'final_tournament':'Finalturniere'
+}
+STAT_TRAINING={
+    'free_x01':'Freies X01', 'sau':'Gegen die Sau', 'bobs27':'Bobs 27',
+    'tug':'Tauziehen', 'football':'Fußball', 'minigolf':'Minigolf',
+    'tictactoe':'Tic Tac Toe', 'connect4':'Vier gewinnt'
+}
+
+async def profile_stats_policy(db):
+    rows=await db.fetch(f'SELECT source_key,is_enabled,reset_at FROM {SCHEMA}.profile_stat_controls')
+    disabled={r['source_key'] for r in rows if not r['is_enabled']}
+    reset=next((r['reset_at'] for r in rows if r['source_key']=='__reset__'),None)
+    return disabled,reset
+
+def profile_comp_included(comp_id,kind,disabled):
+    return 'format:'+str(kind) not in disabled and 'competition:'+str(comp_id) not in disabled
+
+def profile_training_included(kind,disabled):
+    return 'training:'+str(kind) not in disabled
+
+async def admin_stat_sources(req):
+    await actor(req,'admin')
+    async with pool(req).acquire() as db:
+        disabled,reset_at=await profile_stats_policy(db)
+        competitions=await db.fetch(f'''SELECT c.id,c.title,c.kind,c.status,c.deleted_at,
+          COUNT(m.id) FILTER (WHERE m.status='finished') AS finished
+          FROM {SCHEMA}.competitions c LEFT JOIN {SCHEMA}.matches m ON m.competition_id=c.id
+          GROUP BY c.id ORDER BY c.created_at DESC''')
+        training=await db.fetch(f'''SELECT kind,COUNT(*) AS finished FROM {SCHEMA}.training_sessions GROUP BY kind''')
+        tug=await db.fetchval(f'SELECT COUNT(*) FROM {SCHEMA}.training_tug_sessions')
+        x01=await db.fetchval(f"SELECT COUNT(*) FROM {SCHEMA}.free_x01_matches WHERE status='finished'")
+    totals={r['kind']:int(r['finished']) for r in training}
+    totals['tug']=int(tug or 0)
+    totals['free_x01']=int(x01 or 0)
+    sources=[]
+    for kind,label in STAT_FORMATS.items():
+        count=sum(int(c['finished']) for c in competitions if c['kind']==kind and c['deleted_at'] is None)
+        key='format:'+kind
+        sources.append({'key':key,'label':label,'group':'Formate','finished':count,
+          'enabled':key not in disabled,'effective_enabled':key not in disabled})
+    for kind,label in STAT_TRAINING.items():
+        key='training:'+kind
+        sources.append({'key':key,'label':label,'group':'Training','finished':totals.get(kind,0),
+          'enabled':key not in disabled,'effective_enabled':key not in disabled})
+    for c in competitions:
+        key='competition:'+str(c['id'])
+        sources.append({'key':key,'label':c['title'],'group':'Wettbewerbe',
+           'kind':c['kind'],'status':c['status'],'deleted':c['deleted_at'] is not None,
+           'finished':int(c['finished']), 'enabled':key not in disabled,
+           'effective_enabled':c['deleted_at'] is None and profile_comp_included(c['id'],c['kind'],disabled)})
+    return response({'sources':sources,'reset_at':reset_at,
+       'note':'Ausblenden oder Zurücksetzen beeinflusst nur persönliche Statistiken, nicht Ergebnisse, ELO und Spielpläne.'})
+
+async def admin_stat_source_update(req):
+    a=await actor(req,'admin');data=await body(req)
+    key=data.get('key');enabled=data.get('enabled')
+    if not isinstance(key,str) or not isinstance(enabled,bool):
+        raise web.HTTPBadRequest(text='Statistikquelle oder Status ungültig')
+    async with pool(req).acquire() as db:
+        valid=key in {'format:'+k for k in STAT_FORMATS} or key in {'training:'+k for k in STAT_TRAINING}
+        if key.startswith('competition:'):
+            comp=uid(key.split(':',1)[1])
+            valid=bool(await db.fetchval(f'SELECT 1 FROM {SCHEMA}.competitions WHERE id=$1',comp))
+        if not valid:raise web.HTTPBadRequest(text='Unbekannte Statistikquelle')
+        async with db.transaction():
+            await db.execute(f'''INSERT INTO {SCHEMA}.profile_stat_controls(source_key,is_enabled,updated_at)
+                VALUES($1,$2,now()) ON CONFLICT (source_key)
+                DO UPDATE SET is_enabled=excluded.is_enabled,updated_at=now()''',key,enabled)
+            await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+                VALUES($1,'profile_stat_source','profile_statistics',$2,$3::jsonb)''',
+                a['id'],key,json.dumps({'enabled':enabled}))
+    return response({'key':key,'enabled':enabled})
+
+async def admin_stats_reset(req):
+    a=await actor(req,'admin');data=await body(req)
+    if data.get('confirm')!='STATISTIKEN ZURÜCKSETZEN':
+        raise web.HTTPBadRequest(text='Bitte STATISTIKEN ZURÜCKSETZEN vollständig eingeben')
+    async with pool(req).acquire() as db:
+        async with db.transaction():
+            reset=await db.fetchval(f'''INSERT INTO {SCHEMA}.profile_stat_controls(source_key,is_enabled,reset_at,updated_at)
+                  VALUES('__reset__',true,now(),now())
+                  ON CONFLICT (source_key) DO UPDATE SET reset_at=now(),updated_at=now()
+                  RETURNING reset_at''')
+            await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+                  VALUES($1,'profile_stats_reset','profile_statistics','all',$2::jsonb)''',
+                  a['id'],json.dumps({'reset_at':reset.isoformat()}))
+    return response({'reset_at':reset,'note':'Historische Spiele bleiben gespeichert. Die Profilstatistik zählt ab diesem Zeitpunkt neu.'})
+
 async def stats(req):
     await actor(req);pid=uid(req.match_info['pid']);kind=req.query.get('kind','overall')
     selected_competition=uid(req.query['competition_id']) if req.query.get('competition_id') else None
     if kind not in ('overall',*KINDS):raise web.HTTPBadRequest(text='Ungültiger Statistikfilter')
     async with pool(req).acquire() as db:
-        sql=f'''SELECT m.id,m.status,m.source,m.legs1,m.legs2,m.sets1,m.sets2,m.player1_id,m.player2_id,m.state,
+        disabled,reset_at=await profile_stats_policy(db)
+        sql=f'''SELECT c.id AS competition_id,m.finished_at,m.created_at,m.id,m.status,m.source,m.legs1,m.legs2,m.sets1,m.sets2,m.player1_id,m.player2_id,m.state,
           c.kind,c.title FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
           WHERE c.deleted_at IS NULL AND m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)'''
         params=[pid]
@@ -1407,19 +1502,24 @@ async def stats(req):
             params.append(selected_competition)
             sql+=f' AND m.competition_id=${len(params)}'
         games=await db.fetch(sql,*params)
-        scored=await db.fetch(f'''SELECT t.points,t.darts,t.is_bust,t.is_checkout,t.is_bullfinish,m.competition_id,c.kind
+        scored=await db.fetch(f'''SELECT c.id AS comp_id,m.finished_at,m.created_at,t.points,t.darts,t.is_bust,t.is_checkout,t.is_bullfinish,m.competition_id,c.kind
           FROM {SCHEMA}.throws t JOIN {SCHEMA}.matches m ON m.id=t.match_id
           JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
           WHERE t.player_id=$1 AND c.deleted_at IS NULL AND m.status='finished' AND m.source='scorer' ''',pid)
+    games=[m for m in games if profile_comp_included(m['competition_id'],m['kind'],disabled)
+           and (reset_at is None or (m['finished_at'] or m['created_at'])>=reset_at)]
+    scored=[s for s in scored if profile_comp_included(s['comp_id'],s['kind'],disabled)
+            and (reset_at is None or (s['finished_at'] or s['created_at'])>=reset_at)]
     if kind!='overall':scored=[s for s in scored if s['kind']==kind]
     if selected_competition:scored=[s for s in scored if s['competition_id']==selected_competition]
     games=list(games);scored=list(scored)
-    if kind=='overall' and not selected_competition:
+    if kind=='overall' and not selected_competition and profile_training_included('free_x01',disabled):
         # Standalone X01 practice lives in its own table and never affects league/cup/ladder.
         async with pool(req).acquire() as db:
             free_games=await db.fetch(f'''SELECT player1_id,player2_id,state,status
                 FROM {SCHEMA}.free_x01_matches WHERE status='finished'
-                  AND (player1_id=$1 OR player2_id=$1)''',pid)
+                  AND (player1_id=$1 OR player2_id=$1)
+                  AND ($2::timestamptz IS NULL OR COALESCE(finished_at,created_at)>=$2)''',pid,reset_at)
         for m in free_games:
             raw=as_json(m['state']);legs=raw.get('legs') or [0,0];sets=raw.get('sets') or [0,0]
             games.append({'player1_id':m['player1_id'],'player2_id':m['player2_id'],
@@ -1434,7 +1534,8 @@ async def stats(req):
     solo=[]
     if kind in ('overall','training_tournament') and not selected_competition:
         async with pool(req).acquire() as db:
-            solo=await db.fetch(f'''SELECT kind,result FROM {SCHEMA}.training_sessions WHERE player_id=$1''',pid)
+            solo=await db.fetch(f'''SELECT kind,result FROM {SCHEMA}.training_sessions WHERE player_id=$1
+                AND ($2::timestamptz IS NULL OR created_at>=$2)''',pid,reset_at)
     wins=draws=losses=legs_for=legs_against=0
     for m in games:
         left=m['player1_id']==pid
@@ -1470,18 +1571,20 @@ async def stats(req):
                 if value>=100:highfinishes.append(value)
                 if finished[-1].get('bullfinish'):bull_finishes.append(value)
         highscores.extend(int(v.get('score',0)) for v in own if int(v.get('score',0))>=171 and not v.get('bust'))
+    solo=[v for v in solo if profile_training_included(v['kind'],disabled)]
     sau_results=[as_json(v['result']) for v in solo if v['kind']=='sau']
     bobs_results=[as_json(v['result']) for v in solo if v['kind']=='bobs27']
     mini_counts={key:sum(v['kind']==key for v in solo) for key in ('football','minigolf','tictactoe','connect4')}
     tug_count=0
-    if kind in ('overall','training_tournament') and not selected_competition:
+    if kind in ('overall','training_tournament') and not selected_competition and profile_training_included('tug',disabled):
         async with pool(req).acquire() as db:
             tug_count=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.training_tug_sessions
-                 WHERE player_id=$1 OR opponent_id=$1''',pid)
+                 WHERE (player_id=$1 OR opponent_id=$1)
+                   AND ($2::timestamptz IS NULL OR created_at>=$2)''',pid,reset_at)
     points=sum(s['points'] for s in scored if not s['is_bust']);darts=sum(s['darts'] for s in scored)
     return response({'matches':len(games),'wins':wins,'draws':draws,'losses':losses,'legs_for':legs_for,
-        'legs_against':legs_against,'scored_visits':len(scored),'average':round(points/darts*3,2) if darts else None,
-        'first9':round(3*first9_score/first9_darts,2) if first9_darts else None,
+        'legs_against':legs_against,'scored_visits':len(scored),'average':round(points/darts*3,2) if darts else (0 if reset_at is not None else None),
+        'first9':round(3*first9_score/first9_darts,2) if first9_darts else (0 if reset_at is not None else None),
         'lowdarts':len(lowdarts),'lowdart_details':sorted(lowdarts),
         'highfinishes':len(highfinishes),'highfinish_details':sorted(highfinishes,reverse=True),
         'bullfinish_details':bull_finishes,'highscores':sorted(highscores,reverse=True),
@@ -1501,7 +1604,7 @@ async def stats(req):
         'training_connect4_sessions':mini_counts['connect4'],
         'training_sau_success':sum(int(x.get('checkouts',0)) for x in sau_results),
         'training_sau_marks':sum(int(x.get('sau',0)) for x in sau_results),
-        'training_bobs_best':max([int(x.get('points',0)) for x in bobs_results],default=None),
+        'training_bobs_best':max([int(x.get('points',0)) for x in bobs_results],default=(0 if reset_at is not None else None)),
         'missing_throw_stats_matches':sum(m['source']!='scorer' for m in games)})
 
 async def tournament_statistics(req):
@@ -1579,6 +1682,7 @@ async def tournament_statistics(req):
 async def tournament_podiums(req):
     await actor(req);pid=uid(req.match_info['pid'])
     async with pool(req).acquire() as db:
+        disabled,reset_at=await profile_stats_policy(db)
         comps=await db.fetch(f"""SELECT c.id,c.title,c.kind FROM {SCHEMA}.competitions c
            JOIN {SCHEMA}.entries e ON e.competition_id=c.id WHERE e.player_id=$1
            AND c.status IN ('finished','archived') AND c.kind <> 'ladder' AND c.deleted_at IS NULL""",pid)
@@ -1588,6 +1692,10 @@ async def tournament_podiums(req):
         from types import SimpleNamespace
         # No new request is forged: placement computation runs through shared DB data below.
         for c in comps:
+            if not profile_comp_included(c['id'],c['kind'],disabled):continue
+            if reset_at is not None and not await db.fetchval(f'''SELECT 1 FROM {SCHEMA}.matches
+               WHERE competition_id=$1 AND status='finished'
+                 AND COALESCE(finished_at,created_at)>=$2 LIMIT 1''',c['id'],reset_at):continue
             phase=await db.fetch(f"""SELECT ph.id,ph.name,ph.kind,ph.phase_order,ph.rules
                 FROM {SCHEMA}.phases ph WHERE ph.competition_id=$1 ORDER BY ph.phase_order DESC""",c['id'])
             if not phase:continue
@@ -1751,22 +1859,25 @@ async def head_to_head(req):
     selected_competition=uid(req.query['competition_id']) if req.query.get('competition_id') else None
     if kind not in ('overall',*KINDS):raise web.HTTPBadRequest(text='Ungültiger Filter')
     async with pool(req).acquire() as db:
-        rows=await db.fetch(f'''SELECT m.player1_id,m.player2_id,m.legs1,m.legs2,m.sets1,m.sets2,
+        disabled,reset_at=await profile_stats_policy(db)
+        rows=await db.fetch(f'''SELECT c.id AS competition_id,m.finished_at,m.created_at,m.player1_id,m.player2_id,m.legs1,m.legs2,m.sets1,m.sets2,
          p1.display_name AS name1,p2.display_name AS name2,c.kind
          FROM {SCHEMA}.matches m JOIN {SCHEMA}.competitions c ON c.id=m.competition_id
          JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
          WHERE c.deleted_at IS NULL AND m.status='finished' AND
          (m.player1_id=$1 OR m.player2_id=$1) AND ($2::uuid IS NULL OR m.competition_id=$2)
          ORDER BY m.finished_at DESC''',pid,selected_competition)
-    rows=list(rows)
-    if kind=='overall' and not selected_competition:
+    rows=[m for m in rows if profile_comp_included(m['competition_id'],m['kind'],disabled)
+          and (reset_at is None or (m['finished_at'] or m['created_at'])>=reset_at)]
+    if kind=='overall' and not selected_competition and profile_training_included('free_x01',disabled):
         async with pool(req).acquire() as db:
             free=await db.fetch(f'''SELECT m.player1_id,m.player2_id,m.state,
               p1.display_name AS name1,p2.display_name AS name2
               FROM {SCHEMA}.free_x01_matches m
               JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id
               JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
-              WHERE m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)''',pid)
+              WHERE m.status='finished' AND (m.player1_id=$1 OR m.player2_id=$1)
+                  AND ($2::timestamptz IS NULL OR COALESCE(m.finished_at,m.created_at)>=$2)''',pid,reset_at)
             for m in free:
                 state=as_json(m['state']);legs=state.get('legs') or [0,0];sets=state.get('sets') or [0,0]
                 rows.append({'player1_id':m['player1_id'],'player2_id':m['player2_id'],
@@ -1837,12 +1948,17 @@ async def overview(req):
                 FROM {SCHEMA}.ladder_ratings r JOIN {SCHEMA}.competitions c ON c.id=r.competition_id
                 WHERE r.player_id=$1 AND c.kind='ladder' AND c.deleted_at IS NULL
                 ORDER BY CASE WHEN c.status='active' THEN 0 ELSE 1 END,c.created_at DESC LIMIT 5''',viewed)
-    matches=[dict(row) for row in regular]
+    async with pool(req).acquire() as db:
+        disabled,reset_at=await profile_stats_policy(db)
+    matches=[dict(row) for row in regular if profile_comp_included(row['competition_id'],row['kind'],disabled)
+             and (reset_at is None or (row['finished_at'] or row['created_at'])>=reset_at)]
     for m in free:
         if m['status']!='finished':
             own.append({'id':m['id'],'status':m['status'],'competition_id':None,'title':'Freies X01',
                'kind':'free_x01','player1':m['player1'],'player2':m['player2'],
                'player1_id':m['player1_id'],'player2_id':m['player2_id']})
+            continue
+        if not profile_training_included('free_x01',disabled) or (reset_at is not None and (m['finished_at'] or m['created_at'])<reset_at):
             continue
         raw=as_json(m['state']);legs=raw.get('legs') or [0,0];sets=raw.get('sets') or [0,0]
         matches.append({'id':m['id'],'competition_id':None,'title':'Freies X01','kind':'free_x01',
@@ -1920,6 +2036,9 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/profile/username',change_my_username),
       ('GET','/dart/v2/api/admin/sessions',admin_sessions),
       ('GET','/dart/v2/api/admin/audit',admin_audit),
+      ('GET','/dart/v2/api/admin/stat-sources',admin_stat_sources),
+      ('POST','/dart/v2/api/admin/stat-sources',admin_stat_source_update),
+      ('POST','/dart/v2/api/admin/stats-reset',admin_stats_reset),
       ('GET','/dart/v2/api/boards',board_list),('POST','/dart/v2/api/boards/{bid}',edit_board),
       ('GET','/dart/v2/api/competitions',competition_list),('POST','/dart/v2/api/competitions',create_competition),
       ('GET','/dart/v2/api/competitions/{cid}',competition_detail),

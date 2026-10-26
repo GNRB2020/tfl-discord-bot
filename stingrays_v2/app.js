@@ -85,7 +85,7 @@ const amAdmin=()=>user?.role==='admin';
 const trainingOwner=()=>selected?.competition?.kind==='training_tournament'&&selected?.competition?.created_by===user?.id;
 function section(name){for(const id of ['setup','login','changePassword','dashboard','settings','training','ladder','competitions','boards','members','statistics','admin','scorer'])$(id).hidden=id!==name;$('nav').hidden=!user||['login','setup','changePassword'].includes(name);for(const b of document.querySelectorAll('nav [data-view]')){b.classList.toggle('active',b.dataset.view===name);b.style.display=b.classList.contains('admin')&&!amAdmin()?'none':(b.dataset.view==='boards'&&user?.role==='member'?'none':'')}notice('')}
 async function session(){try{user=await api('/me');if(user.must_change_password){section('changePassword');return}section('dashboard');await show('dashboard')}catch{user=null;section('login')}}
-async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false)}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false);await Promise.all([loadOnlineSessions(),loadAuditLog(true)])}}catch(e){notice(e.message,true)}}
+async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false)}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false);await Promise.all([loadOnlineSessions(),loadAuditLog(true),loadStatSources()])}}catch(e){notice(e.message,true)}}
 for(const b of document.querySelectorAll('nav [data-view]'))b.onclick=()=>show(b.dataset.view);
 $('firstAdmin').onclick=()=>section('setup');
 $('setupForm').onsubmit=async e=>{e.preventDefault();try{await api('/bootstrap',formData(e.target));section('login');notice('Administrator erstellt. Bitte anmelden.')}catch(err){notice(err.message,true)}};
@@ -234,7 +234,12 @@ async function newAccountForPlayer(player){
 function renderPlayers(){
  const q=$('memberSearch').value.toLocaleLowerCase('de');const host=$('membersList');clear(host);
  for(const p of players.filter(p=>p.display_name.toLocaleLowerCase('de').includes(q))){
-  const t=el('article',undefined,'member-tile');t.append(el('strong',p.display_name),el('small',p.username?'Konto: '+p.username+' · '+p.role:'Ohne Benutzerkonto'));
+  const t=el('article',undefined,'member-tile');
+  const top=el('div',undefined,'member-role-top');top.append(el('strong',p.display_name));
+  const role=p.username?(p.role||'member'):'none';
+  const caption={admin:'ADMIN',tournament:'TURNIERACCOUNT',member:'MITGLIED',none:'KEIN ZUGANG'}[role]||'UNBEKANNT';
+  const badge=el('span',caption,'member-role-badge role-'+role);badge.title='Vergebene Berechtigung: '+caption;
+  top.append(badge);t.append(top,el('small',p.username?'Benutzername: '+p.username:'Ohne Benutzerkonto'));
   const foot=el('div',undefined,'member-actions');if(amAdmin()&&!p.username)foot.append(action('Zugang erstellen',()=>newAccountForPlayer(p),'primary'));
   if(amAdmin()&&p.username){foot.append(action('Berechtigung ändern',()=>editMemberRole(p),'subtle'));
     foot.append(el('span',p.is_enabled?'Zugang aktiv':'Zugang gesperrt','helper'));
@@ -247,6 +252,53 @@ function renderPlayers(){
   t.append(foot);host.append(t)
  }
 }
+// Profile statistics inclusion and non-destructive reset. Admin access is enforced server-side.
+async function loadStatSources(){
+ const host=$('statSourcesList');if(!host)return;
+ clear(host);host.append(el('p','Statistikquellen werden geladen …','helper'));
+ try{
+  const data=await api('/admin/stat-sources');clear(host);
+  const stamp=$('statResetStamp');if(stamp)stamp.textContent=data.reset_at?
+     'Letzter Statistik-Neustart: '+new Date(data.reset_at).toLocaleString('de-DE'):
+     'Noch kein Statistik-Neustart durchgeführt';
+  const groups=[['Formate','Wettbewerbsarten'],['Training','Freie Trainingsformate'],['Wettbewerbe','Einzelne Wettbewerbe']];
+  for(const [kind,title] of groups){
+   const section=el('div',undefined,'stat-source-group');section.append(el('h3',title));
+   const rows=data.sources.filter(x=>x.group===kind);
+   for(const item of rows){
+    const row=el('div',undefined,'stat-source-row');
+    const copy=el('div',undefined,'stat-source-copy');copy.append(el('strong',item.label));
+    let extra=item.finished+' bisher abgeschlossene '+(kind==='Training'?'Trainings':'Spiele')+' (historisch)';
+    if(item.kind)extra+=' · '+({league:'Liga',cup:'Cup',ladder:'Ladder',vm:'Vereinsmeisterschaft',training_tournament:'Trainingsturnier',final_tournament:'Finalturnier'}[item.kind]||item.kind);
+    if(item.deleted)extra+=' · Wettbewerb gelöscht';
+    if(item.enabled&&!item.effective_enabled&&!item.deleted)extra+=' · durch Format ausgeschlossen';
+    copy.append(el('small',extra));
+    const label=el('label',undefined,'stat-source-switch');
+    const cb=document.createElement('input');cb.type='checkbox';cb.checked=item.enabled;cb.disabled=!!item.deleted;
+    const state=el('span',item.deleted?'Gelöscht':item.effective_enabled?'Zählt mit':'Ausgeblendet','stat-source-status '+(item.effective_enabled?'is-on':'is-off'));
+    label.append(cb,state);row.append(copy,label);section.append(row);
+    cb.onchange=async()=>{
+     cb.disabled=true;try{
+      await api('/admin/stat-sources',{key:item.key,enabled:cb.checked});
+      await loadStatSources();notice('Statistikquelle '+(cb.checked?'aktiviert':'ausgeschlossen')+'. Bestehende Ergebnisse bleiben unverändert.');
+     }catch(e){cb.checked=!cb.checked;cb.disabled=false;notice(e.message,true)}
+    };
+   }
+   host.append(section)
+  }
+ }catch(e){clear(host);host.append(el('p','Statistikquellen konnten nicht geladen werden: '+e.message,'helper'));}
+}
+$('statSourcesReload').onclick=()=>loadStatSources();
+$('statResetAll').onclick=async()=>{
+ if(!amAdmin())return;
+ const value=await configure('Profilstatistiken auf Null setzen',[
+   {name:'confirm',label:'Alle Profilstatistiken beginnen ab jetzt neu. Spiele, Ergebnisse, ELO und Bestenlisten bleiben erhalten. Zur Bestätigung exakt STATISTIKEN ZURÜCKSETZEN eingeben.',required:true}
+ ],'Statistiken zurücksetzen');
+ if(!value)return;
+ if(value.confirm!=='STATISTIKEN ZURÜCKSETZEN')return notice('Bestätigung stimmt nicht überein. Nichts verändert.',true);
+ try{await api('/admin/stats-reset',{confirm:value.confirm});await loadStatSources();notice('Alle Profilstatistiken starten jetzt wieder bei null. Alte Spielresultate bleiben gespeichert.')}catch(e){notice(e.message,true)}
+};
+
 $('memberSearch').oninput=renderPlayers;
 function fillPlayerSelect(id,blank){const host=$(id);clear(host);if(blank)host.append(new Option('Turnierkonto ohne Spieler',''));for(const p of players)host.append(new Option(p.display_name,p.id))}
 const roleLabels={member:'Mitglied',tournament:'Turnieraccount',admin:'Administrator'};

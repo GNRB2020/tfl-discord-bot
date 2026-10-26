@@ -325,3 +325,24 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .mini-highscores .mini-scorecard td:last-child{color:#91e0b6;font-weight:800}
 .mini-highscores tr.mini-preview{background:#3a3626}
 @media(max-width:550px){.mini-target-track{grid-template-columns:repeat(auto-fill,minmax(54px,1fr))}.mini-target{padding:6px 3px;font-size:12px}}
+
+/* Distinct, accessible member role labels */
+.member-role-top{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.member-role-badge{display:inline-flex;align-items:center;justify-content:center;padding:6px 11px;border:1px solid;border-radius:8px;font-size:12px;font-weight:900;letter-spacing:.045em;white-space:nowrap}
+.member-role-badge.role-admin{background:#672d36;color:#ffe7e9;border-color:#ed8e9c}
+.member-role-badge.role-tournament{background:#3c365d;color:#e7ddff;border-color:#af99ff}
+.member-role-badge.role-member{background:#234b3b;color:#d9ffea;border-color:#72cba3}
+.member-role-badge.role-none{background:#3c3c40;color:#ddd;border-color:#888}
+.stat-source-panel{width:100%;max-width:none}.stat-source-group{margin-top:22px}
+.stat-source-group>h3{border-bottom:1px solid #75664a;padding-bottom:9px}
+.stat-source-row{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:12px 14px;margin:8px 0;border-radius:9px;border:1px solid #5c5246;background:#2a2a2c}
+.stat-source-copy{display:grid;gap:5px;min-width:0}.stat-source-copy strong{overflow-wrap:anywhere}
+.stat-source-copy small{color:#c6bbb0}
+.stat-source-switch{display:inline-flex;align-items:center;gap:10px;margin:0;white-space:nowrap;cursor:pointer}
+.stat-source-switch input{width:20px;height:20px;accent-color:#5ca582;margin:0}
+.stat-source-status{font-size:12px;font-weight:800;padding:5px 9px;border-radius:8px;border:1px solid #777}
+.stat-source-status.is-on{color:#cbffdc;background:#204d36;border-color:#57a77b}
+.stat-source-status.is-off{color:#f7d0d0;background:#5c3030;border-color:#b36969}
+.stat-reset-area{margin-top:28px;padding:18px;border:1px solid #b86e6e;background:#34272a;border-radius:10px}
+.stat-reset-area h3{margin-top:0}
+@media(max-width:600px){.stat-source-row{align-items:flex-start;flex-direction:column}.stat-source-switch{width:100%;justify-content:flex-end}}
