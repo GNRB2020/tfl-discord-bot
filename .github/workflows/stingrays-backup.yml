@@ -1,1 +1,64 @@
+name: Stingray database backup
 
+on:
+  workflow_dispatch:
+  schedule:
+    # Sunday night, UTC. Berlin time changes with daylight savings.
+    - cron: '0 20 * * 0'
+
+permissions:
+  contents: read
+
+jobs:
+  database-backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check database secret
+        env:
+          STINGRAYS_DATABASE_URL: ${{ secrets.STINGRAYS_DATABASE_URL }}
+        run: |
+          if [ -z "$STINGRAYS_DATABASE_URL" ]; then
+            echo '::error::Repository secret STINGRAYS_DATABASE_URL is not configured.'
+            exit 1
+          fi
+
+      - name: Export Stingray schema (PostgreSQL 18)
+        env:
+          STINGRAYS_DATABASE_URL: ${{ secrets.STINGRAYS_DATABASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p backups
+          docker run --rm -e STINGRAYS_DATABASE_URL postgres:18 \
+            sh -ec 'pg_dump "$STINGRAYS_DATABASE_URL" --format=custom --schema=stingrays_app --no-owner --no-acl' \
+            > backups/stingrays.dump
+          test -s backups/stingrays.dump
+          (cd backups && sha256sum stingrays.dump > SHA256SUMS)
+
+      - name: Verify backup by restoring into an isolated local PostgreSQL database
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --name stingrays-restore-check -d \
+            -e POSTGRES_PASSWORD=temporary-check-only postgres:18 >/dev/null
+          trap 'docker rm -f stingrays-restore-check >/dev/null 2>&1 || true' EXIT
+          for i in {1..30}; do
+            if docker exec stingrays-restore-check pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec -i stingrays-restore-check pg_restore \
+            -U postgres -d postgres --no-owner --no-acl --exit-on-error < backups/stingrays.dump
+          docker exec stingrays-restore-check psql -U postgres -d postgres -tAc \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='stingrays_app'" \
+            | awk '{if ($1 < 10) { print "Schema restore incomplete"; exit 1 }}'
+          (cd backups && sha256sum -c SHA256SUMS)
+
+      - name: Upload encrypted-at-rest workflow artifact (14-day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: stingrays-backup-${{ github.run_id }}
+          path: backups/
+          if-no-files-found: error
+          retention-days: 14
