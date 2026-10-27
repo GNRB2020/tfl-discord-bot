@@ -25,6 +25,11 @@ from sheets_connection import get_season_spreadsheet
 LOG = logging.getLogger(__name__)
 TZ = pytz.timezone("Europe/Berlin")
 CHANNEL_ID = int(os.getenv("TFL_COOP_TERMINBOERSE_CHANNEL_ID", "1544986965202567188"))
+CHANNEL_B_ID = int(os.getenv("TFL_COOP_TERMINBOERSE_B_CHANNEL_ID", "1563809712728973342"))
+
+
+def channel_for_group(group):
+    return CHANNEL_B_ID if group == "Coop_B" else CHANNEL_ID
 STORE_SHEET = "CoopTerminboerseV3"
 MODES = ("AD Boots", "Crosskeys", "Duality", "Logical Enemizer", "Influkeys", "Pilot Spoiler")
 HEADERS = ["ID", "Gruppe", "Anbieterteam", "Anbieter ID", "Termin", "Status", "Kanal ID", "Nachricht ID", "Heimteam", "Gastteam", "Matchzeile", "Modus", "Annehmendes Team", "Modus-Deadline", "Event", "Aktualisiert"]
@@ -653,18 +658,20 @@ class OfferModal(discord.ui.Modal, title="Coop: Race-Termine anbieten"):
             instants = [_parse(v) for v in dates]
             created = await asyncio.to_thread(_create, group, team, interaction.user.id, instants)
             try:
-                channel = _interaction_guild(interaction).get_channel(CHANNEL_ID) if _interaction_guild(interaction) else None
+                target_channel_id = channel_for_group(group)
+                guild = _interaction_guild(interaction)
+                channel = guild.get_channel(target_channel_id) if guild else None
                 if channel is None:
-                    channel = await interaction.client.fetch_channel(CHANNEL_ID)
+                    channel = await interaction.client.fetch_channel(target_channel_id)
                 if not hasattr(channel, "send"):
                     raise RuntimeError("Terminbörsen-Kanal ist kein Textkanal.")
                 rows = [(await asyncio.to_thread(_load, identifier))[1] for _, identifier in created]
                 msg = await channel.send(_offer_content(rows), view=PublicOfferView(rows))
                 await asyncio.to_thread(_attach_message, created, msg.channel.id, msg.id)
-                await interaction.followup.send(f"**{len(created)} Termine** in <#{CHANNEL_ID}> veröffentlicht: {msg.jump_url}", ephemeral=True)
+                await interaction.followup.send(f"**{len(created)} Termine** in <#{target_channel_id}> veröffentlicht: {msg.jump_url}", ephemeral=True)
             except Exception as exc:
                 await asyncio.to_thread(_mark_failed, created)
-                raise RuntimeError(f"Terminbörse konnte nicht in <#{CHANNEL_ID}> veröffentlicht werden: {exc}")
+                raise RuntimeError(f"Terminbörse konnte nicht in <#{target_channel_id}> veröffentlicht werden: {exc}")
         except Exception as exc:
             await interaction.followup.send(f"Coop-Terminangebot fehlgeschlagen: {exc}", ephemeral=True)
 

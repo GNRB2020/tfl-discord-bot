@@ -1,4 +1,4 @@
-"""TFL-Tabellen: sechs feste Discord-Nachrichten, Update alle 15 Minuten."""
+"""TFL-Tabellen: sechs Divisionen und zwei Coop-Gruppen, Update alle 15 Minuten."""
 import asyncio
 import logging
 import re
@@ -10,6 +10,8 @@ LOG = logging.getLogger(__name__)
 CHANNEL_ID = 1562124923441254450
 INTERVAL = 900
 MARKER = 'TFL-TABELLE-DIV-'
+COOP_GROUPS = ('Coop_A', 'Coop_B')
+COOP_MARKER = 'TFL-TABELLE-COOP-'
 
 
 def calculate(rows):
@@ -60,6 +62,73 @@ def render(division, rows):
     ).set_footer(text=f'{MARKER}{division} | Stand: {now} Uhr | Aktualisierung alle 15 Minuten')
 
 
+
+def calculate_coop(rows):
+    """Coop-Wertung: Siege 2, Remis 1, Niederlagen 0; Kader steht in Spalte N."""
+    teams = {}
+    def add(name):
+        name = name.strip()
+        if name and name.casefold() not in ('team', 'teamname', 'heim', 'gast', 'heimteam', 'gastteam', 'coop-gruppe a', 'coop-gruppe b'):
+            teams.setdefault(name.casefold(), dict(name=name, sp=0, s=0, u=0, n=0, won=0, lost=0, pts=0))
+    for row in rows[1:]:
+        if len(row) > 13:
+            add(row[13])
+    for row in rows[1:]:
+        home = row[3].strip() if len(row) > 3 else ''
+        away = row[5].strip() if len(row) > 5 else ''
+        result = row[4].strip() if len(row) > 4 else ''
+        if not home or not away or home.casefold() == away.casefold():
+            continue
+        add(home)
+        add(away)
+        match = re.fullmatch(r'\s*([012])\s*[:\-]\s*([012])\s*', result)
+        if not match:
+            continue
+        a, b = map(int, match.groups())
+        if a + b != 2:
+            continue
+        for rec, scored, conceded in ((teams[home.casefold()], a, b), (teams[away.casefold()], b, a)):
+            rec['sp'] += 1
+            rec['won'] += scored
+            rec['lost'] += conceded
+            if scored > conceded:
+                rec['s'] += 1
+                rec['pts'] += 2
+            elif scored == conceded:
+                rec['u'] += 1
+                rec['pts'] += 1
+            else:
+                rec['n'] += 1
+    return sorted(teams.values(), key=lambda x: (-x['pts'], -(x['won']-x['lost']), -x['won'], -x['s'], x['name'].casefold()))
+
+
+def render_coop(group, rows):
+    standings = calculate_coop(rows)
+    header = 'Pl  Team                 Sp S U N  Diff Pkt'
+    lines = [header, '-' * len(header)]
+    for i, r in enumerate(standings, 1):
+        lines.append(f"{i:>2}  {r['name'][:20]:<20} {r['sp']:>2} {r['s']:>1} {r['u']:>1} {r['n']:>1} {r['won']-r['lost']:>+5} {r['pts']:>3}")
+    if not standings:
+        lines.append('Keine Teams gefunden.')
+    now = datetime.now(ZoneInfo('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')
+    return discord.Embed(
+        title=f'Coop League | Gruppe {group[-1]} | Tabelle',
+        description='```\n' + '\n'.join(lines) + '\n```',
+        color=discord.Color.blurple(),
+    ).set_footer(text=f'{COOP_MARKER}{group} | Stand: {now} Uhr | Aktualisierung alle 15 Minuten')
+
+
+async def find_coop_message(channel, bot_id, group):
+    marker = f'{COOP_MARKER}{group} |'
+    async for msg in channel.history(limit=250):
+        if msg.author.id == bot_id and any(
+            emb.footer and emb.footer.text and emb.footer.text.startswith(marker)
+            for emb in msg.embeds
+        ):
+            return msg
+    return None
+
+
 async def find_message(channel, bot_id, division):
     marker = f'{MARKER}{division} |'
     async for msg in channel.history(limit=250):
@@ -84,6 +153,17 @@ async def refresh(client, workbook):
                 await channel.send(embed=embed)
         except Exception:
             LOG.exception('Fehler bei Division %s', div)
+    for group in COOP_GROUPS:
+        try:
+            rows = await asyncio.to_thread(workbook.worksheet(group).get_all_values)
+            embed = render_coop(group, rows)
+            msg = await find_coop_message(channel, client.user.id, group)
+            if msg:
+                await msg.edit(embed=embed)
+            else:
+                await channel.send(embed=embed)
+        except Exception:
+            LOG.exception('Fehler bei Coop-Gruppe %s', group)
 
 
 async def division_table_loop(client, workbook):

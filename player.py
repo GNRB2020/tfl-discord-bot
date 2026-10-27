@@ -2162,7 +2162,8 @@ class CoopGameSelectView(PlayerBaseView):
 
 # Coop-only: independent offers and team strike mode; no League term-offer changes.
 COOP_OFFERS_SHEET = "CoopTerminangebote"
-COOP_OFFER_CHANNEL_ID = int(os.getenv("TFL_COOP_TERMINBOERSE_CHANNEL_ID", "0") or 0)
+COOP_OFFER_CHANNEL_ID = int(os.getenv("TFL_COOP_TERMINBOERSE_CHANNEL_ID", "1544986965202567188") or 0)
+COOP_OFFER_B_CHANNEL_ID = int(os.getenv("TFL_COOP_TERMINBOERSE_B_CHANNEL_ID", "1563809712728973342") or 0)
 COOP_EVENT_LENGTH_MINUTES = int(os.getenv("TFL_COOP_EVENT_LENGTH_MINUTES", "180") or 180)
 COOP_MODE_CHOICES = ("AD Boots", "Crosskeys", "Duality", "Logical Enemizer", "Influkeys", "Pilot Spoiler")
 _COOP_OFFERS_LOCK = threading.RLock()
@@ -2474,15 +2475,16 @@ async def _coop_offer_publish(interaction, offer_id, group, home, away, opponent
     if not guild:
         return (False, 0, "")
     channel = None
-    if COOP_OFFER_CHANNEL_ID:
-        channel = guild.get_channel(COOP_OFFER_CHANNEL_ID)
+    target_channel_id = COOP_OFFER_B_CHANNEL_ID if group == "Coop_B" else COOP_OFFER_CHANNEL_ID
+    if target_channel_id:
+        channel = guild.get_channel(target_channel_id)
         if channel is None:
             try:
-                channel = await interaction.client.fetch_channel(COOP_OFFER_CHANNEL_ID)
+                channel = await interaction.client.fetch_channel(target_channel_id)
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 channel = None
     if channel is None:
-        channel = interaction.channel
+        print(f"[COOP OFFER] Zielkanal {target_channel_id} nicht erreichbar; keine Veröffentlichung in falschem Kanal.")
     posted = False
     jump_url = ""
     if channel and hasattr(channel, "send"):

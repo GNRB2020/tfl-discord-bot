@@ -111,6 +111,7 @@ EVENT_TITLE_FILTERS = (
     "Div 5",
     "Div 6",
     "TFL Cup",
+    "Coop ",
 )
 
 # Rolle, die Restream-Commands zusätzlich zu Administratoren ausführen darf.
@@ -479,6 +480,11 @@ def parse_event_title(event: discord.ScheduledEvent) -> dict:
     """
     title = clean_text(event.name)
     parts = [clean_text(p) for p in title.split("|") if clean_text(p)]
+    if title.casefold().startswith("coop ") and "|" not in title:
+        group = (event.description or "").split("·", 1)[0].strip()
+        area = "Coop B" if group == "Coop_B" else "Coop A" if group == "Coop_A" else "Coop"
+        mode_match = re.search(r"Modus:\s*([^\n·]+)", event.description or "", re.IGNORECASE)
+        parts = [area, title[5:].strip(), mode_match.group(1).strip() if mode_match else ""]
 
     # Falls Event bereits als Restream markiert ist:
     # RESTREAM ZSRDE | Div X | Spieler1 vs. Spieler2 | Modus
