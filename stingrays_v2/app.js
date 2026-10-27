@@ -10,6 +10,32 @@ function btn(label,fn){const x=el('button',label);x.type='button';x.onclick=fn;r
 // Every popup is dismissed only by its own explicit controls, never its backdrop.
 function popupCloseButton(onClose){const x=btn('×',onClose);x.className='sheet-close';x.setAttribute('aria-label','Fenster schließen');x.title='Fenster schließen';return x}
 function tile(title,sub,fn){const x=btn('',fn);x.className='tile';x.append(el('strong',title),el('small',sub));return x}
+// Compact navigation: at most a single viewport of records, with explicit page controls.
+const letterBands=[['AF','A–F'],['GL','G–L'],['MR','M–R'],['SZ','S–Z'],['other','Sonstige']];
+function bandOf(name){const v=String(name||'').trim().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();const initial=v[0]||'';if(initial>='A'&&initial<='F')return 'AF';if(initial>='G'&&initial<='L')return 'GL';if(initial>='M'&&initial<='R')return 'MR';if(initial>='S'&&initial<='Z')return 'SZ';return 'other'}
+function makeTabs(host,items,current,onChange){clear(host);for(const [value,label] of items){const b=btn(label,()=>onChange(value));b.className='ui-tab'+(value===current?' selected':'');b.dataset.tab=value;b.setAttribute('role','tab');b.setAttribute('aria-selected',String(value===current));host.append(b)}}
+function makeTable(host,headers,records,renderRow){clear(host);const table=el('table',undefined,'data-table polished density-table'),head=el('thead'),tr=el('tr');for(const name of headers){const th=el('th',name);th.scope='col';tr.append(th)}head.append(tr);table.append(head);const body=el('tbody');records.forEach((entry,i)=>body.append(renderRow(entry,i)));table.append(body);host.append(table)}
+function compactPager(host,total,page,setPage,per=9){clear(host);const max=Math.max(1,Math.ceil(total/per));if(max===1)return;const back=btn('← Zurück',()=>setPage(page-1)),next=btn('Weiter →',()=>setPage(page+1));back.disabled=page===0;next.disabled=page>=max-1;host.append(back,el('span','Seite '+(page+1)+' / '+max),next)}
+let dashboardTab='overview';function displayDashboardTab(tab){dashboardTab=tab;makeTabs($('dashboardTabs'),[['overview','Kennzahlen'],['matches','Spiele'],['competitions','Wettbewerbe'],['live','Live']],tab,displayDashboardTab);for(const node of document.querySelectorAll('[data-dashboard-pane]'))node.hidden=node.dataset.dashboardPane!==tab;if(tab==='live'&&user)refreshLive().catch(()=>{})}
+$('dashboardTabs')?.addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;const buttons=[...$('dashboardTabs').querySelectorAll('button')];const i=buttons.indexOf(document.activeElement);if(i<0)return;e.preventDefault();const next=buttons[(i+(e.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length];next.click();next.focus()});
+displayDashboardTab('overview');
+function setupSettingsTabs(){
+ const form=$('settingsForm'),panels=[...form.children].filter(n=>n.classList.contains('panel'));
+ const tabs=el('div',undefined,'ui-tabs settings-tabs'),container=el('div',undefined,'settings-tab-container');
+ form.before(tabs);form.prepend(container);
+ const map={profile:el('div',undefined,'settings-pane'),widgets:el('div',undefined,'settings-pane'),security:el('div',undefined,'settings-pane')};
+ // Original order: personal details, dashboard widgets, password, optional admin linking.
+ panels.forEach((p,i)=>map[["profile","widgets","security","profile"][i]||'profile'].append(p));
+ for(const pane of Object.values(map))container.append(pane);
+ let current='profile';function activate(key){current=key;makeTabs(tabs,[['profile','Profil'],['widgets','Dashboard-Auswahl'],['security','Passwort & Sicherheit']],key,activate);for(const [name,pane] of Object.entries(map))pane.hidden=name!==key}
+ activate(current);
+}
+setupSettingsTabs();
+let trainingTab='games';function displayTrainingTab(kind){trainingTab=kind;makeTabs($('trainingTabs'),[['games','Trainingsspiele'],['tournaments','Trainingsturniere']],kind,displayTrainingTab);$('trainingPaneGames').hidden=kind!=='games';$('trainingPaneTournaments').hidden=kind!=='tournaments'}
+displayTrainingTab('games');
+const fullscreenButton=$('fullscreenToggle');function syncFullscreen(){const active=!!document.fullscreenElement;fullscreenButton.textContent=active?'⛶ Vollbild verlassen':'⛶ Vollbild';fullscreenButton.setAttribute('aria-pressed',String(active));document.body.classList.toggle('is-fullscreen',active)}
+fullscreenButton.onclick=async()=>{try{if(document.fullscreenElement){await document.exitFullscreen()}else if(document.documentElement.requestFullscreen){await document.documentElement.requestFullscreen()}else{notice('Dieser Browser unterstützt den Vollbildmodus hier nicht. Auf Mobilgeräten kann die App zum Startbildschirm hinzugefügt werden.',true)}}catch(e){notice('Vollbild konnte nicht aktiviert werden: '+e.message,true)}};
+document.addEventListener('fullscreenchange',syncFullscreen);syncFullscreen();
 const defaultDashboardWidgets=['open_matches','last10','ladder_rank','elo'];
 const widgetLabels={open_matches:'Offene Begegnungen',last10:'Bilanz letzte 10 Spiele',ladder_rank:'Platzierung Ladder',elo:'Aktueller ELO-Wert',competitions:'Aktive Wettbewerbe',average:'Ø Average',first9:'Ø First 9','180':'180er','95plus':'95+'};
 function portrait(playerId,large=false){const shell=el('span',undefined,'player-portrait'+(large?' portrait-large':''));
@@ -83,12 +109,34 @@ function configure(title,fields,submitText='Speichern'){
 async function approve(title,text){return !!await configure(title,[{name:'ack',label:text,type:'select',options:[['','Bitte wählen'],['yes','Ja, ausführen']],required:true}],'Bestätigen').then(x=>x?.ack==='yes')}
 const amAdmin=()=>user?.role==='admin';
 const trainingOwner=()=>selected?.competition?.kind==='training_tournament'&&selected?.competition?.created_by===user?.id;
-function section(name){for(const id of ['setup','login','changePassword','dashboard','settings','training','ladder','competitions','boards','members','statistics','admin','scorer'])$(id).hidden=id!==name;$('nav').hidden=!user||['login','setup','changePassword'].includes(name);for(const b of document.querySelectorAll('nav [data-view]')){b.classList.toggle('active',b.dataset.view===name);b.style.display=b.classList.contains('admin')&&!amAdmin()?'none':(b.dataset.view==='boards'&&user?.role==='member'?'none':'')}notice('')}
+function section(name){for(const id of ['setup','login','changePassword','dashboard','settings','training','ladder','competitions','boards','members','statistics','admin','scorer'])$(id).hidden=id!==name;$('nav').hidden=!user||['login','setup','changePassword'].includes(name);$('mobileMenu').hidden=$('nav').hidden;$('nav').classList.remove('mobile-open');$('mobileMenu').setAttribute('aria-expanded','false');for(const b of document.querySelectorAll('nav [data-view]')){b.classList.toggle('active',b.dataset.view===name);b.style.display=b.classList.contains('admin')&&!amAdmin()?'none':(b.dataset.view==='boards'&&user?.role==='member'?'none':'')}notice('')}
 async function session(){try{user=await api('/me');if(user.must_change_password){section('changePassword');return}section('dashboard');await show('dashboard')}catch{user=null;section('login')}}
-async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false)}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false);await Promise.all([loadOnlineSessions(),loadAuditLog(true),loadStatSources()])}}catch(e){notice(e.message,true)}}
+async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false);renderStatisticsProfiles();}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false);await Promise.all([loadOnlineSessions(),loadAuditLog(true),loadStatSources(),loadPasswordRequests()])}}catch(e){notice(e.message,true)}}
+$('mobileMenu').onclick=()=>{const expanded=$('nav').classList.toggle('mobile-open');$('mobileMenu').setAttribute('aria-expanded',String(expanded))};
 for(const b of document.querySelectorAll('nav [data-view]'))b.onclick=()=>show(b.dataset.view);
 $('firstAdmin').onclick=()=>section('setup');
 $('setupForm').onsubmit=async e=>{e.preventDefault();try{await api('/bootstrap',formData(e.target));section('login');notice('Administrator erstellt. Bitte anmelden.')}catch(err){notice(err.message,true)}};
+$('forgotPassword').onclick=async()=>{
+ const prefill=$('loginForm').elements.username.value||'';
+ const data=await configure('Passwort zurücksetzen',[
+  {name:'username',label:'Dein Benutzername',value:prefill,required:true}
+ ],'Anfrage senden');
+ if(!data)return;
+ try{await api('/password-reset/request',{username:data.username});notice('Anfrage übermittelt. Falls das Konto existiert, kann die Administration ein neues Startpasswort vergeben. Es wird dir persönlich mitgeteilt.')}catch(e){notice(e.message,true)}
+};
+async function loadPasswordRequests(){
+ const host=$('passwordRequests');if(!host)return;clear(host);
+ try{const result=await api('/admin/password-reset-requests');if(!result.items.length){host.append(el('p','Keine offenen Passwort-Anfragen.','helper'));return}
+  const table=el('div',undefined,'request-list');for(const item of result.items){const row=el('div',undefined,'request-row');row.append(el('strong',item.username),el('small',new Date(item.requested_at).toLocaleString('de-DE')));
+    row.append(action('Startpasswort vergeben',async()=>{
+      const values=await configure('Passwort zurücksetzen · '+item.username,[{name:'initial_password',label:'Neues Startpasswort (mindestens 12 Zeichen)',type:'password',required:true}], 'Zurücksetzen');
+      if(!values)return;if(values.initial_password.length<12)return notice('Mindestens 12 Zeichen erforderlich.',true);
+      if(!await approve('Passwortwechsel bestätigen','Alle bestehenden Sitzungen von '+item.username+' werden beendet. Das Startpasswort muss der Person persönlich mitgeteilt werden.'))return;
+      try{await api('/admin/password-reset-requests/'+item.id+'/complete',{initial_password:values.initial_password});await loadPasswordRequests();notice('Startpasswort für '+item.username+' vergeben. Bitte der Person persönlich mitteilen.')}catch(e){notice(e.message,true)}
+    },'subtle'));table.append(row)}host.append(table);
+ }catch(e){host.append(el('p','Passwort-Anfragen konnten nicht geladen werden: '+e.message,'helper'))}
+}
+$('refreshPasswordRequests').onclick=loadPasswordRequests;
 $('loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/login',formData(e.target));await session()}catch(err){notice(err.message,true)}};
 $('passwordForm').onsubmit=async e=>{e.preventDefault();try{await api('/password',formData(e.target));await session()}catch(err){notice(err.message,true)}};
 $('logout').onclick=async()=>{try{await api('/logout',{})}catch{}user=null;section('login')};
@@ -215,7 +263,7 @@ async function editMemberRole(player){
    notice('Rolle von '+player.display_name+' auf '+target+' geändert. Alle Sitzungen dieses Kontos wurden beendet.');}
  catch(e){notice(e.message,true)}
 }
-async function loadPlayers(){players=await api('/players');setAvatarMetadata(players);renderPlayers()}
+async function loadPlayers(){players=await api('/players');setAvatarMetadata(players);renderPlayers();if(!$('statistics').hidden)renderStatisticsProfiles()}
 async function newAccountForPlayer(player){
  if(!amAdmin())return notice('Nur Administratoren dürfen Konten vergeben.',true);
  if(player.username)return notice('Dieses Mitglied besitzt bereits ein Konto.',true);
@@ -231,26 +279,32 @@ async function newAccountForPlayer(player){
   await loadPlayers();notice('Zugang für '+player.display_name+' angelegt. Beim ersten Login muss das Passwort geändert werden.');}
  catch(e){notice(e.message,true)}
 }
+let memberBand='AF',memberPage=0;
 function renderPlayers(){
- const q=$('memberSearch').value.toLocaleLowerCase('de');const host=$('membersList');clear(host);
- for(const p of players.filter(p=>p.display_name.toLocaleLowerCase('de').includes(q))){
-  const t=el('article',undefined,'member-tile');
-  const top=el('div',undefined,'member-role-top');top.append(el('strong',p.display_name));
-  const role=p.username?(p.role||'member'):'none';
-  const caption={admin:'ADMIN',tournament:'TURNIERACCOUNT',member:'MITGLIED',none:'KEIN ZUGANG'}[role]||'UNBEKANNT';
-  const badge=el('span',caption,'member-role-badge role-'+role);badge.title='Vergebene Berechtigung: '+caption;
-  top.append(badge);t.append(top,el('small',p.username?'Benutzername: '+p.username:'Ohne Benutzerkonto'));
-  const foot=el('div',undefined,'member-actions');if(amAdmin()&&!p.username)foot.append(action('Zugang erstellen',()=>newAccountForPlayer(p),'primary'));
-  if(amAdmin()&&p.username){foot.append(action('Berechtigung ändern',()=>editMemberRole(p),'subtle'));
-    foot.append(el('span',p.is_enabled?'Zugang aktiv':'Zugang gesperrt','helper'));
-    foot.append(action(p.is_enabled?'Zugang deaktivieren':'Zugang reaktivieren',async()=>{
+ const term=$('memberSearch').value.trim().toLocaleLowerCase('de'),all=players.filter(p=>p.display_name.toLocaleLowerCase('de').includes(term));
+ const available=letterBands.filter(([key])=>all.some(p=>bandOf(p.display_name)===key));
+ if(!available.some(([key])=>key===memberBand))memberBand=available[0]?.[0]||'AF';
+ makeTabs($('memberAlphabet'),available.map(([k,label])=>[k,label+' ('+all.filter(p=>bandOf(p.display_name)===k).length+')']),memberBand,key=>{memberBand=key;memberPage=0;renderPlayers()});
+ const rows=all.filter(p=>bandOf(p.display_name)===memberBand).sort((a,b)=>a.display_name.localeCompare(b.display_name,'de'));
+ const per=window.innerHeight<800?6:window.innerHeight<950?9:12,max=Math.max(1,Math.ceil(rows.length/per));memberPage=Math.min(memberPage,max-1);
+ $('memberCount').textContent=all.length+' Profile · '+rows.length+' im Bereich';
+ makeTable($('membersList'),['Mitglied','Benutzername','Recht','Zugang','Aktionen'],rows.slice(memberPage*per,(memberPage+1)*per),(p)=>{
+  const tr=el('tr'),name=el('td');name.append(participantName(p.id,p.display_name));tr.append(name,el('td',p.username||'–'));
+  const role=p.username?(p.role||'member'):'none',caption={admin:'ADMIN',tournament:'TURNIERACCOUNT',member:'MITGLIED',none:'KEIN ZUGANG'}[role]||'UNBEKANNT';
+  const right=el('td'),badge=el('span',caption,'member-role-badge role-'+role);right.append(badge);tr.append(right);
+  tr.append(el('td',p.username?(p.is_enabled?'Aktiv':'Gesperrt'):'–'));
+  const actions=el('td'),box=el('div',undefined,'row-actions');
+  if(amAdmin()&&!p.username)box.append(action('Zugang erstellen',()=>newAccountForPlayer(p),'subtle'));
+  if(amAdmin()&&p.username){box.append(action('Recht ändern',()=>editMemberRole(p),'subtle'));
+    box.append(action(p.is_enabled?'Sperren':'Freigeben',async()=>{
       const desired=!p.is_enabled;
       if(!await approve('Kontozugang ändern',(desired?'Zugang von ':'Zugang für ')+p.display_name+(desired?' wieder aktivieren?':' deaktivieren? Das Mitglied wird auf allen Geräten abgemeldet.')))return;
       try{await api('/accounts/'+p.account_id,{is_enabled:desired});await loadPlayers();notice('Kontostatus geändert.')}catch(e){notice(e.message,true)}
     },'subtle'));
   }
-  t.append(foot);host.append(t)
- }
+  actions.append(box);tr.append(actions);return tr;
+ });
+ compactPager($('memberPager'),rows.length,memberPage,p=>{memberPage=p;renderPlayers()},per);
 }
 // Profile statistics inclusion and non-destructive reset. Admin access is enforced server-side.
 async function loadStatSources(){
@@ -299,7 +353,7 @@ $('statResetAll').onclick=async()=>{
  try{await api('/admin/stats-reset',{confirm:value.confirm});await loadStatSources();notice('Alle Profilstatistiken starten jetzt wieder bei null. Alte Spielresultate bleiben gespeichert.')}catch(e){notice(e.message,true)}
 };
 
-$('memberSearch').oninput=renderPlayers;
+$('memberSearch').oninput=()=>{memberPage=0;renderPlayers()};
 function fillPlayerSelect(id,blank){const host=$(id);clear(host);if(blank)host.append(new Option('Turnierkonto ohne Spieler',''));for(const p of players)host.append(new Option(p.display_name,p.id))}
 const roleLabels={member:'Mitglied',tournament:'Turnieraccount',admin:'Administrator'};
 let auditOffset=0;
@@ -362,7 +416,7 @@ async function loadAuditLog(reset=true){
 $('onlineRefresh').onclick=loadOnlineSessions;
 $('auditRefresh').onclick=()=>loadAuditLog(true);
 $('auditMore').onclick=()=>loadAuditLog(false);
-let competitionListTab='running';
+let competitionListTab='running',competitionListPage=0;
 async function loadCompetitions(){
  $('createCompetitionWizard').hidden=!amAdmin();
  competitions=await api('/competitions');const host=$('competitionsList');clear(host);
@@ -372,10 +426,10 @@ async function loadCompetitions(){
  const groups=[['planned','Geplante'],['running','Laufende'],['completed','Abgeschlossene']];
  const bucket=c=>['finished','archived','cancelled'].includes(c.status)?'completed':
    ['draft','planned','scheduled'].includes(c.status)?'planned':'running';
- const tabs=el('div',undefined,'competition-directory-tabs'),info=el('div',undefined,'competition-directory-info'),body=el('div',undefined,'competition-directory-body');
- host.append(tabs,info,body);
+ const tabs=el('div',undefined,'competition-directory-tabs'),info=el('div',undefined,'competition-directory-info'),body=el('div',undefined,'competition-directory-body'),pager=el('div',undefined,'compact-pager');
+ host.append(tabs,info,body,pager);
  const labels={draft:'Geplant',planned:'Geplant',scheduled:'Geplant',active:'Laufend',running:'Laufend',finished:'Abgeschlossen',archived:'Archiviert',cancelled:'Abgesagt'};
- function draw(){clear(body);clear(info);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===competitionListTab);
+ function draw(){clear(body);clear(info);clear(pager);for(const b of tabs.children)b.classList.toggle('selected',b.dataset.tab===competitionListTab);
   const rows=allowed.filter(c=>bucket(c)===competitionListTab).sort((a,b)=>{
    const aTime=a.starts_at||a.created_at||'',bTime=b.starts_at||b.created_at||'';
    return competitionListTab==='completed'?bTime.localeCompare(aTime):aTime.localeCompare(bTime);
@@ -384,14 +438,15 @@ async function loadCompetitions(){
   if(!rows.length){body.append(el('p','Keine Wettbewerbe in diesem Bereich.','empty'));return}
   const frame=el('div',undefined,'scroll competition-directory-scroll');const table=el('table',undefined,'data-table polished competition-directory-table');
   const thead=el('thead'),tr=el('tr');for(const title of ['Wettbewerb','Art','Teilnehmer','Beginn','Status',''])tr.append(el('th',title));thead.append(tr);table.append(thead);
-  const tbody=el('tbody');for(const c of rows){const line=el('tr');
+  const pageSize=window.innerHeight<800?6:9;competitionListPage=Math.min(competitionListPage,Math.max(0,Math.ceil(rows.length/pageSize)-1));
+  const tbody=el('tbody');for(const c of rows.slice(competitionListPage*pageSize,(competitionListPage+1)*pageSize)){const line=el('tr');
    const name=el('td');name.append(action(c.title,()=>openCompetition(c.id),'competition-directory-name'));line.append(name);
    line.append(el('td',kindNames[c.kind]||c.kind),el('td',String(c.players??0)),el('td',c.starts_at?new Date(c.starts_at).toLocaleDateString('de-DE'):'–'));
    const state=el('td');state.append(el('span',labels[c.status]||c.status,'competition-status '+bucket(c)));line.append(state);
    const controls=el('td');controls.append(action('Öffnen',()=>openCompetition(c.id),'subtle'));line.append(controls);tbody.append(line);
-  }table.append(tbody);frame.append(table);body.append(frame);
+  }table.append(tbody);frame.append(table);body.append(frame);compactPager(pager,rows.length,competitionListPage,n=>{competitionListPage=n;draw()},pageSize);
  }
- for(const [key,label] of groups){const b=action(label+' ('+allowed.filter(c=>bucket(c)===key).length+')',()=>{competitionListTab=key;draw()},'subtle');b.dataset.tab=key;tabs.append(b)}
+ for(const [key,label] of groups){const b=action(label+' ('+allowed.filter(c=>bucket(c)===key).length+')',()=>{competitionListTab=key;competitionListPage=0;draw()},'subtle');b.dataset.tab=key;tabs.append(b)}
  draw();
 }
 async function loadLadder(){
@@ -707,9 +762,16 @@ async function loadTraining(){
 
 $('previewOpen').onclick=async()=>{if(user?.role!=='admin')return;previewId=$('previewPlayer').value;await show('dashboard')};
 $('previewExit').onclick=async()=>{previewId=null;await show('dashboard')};$('previewBack').onclick=$('previewExit').onclick;
-async function loadBoards(){const boards=await api('/boards'),host=$('boardsList');clear(host);for(const b of boards){const t=el('article',undefined,'board '+(!b.enabled?'inactive':b.match_id?'busy':''));t.append(el('strong',b.label),el('p',!b.enabled?'Deaktiviert':b.match_id?'Belegt: '+b.competition:'Frei'));
+let boardBand=0;
+async function loadBoards(){const boards=await api('/boards'),host=$('boardsList');
+ const groups=[boards.slice(0,11),boards.slice(11,22)];if(boardBand>=groups.length)boardBand=0;
+ makeTabs($('boardTabs'),groups.map((g,i)=>[String(i),i===0?'Board 1–11':'Board 12–22']),String(boardBand),v=>{boardBand=Number(v);draw()});
+ function draw(){clear(host);makeTabs($('boardTabs'),groups.map((g,i)=>[String(i),i===0?'Board 1–11':'Board 12–22']),String(boardBand),v=>{boardBand=Number(v);draw()});
+ for(const b of groups[boardBand]){const t=el('article',undefined,'board '+(!b.enabled?'inactive':b.match_id?'busy':''));t.append(el('strong',b.label),el('p',!b.enabled?'Deaktiviert':b.match_id?'Belegt: '+b.competition:'Frei'));
  if(b.match_id&&user.role!=='member')t.append(action('Scorer öffnen',()=>openScorer(b.match_id),'primary'));
- if(amAdmin())t.append(action('Bearbeiten',async()=>{const d=await configure('Board '+b.id,[{name:'label',label:'Bezeichnung',value:b.label,required:true},{name:'enabled',type:'select',label:'Status',value:String(b.enabled),options:[['true','Aktiv'],['false','Deaktiviert']]}]);if(!d)return;try{await api('/boards/'+b.id,{label:d.label,enabled:d.enabled==='true'});await loadBoards()}catch(e){notice(e.message,true)}}));host.append(t)}}
+ if(amAdmin())t.append(action('Bearbeiten',async()=>{const d=await configure('Board '+b.id,[{name:'label',label:'Bezeichnung',value:b.label,required:true},{name:'enabled',type:'select',label:'Status',value:String(b.enabled),options:[['true','Aktiv'],['false','Deaktiviert']]}]);if(!d)return;try{await api('/boards/'+b.id,{label:d.label,enabled:d.enabled==='true'});await loadBoards()}catch(e){notice(e.message,true)}}));host.append(t)}
+ }draw();
+}
 const table=(headers,rows)=>{const outer=el('div',undefined,'scroll'),tab=el('table',undefined,'data-table'),head=el('thead'),tr=el('tr');for(const h of headers)tr.append(el('th',h));head.append(tr);tab.append(head);const tb=el('tbody');for(const row of rows){const line=el('tr');for(const val of row)line.append(el('td',String(val??'–')));tb.append(line)}tab.append(tb);outer.append(tab);return outer};
 const kindNames={league:'Stingray League',cup:'Stingray Cup',ladder:'Stingray Ladder',vm:'Vereinsmeisterschaft',training_tournament:'Trainingsturnier',final_tournament:'Finalrunde'};
 let competitionTab='table',schedulePage=0;
@@ -979,7 +1041,7 @@ async function openCompetition(id){
     function reset(){sessionStorage.setItem(scheduleKey(),JSON.stringify({group:g.value,player:p.value,status:status.value}));schedulePage=0;draw()}
     function draw(){clear(list);clear(pages);
       const matches=selected.matches.filter(m=>(!g.value||m.group_id===g.value)&&(!p.value||m.player1_id===p.value||m.player2_id===p.value)&&(!status.value||m.status===status.value));
-      const pageCount=Math.max(1,Math.ceil(matches.length/12));schedulePage=Math.max(0,Math.min(schedulePage,pageCount-1));
+      const pageCount=Math.max(1,Math.ceil(matches.length/8));schedulePage=Math.max(0,Math.min(schedulePage,pageCount-1));
       box.querySelector('.schedule-controls').setAttribute('data-total',String(matches.length));
       const sorted=matches.slice().sort((a,b)=>{
         const groupName=m=>selected.groups.find(g=>g.id===m.group_id)?.name||selected.phases.find(x=>x.id===m.phase_id)?.name||'Spiel';
@@ -990,7 +1052,7 @@ async function openCompetition(id){
       const table=el('table',undefined,'fixture-table');const head=el('thead');const heading=el('tr');
       for(const label of ['Gruppe / Phase','Runde','Spieler 1','Spieler 2','Ergebnis / Status','Aktionen'])heading.append(el('th',label));
       head.append(heading);table.append(head);const tbody=el('tbody');table.append(tbody);if(matches.length)list.append(table);
-      for(const m of sorted.slice(schedulePage*12,(schedulePage+1)*12)){
+      for(const m of sorted.slice(schedulePage*8,(schedulePage+1)*8)){
         const line=el('tr',undefined,'fixture-row '+m.status);const group=selected.groups.find(g=>g.id===m.group_id)?.name||selected.phases.find(x=>x.id===m.phase_id)?.name||'Spiel';
         line.append(el('td',group),el('td',m.round_number?'Runde '+m.round_number:'–'));
         const first=el('td');first.append(participantName(m.player1_id,names.get(m.player1_id)||'Spieler 1'));
@@ -1043,9 +1105,9 @@ async function openCompetition(id){
     draw();
   }
   function showParticipants(box){
-    const grid=el('div',undefined,'members-grid');
-    for(const entry of selected.entries){const item=el('article',undefined,'member-tile');item.append(participantName(entry.player_id,entry.display_name),el('small',entry.status==='withdrawn'?'Ausgetreten':'Aktiv'));grid.append(item)}
-    box.append(grid);
+    const heading=el('p',selected.entries.length+' angemeldete Teilnehmer','helper'),holder=el('div',undefined,'table-frame compact-table'),pager=el('div',undefined,'compact-pager');box.append(heading,holder,pager);
+    const entries=[...selected.entries].sort((a,b)=>a.display_name.localeCompare(b.display_name,'de'));let page=0;
+    function draw(){const per=window.innerHeight<800?6:window.innerHeight<950?9:12;makeTable(holder,['#','Teilnehmer','Status'],entries.slice(page*per,(page+1)*per),(e,i)=>{const tr=el('tr');tr.append(el('td',String(page*per+i+1)));const name=el('td');name.append(participantName(e.player_id,e.display_name));tr.append(name,el('td',e.status==='withdrawn'?'Ausgetreten':'Aktiv'));return tr;});compactPager(pager,entries.length,page,n=>{page=n;draw()},per)}draw();
   }
   function showLadderAdmin(box){
     box.append(el('p','Ladder-Verwaltung · Freie Matchvereinbarung, ELO und Finalqualifikation. Keine künstlichen Gruppen für die Vorrunde.','helper'));
@@ -1262,28 +1324,64 @@ $('backToCompetition').onclick=()=>selected?openCompetition(selected.competition
 const statsLabels={tournament_wins:'Turniersiege',tournament_seconds:'2. Plätze',tournament_thirds:'3. Plätze',matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_football_sessions:'Fußball',training_minigolf_sessions:'Minigolf',training_tictactoe_sessions:'Tic Tac Toe',training_connect4_sessions:'Vier gewinnt',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','100plus':'100+','140plus':'140+','171plus':'171+','95plus':'95+','133plus':'133+','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
 function multiplicities(values,ascending=false){const counts=new Map();for(const x of values||[])counts.set(String(x),(counts.get(String(x))||0)+1);return [...counts.entries()].sort((a,b)=>ascending?Number(a[0])-Number(b[0]):Number(b[0])-Number(a[0])).map(([value,n])=>n+'×'+value).join(' · ')||'–'}
 function statValue(k,v){if(Array.isArray(v))return multiplicities(v);if(v===null||v===undefined)return '–';if(typeof v==='number')return String(v).replace('.',',');return String(v)}
+let statProfileId=null,statProfileBand='AF',statProfilePage=0,statDetailTab='balance';
+const statScopes=[['overall','Gesamt'],['training_tournament','Training'],['league','League'],['cup','Cup'],['ladder','Ladder'],['vm','Vereinsmeisterschaft']];
+function renderStatisticsProfiles(){
+ const term=$('statsProfileSearch').value.trim().toLocaleLowerCase('de'),all=players.filter(p=>p.display_name.toLocaleLowerCase('de').includes(term));
+ const available=letterBands.filter(([k])=>all.some(p=>bandOf(p.display_name)===k));
+ if(!available.some(([k])=>k===statProfileBand))statProfileBand=available[0]?.[0]||'AF';
+ makeTabs($('statsAlphabet'),available.map(([k,label])=>[k,label+' ('+all.filter(p=>bandOf(p.display_name)===k).length+')']),statProfileBand,k=>{statProfileBand=k;statProfilePage=0;renderStatisticsProfiles()});
+ const rows=all.filter(p=>bandOf(p.display_name)===statProfileBand).sort((a,b)=>a.display_name.localeCompare(b.display_name,'de'));
+ const per=window.innerHeight<800?6:window.innerHeight<950?9:12,max=Math.max(1,Math.ceil(rows.length/per));statProfilePage=Math.min(statProfilePage,max-1);
+ $('statsProfileCount').textContent=all.length+' Profile · Profil antippen für Details';
+ makeTable($('statsProfiles'),['Spielerprofil','Status','Statistik'],rows.slice(statProfilePage*per,(statProfilePage+1)*per),p=>{
+  const tr=el('tr');if(p.id===statProfileId)tr.className='selected-profile';
+  const name=el('td');name.append(participantName(p.id,p.display_name));tr.append(name,el('td',p.is_active?'Aktiv':'Inaktiv'));
+  const cell=el('td');cell.append(action('Anzeigen',()=>openProfileStats(p.id),'subtle'));tr.append(cell);return tr;
+ });
+ compactPager($('statsProfilePager'),rows.length,statProfilePage,p=>{statProfilePage=p;renderStatisticsProfiles()},per);
+}
+async function openProfileStats(id){
+ statProfileId=id;$('statPlayer').value=id;$('statsDetail').hidden=false;$('statistics').classList.add('detail-open');
+ $('statsSelectedTitle').textContent='Statistik · '+(players.find(p=>p.id===id)?.display_name||'Profil');
+ renderStatisticsProfiles();renderStatScopeTabs();await loadProfileStatistics();
+}
+function renderStatScopeTabs(){const kind=$('statKind').value;makeTabs($('statsKindTabs'),statScopes,kind,async value=>{$('statKind').value=value;renderStatScopeTabs();statDetailTab='balance';await loadProfileStatistics()})}
+let statLoadingId=0;
+async function loadProfileStatistics(){const seq=++statLoadingId;const pid=$('statPlayer').value,kind=$('statKind').value;
+ if(!pid)return;const host=$('statsResult');clear(host);host.append(el('p','Statistik wird geladen …','helper'));
+ try{const [s,h,podium]=await Promise.all([api('/players/'+pid+'/stats?kind='+kind),api('/players/'+pid+'/h2h?kind='+kind),kind==='overall'?api('/players/'+pid+'/podiums'):Promise.resolve(null)]);
+  if(seq!==statLoadingId)return;if(podium){s.podiums=podium;s.tournament_wins=podium.wins;s.tournament_seconds=podium.second;s.tournament_thirds=podium.third}
+  statisticsPanels(host,s,h,kind);
+ }catch(e){if(seq===statLoadingId)notice(e.message,true)}
+}
 function statisticsPanels(host,stats,h2h,scope){
  clear(host);host.className='stats-dashboard';
- const show=(key)=>stats[key]!==null&&stats[key]!==undefined;
- const pretty=(key)=>statValue(key,stats[key]);
- function panel(title,classname='') {const p=el('section',undefined,'stat-block '+classname);p.append(el('h3',title));host.append(p);return p}
- function cards(p,keys){const grid=el('div',undefined,'stat-cards');for(const k of keys){if(!show(k))continue;
-   const card=el('article',undefined,'stat-card');card.append(el('span',statsLabels[k]||k),el('strong',pretty(k)));grid.append(card)}p.append(grid)}
- cards(panel('Spielbilanz','stat-wide'),['matches','wins','draws','losses','legs_for','legs_against']);
- cards(panel('Durchschnitt & Aufnahmen','stat-wide'),['average','first9','scored_visits','missing_throw_stats_matches']);
- cards(panel('Scoring & Specials','stat-wide'),['95plus','100plus','133plus','exact133','140plus','171plus','180','bullfinishes']);
- const best=panel('Bestleistungen im Detail','stat-wide');
+ const tabs=el('div',undefined,'ui-tabs stat-detail-tabs');host.append(tabs);
+ const blocks=el('div',undefined,'stat-panels');host.append(blocks);
+ const show=key=>stats[key]!==null&&stats[key]!==undefined;
+ const pretty=key=>statValue(key,stats[key]);
+ function panel(title,tab){const p=el('section',undefined,'stat-block stat-wide');p.dataset.statPane=tab;p.append(el('h3',title));blocks.append(p);return p}
+ function cards(p,keys){const grid=el('div',undefined,'stat-cards');for(const k of keys){if(!show(k))continue;const card=el('article',undefined,'stat-card');card.append(el('span',statsLabels[k]||k),el('strong',pretty(k)));grid.append(card)}p.append(grid)}
+ cards(panel('Spielbilanz','balance'),['matches','wins','draws','losses','legs_for','legs_against']);
+ cards(panel('Durchschnitt & Aufnahmen','average'),['average','first9','scored_visits','missing_throw_stats_matches']);
+ cards(panel('Scoring & Specials','scoring'),['95plus','100plus','133plus','exact133','140plus','171plus','180','bullfinishes']);
+ const best=panel('Bestleistungen im Detail','best');
  for(const [label,k] of [['Highfinishes','highfinish_details'],['Lowdarts','lowdart_details'],['Bullfinishes','bullfinish_details'],['Highscores','highscores']]){
   if(!show(k))continue;const row=el('div',undefined,'stat-detail-row');row.append(el('b',label),el('span',multiplicities(stats[k])));best.append(row)}
- if(scope==='overall'||scope==='training_tournament')cards(panel('Training','stat-wide'),['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions','training_football_sessions','training_minigolf_sessions','training_tictactoe_sessions','training_connect4_sessions']);
- if(stats.podiums){const p=panel('Turniererfolge','stat-wide');cards(p,['tournament_wins','tournament_seconds','tournament_thirds']);}
- const h=panel('Head to Head','stat-wide');
+ if(scope==='overall'||scope==='training_tournament')cards(panel('Training','training'),['training_sau_sessions','training_sau_success','training_sau_marks','training_bobs_sessions','training_bobs_best','training_tug_sessions','training_football_sessions','training_minigolf_sessions','training_tictactoe_sessions','training_connect4_sessions']);
+ if(stats.podiums)cards(panel('Turniererfolge','podiums'),['tournament_wins','tournament_seconds','tournament_thirds']);
+ const h=panel('Head to Head','h2h');
  if(!h2h.length)h.append(el('p','Noch keine direkten Duelle in diesem Bereich.'));
  else{const list=el('div',undefined,'h2h-rows');for(const o of h2h){const row=el('div',undefined,'h2h-row');row.append(el('b',o.opponent),el('span',o.played+' Spiele'),el('span',o.wins+' S · '+o.draws+' U · '+o.losses+' N'),el('span',o.legs_for+':'+o.legs_against+' Legs'));list.append(row)}h.append(list)}
+ const nav=[['balance','Bilanz'],['average','Averages'],['scoring','Scoring'],['best','Bestleistungen'],['training','Training'],['podiums','Erfolge'],['h2h','Head-to-Head']].filter(([k])=>blocks.querySelector('[data-stat-pane="'+k+'"]'));
+ if(!nav.some(([k])=>k===statDetailTab))statDetailTab='balance';
+ function activate(tab){statDetailTab=tab;makeTabs(tabs,nav,tab,activate);for(const p of blocks.children)p.hidden=p.dataset.statPane!==tab}
+ activate(statDetailTab);
 }
-$('statsLoad').onclick=async()=>{try{const pid=$('statPlayer').value,kind=$('statKind').value,s=await api('/players/'+pid+'/stats?kind='+kind),h=await api('/players/'+pid+'/h2h?kind='+kind);
- if(kind==='overall'){const podium=await api('/players/'+pid+'/podiums');s.podiums=podium;s.tournament_wins=podium.wins;s.tournament_seconds=podium.second;s.tournament_thirds=podium.third;}
- statisticsPanels($('statsResult'),s,h,kind)}catch(e){notice(e.message,true)}};
+$('statsBackToProfiles').onclick=()=>{$('statistics').classList.remove('detail-open');$('statsDetail').hidden=true};
+$('statsProfileSearch').oninput=()=>{statProfilePage=0;renderStatisticsProfiles()};
+$('statsLoad').onclick=loadProfileStatistics;
 $('memberForm').onsubmit=async e=>{e.preventDefault();if(!amAdmin())return;try{await api('/players',formData(e.target));e.target.reset();await loadPlayers();notice('Mitglied erstellt')}catch(err){notice(err.message,true)}};
 $('accountForm').onsubmit=async e=>{e.preventDefault();try{await api('/accounts',formData(e.target));e.target.reset();notice('Konto erstellt. Erstpasswort nur direkt an die betreffende Person weitergeben.')}catch(err){notice(err.message,true)}};
 const migrationPanel=el('div',undefined,'panel');migrationPanel.append(el('h2','Vorhandene League und Profile übernehmen'),el('p','Übernahme erfolgt ausdrücklich als Kopie nach Neon. Die alte League bleibt unverändert.'));migrationPanel.append(btn('Aktive Google-Sheets-Profile nach Neon kopieren',async()=>{if(!await approve('Profile importieren','Aktive Profile nach Neon kopieren?'))return;try{const result=await api('/legacy/sync-profiles',{});notice(result.synced_active_profiles+' Profile kopiert');await loadPlayers()}catch(e){notice(e.message,true)}}));migrationPanel.append(btn('League-Migration: Vorschau',async()=>{try{const result=await api('/legacy/preview');if(!result.leagues.length){notice('Keine alten Liga-Snapshots gefunden');return}const d=await configure('League-Kopie nach Neon',[{name:'legacy_id',label:'Quellliga',type:'select',required:true,options:result.leagues.map(l=>[l.legacy_id,l.name+' ('+l.completed+'/'+l.fixtures+' gespielt)'])}],'Kopie prüfen');if(!d)return;

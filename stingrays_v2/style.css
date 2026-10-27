@@ -346,3 +346,69 @@ button.primary:hover,.primary:hover{background:linear-gradient(130deg,#aa8539,#7
 .stat-reset-area{margin-top:28px;padding:18px;border:1px solid #b86e6e;background:#34272a;border-radius:10px}
 .stat-reset-area h3{margin-top:0}
 @media(max-width:600px){.stat-source-row{align-items:flex-start;flex-direction:column}.stat-source-switch{width:100%;justify-content:flex-end}}
+
+/* 2026-10-27: Compact tabbed workstation, no document-length lists */
+html,body{height:100%;min-height:0}body{height:100dvh;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+header{flex:none;padding:7px max(12px,calc((100vw - 1450px)/2));gap:9px;min-height:58px}
+header .brand-graphic{height:44px;width:48px}.brand-type strong{font-size:17px}.brand-kicker{font-size:9px}.brand-type small{font-size:10px}
+header nav{gap:3px;flex:1;justify-content:flex-end}header nav button{padding:7px 9px;min-height:34px;font-size:12px}
+.fullscreen-toggle{margin-left:auto;white-space:nowrap;padding:7px 10px;font-size:12px;background:#2d2c2b;border-color:#aa8c46}
+main{box-sizing:border-box;flex:1;min-height:0;width:100%;max-width:1600px;overflow:hidden;display:flex;flex-direction:column;padding:8px 14px;margin:0 auto}
+main>#message{flex:0 0 auto;max-height:66px;overflow:auto}
+main>section:not([hidden]){min-height:0;max-height:100%;overflow-y:auto;overflow-x:hidden;flex:1;scrollbar-width:thin;overscroll-behavior:contain}
+main>#login:not([hidden]),main>#setup:not([hidden]),main>#changePassword:not([hidden]){flex:0 1 auto;max-height:100%;overflow:auto;align-self:center;margin:10px auto;min-width:min(500px,100%)}
+.build-stamp{display:none!important}
+.ui-tabs{display:flex;gap:5px;align-items:center;overflow-x:auto;overflow-y:hidden;padding:4px 0 9px;margin:4px 0 9px;scrollbar-width:thin;flex:none}
+.ui-tab{white-space:nowrap;flex:0 0 auto;border:1px solid #756446;background:#28292b;color:#ddd4c4;border-radius:8px;padding:9px 15px;font-weight:700;min-height:38px}
+.ui-tab.selected,.ui-tab[aria-selected=true]{border-color:#e2bc63;background:#604820;color:#fff}
+.ui-pane[hidden],.stat-block[hidden]{display:none!important}
+.dashboard-pane{padding-bottom:8px}.dash-hero{padding:9px 16px;margin:0 0 9px}.dash-hero-actions{margin-top:9px}.dash-portrait{width:70px;height:70px}.dash-intro h1{font-size:clamp(16px,2vw,23px);margin:3px 0}.dash-date{font-size:12px}
+.dash-columns{gap:10px}.dash-group{padding:12px!important}.dash-group h2{margin:0 0 8px!important}.dash-section-title{margin:10px 0}.dash-kpis{gap:9px}.dash-kpi{min-height:80px;padding:10px}.dash-footer{padding:6px 0;margin:0}
+#dashboardLive .live-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr))}
+.list-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:5px 0}.list-top input{width:min(400px,100%);min-height:38px;margin:0}.alphabet-tabs{margin:8px 0}
+.compact-table{margin:0!important;overflow-x:auto;max-height:none}.density-table{width:100%;min-width:580px;border-collapse:collapse}.density-table th{padding:8px 10px;font-size:12px}.density-table td{padding:6px 10px;font-size:13px;white-space:nowrap}.density-table .participant-name>span:last-child{white-space:nowrap}.density-table .player-portrait{width:25px;height:25px;min-width:25px}
+.density-table tbody tr.selected-profile{background:#514225}.row-actions{display:flex;gap:5px;flex-wrap:nowrap}.row-actions button{padding:5px 8px;font-size:11px;white-space:nowrap}
+.compact-pager{display:flex;justify-content:center;align-items:center;gap:15px;margin:8px 0}.compact-pager button{padding:6px 12px}.compact-pager span{font-size:13px}
+.stats-detail{border-top:1px solid #6c583a;margin-top:10px;padding-top:10px}.stats-detail h2{margin:0 0 7px;font-size:19px}.stat-detail-tabs{margin:0 0 8px}.stat-panels>.stat-block{padding:12px!important}.stat-cards{grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}
+.request-list{display:grid;gap:8px}.request-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;border:1px solid #675839;padding:9px;border-radius:7px}.request-row small{color:#bfb6a7}.login-utilities{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+#competitionDetail .competition-header{padding-bottom:8px;gap:8px}#competitionDetail .competition-tabs{margin:8px 0}#competitionDetail .competition-tabs button{padding:9px 12px}#competitionDetail .competition-content{min-height:0}
+#admin .v2-admin-nav{margin:4px 0 8px!important;padding-bottom:7px!important}#admin .v2-admin-pane{align-items:start!important}
+@media(max-width:950px){header{flex-wrap:wrap}header nav{flex:0 0 100%;justify-content:flex-start;overflow-x:auto;flex-wrap:nowrap}header nav button{flex:0 0 auto}header .brand-identity{min-width:0}header .brand-type small{display:none}}
+@media(max-width:600px){main{padding:6px 8px}header{padding:5px 9px}header .brand-graphic{width:37px;height:35px}header .brand-type strong{font-size:15px}.fullscreen-toggle{padding:6px 9px}.dash-hero{gap:6px;padding:8px}.dash-hero-actions button{min-height:35px;padding:6px;font-size:11px}.dash-portrait{width:54px;height:54px}.dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.list-top{flex-direction:column;align-items:stretch}.list-top input{width:100%}.ui-tab{padding:7px 10px;font-size:12px}.density-table{min-width:540px}}
+
+/* Switch statistics from directory to a single-screen profile detail */
+#statistics.detail-open>.list-top,#statistics.detail-open>#statsAlphabet,#statistics.detail-open>#statsProfiles,#statistics.detail-open>#statsProfilePager{display:none!important}
+#statistics.detail-open>.stats-detail{border:0;margin:0;padding:0}
+.stats-detail-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.stats-detail-top button{padding:7px 12px}.stat-detail-tabs{margin-bottom:5px}
+
+.settings-pane[hidden],.training-pane[hidden]{display:none!important}
+.settings-tab-container{min-width:0}.settings-tabs{margin:4px 0 10px}.settings-pane>.panel{margin:0 0 10px}.settings-pane .settings-fields{gap:9px}.settings-submit{margin:9px 0}
+#trainingPaneGames .training-options{grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:9px}#trainingPaneGames .tile{min-height:105px;padding:12px}#trainingPaneGames .tile strong{font-size:16px}#trainingPaneGames .tile small{font-size:12px}
+#boardsList.boardgrid{grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:8px}#boardsList .board{min-height:94px;padding:12px}
+#competitionDetail .schedule-table-wrap{margin:5px 0}#competitionDetail .fixture-table td{padding:6px 8px}
+@media(max-width:780px){#trainingPaneGames .training-options{grid-template-columns:repeat(2,minmax(0,1fr))}#trainingPaneGames .tile{min-height:100px;padding:8px}}
+/* Respect the HTML hidden attribute on all controls, including select and button. */
+[hidden]{display:none!important}
+
+/* A compact, overlay-based mobile menu instead of a scrolling browser-width navbar. */
+#mobileMenu{display:none;margin-left:0;font-size:12px;padding:7px 10px;white-space:nowrap;background:#33302b;border:1px solid #a78b55}
+@media(max-width:950px){
+ header{position:relative;z-index:10;align-items:center;justify-content:space-between}
+ header .brand-identity{flex:1;min-width:0}
+ #mobileMenu:not([hidden]){display:inline-flex;align-items:center}
+ header nav:not([hidden]){display:none}
+ header nav:not([hidden]).mobile-open{display:grid;position:absolute;left:5px;right:5px;top:100%;width:auto;z-index:100;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:10px;background:#19191a;border:1px solid #a58a4f;border-radius:0 0 12px 12px;box-shadow:0 18px 28px #000a;max-height:calc(100dvh - 70px);overflow:auto}
+ header nav:not([hidden]).mobile-open button{display:block!important;padding:9px 5px;min-width:0;min-height:43px;white-space:normal;font-size:11px}
+}
+@media(max-width:600px){
+ #membersList .density-table,#statsProfiles .density-table,.competition-content .density-table{min-width:0!important}
+ #membersList .density-table tr>:nth-child(2),#membersList .density-table tr>:nth-child(4),#statsProfiles .density-table tr>:nth-child(2){display:none}
+ #membersList .density-table td,#membersList .density-table th,#statsProfiles .density-table td,#statsProfiles .density-table th{padding:6px 5px!important;font-size:11px!important}
+ #membersList .member-role-badge{font-size:9px!important;padding:3px 5px!important}
+ #membersList .row-actions{gap:3px;flex-wrap:wrap}
+ #membersList .row-actions button{font-size:10px;padding:4px 5px;line-height:1.2}
+ #membersList .participant-name,#statsProfiles .participant-name{gap:3px}
+ #membersList .participant-name>span:last-child,#statsProfiles .participant-name>span:last-child{white-space:normal!important;word-break:break-word;max-width:112px}
+ #statsProfiles button{padding:5px 7px;font-size:11px}
+}

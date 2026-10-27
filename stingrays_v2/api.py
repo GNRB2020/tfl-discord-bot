@@ -164,6 +164,47 @@ async def login(req):
     result.set_cookie(COOKIE,raw,httponly=True,secure=True,samesite='Strict',max_age=43200,path='/dart/v2')
     return result
 
+# Account recovery: request from login, administrator issues a one-time initial password.
+# No email delivery is configured; never reset a password based only on a username.
+async def password_reset_request(req):
+    d=await body(req)
+    name=str(d.get('username','')).strip()[:80]
+    if len(name)>=3:
+        async with pool(req).acquire() as db:
+            await db.execute(f"""INSERT INTO {SCHEMA}.password_reset_requests(account_id)
+                SELECT a.id FROM {SCHEMA}.accounts a
+                WHERE lower(a.username)=lower($1) AND a.is_enabled=true
+                AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.password_reset_requests r
+                  WHERE r.account_id=a.id AND r.completed_at IS NULL)
+                ON CONFLICT DO NOTHING""",name)
+    # Identical response for existing and unknown users (prevent account enumeration).
+    await asyncio.sleep(.35)
+    return response({'ok':True})
+
+async def admin_password_reset_requests(req):
+    await actor(req,'admin')
+    async with pool(req).acquire() as db:
+        rows=await db.fetch(f"""SELECT r.id,r.requested_at,a.username
+               FROM {SCHEMA}.password_reset_requests r JOIN {SCHEMA}.accounts a ON a.id=r.account_id
+               WHERE r.completed_at IS NULL ORDER BY r.requested_at DESC LIMIT 100""")
+    return response({'items':list(map(dict,rows))})
+
+async def admin_complete_password_reset(req):
+    admin=await actor(req,'admin');data=await body(req);rid=uid(req.match_info['rid'])
+    try:hashed=hash_password(str(data.get('initial_password','')))
+    except ValueError as e:raise web.HTTPBadRequest(text=str(e))
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        rec=await db.fetchrow(f"""SELECT id,account_id FROM {SCHEMA}.password_reset_requests
+             WHERE id=$1 AND completed_at IS NULL FOR UPDATE""",rid)
+        if not rec:raise web.HTTPNotFound(text='Anfrage nicht mehr offen')
+        await db.execute(f"UPDATE {SCHEMA}.accounts SET password_hash=$2,must_change_password=true WHERE id=$1",rec['account_id'],hashed)
+        await db.execute(f"UPDATE {SCHEMA}.sessions SET revoked_at=now() WHERE account_id=$1",rec['account_id'])
+        await db.execute(f"UPDATE {SCHEMA}.password_reset_requests SET completed_at=now(),handled_by=$2 WHERE id=$1",rid,admin['id'])
+        await db.execute(f"""INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id)
+             VALUES($1,'reset_password','account',$2)""",admin['id'],str(rec['account_id']))
+    return response({'ok':True})
+
 async def logout(req):
     await body(req)
     token=req.cookies.get(COOKIE,'')
@@ -2025,6 +2066,9 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/legacy/sync-profiles',sync_legacy_profiles),
       ('POST','/dart/v2/api/legacy/import',import_legacy),('POST','/dart/v2/api/bootstrap',bootstrap),
       ('POST','/dart/v2/api/login',login),('POST','/dart/v2/api/logout',logout),
+      ('POST','/dart/v2/api/password-reset/request',password_reset_request),
+      ('GET','/dart/v2/api/admin/password-reset-requests',admin_password_reset_requests),
+      ('POST','/dart/v2/api/admin/password-reset-requests/{rid}/complete',admin_complete_password_reset),
       ('GET','/dart/v2/api/me',me),('POST','/dart/v2/api/password',password),
       ('GET','/dart/v2/api/dashboard',overview),('GET','/dart/v2/api/profile',profile_settings),
       ('POST','/dart/v2/api/profile',save_profile_settings),('POST','/dart/v2/api/profile/avatar',save_avatar),
