@@ -63,7 +63,6 @@ def render(division, rows):
     ).set_footer(text=f'{MARKER}{division} | Stand: {now} Uhr | Aktualisierung alle 15 Minuten')
 
 
-
 def calculate_coop(rows):
     """Coop-Wertung: Siege 2, Remis 1, Niederlagen 0; Kader steht in Spalte N."""
     teams = {}
@@ -141,11 +140,35 @@ async def find_message(channel, bot_id, division):
     return None
 
 
+
+# TFL_WEB_STANDINGS_EXPORT_V1
+import os
+import json
+import urllib.request
+
+def publish_web_standings(tables):
+    base = os.getenv('TFL_API_URL', '').rstrip('/')
+    token = os.getenv('TFL_WEB_TOKEN', '')
+    if not base or not token or not base.startswith('https://'):
+        LOG.warning('TFL Website-Export deaktiviert: TFL_API_URL / TFL_WEB_TOKEN fehlen')
+        return
+    try:
+        raw = json.dumps({'tables': tables}, ensure_ascii=False).encode('utf-8')
+        req = urllib.request.Request(base + '/api/update/web/standings', data=raw,
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token}, method='POST')
+        with urllib.request.urlopen(req, timeout=10) as response:
+            LOG.info('TFL Website-Snapshot übertragen: %s', response.status)
+    except Exception:
+        LOG.exception('TFL Website-Snapshot konnte nicht übertragen werden')
+
 async def refresh(client, workbook):
+    tables_for_web = {}
+    now_web = datetime.now(ZoneInfo('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')
     channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
     for div in range(1, 7):
         try:
             rows = await asyncio.to_thread(get_all_values_cached, lambda d=div: workbook.worksheet(f'{d}.DIV'), sheet_name=f'{div}.DIV', ttl_seconds=840)
+            tables_for_web[f'division-{div}'] = {'title': f'Division {div}', 'items': calculate(rows), 'updated_at': now_web}
             embed = render(div, rows)
             msg = await find_message(channel, client.user.id, div)
             if msg:
@@ -157,6 +180,7 @@ async def refresh(client, workbook):
     for group in COOP_GROUPS:
         try:
             rows = await asyncio.to_thread(get_all_values_cached, lambda g=group: workbook.worksheet(g), sheet_name=group, ttl_seconds=840)
+            tables_for_web[f'coop-{group[-1].lower()}'] = {'title': f'Coop League – Gruppe {group[-1]}', 'items': calculate_coop(rows), 'updated_at': now_web}
             embed = render_coop(group, rows)
             msg = await find_coop_message(channel, client.user.id, group)
             if msg:
@@ -165,6 +189,8 @@ async def refresh(client, workbook):
                 await channel.send(embed=embed)
         except Exception:
             LOG.exception('Fehler bei Coop-Gruppe %s', group)
+    if tables_for_web:
+        await asyncio.to_thread(publish_web_standings, tables_for_web)
 
 
 async def division_table_loop(client, workbook):

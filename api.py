@@ -457,8 +457,39 @@ async def update_tfnl_results(request):
 # =========================================================
 # START SERVER
 # =========================================================
+
+# TFL Website: Tabellen-Snapshot ohne zusätzliche Sheets-Zugriffe
+WEB_STANDINGS = {}
+
+async def get_web_standings(request):
+    key = request.query.get('competition', '')
+    if key not in [f'division-{i}' for i in range(1, 7)] + ['coop-a', 'coop-b']:
+        return web.json_response({'error': 'unknown competition'}, status=400)
+    result = WEB_STANDINGS.get(key)
+    if not result:
+        return web.json_response({'items': [], 'title': key, 'status': 'waiting'})
+    return web.json_response(result)
+
+async def update_web_standings(request):
+    import hmac
+    expected = os.getenv('TFL_WEB_TOKEN', '')
+    provided = request.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+    if not expected or not hmac.compare_digest(expected, provided):
+        return web.json_response({'error': 'unauthorized'}, status=401)
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get('tables'), dict):
+        return web.json_response({'error': 'invalid payload'}, status=400)
+    allowed = [f'division-{i}' for i in range(1, 7)] + ['coop-a', 'coop-b']
+    for key, val in body['tables'].items():
+        if key in allowed and isinstance(val, dict) and isinstance(val.get('items'), list) and len(val['items']) <= 100:
+            WEB_STANDINGS[key] = {k: val.get(k) for k in ('title', 'items', 'updated_at')}
+    CACHE['web_standings'] = WEB_STANDINGS.copy()
+    save_cache()
+    return web.json_response({'status': 'ok', 'count': len(WEB_STANDINGS)})
+
 async def start():
     load_cache()
+    WEB_STANDINGS.update(CACHE.get("web_standings", {}))
 
     # CORS MIDDLEWARE
     @web.middleware
@@ -477,6 +508,8 @@ async def start():
 
     # Public GET Routes
     app.router.add_get("/health", health)
+    app.router.add_get("/api/web/standings", get_web_standings)
+    app.router.add_post("/api/update/web/standings", update_web_standings)
     app.router.add_get("/api/upcoming", get_upcoming)
     app.router.add_get("/api/results", get_results)
     app.router.add_get("/api/results-db", get_results_db)
@@ -498,7 +531,6 @@ async def start():
     register_dartmarathon(app)
     register_dart_render_preview(app)
     register_stingrays_v2(app)
-
 
     port = int(os.getenv("PORT", "10000"))
     print(f"[API] STARTING on port {port}")
