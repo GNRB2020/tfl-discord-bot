@@ -495,19 +495,23 @@ async function guidedCompetitionSetup(cid,detail){
  if((detail?.phases||[]).length)return notice('Dieser Wettbewerb enthält bereits Phasen. Bestehende Spiele und Ergebnisse werden nicht überschrieben.',true);
  if(entries.length<4)return notice('Für eine Gruppenrunde sind mindestens vier Teilnehmer nötig.',true);
  const count=entries.length;
- const start=await configure('Turnierassistent · 1/4 · Gruppenrunde',[
+ const isCup=detail?.competition?.kind==='cup';
+ const fixedCupRules={start_score:501,mode:'sets',max_legs:5,best_of_sets:5,best_of_legs_per_set:5,double_out:true,allow_draw:false};
+ const start=await configure(isCup?'Stingray Cup · Gruppen auslosen · Bo5 Sets / Bo5 Legs':'Turnierassistent · 1/4 · Gruppenrunde',[
   {name:'group_count',label:'Wie viele Gruppen sollen ausgelost werden?',type:'number',min:1,max:Math.min(50,Math.floor(count/2)),value:Math.min(Math.max(2,Math.ceil(count/6)),Math.floor(count/2)),required:true},
-  {name:'mode',label:'Wie wird in der Gruppe gespielt?',type:'select',options:[['legs','Best of X Legs'],['sets','Best of X Sets']]},
-  {name:'max_legs',label:'Gruppenspiele · Best of X Legs',type:'number',min:1,max:101,value:6,required:true,when:['mode','legs']},
-  {name:'best_of_sets',label:'Gruppenspiele · Best of X Sets',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']},
-  {name:'best_of_legs_per_set',label:'Legs je Set · Best of X',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']},
+  ...(!isCup?[
+    {name:'mode',label:'Wie wird in der Gruppe gespielt?',type:'select',options:[['legs','Best of X Legs'],['sets','Best of X Sets']]},
+    {name:'max_legs',label:'Gruppenspiele · Best of X Legs',type:'number',min:1,max:101,value:6,required:true,when:['mode','legs']},
+    {name:'best_of_sets',label:'Gruppenspiele · Best of X Sets',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']},
+    {name:'best_of_legs_per_set',label:'Legs je Set · Best of X',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']}
+  ]:[]),
   {name:'double_round',label:'Begegnungen in der Gruppe',type:'select',options:[['no','Jeder gegen jeden (1×)'],['yes','Hin- und Rückrunde (2×)']]}
  ],'Weiter zu den Folgerunden');
  if(!start)return;
  const n=Number(start.group_count), minGroup=Math.floor(count/n);
  if(!Number.isInteger(n)||n<1||n>Math.floor(count/2))return notice('Gruppenanzahl muss mindestens zwei Teilnehmer je Gruppe erlauben.',true);
- const groupRules={start_score:501,mode:start.mode,max_legs:Number(start.max_legs||6),best_of_sets:Number(start.best_of_sets||3),best_of_legs_per_set:Number(start.best_of_legs_per_set||3)};
- if(start.mode==='sets'&&(groupRules.best_of_sets%2===0||groupRules.best_of_legs_per_set%2===0))return notice('Bei Setmodus müssen Best-of-Sets und Best-of-Legs je Set ungerade sein.',true);
+ const groupRules=isCup?{...fixedCupRules}:{start_score:501,mode:start.mode,max_legs:Number(start.max_legs||6),best_of_sets:Number(start.best_of_sets||3),best_of_legs_per_set:Number(start.best_of_legs_per_set||3)};
+ if(!isCup&&start.mode==='sets'&&(groupRules.best_of_sets%2===0||groupRules.best_of_legs_per_set%2===0))return notice('Bei Setmodus müssen Best-of-Sets und Best-of-Legs je Set ungerade sein.',true);
  const more=await configure('Turnierassistent · 2/4 · Qualifikation',[
   {name:'follow',label:'Gibt es eine weitere Spielrunde?',type:'select',options:[['yes','Ja, Hauptrunde'],['no','Nein, Gruppenrunde ist das Finale']],value:'yes'},
   {name:'qualifiers',label:'Wie viele je Gruppe kommen sicher weiter?',type:'number',min:1,max:minGroup,value:Math.min(2,Math.max(1,minGroup-1)),required:true,when:['follow','yes']},
@@ -536,7 +540,7 @@ async function guidedCompetitionSetup(cid,detail){
  }
  const anyKo=follow&&(['single_ko','double_ko'].includes(more.follow_format)||(more.consolation==='yes'&&['single_ko','double_ko'].includes(following.consolation_format)));
  let koRules={mode:'legs',start_score:501,max_legs:5,best_of_sets:3,best_of_legs_per_set:3},lengths={};let third_place=false;
- if(anyKo){
+ if(anyKo&&!isCup){
   const setup=await configure('Turnierassistent · K.O.-Spiele',[
    {name:'mode',label:'Spielmodus der K.O.-Runden',type:'select',options:[['legs','Best of X Legs'],['sets','Best of X Sets']]},
    {name:'max_legs',label:'Standard · Best of X Legs',type:'number',min:1,max:101,step:2,value:5,required:true,when:['mode','legs']},
@@ -560,7 +564,7 @@ async function guidedCompetitionSetup(cid,detail){
  const shuffle=()=>{const copy=[...ids];for(let i=copy.length-1;i>0;i--){const bits=new Uint32Array(1);crypto.getRandomValues(bits);const j=bits[0]%(i+1);[copy[i],copy[j]]=[copy[j],copy[i]];}return Array.from({length:n},(_,j)=>copy.filter((_,k)=>k%n===j))};
  let groups=shuffle();
  const shade=el('div',undefined,'sheet-shade'),panel=el('section',undefined,'config-sheet guided-draw');panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
- const subtitle=el('p',count+' Spieler · '+n+' Gruppen · Gruppenspiele '+(start.mode==='legs'?'Bo'+groupRules.max_legs+' Legs':'Bo'+groupRules.best_of_sets+' Sets')+' · '+(follow?qualifiers+' je Gruppe weiter'+(wild?' + '+wild+' Nachrücker':''):'nur Gruppenrunde'),'helper');
+ const subtitle=el('p',count+' Spieler · '+n+' Gruppen · Gruppenspiele '+(start.mode==='legs'?'Bo'+groupRules.max_legs+' Legs':'Bo'+groupRules.best_of_sets+' Sets / Bo'+groupRules.best_of_legs_per_set+' Legs')+' · '+(follow?qualifiers+' je Gruppe weiter'+(wild?' + '+wild+' Nachrücker':''):'nur Gruppenrunde'),'helper');
  panel.append(popupCloseButton(()=>shade.remove()),el('h2','Turnierassistent · 4/4 · Auslosung prüfen'),subtitle,
  el('p','Zufällig ausgelost. Zum Ändern einen Spieler auf einen anderen ziehen (Tausch), oder auf die Zielgruppe ziehen. Erst mit „Auslosung freigeben“ werden Gruppen und Begegnungen gespeichert.','helper'));
  const preview=el('div',undefined,'guided-draw-groups'),msg=el('p','','helper');
@@ -589,7 +593,7 @@ async function guidedCompetitionSetup(cid,detail){
   if(!await approve('Auslosung endgültig freigeben',n+' Gruppen, '+count+' Spieler, '+games+' Gruppenspiele werden angelegt. Danach kann die Gruppeneinteilung nicht mehr durch diesen Assistenten geändert werden.'))return;
   finish.disabled=true;
   try{await api('/competitions/'+cid+'/guided-setup',{
-   group_count:n,groups,group_rules:groupRules,ko_rules:koRules,double_round:start.double_round==='yes',
+   group_count:n,groups,group_rules:groupRules,ko_rules:isCup?fixedCupRules:koRules,double_round:start.double_round==='yes',
    follow,qualifiers:qualifiers||1,best_third_count:wild,follow_format:more.follow_format||'single_ko',
    consolation:follow&&more.consolation==='yes',consolation_format:following.consolation_format||'single_ko',
    follow_group_count:Number(following.follow_group_count||2),consolation_group_count:Number(following.consolation_group_count||2),
@@ -944,7 +948,7 @@ async function openCompetition(id){
   const firstPhase=selected.phases?.[0];
   const firstMatches=(selected.matches||[]).filter(m=>m.phase_id===firstPhase?.id);
   const pendingWildcardDecision=amAdmin()&&c.rules?.guided_setup&&c.rules?.follow&&Number(c.rules.best_third_count||0)>0&&
-    selected.phases.length===1&&firstMatches.length>0&&firstMatches.every(m=>m.status==='finished');
+    !selected.matches.some(m=>selected.phases.some(p=>p.id===m.phase_id&&Number(p.phase_order)>1))&&firstMatches.length>0&&firstMatches.every(m=>m.status==='finished');
   if(pendingWildcardDecision){const flag=el('div',undefined,'qualification-pending');flag.append(el('strong','Gruppenrunde beendet · Qualifikation prüfen'),
     el('p','Die automatische Hauptrunde ist noch nicht freigegeben. Bei Gleichstand der besten Nächstplatzierten muss die Turnierleitung entscheiden.'),
     action('Nachrücker festlegen',()=>view('management'),'primary'));host.append(flag)}
@@ -1088,10 +1092,31 @@ async function openCompetition(id){
     if(!selected.groups.length){box.append(el('p','Noch keine Gruppen angelegt. Die Einteilung erfolgt unter Verwaltung.','empty'));return}
     const switcher=el('div',undefined,'competition-group-tabs');
     const savedGroup=groupSelections.get(id);
-    let currentGroup=selected.groups.some(g=>g.id===savedGroup)?savedGroup:selected.groups[0].id;
+    const comparing=Boolean(c.rules?.follow&&Number(c.rules?.best_third_count||0)>0);
+    let currentGroup=(savedGroup==='best-placed'&&comparing)||selected.groups.some(g=>g.id===savedGroup)?savedGroup:selected.groups[0].id;
     const area=el('div');box.append(switcher,area);
     for(const g of selected.groups){const b=action(g.name,()=>{currentGroup=g.id;groupSelections.set(id,g.id);for(const tab of switcher.children)tab.classList.toggle('selected',tab===b);fill()},'subtle');b.classList.toggle('selected',g.id===currentGroup);switcher.append(b)}
-    async function fill(){clear(area);const g=selected.groups.find(g=>g.id===currentGroup);if(!g)return;
+    if(comparing){const b=action('Beste Nächstplatzierte',()=>{currentGroup='best-placed';groupSelections.set(id,currentGroup);for(const tab of switcher.children)tab.classList.toggle('selected',tab===b);fill()},'subtle');b.classList.toggle('selected',currentGroup==='best-placed');switcher.append(b)}
+    async function fill(){clear(area);
+      if(currentGroup==='best-placed'){
+        const data=await api('/competitions/'+id+'/best-placed');
+        area.append(el('h3','Gruppenvergleich · beste Nächstplatzierte'));
+        area.append(el('p','Vergleich aller nicht direkt Qualifizierten: zunächst nach Gruppenplatz, dann Punkte pro Spiel, Legdifferenz pro Spiel und geworfene Legs pro Spiel. Bei unvollständigen Gruppen sind die Plätze vorläufig.','helper'));
+        if(data.decision_required)area.append(el('p','Gleichstand an der Qualifikationsgrenze: Die Turnierleitung muss entscheiden, bevor die nächste Runde ausgelost wird.','qualification-pending'));
+        const rows=data.candidates||[];
+        if(!rows.length){area.append(el('p','Keine Kandidaten für zusätzliche Qualifikationsplätze.','empty'));return}
+        const wrap=renderTable(['Rang','Teilnehmer','Gruppe','Platz','Sp.','Pkt','Pkt/Sp.','Leg-Diff/Sp.','Gewertete Legs','Status'],rows.map(r=>[
+          r.rank,{player_id:r.player_id,name:r.name},r.group,r.group_rank,r.played,r.points,
+          Number(r.points_per_match).toLocaleString('de-DE',{maximumFractionDigits:3}),
+          Number(r.leg_difference_per_match).toLocaleString('de-DE',{maximumFractionDigits:3}),r.legs_for,
+          r.cutoff_tie?'Entscheidung nötig':r.selected?'Zusatzplatz':'Nicht qualifiziert'
+        ]),true);
+        wrap.querySelectorAll('tbody tr').forEach((tr,i)=>{if(rows[i].selected&&!rows[i].cutoff_tie)tr.classList.add('tournament-qualified');if(i===data.wildcard_count-1)tr.classList.add('tournament-cutoff')});
+        area.append(wrap);
+        area.append(el('p',data.wildcard_count+' zusätzliche Startplätze · '+(data.completed?'Vorrunde abgeschlossen':'vorläufiger Stand'),'helper'));
+        return;
+      }
+      const g=selected.groups.find(g=>g.id===currentGroup);if(!g)return;
       const rows=await api('/competitions/'+id+'/standings?group_id='+g.id);
       const withdrawals=new Set(selected.entries.filter(e=>e.status==='withdrawn').map(e=>e.player_id));
       const rawRules=typeof c.rules==='string'?JSON.parse(c.rules||'{}'):(c.rules||{});
@@ -1423,21 +1448,39 @@ async function openCompetition(id){
       const guide=action('Turnierassistent starten · Gruppen automatisch auslosen',()=>guidedCompetitionSetup(id,selected),'primary');phases.append(guide);
       phases.append(el('p','Mit Vorschau, Drag & Drop, automatischem Spielplan, Qualifikation, Hauptrunde und Trostrunde.','helper'));
     }
-    if(c.rules?.guided_setup){phases.append(el('p','Automatischer Modus: Gruppen und Spielplan sind bereits ausgelost. Die Hauptrunde und gegebenenfalls die Trostrunde werden nach dem letzten Gruppenspiel automatisch erzeugt. Beste gleichplatzierte Nachrücker können bei Gleichstand entschieden werden.','helper'))}
-    if(c.rules?.guided_setup && Number(c.rules.best_third_count||0)>0 && !selected.phases.some(p=>Number(p.phase_order)>1)){
+    if(c.rules?.guided_setup){
+      phases.append(el('p','Automatischer Modus: Nach dem letzten Vorrundenspiel werden die Folgerunden erstellt. Wenn bereits eine leere K.O.-Phase existiert, wird sie vom Assistenten befüllt.','helper'));
+      const preliminary=selected.phases.find(p=>Number(p.phase_order)===1);
+      const preMatches=selected.matches.filter(m=>m.phase_id===preliminary?.id);
+      const followGames=selected.matches.filter(m=>selected.phases.some(p=>p.id===m.phase_id&&Number(p.phase_order)>1));
+      if(c.rules.follow&&preMatches.length&&preMatches.every(m=>m.status==='finished')&&!followGames.length){
+        phases.append(action('Folgerunde jetzt erzeugen / Automatik erneut prüfen',async()=>{
+          try{const r=await api('/competitions/'+id+'/advance-now',{});await openCompetition(id);
+            notice(r.follow_matches?'Folgerunde erstellt: '+r.follow_matches+' Begegnungen.':'Noch keine Begegnungen erzeugt. Bitte Qualifikation prüfen.',!r.follow_matches)}
+          catch(e){notice('Folgerunde noch nicht erzeugt: '+e.message,true)}
+        },'primary'));
+      }
+    }
+    if(c.rules?.guided_setup && Number(c.rules.best_third_count||0)>0 && !selected.matches.some(m=>selected.phases.some(p=>p.id===m.phase_id&&Number(p.phase_order)>1))){
       const pre=selected.phases[0];
       const matches=selected.matches.filter(m=>m.phase_id===pre?.id);
       if(matches.length && matches.every(m=>m.status==='finished')){
         phases.append(action('Gleichstand / beste Nächstplatzierte entscheiden',async()=>{
-          try{const n=Number(c.rules.qualifiers||1),candidates=[];
-            for(const group of selected.groups.filter(g=>g.phase_id===pre.id)){
-              const rows=await api('/competitions/'+id+'/standings?group_id='+group.id);
-              for(const row of rows.slice(n))candidates.push([row.player_id,group.name+' · '+row.name+' · '+row.points+' Punkte · '+row.legs_for+':'+row.legs_against]);
-            }
-            const data=await configure('Beste Nächstplatzierte wählen',[{name:'ids',label:'Genau '+c.rules.best_third_count+' weitere Qualifikanten',type:'multi',options:candidates,value:c.rules.best_third_manual_ids||[]}],'Auswahl freigeben');
-            if(!data)return;if(data.ids.length!==Number(c.rules.best_third_count))return notice('Bitte genau '+c.rules.best_third_count+' Teilnehmer wählen.',true);
-            if(!await approve('Qualifikation bestätigen','Diese Teilnehmer werden zusätzlich in die Hauptrunde übernommen.'))return;
-            await api('/competitions/'+id+'/wildcard-decision',{player_ids:data.ids});await openCompetition(id);notice('Nachrücker gesetzt.');
+          try{
+            const overview=await api('/competitions/'+id+'/best-placed');
+            if(!overview.decision_required)return notice('Kein ungeklärter Gleichstand. Nutze „Folgerunde jetzt erzeugen“, damit die automatische Rangliste gilt.');
+            const candidates=overview.candidates,count=Number(overview.wildcard_count);
+            const locked=candidates.slice(0,count).filter(x=>!x.cutoff_tie);
+            const tied=candidates.filter(x=>x.cutoff_tie);
+            const remaining=count-locked.length;
+            const label=tied.map(x=>[x.player_id,x.group+' · '+x.name+' · '+x.points+' Pkt / '+x.played+' Sp. · '+x.leg_difference+' Legdiff.']);
+            const data=await configure('Gleichstand an der Qualifikationsgrenze',[
+              {name:'ids',label:'Wähle '+remaining+' aus '+tied.length+' gleichplatzierten Teilnehmern',type:'multi',options:label,value:[]}
+            ],'Entscheidung übernehmen');
+            if(!data)return;if(data.ids.length!==remaining)return notice('Bitte genau '+remaining+' Teilnehmer auswählen.',true);
+            const ids=[...locked.map(x=>x.player_id),...data.ids];
+            if(!await approve('Qualifikation bestätigen',locked.length+' eindeutige Plätze stehen fest. '+remaining+' Plätze werden aus dem Gleichstand entschieden.'))return;
+            await api('/competitions/'+id+'/wildcard-decision',{player_ids:ids});await openCompetition(id);notice('Gleichstand geklärt und Folgerunde erzeugt.');
           }catch(e){notice('Nachrücker konnten nicht gesetzt werden: '+e.message,true)}
         },'primary'));
       }

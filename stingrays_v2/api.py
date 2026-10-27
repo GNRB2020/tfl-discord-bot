@@ -1238,6 +1238,8 @@ async def close_phase(req):
         remaining=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.matches WHERE phase_id=$1 AND status IN ('open','running')",pid)
         if remaining:raise web.HTTPConflict(text=f'{remaining} offene oder laufende Begegnungen')
         await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_by=$2,closed_at=now() WHERE id=$1",pid,a['id'])
+    from .tournament_automation import progress
+    await progress(req,p['competition_id'])
     return response({'closed':True})
 
 async def bracket(req):
@@ -2055,6 +2057,7 @@ def register_stingrays_v2(app):
     register_free_training(app)
     from .tournament_automation import setup as auto_training_setup, live_games as auto_live_games, report as auto_training_report
     from .competition_wizard import create_group_plan, choose_wildcards
+    from .tournament_automation import wildcard_overview, retry_progress
     routes=[
       ('POST','/dart/v2/api/training/tournament/setup',auto_training_setup),
       ('GET','/dart/v2/api/live-games',auto_live_games),
@@ -2090,6 +2093,8 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/competitions/{cid}',competition_detail),
       ('POST','/dart/v2/api/competitions/{cid}/guided-setup',create_group_plan),
       ('POST','/dart/v2/api/competitions/{cid}/wildcard-decision',choose_wildcards),
+      ('GET','/dart/v2/api/competitions/{cid}/best-placed',wildcard_overview),
+      ('POST','/dart/v2/api/competitions/{cid}/advance-now',retry_progress),
       ('POST','/dart/v2/api/competitions/{cid}/entries',add_entries),
       ('POST','/dart/v2/api/competitions/{cid}/phases',create_phase),
       ('POST','/dart/v2/api/phases/{pid}/groups',create_group),

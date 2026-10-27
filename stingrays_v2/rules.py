@@ -26,6 +26,11 @@ def mode_rules(kind, phase, final=False, overrides=None):
         rules.update(max_legs=6, allow_draw=True)
     if phase == 'knockout': rules['allow_draw'] = False
     rules.update(overrides or {})
+    # Stingray Cup is always best of five sets, each set best of five legs.
+    # This is enforced server-side even for manually created phases and matches.
+    if kind == 'cup':
+        rules.update(mode='sets', max_legs=5, best_of_sets=5,
+                     best_of_legs_per_set=5, allow_draw=False, double_out=True)
     if rules['mode'] not in ('legs','sets'):
         raise ValueError('Unknown scorer mode')
     if not 1 <= int(rules['max_legs']) <= 101: raise ValueError('Invalid legs')

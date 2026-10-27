@@ -9,10 +9,13 @@ from .rules import round_robin
 from .tournament_extensions import validate_training_rules
 
 FORMATS = {'single_ko', 'double_ko', 'groups', 'league'}
+CUP_FIXED = {'start_score': 501, 'double_out': True, 'mode': 'sets', 'max_legs': 5,
+             'best_of_sets': 5, 'best_of_legs_per_set': 5, 'allow_draw': False}
+
 ROUND_NAMES = ('first_round', 'round32', 'round16', 'quarterfinal', 'semifinal', 'final', 'third_place')
 
 
-def normalize(d, participants):
+def normalize(d, participants, kind=None):
     if not isinstance(d, dict):
         raise web.HTTPBadRequest(text='Ungültige Turnierkonfiguration')
     try:
@@ -49,6 +52,9 @@ def normalize(d, participants):
         raise web.HTTPBadRequest(text='Zu wenige Finalteilnehmer für diese Gruppenzahl')
     rules=validate_training_rules(d.get('group_rules') or {}, elimination=False)
     ko_rules=validate_training_rules(d.get('ko_rules') or {'mode':'legs','max_legs':5}, elimination=True)
+    if kind=='cup':
+        rules=validate_training_rules(CUP_FIXED, elimination=False)
+        ko_rules=validate_training_rules(CUP_FIXED, elimination=True)
     lengths=d.get('round_lengths') or {}
     if not isinstance(lengths,dict):
         raise web.HTTPBadRequest(text='Ungültige Matchlängen')
@@ -60,6 +66,8 @@ def normalize(d, participants):
         if not 1<=val<=101 or val%2==0:
             raise web.HTTPBadRequest(text='K.O.-Runden müssen ein ungerades Best of X (1–101) haben')
         prepared[key]=val
+    if kind=='cup':
+        prepared={key:5 for key in ROUND_NAMES}
     if ko_rules['mode']=='sets':
         # In this mode round_lengths refer to best-of-sets, not best-of-legs.
         prepared={k:v for k,v in prepared.items() if v%2==1}
@@ -94,7 +102,7 @@ async def create_group_plan(req):
         if has_phase:
             raise web.HTTPConflict(text='Es sind bereits Phasen vorhanden. Bitte keine bestehende Auslosung überschreiben; nur neue Wettbewerbe ohne Phasen können hier automatisch eingerichtet werden.')
         entries=await db.fetch(f"SELECT id,player_id FROM {SCHEMA}.entries WHERE competition_id=$1 AND status<>'withdrawn'",cid)
-        spec=normalize(data,len(entries))
+        spec=normalize(data,len(entries),comp['kind'])
         available={e['player_id'] for e in entries}
         flat=[p for g in spec['groups'] for p in g]
         if len(flat)!=len(entries) or len(set(flat))!=len(flat) or set(flat)!=available:
@@ -106,7 +114,7 @@ async def create_group_plan(req):
             'best_third_count':spec['best_third_count'],'follow_format':spec['follow_format'],
             'consolation_format':spec['consolation_format'],'follow_group_count':spec['follow_group_count'],
             'consolation_group_count':spec['consolation_group_count'],'round_lengths':spec['round_lengths'],
-            'third_place':spec['third_place'],'guided_setup':True})
+            'third_place':spec['third_place'],'guided_setup':True,'cup_fixed_bo5':comp['kind']=='cup'})
         await db.execute(f'UPDATE {SCHEMA}.competitions SET rules=$2::jsonb,status=$3 WHERE id=$1',cid,json.dumps(cfg),'active')
         phase=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
             VALUES($1,'Gruppenrunde','groups',1,'open',$2::jsonb) RETURNING id''',cid,
@@ -139,11 +147,47 @@ async def choose_wildcards(req):
         cfg=as_json(c['rules']) if c else {}
         if not cfg.get('guided_setup') or not cfg.get('best_third_count'):
             raise web.HTTPConflict(text='Keine Qualifikationsentscheidung nötig')
-        if await db.fetchval(f'SELECT EXISTS(SELECT 1 FROM {SCHEMA}.phases WHERE competition_id=$1 AND phase_order>1)',cid):
+        if await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.phases p
+            WHERE p.competition_id=$1 AND p.phase_order>1 AND (
+              p.rules ? 'stage' OR EXISTS(SELECT 1 FROM {SCHEMA}.matches m WHERE m.phase_id=p.id)))''',cid):
             raise web.HTTPConflict(text='Folgerunden sind bereits erzeugt')
         ids=[uid(x) for x in data.get('player_ids',[])]
-        if len(ids)!=int(cfg['best_third_count']) or len(ids)!=len(set(ids)):
+        count=int(cfg['best_third_count'])
+        if len(ids)!=count or len(ids)!=len(set(ids)):
             raise web.HTTPBadRequest(text='Bitte genau die erforderliche Anzahl Qualifikanten wählen')
+        pre=await db.fetchrow(f'''SELECT id FROM {SCHEMA}.phases
+           WHERE competition_id=$1 ORDER BY phase_order LIMIT 1''',cid)
+        if not pre:raise web.HTTPConflict(text='Keine Vorrunde vorhanden')
+        if await db.fetchval(f'''SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches
+            WHERE phase_id=$1 AND status<>'finished')''',pre['id']):
+            raise web.HTTPConflict(text='Alle Gruppenspiele müssen abgeschlossen sein')
+        from .rules import rank_rows
+        from .tournament_automation import rank_wildcards
+        group_rows=await db.fetch(f'SELECT id,sort_order FROM {SCHEMA}.groups WHERE phase_id=$1 ORDER BY sort_order',pre['id'])
+        direct=int(cfg.get('qualifiers',1))
+        candidates=[]
+        for group in group_rows:
+            members=await db.fetch(f'''SELECT e.player_id FROM {SCHEMA}.group_members gm
+                JOIN {SCHEMA}.entries e ON e.id=gm.entry_id WHERE gm.group_id=$1''',group['id'])
+            matches=await db.fetch(f'''SELECT player1_id,player2_id,status,legs1,legs2,sets1,sets2
+                FROM {SCHEMA}.matches WHERE group_id=$1''',group['id'])
+            ranked=rank_rows([dict(m) for m in matches],[p['player_id'] for p in members])
+            candidates.extend((r['player_id'],r,group['sort_order'],place)
+                              for place,r in enumerate(ranked[direct:],start=direct))
+        best=rank_wildcards(candidates)
+        if len(best)<=count:raise web.HTTPConflict(text='Kein Gleichstand am Rand der Qualifikation')
+        def metric(item):
+            r=item[1];g=max(1,int(r['played']))
+            return (item[3],r['points']/g,(r['legs_for']-r['legs_against'])/g,r['legs_for']/g)
+        border=metric(best[count-1])
+        if border!=metric(best[count]):raise web.HTTPConflict(text='Die Qualifikation ist eindeutig; keine Entscheidung notwendig')
+        # rank_wildcards orders strongest first; retain all strictly better records.
+        guaranteed={p[0] for p in best if p[3]<border[0] or
+           (p[3]==border[0] and (-metric(p)[1],-metric(p)[2],-metric(p)[3])<(-border[1],-border[2],-border[3]))}
+        tied={p[0] for p in best if metric(p)==border}
+        chosen=set(ids)
+        if not guaranteed.issubset(chosen) or not chosen.issubset(guaranteed|tied):
+            raise web.HTTPBadRequest(text='Nur die gleichplatzierten Teilnehmer an der Grenze dürfen ausgewählt werden')
         cfg['best_third_manual_ids']=[str(x) for x in ids]
         await db.execute(f'UPDATE {SCHEMA}.competitions SET rules=$2::jsonb WHERE id=$1',cid,json.dumps(cfg))
     from .tournament_automation import progress

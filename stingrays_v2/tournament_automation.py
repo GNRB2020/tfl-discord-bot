@@ -134,10 +134,27 @@ async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=Fa
         if match_rules['mode']=='legs' and match_rules['max_legs']%2==0:
             match_rules['max_legs']+=1
     order=2 if stage=='final' else 3
-    ph=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
-      VALUES($1,$2,$3,$4,'open',$5::jsonb) RETURNING id''',cid,'Finalrunde' if stage=='final' else 'Trostrunde',
-      'groups' if fmt in ('groups','league') else 'knockout',order,
-      json.dumps({'stage':stage,'format':fmt,'participants':[str(p) for p in ids],'match_rules':match_rules,'origin_groups':origin_groups or {}}))
+    stage_kind='groups' if fmt in ('groups','league') else 'knockout'
+    stage_rules={'stage':stage,'format':fmt,'participants':[str(p) for p in ids],
+                 'match_rules':match_rules,'origin_groups':origin_groups or {}}
+    # Admins sometimes created an empty K.O. placeholder after the group draw.
+    # Reuse it instead of silently assuming the next round already exists.
+    placeholder=await db.fetchrow(f'''SELECT id,kind,rules FROM {SCHEMA}.phases
+      WHERE competition_id=$1 AND phase_order=$2 FOR UPDATE''',cid,order)
+    if placeholder:
+        if as_json(placeholder['rules']).get('stage') or await db.fetchval(
+          f'SELECT EXISTS(SELECT 1 FROM {SCHEMA}.matches WHERE phase_id=$1)',placeholder['id']):
+            raise web.HTTPConflict(text='Die Folgerunde enthält bereits Daten; automatische Auslosung abgebrochen')
+        if await db.fetchval(f'SELECT EXISTS(SELECT 1 FROM {SCHEMA}.groups WHERE phase_id=$1)',placeholder['id']):
+            raise web.HTTPConflict(text='Die Folgerunde enthält manuell angelegte Gruppen; bitte zuerst prüfen')
+        ph=placeholder['id']
+        await db.execute(f'''UPDATE {SCHEMA}.phases SET name=$2,kind=$3,status='open',rules=$4::jsonb,
+            closed_at=NULL,closed_by=NULL WHERE id=$1''',ph,
+            'Finalrunde' if stage=='final' else 'Trostrunde',stage_kind,json.dumps(stage_rules))
+    else:
+        ph=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
+          VALUES($1,$2,$3,$4,'open',$5::jsonb) RETURNING id''',cid,'Finalrunde' if stage=='final' else 'Trostrunde',
+          stage_kind,order,json.dumps(stage_rules))
     count=0
     if fmt in ('groups','league'):
         buckets=[[] for _ in range(max(1,min(ngroups,len(ids)//2)))]
@@ -231,17 +248,31 @@ async def progress(req,cid):
     """Run after score commit, serialize by competition row. Idempotent across tablets."""
     async with pool(req).acquire() as db:
       async with db.transaction():
-        c=await db.fetchrow(f'''SELECT id,rules,status FROM {SCHEMA}.competitions
+        c=await db.fetchrow(f'''SELECT id,kind,rules,status FROM {SCHEMA}.competitions
           WHERE id=$1 AND kind IN ('training_tournament','final_tournament','league','cup','vm') AND deleted_at IS NULL FOR UPDATE''',cid)
         if not c or c['status'] not in ('active','draft'):return
         cfg=as_json(c['rules']);
         if not cfg.get('auto_tournament'):return
+        if c['kind']=='cup':
+            # Also protect older Stingray Cups that were created before fixed Bo5/Bo5 rules.
+            from .competition_wizard import CUP_FIXED, ROUND_NAMES
+            cfg['ko_match']={**CUP_FIXED}
+            cfg['training_match']={**CUP_FIXED}
+            cfg['round_lengths']={name:5 for name in ROUND_NAMES}
         phases=await db.fetch(f'SELECT id,phase_order,kind,rules,status FROM {SCHEMA}.phases WHERE competition_id=$1 ORDER BY phase_order',cid)
         if not phases:return
         pre=phases[0]
         pending=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.matches WHERE phase_id=$1 AND status<>'finished'",pre['id'])
         total=await db.fetchval(f'SELECT count(*) FROM {SCHEMA}.matches WHERE phase_id=$1',pre['id'])
-        if not pending and total and not any(p['phase_order']>1 for p in phases):
+        # An empty manually added 'KO Runde' must not suppress auto advancement.
+        follow_phases=[p for p in phases if p['phase_order']>pre['phase_order']]
+        has_prepared_follow=any(as_json(p['rules']).get('stage') for p in follow_phases)
+        has_started_follow=False
+        if follow_phases and not has_prepared_follow:
+            has_started_follow=bool(await db.fetchval(f'''SELECT EXISTS(
+                SELECT 1 FROM {SCHEMA}.matches m JOIN {SCHEMA}.phases ph ON ph.id=m.phase_id
+                WHERE ph.competition_id=$1 AND ph.phase_order>$2)''',cid,pre['phase_order']))
+        if not pending and total and not has_prepared_follow and not has_started_follow:
             if cfg['format'] in ('league','groups'):
                 await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1 AND status<>'closed'",pre['id'])
             if cfg.get('follow'):
@@ -349,6 +380,72 @@ async def progress(req,cid):
             if anygames and not nonfinal:await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id'])
         active=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.phases WHERE competition_id=$1 AND status<>'closed'",cid)
         if active==0:await db.execute(f"UPDATE {SCHEMA}.competitions SET status='finished' WHERE id=$1",cid)
+
+
+async def wildcard_overview(req):
+    # Read-only comparison; same ranking as the automatic progression.
+    await actor(req)
+    cid=uid(req.match_info['cid'])
+    async with pool(req).acquire() as db:
+        c=await db.fetchrow(f'SELECT kind,rules FROM {SCHEMA}.competitions WHERE id=$1 AND deleted_at IS NULL',cid)
+        if not c:raise web.HTTPNotFound()
+        cfg=as_json(c['rules'])
+        pre=await db.fetchrow(f'''SELECT id FROM {SCHEMA}.phases
+            WHERE competition_id=$1 ORDER BY phase_order LIMIT 1''',cid)
+        if not pre or not cfg.get('follow') or not int(cfg.get('best_third_count',0) or 0):
+            return response({'candidates':[],'wildcard_count':0,'completed':False})
+        groups=await db.fetch(f'SELECT id,name,sort_order FROM {SCHEMA}.groups WHERE phase_id=$1 ORDER BY sort_order',pre['id'])
+        n=int(cfg.get('qualifiers',1)) if str(cfg.get('qualifiers','1'))!='all' else 99999
+        candidates=[]
+        names={}
+        for g in groups:
+            people=await db.fetch(f'''SELECT e.player_id,p.display_name FROM {SCHEMA}.group_members gm
+                JOIN {SCHEMA}.entries e ON e.id=gm.entry_id JOIN {SCHEMA}.players p ON p.id=e.player_id
+                WHERE gm.group_id=$1''',g['id'])
+            names.update({p['player_id']:p['display_name'] for p in people})
+            ms=await db.fetch(f'''SELECT player1_id,player2_id,status,legs1,legs2,sets1,sets2
+               FROM {SCHEMA}.matches WHERE group_id=$1''',g['id'])
+            standings=rank_rows([dict(m) for m in ms],[p['player_id'] for p in people])
+            for place,row in enumerate(standings[n:],start=n):
+                candidates.append((row['player_id'],row,g['sort_order'],place,g['name']))
+        ranked=rank_wildcards(candidates)
+        count=int(cfg['best_third_count'])
+        completed=bool(await db.fetchval(f'''SELECT count(*)=0 FROM {SCHEMA}.matches
+            WHERE phase_id=$1 AND status<>'finished' ''',pre['id']))
+        manual=set(str(x) for x in cfg.get('best_third_manual_ids',[]))
+        def score(item):
+            r=item[1];played=max(1,int(r['played']))
+            return (int(item[3]),int(r['points'])/played,(int(r['legs_for'])-int(r['legs_against']))/played,int(r['legs_for'])/played)
+        decision_required=(completed and not manual and len(ranked)>count and count>0
+            and score(ranked[count-1])==score(ranked[count]))
+        out=[]
+        for i,(pid,row,_,place,gname) in enumerate(ranked):
+            played=max(1,int(row['played']))
+            out.append({'rank':i+1,'player_id':str(pid),'name':names.get(pid,''),'group':gname,
+                'group_rank':place+1,'played':row['played'],'points':row['points'],
+                'points_per_match':round(int(row['points'])/played,3),
+                'leg_difference':int(row['legs_for'])-int(row['legs_against']),
+                'leg_difference_per_match':round((int(row['legs_for'])-int(row['legs_against']))/played,3),
+                'legs_for':row['legs_for'],'legs_for_per_match':round(int(row['legs_for'])/played,3),
+                'selected':str(pid) in manual if manual else i<count,
+                'cutoff_tie':decision_required and score(ranked[count-1])==score((pid,row,0,place))})
+        return response({'candidates':out,'wildcard_count':count,'completed':completed,
+            'decision_required':decision_required})
+
+async def retry_progress(req):
+    # Explicitly recover a completed preliminary round whose advancement was interrupted.
+    account=await actor(req);cid=uid(req.match_info['cid']);await body(req)
+    from .api import require_manager
+    async with pool(req).acquire() as db:
+        await require_manager(db,account,cid)
+    await progress(req,cid)
+    async with pool(req).acquire() as db:
+        phases=await db.fetch(f'''SELECT id,phase_order,status,name FROM {SCHEMA}.phases
+            WHERE competition_id=$1 ORDER BY phase_order''',cid)
+        matches=await db.fetchval(f'''SELECT count(*) FROM {SCHEMA}.matches m
+            JOIN {SCHEMA}.phases p ON p.id=m.phase_id
+            WHERE p.competition_id=$1 AND p.phase_order>1''',cid)
+    return response({'ok':True,'follow_matches':int(matches),'phases':[dict(p) for p in phases]})
 
 async def live_games(req):
     await actor(req)
