@@ -8,6 +8,7 @@ from aiohttp import web
 from .api import actor, body, uid, pool, response, SCHEMA, as_json
 from .rules import rank_rows, round_robin, bracket_pairs
 from .tournament_extensions import validate_training_rules
+from .live_stats import live_averages
 
 FORMAT={'league','groups','single_ko','double_ko'}
 SCORES={170,301,501,701,1001,5001,10001}
@@ -456,17 +457,12 @@ async def live_games(req):
            m.legs1,m.legs2,m.sets1,m.sets2,m.state,m.started_at FROM {SCHEMA}.matches m
            JOIN {SCHEMA}.competitions c ON c.id=m.competition_id AND c.deleted_at IS NULL
            JOIN {SCHEMA}.players p1 ON p1.id=m.player1_id JOIN {SCHEMA}.players p2 ON p2.id=m.player2_id
-           WHERE m.status='running' ORDER BY m.started_at DESC LIMIT 16''')
+           WHERE m.status='running' ORDER BY m.started_at DESC LIMIT 22''')
     out=[]
     for r in rows:
         state=as_json(r['state'])
-        totals=[[0,0],[0,0]]
-        for visit in state.get('visits',[]):
-            idx=visit.get('player')
-            if idx not in (0,1):continue
-            totals[idx][0]+=int(visit.get('score',0) or 0)
-            totals[idx][1]+=int(visit.get('darts',3) or 3)
-        averages=[round(3*points/darts,2) if darts else None for points,darts in totals]
+        # Bust consumes darts but awards zero points, like the main scorer.
+        averages=live_averages(state.get('visits',[]))
         out.append({'id':r['id'],'competition_id':r['competition_id'],'title':r['title'],
           'kind':r['kind'],'player1':r['player1'],'player2':r['player2'],
           'legs':state.get('legs',[r['legs1'] or 0,r['legs2'] or 0]),'sets':state.get('sets',[r['sets1'] or 0,r['sets2'] or 0]),
