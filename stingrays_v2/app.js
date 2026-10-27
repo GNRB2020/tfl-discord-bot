@@ -936,7 +936,11 @@ function labelFor(m,names){return (names.get(m.player1_id)||'Offen')+' – '+(na
 const groupSelections=new Map();
 async function openCompetition(id){
   selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');$('competitionsList').hidden=true;
-  const c=selected.competition,host=$('competitionDetail');host.hidden=false;clear(host);
+  const c=selected.competition,host=$('competitionDetail');
+  // asyncpg returns PostgreSQL jsonb columns as JSON text by default.
+  // Normalize once, before tab/qualification/bracket visibility is checked.
+  if(typeof c.rules==='string')c.rules=JSON.parse(c.rules||'{}');
+  host.hidden=false;clear(host);
   host.className='competition-view';
   const header=el('div',undefined,'competition-header');
   const h=el('div');h.append(el('span',kindNames[c.kind]||c.kind,'eyebrow'),el('h2',c.title));
@@ -1095,8 +1099,10 @@ async function openCompetition(id){
     const comparing=Boolean(c.rules?.follow&&Number(c.rules?.best_third_count||0)>0);
     let currentGroup=(savedGroup==='best-placed'&&comparing)||selected.groups.some(g=>g.id===savedGroup)?savedGroup:selected.groups[0].id;
     const area=el('div');box.append(switcher,area);
+    // Always put the special qualification comparison ahead of group A-Z.
+    // With ten or more groups it would otherwise be hidden offscreen on phones.
+    if(comparing){const b=action('Beste Nächstplatzierte ('+Number(c.rules.best_third_count)+')',()=>{currentGroup='best-placed';groupSelections.set(id,currentGroup);for(const tab of switcher.children)tab.classList.toggle('selected',tab===b);fill()},'subtle');b.classList.toggle('selected',currentGroup==='best-placed');switcher.append(b)}
     for(const g of selected.groups){const b=action(g.name,()=>{currentGroup=g.id;groupSelections.set(id,g.id);for(const tab of switcher.children)tab.classList.toggle('selected',tab===b);fill()},'subtle');b.classList.toggle('selected',g.id===currentGroup);switcher.append(b)}
-    if(comparing){const b=action('Beste Nächstplatzierte',()=>{currentGroup='best-placed';groupSelections.set(id,currentGroup);for(const tab of switcher.children)tab.classList.toggle('selected',tab===b);fill()},'subtle');b.classList.toggle('selected',currentGroup==='best-placed');switcher.append(b)}
     async function fill(){clear(area);
       if(currentGroup==='best-placed'){
         const data=await api('/competitions/'+id+'/best-placed');
