@@ -114,7 +114,7 @@ async def spa(req):
 
 async def assets(req):
     which=req.match_info['filename']
-    if which not in ('app.js','style.css','legacy_bridge.js','scorer_theme.css','brand.png','training_original.js','training_original.css','training_minigames.js'):raise web.HTTPNotFound()
+    if which not in ('app.js','style.css','legacy_bridge.js','match_statistics.js','scorer_theme.css','brand.png','training_original.js','training_original.css','training_minigames.js'):raise web.HTTPNotFound()
     return web.FileResponse(HERE/which,headers={'Cache-Control':'no-store'})
 
 async def legacy_scorer_page(req):
@@ -123,7 +123,7 @@ async def legacy_scorer_page(req):
     html=(ROOT/'dart_ui'/'index.html').read_text(encoding='utf-8')
     html=html.replace("api('state').then(s=>{S=s;if(S.kind==='x01')showMatch();else if(S.kind==='sau')showSau();else screen('menuView')}).catch(()=>screen('loginView'));",'')
     html=html.replace('</head>', '<link rel="stylesheet" href="/dart/v2/assets/scorer_theme.css"></head>')
-    html=html.replace('</body>', '<script src="/dart/v2/assets/legacy_bridge.js"></script></body>')
+    html=html.replace('</body>', '<script src="/dart/v2/assets/match_statistics.js"></script><script src="/dart/v2/assets/legacy_bridge.js"></script></body>')
     return web.Response(text=html,content_type='text/html',headers={'Cache-Control':'no-store'})
 
 async def bootstrap(req):
@@ -1630,12 +1630,14 @@ async def stats(req):
         'highfinishes':len(highfinishes),'highfinish_details':sorted(highfinishes,reverse=True),
         'bullfinish_details':bull_finishes,'highscores':sorted(highscores,reverse=True),
         '180':sum(s['points']==180 and not s['is_bust'] for s in scored),
-        '140plus':sum(s['points']>=140 and not s['is_bust'] for s in scored),
+        '60plus':sum(60<=s['points']<80 and not s['is_bust'] for s in scored),
+        '80plus':sum(80<=s['points']<100 and not s['is_bust'] for s in scored),
+        '140plus':sum(140<=s['points']<171 and not s['is_bust'] for s in scored),
         '171plus':sum(s['points']>=171 and not s['is_bust'] for s in scored),
-        '95plus':sum(s['points']>=95 and not s['is_bust'] for s in scored),
-        '133plus':sum(s['points']>=133 and not s['is_bust'] for s in scored),
+        '95plus':sum(95<=s['points']<100 and not s['is_bust'] for s in scored),
+        '133plus':sum(133<=s['points']<140 and not s['is_bust'] for s in scored),
         'exact133':sum(s['points']==133 and not s['is_bust'] for s in scored),
-        '100plus':sum(s['points']>=100 and not s['is_bust'] for s in scored),
+        '100plus':sum(100<=s['points']<140 and not s['is_bust'] for s in scored),
         'bullfinishes':sum(bool(s['is_bullfinish']) for s in scored),
         'training_sau_sessions':len(sau_results),'training_bobs_sessions':len(bobs_results),
         'training_tug_sessions':tug_count,
@@ -1659,7 +1661,7 @@ async def tournament_statistics(req):
             FROM {SCHEMA}.matches WHERE competition_id=$1 AND status='finished' """,cid)
     result={r['id']:{'player_id':r['id'],'name':r['display_name'],'games':0,'wins':0,'draws':0,'losses':0,
         'legs_for':0,'legs_against':0,'points':0,'darts':0,'first9_points':0,'first9_darts':0,
-        '95plus':0,'100plus':0,'133plus':0,'140plus':0,'171plus':0,'180':0,'exact133':0,
+        '60plus':0,'80plus':0,'95plus':0,'100plus':0,'133plus':0,'140plus':0,'171plus':0,'180':0,'exact133':0,
         'highfinish':None,'lowdart':None,'bullfinishes':0,'scored_games':0,
         'highfinish_details':[],'lowdart_details':[],'bullfinish_details':[],
         'highscores':[]} for r in people}
@@ -1683,8 +1685,15 @@ async def tournament_statistics(req):
                 darts=int(v.get('darts',3) or 3)
                 r['points']+=score;r['darts']+=darts
                 if not v.get('bust'):
-                    for threshold,key in ((95,'95plus'),(100,'100plus'),(133,'133plus'),(140,'140plus'),(171,'171plus')):
-                        if score>=threshold:r[key]+=1
+                    # Exclusive primary score bands. Legacy 95+/133+ columns stay as
+                    # separate exact-range analytical indicators, not duplicate score buckets.
+                    if score>=171:r['171plus']+=1
+                    elif score>=140:r['140plus']+=1
+                    elif score>=100:r['100plus']+=1
+                    elif score>=80:r['80plus']+=1
+                    elif score>=60:r['60plus']+=1
+                    r['95plus']+=int(95<=score<100)
+                    r['133plus']+=int(133<=score<140)
                     r['180']+=int(score==180);r['exact133']+=int(score==133)
                 # Keep every special, including repeated identical finishes.
                 # Highfinish means checkout >= 100, not simply the best checkout.

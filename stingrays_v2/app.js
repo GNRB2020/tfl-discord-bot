@@ -86,14 +86,35 @@ function configure(title,fields,submitText='Speichern'){
  return new Promise(resolve=>{
   const shade=el('div',undefined,'sheet-shade'),panel=el('section',undefined,'config-sheet'),heading=el('h2',title),form=el('form',undefined,'sheet-form');
   form.append(heading);
+  const conditional=[];
   for(const f of fields){const label=el('label',f.label||f.name);let control;
    if(f.type==='select'){control=el('select');for(const [id,name] of f.options||[])control.append(new Option(name,id));if(f.value!==undefined)control.value=String(f.value)}
-   else if(f.type==='multi'){control=el('div',undefined,'checklist');for(const [id,name] of f.options||[]){const l=el('label');const cb=document.createElement('input');cb.type='checkbox';cb.name=f.name;cb.value=id;cb.checked=(f.value||[]).includes(id);l.append(cb,el('span',name));control.append(l)}}
+   else if(f.type==='multi'){
+    control=el('div',undefined,'checklist-search');const search=document.createElement('input');search.type='search';
+    search.placeholder='Spieler suchen …';search.setAttribute('aria-label','Liste durchsuchen');
+    const selectedCount=el('small',undefined,'checklist-count'),items=el('div',undefined,'checklist checklist-options');
+    for(const [id,name] of f.options||[]){const l=el('label');const cb=document.createElement('input');cb.type='checkbox';cb.name=f.name;cb.value=id;cb.checked=(f.value||[]).includes(id);l.append(cb,el('span',name));items.append(l)}
+    const update=()=>{const term=search.value.trim().toLocaleLowerCase('de');for(const l of items.children)l.hidden=!l.textContent.toLocaleLowerCase('de').includes(term);
+      selectedCount.textContent=items.querySelectorAll('input:checked').length+' von '+items.querySelectorAll('input').length+' ausgewählt';};
+    search.oninput=update;items.addEventListener('change',update);
+    const controls=el('div',undefined,'checklist-toolbar');const visible=()=>[...items.querySelectorAll('label:not([hidden]) input')];
+    controls.append(btn('Sichtbare wählen',()=>{for(const checkbox of visible())checkbox.checked=true;update()}),btn('Sichtbare abwählen',()=>{for(const checkbox of visible())checkbox.checked=false;update()}));
+    control.append(search,selectedCount,controls,items);update();
+   }
    else if(f.type==='textarea'){control=el('textarea');control.value=f.value||''}
    else {control=document.createElement('input');control.type=f.type||'text';control.value=f.value??'';if(f.min!==undefined)control.min=f.min;if(f.max!==undefined)control.max=f.max;if(f.step!==undefined)control.step=f.step;}
    if(f.type!=='multi'){control.name=f.name;control.required=!!f.required}
    if(f.readonly)control.readOnly=true;
-   label.append(control);form.append(label)}
+   label.append(control);form.append(label);
+   if(f.when)conditional.push({label,control,when:f.when,required:!!f.required});
+  }
+  const refreshFields=()=>{for(const row of conditional){
+   const field=form.elements[row.when[0]],visible=!!field&&String(field.value)===String(row.when[1]);
+   row.label.hidden=!visible;
+   const elements=row.control.matches?.('input,select,textarea')?[row.control]:[...row.control.querySelectorAll('input,select,textarea')];
+   for(const input of elements){input.disabled=!visible;input.required=visible&&row.required}
+  }};
+  form.addEventListener('change',refreshFields);refreshFields();
   const foot=el('div',undefined,'sheet-actions'),cancel=btn('Abbrechen',()=>finish(null)),ok=document.createElement('button');ok.type='submit';ok.textContent=submitText;
   const previousFocus=document.activeElement;
   const finish=data=>{shade.remove();if(previousFocus?.isConnected)previousFocus.focus();resolve(data)};
@@ -176,8 +197,15 @@ async function dashboard(){
  const list=$('myOpen');clear(list);
  for(const m of d.own_open){const x=el('div',undefined,'dash-match');const names=el('div',undefined,'dash-player-pair');names.append(participantName(m.player1_id,m.player1),el('span','–'),participantName(m.player2_id,m.player2));
   const heading=el('div');heading.append(el('small',m.title),names);x.append(heading,el('span',m.status==='running'?'Laufend':m.status==='cancelled'?'Abgesagt':'Offen','chip'));
-  x.append(action(previewId?'Spiel ansehen':'Scorer starten',()=>previewId?notice('Die Vorschau ist schreibgeschützt.',true):
-   m.kind==='free_x01'?openGameWindow('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id)):openScorer(m.id),'primary'));list.append(x)}
+  x.append(action(previewId?'Spiel ansehen':m.status==='running'?'Fortsetzen':'Scorer starten',()=>previewId?notice('Die Vorschau ist schreibgeschützt.',true):
+   m.kind==='free_x01'?openGameWindow('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id)):openScorer(m.id),'primary'));
+  if(m.status==='running'&&!previewId)x.append(action('Abbrechen',async()=>{
+    if(!await approve('Laufendes Spiel abbrechen','Die bisherigen Aufnahmen dieses Spiels werden verworfen. Das Spiel zählt nicht für Statistiken.'))return;
+    try{await api(m.kind==='free_x01'?'/free-x01/'+m.id+'/abort':'/matches/'+m.id+'/abort',
+       m.kind==='free_x01'?{confirm:'ABBRECHEN'}:{mode:'reset',confirm:'ABBRECHEN',reason:'Im Dashboard abgebrochen'});
+       await dashboard();notice('Spiel abgebrochen.')}catch(e){notice('Spielabbruch fehlgeschlagen: '+e.message,true)}
+   },'subtle'));
+  list.append(x)}
  if(!d.own_open.length)list.append(el('p','Keine offenen Begegnungen','helper'));
  const recent=$('dashboardRecent');clear(recent);
  for(const m of d.recent){const left=m.player1_id===d.viewed_player_id;const value1=(m.sets1||m.sets2)?m.sets1:m.legs1,value2=(m.sets1||m.sets2)?m.sets2:m.legs2;
@@ -509,15 +537,19 @@ async function createTraining(){
  if(rounds){const inputs=[];if(grouped)inputs.push({name:'group_count',label:'Anzahl Gruppen (mindestens 2 Personen je Gruppe)',type:'number',min:2,max:Math.floor(selection.members.length/2),value:2,required:true});
  inputs.push({name:'rounds',label:'Begegnungen',type:'select',options:[['single','Hinrunde'],['double','Hin- und Rückrunde']]});
  settings=await configure('4 / 6 · Spielplan',inputs,'Weiter');if(!settings)return;}
- const matchType=await configure('5 / 6 · Spielmodus',[{name:'start_score',label:'Startscore',type:'select',options:[170,301,501,701,1001,5001,10001].map(x=>[String(x),String(x)]),value:'501'},
- {name:'mode',label:'Spielart',type:'select',options:[['legs','Best of Legs'],['sets','Best of Sets']]}],'Weiter');if(!matchType)return;
- const isSets=matchType.mode==='sets';
- const rulesFields=isSets?[{name:'best_of_sets',label:'Best of X Sets (ungerade)',type:'number',min:1,max:21,value:3,required:true},
- {name:'best_of_legs_per_set',label:'Best of X Legs pro Set (ungerade)',type:'number',min:1,max:21,value:3,required:true}]:
- [{name:'max_legs',label:'Best of X Legs'+(ko?' (ungerade)':''),type:'number',min:1,max:101,value:5,required:true}];
- const lengths=await configure('5 / 6 · Matchlänge',rulesFields,'Weiter');if(!lengths)return;
- const m={start_score:Number(matchType.start_score),mode:matchType.mode,max_legs:Number(lengths.max_legs||5),best_of_sets:Number(lengths.best_of_sets||3),best_of_legs_per_set:Number(lengths.best_of_legs_per_set||3)};
- if(isSets&&(m.best_of_sets%2===0||m.best_of_legs_per_set%2===0)||ko&&!isSets&&m.max_legs%2===0)return notice('K.O. braucht ungerade Leganzahl; Sets und Legs je Set ebenso.',true);
+ const lengths=await configure('5 / 6 · Spielmodus und Matchlänge',[
+  {name:'start_score',label:'Startscore',type:'select',options:[170,301,501,701,1001,5001,10001].map(x=>[String(x),String(x)]),value:'501'},
+  {name:'mode',label:'Spielart',type:'select',options:[['legs','Legmodus'],['sets','Setmodus']],value:'legs'},
+  {name:'max_legs',label:'Best of X Legs'+(ko?' (ungerade)':''),type:'number',min:1,max:101,value:5,required:true,when:['mode','legs']},
+  {name:'best_of_sets',label:'Best of X Sets (ungerade)',type:'number',min:1,max:21,value:3,required:true,when:['mode','sets']},
+  {name:'best_of_legs_per_set',label:'Legs pro Set (ungerade)',type:'number',min:1,max:21,value:3,required:true,when:['mode','sets']}
+ ],'Weiter');if(!lengths)return;
+ const isSets=lengths.mode==='sets';
+ const m={start_score:Number(lengths.start_score),mode:lengths.mode,
+  ...(isSets?{best_of_sets:Number(lengths.best_of_sets),best_of_legs_per_set:Number(lengths.best_of_legs_per_set)}:
+          {max_legs:Number(lengths.max_legs),allow_draw:!ko&&Number(lengths.max_legs)%2===0})};
+ if(isSets&&(m.best_of_sets%2!==1||m.best_of_legs_per_set%2!==1)||ko&&!isSets&&m.max_legs%2===0)
+  return notice('K.O. benötigt eine ungerade Leganzahl; Sets und Legs pro Set ebenfalls.',true);
  let next={follow:false,consolation:false};
  if(rounds){next=await configure('6 / 6 · Folgerunden',[{name:'follow',label:'Gibt es eine Finalrunde?',type:'select',options:[['no','Nein'],['yes','Ja']]}],'Weiter');if(!next)return;
  if(next.follow==='yes'){
@@ -541,19 +573,22 @@ async function createTraining(){
  }
  const roundLengths={};
  if(m.mode==='legs'){
-  const lengthFields=rounds?[{name:'group',label:(grouped?'Gruppenphase':'Ligaphase')+' · Best of Legs (gerade erlaubt)',type:'number',value:m.max_legs,min:1,max:101,required:true}]:[];
+  // The initial group/league length was already entered above; ask only
+  // for additional knockout rounds that can actually occur.
+  const lengthFields=[];
   if(ko||next.follow==='yes'){
-   lengthFields.push({name:'quarterfinal',label:'Viertelfinale · Best of Legs (ungerade)',type:'number',value:5,min:1,max:101,required:true});
-   lengthFields.push({name:'semifinal',label:'Halbfinale · Best of Legs (ungerade)',type:'number',value:7,min:1,max:101,required:true});
-   if(next.third_place==='yes')lengthFields.push({name:'third_place',label:'Spiel um Platz 3 · Best of Legs (ungerade)',type:'number',value:5,min:1,max:101,required:true});
-   lengthFields.push({name:'final',label:'Finale · Best of Legs (ungerade)',type:'number',value:9,min:1,max:101,required:true});
+   if(!ko||selection.members.length>4)lengthFields.push({name:'quarterfinal',label:'Viertelfinale · Best of Legs (ungerade)',type:'number',value:5,min:1,max:101,step:2,required:true});
+   if(!ko||selection.members.length>2)lengthFields.push({name:'semifinal',label:'Halbfinale · Best of Legs (ungerade)',type:'number',value:7,min:1,max:101,step:2,required:true});
+   if(next.third_place==='yes'&&(!ko||selection.members.length>2))lengthFields.push({name:'third_place',label:'Spiel um Platz 3 · Best of Legs (ungerade)',type:'number',value:5,min:1,max:101,step:2,required:true});
+   lengthFields.push({name:'final',label:'Finale · Best of Legs (ungerade)',type:'number',value:9,min:1,max:101,step:2,required:true});
   }
-  const choices=await configure('Matchlängen nach Turnierphase',lengthFields,'Weiter');if(!choices)return;
-  for(const [key,value] of Object.entries(choices)){
-   const n=Number(value);if(!Number.isInteger(n)||n<1||n>101||(key!=='group'&&n%2===0))return notice('K.O.-Matchlängen müssen ungerade sein.',true);
-   roundLengths[key]=n;
+  if(lengthFields.length){
+   const choices=await configure('Matchlängen der weiteren K.O.-Runden',lengthFields,'Weiter');if(!choices)return;
+   for(const [key,value] of Object.entries(choices)){
+    const n=Number(value);if(!Number.isInteger(n)||n<1||n>101||n%2===0)return notice('K.O.-Matchlängen müssen ungerade sein.',true);
+    roundLengths[key]=n;
+   }
   }
-  if(rounds)m.max_legs=roundLengths.group;
  }
  if(!await approve('Turnier anlegen',selection.members.length+' Spieler · '+stage.format+' · '+m.start_score+' Punkte · '+(isSets?'Best of '+m.best_of_sets+' Sets / '+m.best_of_legs_per_set+' Legs':'Best of '+m.max_legs+' Legs')+' · Spielplan wird automatisch erzeugt.'))return;
  try{
@@ -570,15 +605,20 @@ async function quickTraining(){
  try{
   if(!players.length)players=await api('/players');
   const own=user.player_id,opts=players.filter(p=>p.is_active && p.id!==own);
-  const d=await configure('X01-Trainingsmatch',[{name:'other',label:'Gegner',type:'select',options:opts.map(p=>[p.id,p.display_name]),required:true},
-      {name:'mode',label:'Spielmodus',type:'select',options:[['legs','Legs'],['sets','Sets']]},
-      {name:'best',label:'Best of Legs / Sets',type:'number',value:5,min:1,max:101,required:true},
-      {name:'per',label:'Legs pro Set (nur Setmodus)',type:'number',value:3,min:1,max:21}], 'Training starten');
+  const d=await configure('X01-Trainingsmatch',[
+      {name:'other',label:'Gegner',type:'select',options:opts.map(p=>[p.id,p.display_name]),required:true},
+      {name:'mode',label:'Spielmodus',type:'select',options:[['legs','Legmodus'],['sets','Setmodus']],value:'legs'},
+      {name:'best',label:'Best of X Legs',type:'number',value:5,min:1,max:101,required:true,when:['mode','legs']},
+      {name:'sets',label:'Best of X Sets (ungerade)',type:'number',value:3,min:1,max:21,required:true,when:['mode','sets']},
+      {name:'per',label:'Legs pro Set (ungerade)',type:'number',value:3,min:1,max:21,required:true,when:['mode','sets']}], 'Training starten');
   if(!d)return;if(!own)return notice('Deinem Konto ist kein Spielerprofil zugeordnet.',true);
-  const best=Number(d.best),per=Number(d.per);if(d.mode==='sets'&&(best%2!==1||per%2!==1))return notice('Setmodus benötigt ungerade Werte.',true);
-  // A free training game is not a competition and must never appear in tournament tables.
-  const m=await api('/free-x01',{other_id:d.other,rules:{start_score:501,mode:d.mode,
-    max_legs:best,best_of_sets:best,best_of_legs_per_set:per,allow_draw:d.mode==='legs'&&best%2===0}});
+  const best=Number(d.mode==='sets'?d.sets:d.best),per=Number(d.per||3);
+  if(d.mode==='sets'&&(best%2!==1||per%2!==1))return notice('Setmodus benötigt ungerade Werte.',true);
+  if(!Number.isInteger(best)||best<1||best>101)return notice('Ungültige Matchlänge.',true);
+  const rules={start_score:501,mode:d.mode,...(d.mode==='sets'?
+    {best_of_sets:best,best_of_legs_per_set:per}:
+    {max_legs:best,allow_draw:best%2===0})};
+  const m=await api('/free-x01',{other_id:d.other,rules});
   location.assign('/dart/v2/spiel/?free=1&match='+encodeURIComponent(m.id));
  }catch(err){notice(err.message,true)}
 }
@@ -971,8 +1011,9 @@ async function openCompetition(id){
       ])));
       else {
         output.append(el('h3','Scoring & Specials'));
-        output.append(renderTable(['Spieler','95+','100+','133+','exakt 133','140+','171+','180','BF gesamt'],ranked.map(r=>[
-          {player_id:r.player_id,name:r.name},r['95plus'],r['100plus'],r['133plus'],r.exact133,r['140plus'],r['171plus'],r['180'],r.bullfinishes
+        output.append(el('p','Jede Aufnahme zählt genau in eine der fünf Kategorien. 180er werden zusätzlich als Bestleistung ausgewiesen.','helper'));
+        output.append(renderTable(['Spieler','60–79','80–99','100–139','140–170','171–180','180er','BF gesamt'],ranked.map(r=>[
+          {player_id:r.player_id,name:r.name},r['60plus'],r['80plus'],r['100plus'],r['140plus'],r['171plus'],r['180'],r.bullfinishes
         ])));
         output.append(el('h3','Bestleistungen im Detail'));
         output.append(el('p','Alle Leistungen aus abgeschlossenen Scorer-Spielen. Identische Werte werden zusammengezählt (z. B. 2×141 oder 3×18).','helper'));
@@ -1008,11 +1049,16 @@ async function openCompetition(id){
     if(c.kind==='training_tournament'&&(amAdmin()||trainingOwner())){
       const panel=el('div',undefined,'panel ladder-create');panel.append(el('h3','Trainingsmatch anlegen'));
       const people=selected.entries.filter(x=>x.status==='active');const one=picker([['','Spieler 1'],...people.map(x=>[x.player_id,x.display_name])],'',()=>{}),two=picker([['','Spieler 2'],...people.map(x=>[x.player_id,x.display_name])],'',()=>{});
-      const mode=picker([['legs','Legs'],['sets','Sets']],'legs',()=>{});const length=document.createElement('input');length.type='number';length.min='1';length.max='101';length.value='5';
-      for(const [l,f] of [['Spieler 1',one],['Spieler 2',two],['Modus',mode],['Best of X',length]]){const label=el('label',l);label.append(f);panel.append(label)}
+      const mode=picker([['legs','Legmodus'],['sets','Setmodus']],'legs',()=>{perLabel.hidden=mode.value!=='sets';bestLabel.firstChild.textContent=mode.value==='sets'?'Best of X Sets':'Best of X Legs';length.value=mode.value==='sets'?'3':'5'});
+      const length=document.createElement('input');length.type='number';length.min='1';length.max='101';length.value='5';
+      for(const [l,f] of [['Spieler 1',one],['Spieler 2',two],['Modus',mode]]){const label=el('label',l);label.append(f);panel.append(label)}
+      const bestLabel=el('label','Best of X Legs');bestLabel.append(length);panel.append(bestLabel);
+      const per=document.createElement('input');per.type='number';per.min='1';per.max='21';per.step='2';per.value='3';
+      const perLabel=el('label','Legs pro Set');perLabel.append(per);perLabel.hidden=true;panel.append(perLabel);
       panel.append(action('Trainingsmatch hinzufügen',async()=>{if(!one.value||!two.value||one.value===two.value)return notice('Zwei verschiedene Spieler wählen',true);
-        const n=Number(length.value);if(n<1||n>101||mode.value==='sets'&&n%2===0)return notice('Ungültige Matchlänge',true);
-        try{await api('/competitions/'+id+'/matches',{player1_id:one.value,player2_id:two.value,rules:{mode:mode.value,max_legs:n,best_of_sets:n,best_of_legs_per_set:3,allow_draw:mode.value==='legs'&&n%2===0}});await openCompetition(id)}catch(e){notice(e.message,true)}
+        const n=Number(length.value),sets=mode.value==='sets';if(!Number.isInteger(n)||n<1||n>101||sets&&(n%2!==1||Number(per.value)%2!==1))return notice('Ungültige Matchlänge',true);
+        const rules={mode:mode.value,...(sets?{best_of_sets:n,best_of_legs_per_set:Number(per.value)}:{max_legs:n,allow_draw:n%2===0})};
+        try{await api('/competitions/'+id+'/matches',{player1_id:one.value,player2_id:two.value,rules});await openCompetition(id)}catch(e){notice(e.message,true)}
       }));box.append(panel);
     }
     if(c.kind==='ladder'){
@@ -1020,12 +1066,18 @@ async function openCompetition(id){
       const first=picker([['','Spieler 1'],...selected.entries.filter(e=>e.status!=='withdrawn').map(e=>[e.player_id,e.display_name])],'',()=>{});
       const second=picker([['','Spieler 2'],...selected.entries.filter(e=>e.status!=='withdrawn').map(e=>[e.player_id,e.display_name])],'',()=>{});
       const best=document.createElement('input');best.type='number';best.min='5';best.max='101';best.value='6';best.step='1';best.setAttribute('aria-label','Best of X Legs');
-      const mode=picker([['legs','Best of X Legs'],['sets','Best of X Sets (je 3 Legs)']],'legs',()=>{});
-      for(const [label,input] of [['Spieler 1',first],['Spieler 2',second],['Modus',mode],['Best of X (mind. 5)',best]]){const l=el('label',label);l.append(input);add.append(l)}
+      const mode=picker([['legs','Legmodus'],['sets','Setmodus']],'legs',()=>{lengthLabel.firstChild.textContent=mode.value==='sets'?'Best of X Sets (ungerade)':'Best of X Legs (mind. 5)';best.min=mode.value==='sets'?'1':'5';best.value=mode.value==='sets'?'3':'6';perLabel.hidden=mode.value!=='sets'});
+      for(const [label,input] of [['Spieler 1',first],['Spieler 2',second],['Modus',mode]]){const l=el('label',label);l.append(input);add.append(l)}
+      const lengthLabel=el('label','Best of X Legs (mind. 5)');lengthLabel.append(best);add.append(lengthLabel);
+      const per=document.createElement('input');per.type='number';per.min='1';per.max='21';per.step='2';per.value='3';
+      const perLabel=el('label','Legs pro Set');perLabel.append(per);perLabel.hidden=true;add.append(perLabel);
       add.append(action('Match vereinbaren',async()=>{
         if(!first.value||!second.value||first.value===second.value)return notice('Zwei verschiedene Spieler auswählen.',true);
         if(Number(best.value)<(mode.value==='sets'?1:5)||Number(best.value)>101||mode.value==='sets'&&Number(best.value)%2===0)return notice('Legs ab 5, Sets nur ungerade (bis 101).',true);
-        try{const r=await api('/competitions/'+id+'/matches',{player1_id:first.value,player2_id:second.value,rules:{mode:mode.value,max_legs:Number(best.value),best_of_sets:Number(best.value),best_of_legs_per_set:3,allow_draw:mode.value==='legs'&&Number(best.value)%2===0}});await openCompetition(id);notice('Match angelegt – im Spielplan auf Scorer klicken.')}catch(e){notice(e.message,true)}
+        const sets=mode.value==='sets',n=Number(best.value),legPer=Number(per.value);
+        if(!Number.isInteger(n)||sets&&(!Number.isInteger(legPer)||legPer<1||legPer>21||legPer%2!==1))return notice('Bitte gültige ungerade Set- und Legzahlen wählen.',true);
+        const rules={mode:mode.value,...(sets?{best_of_sets:n,best_of_legs_per_set:legPer}:{max_legs:n,allow_draw:n%2===0})};
+        try{await api('/competitions/'+id+'/matches',{player1_id:first.value,player2_id:second.value,rules});await openCompetition(id);notice('Match angelegt – im Spielplan auf Scorer klicken.')}catch(e){notice(e.message,true)}
       },'primary'));box.append(add);
     }
     let storedFilters={};try{storedFilters=JSON.parse(sessionStorage.getItem(scheduleKey())||'{}')}catch{}
@@ -1318,10 +1370,10 @@ async function openScorer(id){
  if(previewId){notice('Die Spieleransicht ist schreibgeschützt.',true);return}
  openGameWindow('/dart/v2/spiel/?match='+encodeURIComponent(id)+'&competition='+encodeURIComponent(selected?.competition?.id||''),id);
 }
-function drawScore(){if(!playing)return;const s=playing.state||{},names=s.names||[playing.player1,playing.player2],rest=s.remaining||[501,501];$('playerOne').textContent=names[0];$('playerTwo').textContent=names[1];$('remainOne').textContent=rest[0];$('remainTwo').textContent=rest[1];$('resultOne').textContent='Legs '+(s.legs?.[0]??playing.legs1??0)+' · Sets '+(s.sets?.[0]??0);$('resultTwo').textContent='Legs '+(s.legs?.[1]??playing.legs2??0)+' · Sets '+(s.sets?.[1]??0);for(let i=0;i<2;i++)document.querySelectorAll('.scorecard')[i].classList.toggle('current',s.current===i&&!s.done);$('toThrow').textContent=s.done?'Spiel beendet':names[s.current??0]+' wirft';$('throwForm').hidden=s.done||playing.status==='finished'||!playing.can_score;$('scoreStatus').textContent='Version '+playing.state_version;const host=$('visits');clear(host);for(const v of (s.visits||[]).slice().reverse())host.append(el('p',names[v.player]+': '+v.score+' / '+v.darts+' Darts'+(v.checkout?' · Checkout':'')+(v.bust?' · Bust':'')))}
+function drawScore(){if(!playing)return;const s=playing.state||{},names=s.names||[playing.player1,playing.player2],rest=s.remaining||[501,501];$('playerOne').textContent=names[0];$('playerTwo').textContent=names[1];$('remainOne').textContent=rest[0];$('remainTwo').textContent=rest[1];$('resultOne').textContent='Legs '+(s.legs?.[0]??playing.legs1??0)+(s.rules?.mode==='sets'?' · Sets '+(s.sets?.[0]??0):'');$('resultTwo').textContent='Legs '+(s.legs?.[1]??playing.legs2??0)+(s.rules?.mode==='sets'?' · Sets '+(s.sets?.[1]??0):'');for(let i=0;i<2;i++)document.querySelectorAll('.scorecard')[i].classList.toggle('current',s.current===i&&!s.done);$('toThrow').textContent=s.done?'Spiel beendet':names[s.current??0]+' wirft';$('throwForm').hidden=s.done||playing.status==='finished'||!playing.can_score;$('scoreStatus').textContent='Version '+playing.state_version;const host=$('visits');clear(host);for(const v of (s.visits||[]).slice().reverse())host.append(el('p',names[v.player]+': '+v.score+' / '+v.darts+' Darts'+(v.checkout?' · Checkout':'')+(v.bust?' · Bust':'')))}
 $('throwForm').onsubmit=async e=>{e.preventDefault();const d=formData(e.target);try{const r=await api('/matches/'+playing.id+'/throw',{points:Number(d.points),darts:Number(d.darts),checkout:!!d.checkout,bullfinish:!!d.bullfinish,version:playing.state_version});playing.state=r.state;playing.state_version=r.version;e.target.reset();e.target.elements.darts.value=3;drawScore()}catch(err){notice(err.message,true)}};
 $('backToCompetition').onclick=()=>selected?openCompetition(selected.competition.id):show('dashboard');
-const statsLabels={tournament_wins:'Turniersiege',tournament_seconds:'2. Plätze',tournament_thirds:'3. Plätze',matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_football_sessions:'Fußball',training_minigolf_sessions:'Minigolf',training_tictactoe_sessions:'Tic Tac Toe',training_connect4_sessions:'Vier gewinnt',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','100plus':'100+','140plus':'140+','171plus':'171+','95plus':'95+','133plus':'133+','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
+const statsLabels={tournament_wins:'Turniersiege',tournament_seconds:'2. Plätze',tournament_thirds:'3. Plätze',matches:'Spiele',wins:'Siege',draws:'Unentschieden',losses:'Niederlagen',legs_for:'Gewonnene Legs',legs_against:'Verlorene Legs',scored_visits:'Aufnahmen',average:'Ø Average',first9:'Ø First 9',lowdarts:'Lowdarts (9–18)',highfinishes:'Highfinishes (100+)',bullfinishes:'Bullfinishes',highscores:'Highscores (171+)',training_sau_sessions:'Gegen die Sau',training_bobs_sessions:'Bobs 27',training_tug_sessions:'Tauziehen',training_football_sessions:'Fußball',training_minigolf_sessions:'Minigolf',training_tictactoe_sessions:'Tic Tac Toe',training_connect4_sessions:'Vier gewinnt',training_bobs_best:'Bobs 27 – Bestwert',training_sau_marks:'Sau-Striche',training_sau_success:'Sau – Checkouts','180':'180er','60plus':'60–79','80plus':'80–99','100plus':'100–139','140plus':'140–170','171plus':'171–180','95plus':'95–99 (Detail)','133plus':'133–139 (Detail)','exact133':'133 exakt',missing_throw_stats_matches:'Spiele ohne Wurfdaten'};
 function multiplicities(values,ascending=false){const counts=new Map();for(const x of values||[])counts.set(String(x),(counts.get(String(x))||0)+1);return [...counts.entries()].sort((a,b)=>ascending?Number(a[0])-Number(b[0]):Number(b[0])-Number(a[0])).map(([value,n])=>n+'×'+value).join(' · ')||'–'}
 function statValue(k,v){if(Array.isArray(v))return multiplicities(v);if(v===null||v===undefined)return '–';if(typeof v==='number')return String(v).replace('.',',');return String(v)}
 let statProfileId=null,statProfileBand='AF',statProfilePage=0,statDetailTab='balance';
@@ -1365,7 +1417,7 @@ function statisticsPanels(host,stats,h2h,scope){
  function cards(p,keys){const grid=el('div',undefined,'stat-cards');for(const k of keys){if(!show(k))continue;const card=el('article',undefined,'stat-card');card.append(el('span',statsLabels[k]||k),el('strong',pretty(k)));grid.append(card)}p.append(grid)}
  cards(panel('Spielbilanz','balance'),['matches','wins','draws','losses','legs_for','legs_against']);
  cards(panel('Durchschnitt & Aufnahmen','average'),['average','first9','scored_visits','missing_throw_stats_matches']);
- cards(panel('Scoring & Specials','scoring'),['95plus','100plus','133plus','exact133','140plus','171plus','180','bullfinishes']);
+ cards(panel('Scoring & Specials','scoring'),['60plus','80plus','100plus','140plus','171plus','180','bullfinishes']);
  const best=panel('Bestleistungen im Detail','best');
  for(const [label,k] of [['Highfinishes','highfinish_details'],['Lowdarts','lowdart_details'],['Bullfinishes','bullfinish_details'],['Highscores','highscores']]){
   if(!show(k))continue;const row=el('div',undefined,'stat-detail-row');row.append(el('b',label),el('span',multiplicities(stats[k])));best.append(row)}

@@ -65,3 +65,18 @@ button.red,.red{background:#6e342e!important;border-color:#b37e6c!important}
 #scorerView #book{background:#356548!important;border:1px solid #9dd5ae!important;color:#fff!important}
 #scorerView #hold{display:none!important}
 @media(max-width:680px){.v2-final-report{padding:6px}.v2-report-grid{min-width:510px}.v2-report-tabs button{flex-basis:44%}}
+
+/* Restscore uses the same keypad as SCORE; this third action stays usable on tablets. */
+#scorerView #v2RestScore{background:#66512b!important;border:1px solid #d3ad65!important;color:#fff2cf!important;font-weight:850!important}
+#scorerView .footer:has(#v2RestScore){display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+#scorerView .footer #v2RestScore,#scorerView .footer #book,#scorerView .footer #checkout{min-width:0;white-space:normal;overflow-wrap:anywhere;padding:4px 6px;font-size:clamp(10px,1.4vw,15px)}
+@media(max-width:650px){#scorerView .footer:has(#v2RestScore){gap:3px}#scorerView #v2RestScore{font-size:11px!important}}
+
+/* Identical 3-column layout for live and completed match statistics. */
+.v2-versus{min-width:500px}
+.v2-versus td:first-child,.v2-versus td:last-child{font-weight:800;font-size:clamp(14px,1.7vw,20px);font-variant-numeric:tabular-nums}
+.v2-versus td:nth-child(2){background:rgba(212,172,87,.10);font-weight:800;color:#e2c277;letter-spacing:.03em}
+.v2-report-tabs button.active{background:#96733b!important;border:2px solid #e7c37d!important;color:#fff!important}
+.v2-report-footer{display:flex;justify-content:flex-end;gap:12px;flex-wrap:wrap}
+.v2-final-report>.modal-close{position:sticky;justify-self:end;top:0;z-index:5;margin:0}
+@media(max-width:680px){.v2-versus{min-width:440px}.v2-versus td:first-child,.v2-versus td:last-child{font-size:14px}}

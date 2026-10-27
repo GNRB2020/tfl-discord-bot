@@ -38,24 +38,59 @@
  document.getElementById('v2StatsTab').onclick=()=>showLiveStats('stats');
  document.getElementById('v2BestTab').onclick=()=>showLiveStats('best');
  document.getElementById('v2ScoreTab').onclick=()=>{closeModal()};
- function showLiveStats(mode){
-  const vis=S?.history||[],names=S?.names||['Spieler 1','Spieler 2'];
-  const items=[0,1].map(i=>vis.filter(v=>v.player===i));
-  const fields=mode==='best'?[
-    ['180',p=>p.filter(v=>v.score===180).length],['171+',p=>p.filter(v=>v.score>=171).length],
-    ['Highfinish',p=>Math.max(0,...p.filter(v=>v.checkout).map(v=>v.score))],['Bullfinishes',p=>p.filter(v=>v.bullfinish).length]
-  ]:[['Aufnahmen',p=>p.length],['Average',p=>{const d=p.reduce((s,v)=>s+(v.darts||3),0);return d?(3*p.filter(v=>!v.bust).reduce((s,v)=>s+v.score,0)/d).toFixed(2):'0,00'}],
-    ['100+',p=>p.filter(v=>v.score>=100).length],['140+',p=>p.filter(v=>v.score>=140).length],
-    ['Checkouts',p=>p.filter(v=>v.checkout).length],['Legs',(_,i)=>S.legs[i]]];
-  let html='<h2>'+(mode==='best'?'Bestleistungen':'Matchstatistiken')+'</h2><table class="v2-stats-table"><thead><tr><th>'+names[0]+'</th><th>Wert</th><th>'+names[1]+'</th></tr></thead><tbody>';
-  for(const [title,calc] of fields){html+='<tr><td>'+calc(items[0],0)+'</td><th>'+title+'</th><td>'+calc(items[1],1)+'</td></tr>'}
-  html+='</tbody></table><div class="actions"><button id="v2CloseStats">ZUM SCORER</button></div>';
-  modal(html);document.getElementById('v2CloseStats').onclick=closeModal;
+ const statsEngine=window.StingrayMatchStats;
+ function getStats(){return statsEngine.summarize(S?.history||[],S?.names||['Spieler 1','Spieler 2'],S?.legs||[0,0],S?.sets||[0,0],S?.rules||{});}
+ function statsGrid(data,rows){
+   const wrap=document.createElement('div');wrap.className='v2-report-scroll';
+   const table=document.createElement('table');table.className='v2-report-grid v2-versus';
+   const head=document.createElement('thead'),header=document.createElement('tr');
+   const score=S?.rules?.mode==='sets'?(S.sets||[0,0]):(S?.legs||[0,0]);
+   for(const value of [data.names[0]+' ['+(score[0]||0)+']','STATISTIK', '['+(score[1]||0)+'] '+data.names[1]]){
+     const th=document.createElement('th');th.textContent=value;header.append(th);
+   }head.append(header);table.append(head);
+   const body=document.createElement('tbody');
+   for(const row of rows){const tr=document.createElement('tr');
+     for(const cell of [row[1],row[0],row[2]]){const td=document.createElement('td');td.textContent=String(cell??'–');tr.append(td)}body.append(tr);
+   }table.append(body);wrap.append(table);return wrap;
  }
+ function statsReport(finished=false,initial='Statistiken'){
+   const data=getStats(),wrap=document.createElement('div');wrap.className='v2-final-report';
+   const closeX=document.createElement('button');closeX.type='button';closeX.className='modal-close';closeX.textContent='×';closeX.setAttribute('aria-label','Fenster schließen');closeX.onclick=closeModal;wrap.append(closeX);
+   const heading=document.createElement('h2');heading.textContent=finished?'Match beendet · '+data.names.join(' – '):'Matchstatistik · '+data.names.join(' – ');wrap.append(heading);
+   const tabs=document.createElement('div');tabs.className='v2-report-tabs';wrap.append(tabs);
+   const body=document.createElement('div');body.className='v2-report-body';wrap.append(body);
+   const formats=[['Spielinfo','Spielinfo'],['Bestleistungen','Bestleistungen'],['Statistiken','Statistiken'],['Scoreboard','Scoreboard']];
+   const buttons=new Map();
+   function render(name){
+     body.replaceChildren();for(const [k,v] of buttons)v.classList.toggle('active',name===k);
+     if(name==='Statistiken')body.append(statsGrid(data,data.statisticalRows));
+     else if(name==='Bestleistungen')body.append(statsGrid(data,data.bestRows));
+     else if(name==='Spielinfo'){
+       const info=[['Spielstand',...(S?.legs||[0,0])],...(S?.rules?.mode==='sets'?[['Sets',...(S?.sets||[0,0])]]:[]),
+         ['Modus',...(S?.rules?.mode==='sets'?['Sets','Sets']:['Legs','Legs'])],
+         ['Startpunkte',S?.rules?.start_score||501,S?.rules?.start_score||501],
+         ['Status',finished?'Beendet':'Laufend',finished?'Beendet':'Laufend']];
+       body.append(statsGrid(data,info));
+     }else if(name==='Scoreboard'){
+       const rows=data.scoreboard.flatMap(leg=>[
+         ['Leg '+leg.leg+' · Darts',...leg.darts.map((n,i)=>leg.checkouts[i]==='–'?'('+n+')':n)],
+         ['Leg '+leg.leg+' · Average',...leg.averages],
+         ['Leg '+leg.leg+' · Checkout',...leg.checkouts]
+       ]);body.append(statsGrid(data,rows.length?rows:[['Keine Aufnahmen','–','–']]));
+     }
+   }
+   for(const [key,label] of formats){const button=document.createElement('button');button.type='button';button.textContent=label;button.onclick=()=>render(key);tabs.append(button);buttons.set(key,button)}
+   const footer=document.createElement('div');footer.className='v2-report-footer';
+   const close=document.createElement('button');close.type='button';close.textContent=finished?'ZUM WETTBEWERB':'ZUM SCORER';close.className='green';close.onclick=finished?back:closeModal;footer.append(close);
+   if(finished){const ret=document.createElement('button');ret.type='button';ret.textContent='SCHLIESSEN';ret.onclick=closeModal;footer.append(ret)}
+   wrap.append(footer);document.getElementById('modalContent').replaceChildren(wrap);
+   document.getElementById('modal').classList.remove('hide');render(initial);
+ }
+ function showLiveStats(mode){statsReport(false,mode==='best'?'Bestleistungen':'Statistiken')}
  function showBoard(){
   if(!S?.names)return;
   document.getElementById('v2LegScore').textContent=(S.legs?.[0]||0)+' : '+(S.legs?.[1]||0);
-  document.getElementById('v2SetScore').textContent='SETS '+(S.sets?.[0]||0)+' : '+(S.sets?.[1]||0);
+  document.getElementById('v2SetScore').textContent='SETS '+(S.sets?.[0]||0)+' : '+(S.sets?.[1]||0);document.getElementById('v2SetScore').hidden=S.rules?.mode!=='sets';
   document.getElementById('v2MatchFormat').textContent=S.rules?.mode==='sets'?'Best of '+S.rules.best_of_sets+' Sets':'Best of '+S.rules?.max_legs+' Legs';
   // Update visible averages from the entire persisted match history on every redraw.
   for(let i=0;i<2;i++){
@@ -105,62 +140,7 @@
    for(const event of ['pointerup','pointerleave','pointercancel'])button.addEventListener(event,()=>{clearTimeout(holdTimer);holdTimer=null});
  }
  // Match-scoped statistics only, without solo modes from unrelated disciplines.
- function summaryFromHistory(){
-   const names=S?.names||['Spieler 1','Spieler 2'],vis=S?.history||[];
-   const own=[0,1].map(i=>vis.filter(v=>v.player===i));
-   const avg=a=>{const d=a.reduce((n,v)=>n+(v.darts||3),0);return d?(3*a.reduce((n,v)=>n+(v.bust?0:v.score),0)/d).toFixed(2):'–'};
-   const firstNine=(a,limit=9)=>{const groups={};for(const v of a)(groups[v.leg_index]??=[]).push(v);
-      let score=0,darts=0;for(const leg of Object.values(groups)){let used=0;for(const v of leg){if(used+(v.darts||3)>limit)break;used+=v.darts||3;darts+=v.darts||3;score+=v.bust?0:v.score}}return darts?(score*3/darts).toFixed(2):'–'};
-   const count=(a,p)=>a.filter(p).length;
-   const rows=[
-     ['Ø Average',...own.map(avg)],['Ø First 9',...own.map(a=>firstNine(a,9))],
-     ['Ø First 12',...own.map(a=>firstNine(a,12))],['Ø First 15',...own.map(a=>firstNine(a,15))],['Ø First 18',...own.map(a=>firstNine(a,18))],
-     ['60+',...own.map(a=>count(a,v=>v.score>=60&&!v.bust))],
-     ['80+',...own.map(a=>count(a,v=>v.score>=80&&!v.bust))],
-     ['100+',...own.map(a=>count(a,v=>v.score>=100&&!v.bust))],
-     ['140+',...own.map(a=>count(a,v=>v.score>=140&&!v.bust))],
-     ['180',...own.map(a=>count(a,v=>v.score===180&&!v.bust))],
-     ['Gewonnene Legs',...(S.legs||[0,0])],
-     ['Gewonnene Sets',...(S.sets||[0,0])],
-   ];
-   const best=[['Highscore',...own.map(a=>Math.max(0,...a.filter(v=>!v.bust).map(v=>v.score)))],
-     ['Highfinish',...own.map(a=>Math.max(0,...a.filter(v=>v.checkout).map(v=>v.score)))],
-     ['Bullfinishes',...own.map(a=>count(a,v=>v.bullfinish))],
-     ['Shortgame',...own.map(a=>{const groups={};for(const v of a)(groups[v.leg_index]??=[]).push(v);const totals=Object.values(groups).filter(x=>x.some(v=>v.checkout)).map(x=>x.reduce((n,v)=>n+(v.darts||3),0));return totals.length?Math.min(...totals):'–'})]];
-   return {names,rows,best,vis};
- }
- function showCompleteReport(){
-   const data=summaryFromHistory();
-   const wrap=document.createElement('div');wrap.className='v2-final-report';
-   const title=document.createElement('h2');title.textContent='Match beendet · '+data.names[0]+' – '+data.names[1];wrap.append(title);
-   const tabs=document.createElement('div');tabs.className='v2-report-tabs';wrap.append(tabs);
-   const report=document.createElement('div');report.className='v2-report-body';wrap.append(report);
-   const makeGrid=(heads,records)=>{const sc=document.createElement('div');sc.className='v2-report-scroll';const table=document.createElement('table');table.className='v2-report-grid';
-     const tr=document.createElement('tr');for(const h of heads){const th=document.createElement('th');th.textContent=h;tr.append(th)}table.append(tr);
-     for(const record of records){const row=document.createElement('tr');for(const cell of record){const td=document.createElement('td');td.textContent=String(cell??'–');row.append(td)}table.append(row)}sc.append(table);return sc};
-   const render=(name)=>{report.replaceChildren();
-     if(name==='Statistiken')report.append(makeGrid(['Kennzahl',...data.names],data.rows));
-     if(name==='Bestleistungen')report.append(makeGrid(['Bestleistung',...data.names],data.best));
-     if(name==='Darts / Leg'){
-       const legs=[...new Set(data.vis.map(v=>v.leg_index))].sort((a,b)=>a-b);
-       const rows=legs.map(leg=>[leg+1,...[0,1].map(i=>{const own=data.vis.filter(v=>v.player===i&&v.leg_index===leg);const darts=own.reduce((n,v)=>n+(v.darts||3),0);return darts?(own.some(v=>v.checkout)?String(darts):'('+darts+')'):'–'})]);
-       report.append(makeGrid(['Leg',...data.names],rows));
-     }
-     if(name==='Averages / Leg'){
-       const legs=[...new Set(data.vis.map(v=>v.leg_index))].sort((a,b)=>a-b);
-       const rows=legs.map(leg=>[leg+1,...[0,1].map(i=>{const a=data.vis.filter(v=>v.player===i&&v.leg_index===leg),d=a.reduce((n,v)=>n+(v.darts||3),0);return d?(3*a.reduce((n,v)=>n+(v.bust?0:v.score),0)/d).toFixed(1):'–'})]);
-       report.append(makeGrid(['Leg',...data.names],rows));
-     }
-     if(name==='Checkouts / Leg'){
-       report.append(makeGrid(['Leg',...data.names],[...new Set(data.vis.map(v=>v.leg_index))].sort((a,b)=>a-b).map(leg=>[leg+1,...[0,1].map(i=>data.vis.find(v=>v.player===i&&v.leg_index===leg&&v.checkout)?.score??'–')])))
-     }
-   };
-   for(const item of ['Statistiken','Bestleistungen','Darts / Leg','Averages / Leg','Checkouts / Leg']){
-     const b=document.createElement('button');b.textContent=item;b.onclick=()=>render(item);tabs.append(b)
-   }
-   render('Statistiken');const close=document.createElement('button');close.className='green';close.textContent='ZUM WETTBEWERB';close.onclick=back;wrap.append(close);
-   $('modalContent').replaceChildren(wrap);$('modal').classList.remove('hide');
- }
+ function showCompleteReport(){statsReport(true,'Spielinfo')}
 
  result=function(){if(!S?.done||completed)return;completed=true;showCompleteReport()};
  const originalShow=showMatch;showMatch=function(){originalShow();document.getElementById('context').textContent='STINGRAYS · WETTBEWERB';};
@@ -169,19 +149,55 @@
  const undo=document.createElement('button');undo.textContent='↶ LETZTE AUFNAHME ZURÜCK';undo.type='button';undo.style.cssText='background:#37495f;border:1px solid #c7a86a;color:white;font-weight:800';
  undo.onclick=async()=>{if(!S?.can_undo||!confirm('Letzte Aufnahme zurücknehmen?'))return;try{S=await api('undo',{});entry='';closeModal();showMatch()}catch(e){err(e.message)}};
  document.querySelector('#scorerView .columns .box')?.append(undo);
- // A running match may be abandoned safely without leaving its board occupied.
- if(!freeMode){
-   const abandon=document.createElement('button');abandon.type='button';abandon.textContent='SPIEL ABBRECHEN';
-   abandon.style.cssText='background:transparent;color:#efc56c;border:1px solid #a28b63;font-weight:700';
-   abandon.onclick=async()=>{
-     if(S?.done){err('Abgeschlossene Spiele können nicht abgebrochen werden.');return}
-     if(!window.confirm('Spiel wirklich abbrechen? Alle bisherigen Aufnahmen werden gelöscht und der Spielstatus wird auf OFFEN gesetzt.'))return;
-     try{await req('/abort',{mode:'reset',confirm:'ABBRECHEN',reason:'Spiel am Board abgebrochen'});back()}
-     catch(e){err(e.message)}
-   };
-   document.querySelector('#scorerView .columns .box')?.append(abandon);
- }
+ // All started games, including free X01, must have an explicit exit action.
+ const abandon=document.createElement('button');abandon.type='button';abandon.textContent='SPIEL ABBRECHEN';
+ abandon.style.cssText='background:#5b302e;color:#ffe0b7;border:1px solid #b47770;font-weight:800';
+ abandon.onclick=async()=>{
+   if(S?.done){err('Ein abgeschlossenes Spiel kann nicht abgebrochen werden.');return}
+   if(!window.confirm(freeMode?'Freies Training endgültig abbrechen? Es zählt nicht in die Statistiken.':'Spiel abbrechen? Alle Aufnahmen werden verworfen, der Status geht zurück auf OFFEN.'))return;
+   abandon.disabled=true;
+   try{
+     await req('/abort',freeMode?{confirm:'ABBRECHEN'}:{mode:'reset',confirm:'ABBRECHEN',reason:'Am Board abgebrochen'});
+     back();
+   }catch(e){abandon.disabled=false;err('Abbruch fehlgeschlagen: '+e.message)}
+ };
+ document.querySelector('#scorerView .columns .box')?.append(abandon);
 
+ // Alternative X01 input: the keypad contains the REMAINING points, not the scored points.
+ // Convert to a real visit so Neon history, averages, leg statistics and Undo remain consistent.
+ function pointsFromRestscore(currentRest,targetRest){
+   if(!Number.isInteger(currentRest)||!Number.isInteger(targetRest))throw Error('Bitte einen gültigen Restscore eingeben.');
+   if(targetRest===0)throw Error('Für das Beenden des Legs bitte CHECK verwenden.');
+   if(targetRest===1)throw Error('Ein Restscore von 1 ist bei Double-Out nicht zulässig.');
+   if(targetRest<0)throw Error('Der Restscore darf nicht negativ sein.');
+   if(targetRest>currentRest)throw Error('Der neue Restscore ist höher als der aktuelle. Bitte die letzte Aufnahme zurücknehmen.');
+   const scored=currentRest-targetRest;
+   if(scored>180)throw Error('Mehr als 180 Punkte in einer Aufnahme sind nicht möglich. Bitte die letzte Aufnahme prüfen.');
+   return scored;
+ }
+ const restScoreButton=document.createElement('button');
+ restScoreButton.id='v2RestScore';restScoreButton.type='button';
+ restScoreButton.textContent='RESTSCORE';
+ restScoreButton.title='Eingegebene Zahl als neuen Restscore übernehmen (3 Darts)';
+ document.querySelector('#scorerView .columns .box .footer')?.insertBefore(restScoreButton,$('checkout'));
+ restScoreButton.addEventListener('click',()=>{
+   if(!S||S.kind!=='x01'||S.done||busy)return;
+   if(!/^\d{1,5}$/.test(entry)){err('Bitte den gewünschten Restscore über das Zahlenfeld eingeben.');return;}
+   const before=Number(S.remaining[S.current]);
+   const after=Number(entry);
+   let points;
+   try{points=pointsFromRestscore(before,after)}catch(e){err(e.message);return}
+   // Match ordinary score booking: with <=170 left the user may record missed doubles.
+   if(before<=170){
+     modal('<h2>Restscore '+after+'</h2><p>Gebuchte Aufnahme: '+points+' Punkte. Wie viele Versuche auf Doppel?</p><div class="actions" id="v2RestAttempts"></div><div class="actions"><button type="button" id="v2RestCancel">ABBRECHEN</button></div>');
+     for(let n=0;n<=3;n++){
+       const button=document.createElement('button');button.type='button';button.textContent=String(n);
+       button.onclick=()=>{closeModal();send(points,{checkout_attempts:n})};
+       $('v2RestAttempts').appendChild(button);
+     }
+     $('v2RestCancel').onclick=closeModal;
+   }else send(points);
+ });
  // Highlight the original keypad's 1/2/3 only if that dart count is a legal checkout.
  // A short tap remains the existing number input; a long press is handled above.
  const checkoutKeys=new Map();
@@ -209,10 +225,12 @@
    }
  }
 
- const showWithUndo=showMatch;showMatch=function(){showWithUndo();undo.disabled=!S?.can_undo;showBoard();updateCheckoutKeys()};
+ const showWithUndo=showMatch;showMatch=function(){showWithUndo();
+   for(let i=0;i<2;i++){const label=document.getElementById('l'+i);if(label&&S?.rules?.mode!=='sets')label.textContent=(S.legs?.[i]||0)+' Legs'}
+   undo.disabled=!S?.can_undo;abandon.disabled=!S||S.done;restScoreButton.disabled=!S||S.done;showBoard();updateCheckoutKeys()};
 
  req().then(async m=>{
-   meta=m;if(!m.can_score&&m.status!=='finished')throw Error('Für dieses Spiel fehlen die Spielrechte');
+   meta=m;if(m.status==='cancelled'){back();return}if(!m.can_score&&m.status!=='finished')throw Error('Für dieses Spiel fehlen die Spielrechte');
    if(m.status==='open'||m.status==='running'){
      let starter=0;
      const previous=typeof m.state==='string'?JSON.parse(m.state||'{}'):(m.state||{});

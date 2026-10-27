@@ -66,7 +66,7 @@ async def start(req):
     async with pool(req).acquire() as db:
       async with db.transaction():
         r=await get_row(db,mid,True);access(a,r)
-        if r['status']=='finished':raise web.HTTPConflict(text='Training abgeschlossen')
+        if r['status'] not in ('open','running'):raise web.HTTPConflict(text='Training bereits beendet oder abgebrochen')
         g=unpack(r)
         if not as_json(r['state']):
             starter=int(d.get('starter',0))
@@ -117,9 +117,23 @@ async def undo(req):
     return response({'state':new_state,'version':r['state_version']+1})
 
 
+
+async def abort(req):
+    """Stop a free training match without turning partial legs into statistics."""
+    a=await actor(req);d=await body(req);mid=uid(req.match_info['mid'])
+    if d.get('confirm')!='ABBRECHEN':raise web.HTTPBadRequest(text='Abbruch bestätigen')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        match=await get_row(db,mid,True);access(a,match)
+        if match['status'] not in ('running','open'):
+            raise web.HTTPConflict(text='Nur offene oder laufende Trainings können abgebrochen werden')
+        await db.execute("UPDATE stingrays_app.free_x01_matches SET status='cancelled', state_version=state_version+1,finished_at=NULL WHERE id=$1",mid)
+    return response({'ok':True,'status':'cancelled'})
+
 def register(app):
     app.router.add_post('/dart/v2/api/free-x01',create)
     app.router.add_get('/dart/v2/api/free-x01/{mid}',detail)
     app.router.add_post('/dart/v2/api/free-x01/{mid}/start',start)
     app.router.add_post('/dart/v2/api/free-x01/{mid}/throw',throw)
     app.router.add_post('/dart/v2/api/free-x01/{mid}/undo',undo)
+    app.router.add_post('/dart/v2/api/free-x01/{mid}/abort',abort)
