@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import discord
+from sheet_guard import get_all_values_cached
 
 LOG = logging.getLogger(__name__)
 CHANNEL_ID = 1562124923441254450
@@ -144,7 +145,7 @@ async def refresh(client, workbook):
     channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
     for div in range(1, 7):
         try:
-            rows = await asyncio.to_thread(workbook.worksheet(f'{div}.DIV').get_all_values)
+            rows = await asyncio.to_thread(get_all_values_cached, lambda d=div: workbook.worksheet(f'{d}.DIV'), sheet_name=f'{div}.DIV', ttl_seconds=840)
             embed = render(div, rows)
             msg = await find_message(channel, client.user.id, div)
             if msg:
@@ -155,7 +156,7 @@ async def refresh(client, workbook):
             LOG.exception('Fehler bei Division %s', div)
     for group in COOP_GROUPS:
         try:
-            rows = await asyncio.to_thread(workbook.worksheet(group).get_all_values)
+            rows = await asyncio.to_thread(get_all_values_cached, lambda g=group: workbook.worksheet(g), sheet_name=group, ttl_seconds=840)
             embed = render_coop(group, rows)
             msg = await find_coop_message(channel, client.user.id, group)
             if msg:

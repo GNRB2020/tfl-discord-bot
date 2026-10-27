@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -65,6 +66,8 @@ def _parse(value):
     return result
 
 
+_WS_HEADER_VERIFIED_AT = 0.0
+
 def _ws():
     wb = get_season_spreadsheet()
     try:
@@ -73,11 +76,15 @@ def _ws():
         ws = wb.add_worksheet(title=STORE_SHEET, rows=1000, cols=len(HEADERS))
     if ws.col_count < len(HEADERS):
         ws.add_cols(len(HEADERS) - ws.col_count)
-    first = ws.row_values(1)
-    if not any(first):
-        ws.update("A1:P1", [HEADERS])
-    elif first[:len(HEADERS)] != HEADERS:
-        raise RuntimeError(f"{STORE_SHEET}: Spaltenüberschriften weichen ab. Keine Änderung vorgenommen.")
+    global _WS_HEADER_VERIFIED_AT
+    # Unveränderte Tabellenüberschriften nicht bei jeder Aktion erneut abfragen.
+    if time.monotonic() - _WS_HEADER_VERIFIED_AT > 3600:
+        first = ws.row_values(1)
+        if not any(first):
+            ws.update("A1:P1", [HEADERS])
+        elif first[:len(HEADERS)] != HEADERS:
+            raise RuntimeError(f"{STORE_SHEET}: Spaltenüberschriften weichen ab. Keine Änderung vorgenommen.")
+        _WS_HEADER_VERIFIED_AT = time.monotonic()
     return ws
 
 
@@ -195,11 +202,12 @@ async def _notify(guild, group, teams, content):
     return total
 
 
-def _busy(group, team, instant, exclude_row=0):
-    """Keine zweite Begegnung eines Teams zur selben Uhrzeit; gruppenübergreifend."""
+def _busy(group, team, instant, exclude_row=0, group_rows=None):
+    """Gruppenübergreifende Terminkollision, einmalige Sheet-Snapshots je Prüfung."""
     p = _player()
-    for section in p.COOP_GROUP_SHEETS:
-        rows = p._coop_group_rows(section, True)
+    if group_rows is None:
+        group_rows = {section: p._coop_group_rows(section, True) for section in p.COOP_GROUP_SHEETS}
+    for section, rows in group_rows.items():
         for match in p._coop_group_matches(section, rows):
             if section == group and match["row"] == exclude_row:
                 continue
@@ -214,14 +222,14 @@ def _busy(group, team, instant, exclude_row=0):
 
 def _match_candidates(group, origin, destination, instant):
     p = _player()
-    rows = p._coop_group_rows(group, True)
+    group_rows = {section: p._coop_group_rows(section, True) for section in p.COOP_GROUP_SHEETS}
     available = []
-    for m in p._coop_group_matches(group, rows):
+    for m in p._coop_group_matches(group, group_rows[group]):
         if {_norm(m["home"]), _norm(m["away"])} != {_norm(origin), _norm(destination)}:
             continue
         if not p._is_open_result_value(m["result"]) or m["date_text"]:
             continue
-        if _busy(group, m["home"], instant, m["row"]) or _busy(group, m["away"], instant, m["row"]):
+        if _busy(group, m["home"], instant, m["row"], group_rows) or _busy(group, m["away"], instant, m["row"], group_rows):
             continue
         available.append(m)
     return available
@@ -286,8 +294,12 @@ def _take(offer_id, group, team, actor, match_row, expected_home, expected_away)
 
 
 def _allowed_modes(group, home, away):
-    _, _, _, h_ban = _player()._coop_team_members(group, home)
-    _, _, _, a_ban = _player()._coop_team_members(group, away)
+    p = _player()
+    rows = p._coop_group_rows(group, True)
+    bans = {_norm(p._safe_row_cell(row, 13)): p._safe_row_cell(row, 14) for row in rows[1:]}
+    if _norm(home) not in bans or _norm(away) not in bans:
+        raise ValueError("Coop-Team im Gruppenkader nicht gefunden.")
+    h_ban, a_ban = bans[_norm(home)], bans[_norm(away)]
     banned = {_norm(h_ban), _norm(a_ban)} - {""}
     return [m for m in MODES if _norm(m) not in banned]
 
