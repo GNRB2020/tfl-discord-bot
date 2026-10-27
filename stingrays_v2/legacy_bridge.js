@@ -14,7 +14,8 @@
    return {...state,kind:'x01',names:state.names||[meta.player1,meta.player2],rules,remaining:rest,current,
       legs:state.legs||[raw.legs1||0,raw.legs2||0],sets:state.sets||[raw.sets1||0,raw.sets2||0],
       done:!!state.done||raw.status==='finished',can_checkout:state.done?[]:possible(rest[current]),
-      current_stats:stats,last:visits.slice(-8),history:visits,can_undo:raw.status==='running'&&visits.length>0,summary:raw.summary||null};
+      current_stats:stats,last:visits.slice(-8),history:visits,can_undo:raw.status==='running'&&visits.length>0,summary:raw.summary||null,
+      advancement:raw.advancement||null};
  }
  api=async function(path,data){
    if(path==='state'){const m=await req();meta=m;return normalize(m)}
@@ -57,6 +58,10 @@
    const data=getStats(),wrap=document.createElement('div');wrap.className='v2-final-report';
    const closeX=document.createElement('button');closeX.type='button';closeX.className='modal-close';closeX.textContent='×';closeX.setAttribute('aria-label','Fenster schließen');closeX.onclick=closeModal;wrap.append(closeX);
    const heading=document.createElement('h2');heading.textContent=finished?'Match beendet · '+data.names.join(' – '):'Matchstatistik · '+data.names.join(' – ');wrap.append(heading);
+   if(finished&&S?.advancement&&S.advancement.status!=='ok'){
+     const warning=document.createElement('p');warning.className='v2-advancement-warning';
+     warning.textContent='Match gespeichert. '+S.advancement.message;warning.setAttribute('role','alert');wrap.append(warning);
+   }
    const tabs=document.createElement('div');tabs.className='v2-report-tabs';wrap.append(tabs);
    const body=document.createElement('div');body.className='v2-report-body';wrap.append(body);
    const formats=[['Spielinfo','Spielinfo'],['Bestleistungen','Bestleistungen'],['Statistiken','Statistiken'],['Scoreboard','Scoreboard']];

@@ -1081,14 +1081,12 @@ async def throw(req):
         # There is one revision per valid throw; append-only history supports proper recovery and review.
         await db.execute(f"UPDATE {SCHEMA}.match_claims SET lease_until=now()+interval '45 minutes',released_at=CASE WHEN $2 THEN now() ELSE NULL END WHERE match_id=$1",mid,g.done)
         if g.done and m['kind']=='ladder':await apply_elo(db,m,[total_one,total_two],g.sets)
+    advancement=None
     if g.done and m['kind'] in ('training_tournament','final_tournament','league','cup','vm'):
-        try:
-            from .tournament_automation import progress
-            await progress(req,m['competition_id'])
-        except Exception:
-            import logging
-            logging.exception('Trainingsturnier: automatischer Rundenwechsel fehlgeschlagen')
-    return response({'state':current,'version':m['state_version']+1,'summary':g.summary() if g.done else None})
+        from .advancement_guard import advance_with_feedback
+        advancement=await advance_with_feedback(req,m['competition_id'])
+    return response({'state':current,'version':m['state_version']+1,
+        'summary':g.summary() if g.done else None,'advancement':advancement})
 
 async def undo_visit(req):
     """Undo the last visit of a running match. Completed ELO matches remain final."""
@@ -1165,13 +1163,9 @@ async def manual_result(req):
         await db.execute(f'''UPDATE {SCHEMA}.matches SET status='finished',source='legacy',legs1=$2,legs2=$3,
            finished_at=now() WHERE id=$1''',mid,x,y)
         await db.execute(f"INSERT INTO {SCHEMA}.match_revisions(match_id,actor_id,action,new_state) VALUES($1,$2,'manual_result',$3::jsonb)",mid,a['id'],json.dumps({'legs1':x,'legs2':y}))
-    try:
-        from .tournament_automation import progress
-        await progress(req,m['competition_id'])
-    except Exception:
-        import logging
-        logging.exception('Trainingsturnier: Rundenwechsel nach manueller Wertung fehlgeschlagen')
-    return response({'ok':True})
+    from .advancement_guard import advance_with_feedback
+    advancement=await advance_with_feedback(req,m['competition_id'])
+    return response({'ok':True,'advancement':advancement})
 
 async def correct_invalid_ko(req):
     # Correct legacy KO draws and rebuild only downstream unstarted matches in same phase.
@@ -1202,14 +1196,9 @@ async def correct_invalid_ko(req):
           VALUES($1,'correct_invalid_ko','match',$2,$3::jsonb)''',a['id'],str(mid),json.dumps({'before':before,'after':[x,y],'reason':str(d.get('reason',''))[:300]}))
         await db.execute(f'''INSERT INTO {SCHEMA}.match_revisions(match_id,actor_id,action,reason)
           VALUES($1,$2,'correct_invalid_ko',$3)''',mid,a['id'],str(d.get('reason',''))[:300])
-    try:
-        from .tournament_automation import progress
-        await progress(req,m['competition_id'])
-    except Exception:
-        import logging
-        logging.exception('KO-Fehlerkorrektur: Turnierfortschreibung fehlgeschlagen')
-        raise web.HTTPInternalServerError(text='Ergebnis korrigiert, aber automatische Rundenfortschreibung fehlgeschlagen. Bitte Admin-Protokoll prüfen.')
-    return response({'ok':True})
+    from .advancement_guard import advance_with_feedback
+    advancement=await advance_with_feedback(req,m['competition_id'])
+    return response({'ok':True,'advancement':advancement})
 
 async def withdraw(req):
     a=await actor(req,'admin');d=await body(req);cid=uid(req.match_info['cid']);pid=uid(d.get('player_id'))
@@ -1244,9 +1233,9 @@ async def close_phase(req):
         remaining=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.matches WHERE phase_id=$1 AND status IN ('open','running')",pid)
         if remaining:raise web.HTTPConflict(text=f'{remaining} offene oder laufende Begegnungen')
         await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_by=$2,closed_at=now() WHERE id=$1",pid,a['id'])
-    from .tournament_automation import progress
-    await progress(req,p['competition_id'])
-    return response({'closed':True})
+    from .advancement_guard import advance_with_feedback
+    advancement=await advance_with_feedback(req,p['competition_id'])
+    return response({'closed':True,'advancement':advancement})
 
 async def bracket(req):
     a=await actor(req);d=await body(req);pid=uid(req.match_info['pid']);ids=d.get('player_ids',[])
@@ -2125,6 +2114,31 @@ async def overview(req):
         'recent':recent,'ladder':list(map(dict,ladder)),'recent_totals':totals,
         'profile':profile,'viewed_player_id':viewed,'preview':bool(preview)})
 
+async def admin_diagnostics(req):
+    """Read-only operations snapshot. No credentials, PII or query bodies are exposed."""
+    await actor(req,'admin')
+    async with pool(req).acquire() as db:
+        summary=await db.fetchrow(f"""SELECT
+            (SELECT count(*) FROM {SCHEMA}.matches WHERE status='running') AS running,
+            (SELECT count(*) FROM {SCHEMA}.matches WHERE status='open') AS open_matches,
+            (SELECT count(*) FROM {SCHEMA}.competitions WHERE deleted_at IS NULL AND status='active') AS active_competitions,
+            (SELECT count(*) FROM {SCHEMA}.backup_runs WHERE status='success') AS successful_backups""")
+        pending=await db.fetch(f"""SELECT c.id,c.title,p.name AS phase_name,
+            (SELECT count(*) FROM {SCHEMA}.matches m WHERE m.phase_id=p.id) AS phase_games
+            FROM {SCHEMA}.competitions c
+            JOIN {SCHEMA}.phases p ON p.competition_id=c.id AND p.phase_order=1
+            WHERE c.deleted_at IS NULL AND c.status IN ('active','draft')
+              AND c.rules->>'auto_tournament'='true' AND c.rules->>'follow'='true'
+              AND EXISTS (SELECT 1 FROM {SCHEMA}.matches m WHERE m.phase_id=p.id)
+              AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.matches m
+                    WHERE m.phase_id=p.id AND m.status<>'finished')
+              AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.phases later
+                    JOIN {SCHEMA}.matches mm ON mm.phase_id=later.id
+                    WHERE later.competition_id=c.id AND later.phase_order>p.phase_order)
+            ORDER BY c.title LIMIT 25""")
+    return response({'summary':dict(summary),'pending_advancement':[dict(row) for row in pending],
+        'note':'Offene Folgerunden können einen ungeklärten Qualifikationsgleichstand haben.'})
+
 async def register_startup(app):
     url=os.environ.get('STINGRAYS_DATABASE_URL')
     if not url:
@@ -2133,8 +2147,13 @@ async def register_startup(app):
         return
     import asyncpg
     # Neon pooled endpoint; a maximum of 3 connections avoids persistent compute load.
-    app['stingrays_pool']=await asyncpg.create_pool(dsn=url,min_size=0,max_size=3,command_timeout=20,
-                                             max_inactive_connection_lifetime=30)
+    # Default remains intentionally small. Raise only after a representative 22-board test.
+    try:
+        max_connections=max(2,min(15,int(os.environ.get('STINGRAYS_DB_POOL_MAX','3'))))
+    except ValueError:
+        max_connections=3
+    app['stingrays_pool']=await asyncpg.create_pool(dsn=url,min_size=0,max_size=max_connections,
+        command_timeout=20,max_inactive_connection_lifetime=30)
     print('[STINGRAYS V2] Neon connection ready')
 
 async def register_cleanup(app):
@@ -2155,11 +2174,9 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/training/tournament/setup',auto_training_setup),
       ('GET','/dart/v2/api/live-games',auto_live_games),
       ('GET','/dart/v2/api/competitions/{cid}/final-report',auto_training_report),
-      ('POST','/dart/v2/api/training/tournament/setup',auto_training_setup),
-      ('GET','/dart/v2/api/live-games',auto_live_games),
-      ('GET','/dart/v2/api/competitions/{cid}/final-report',auto_training_report),
       ('GET','/dart/v2',spa),('GET','/dart/v2/',spa),('GET','/dart/v2/spiel/',legacy_scorer_page),('GET','/dart/v2/assets/{filename}',assets),
       ('GET','/dart/v2/api/health',health),
+      ('GET','/dart/v2/api/admin/diagnostics',admin_diagnostics),
       ('GET','/dart/v2/api/legacy/preview',preview_legacy),
       ('POST','/dart/v2/api/legacy/sync-profiles',sync_legacy_profiles),
       ('POST','/dart/v2/api/legacy/import',import_legacy),('POST','/dart/v2/api/bootstrap',bootstrap),
@@ -2227,7 +2244,7 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/training/highscores',training_highscores),
     ]
     for method,path,handler in routes:app.router.add_route(method,path,handler)
-    print('[STINGRAYS V2] dashboard-ladder-admin r20261023 installed under /dart/v2/')
+    print('[STINGRAYS V2] stable release 20261027 installed under /dart/v2/')
 
 # The existing Google-Sheets League remains authoritative until an administrator
 # explicitly imports a checked copy. No old record is mutated by these routes.

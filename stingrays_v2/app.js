@@ -132,7 +132,7 @@ const amAdmin=()=>user?.role==='admin';
 const trainingOwner=()=>selected?.competition?.kind==='training_tournament'&&selected?.competition?.created_by===user?.id;
 function section(name){for(const id of ['setup','login','changePassword','dashboard','settings','training','ladder','competitions','boards','members','statistics','admin','scorer'])$(id).hidden=id!==name;$('nav').hidden=!user||['login','setup','changePassword'].includes(name);$('mobileMenu').hidden=$('nav').hidden;$('nav').classList.remove('mobile-open');$('mobileMenu').setAttribute('aria-expanded','false');for(const b of document.querySelectorAll('nav [data-view]')){b.classList.toggle('active',b.dataset.view===name);b.style.display=b.classList.contains('admin')&&!amAdmin()?'none':(b.dataset.view==='boards'&&user?.role==='member'?'none':'')}notice('')}
 async function session(){try{user=await api('/me');if(user.must_change_password){section('changePassword');return}section('dashboard');await show('dashboard')}catch{user=null;section('login')}}
-async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false);renderStatisticsProfiles();}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false);await Promise.all([loadOnlineSessions(),loadAuditLog(true),loadStatSources(),loadPasswordRequests()])}}catch(e){notice(e.message,true)}}
+async function show(view){section(view);try{if(view==='dashboard')await dashboard();if(view==='settings')await loadSettings();if(view==='competitions')await loadCompetitions();if(view==='training')await loadTraining();if(view==='ladder')await loadLadder();if(view==='boards')await loadBoards();if(view==='members')await loadPlayers();if(view==='statistics'){await loadPlayers();fillPlayerSelect('statPlayer',false);renderStatisticsProfiles();}if(view==='admin'){if(user.role!=='admin')throw Error('Nur Administratoren');await loadPlayers();fillPlayerSelect('accountPlayer',true);fillPlayerSelect('previewPlayer',false);await Promise.all([loadOnlineSessions(),loadAuditLog(true),loadStatSources(),loadPasswordRequests(),loadSystemDiagnostics()])}}catch(e){notice(e.message,true)}}
 $('mobileMenu').onclick=()=>{const expanded=$('nav').classList.toggle('mobile-open');$('mobileMenu').setAttribute('aria-expanded',String(expanded))};
 for(const b of document.querySelectorAll('nav [data-view]'))b.onclick=()=>show(b.dataset.view);
 $('firstAdmin').onclick=()=>section('setup');
@@ -383,6 +383,26 @@ $('statResetAll').onclick=async()=>{
 
 $('memberSearch').oninput=()=>{memberPage=0;renderPlayers()};
 function fillPlayerSelect(id,blank){const host=$(id);clear(host);if(blank)host.append(new Option('Turnierkonto ohne Spieler',''));for(const p of players)host.append(new Option(p.display_name,p.id))}
+async function loadSystemDiagnostics(){
+ const host=$('systemDiagnosticsResult');if(!host)return;
+ clear(host);
+ try{
+  const data=await api('/admin/diagnostics');const info=data.summary||{};
+  const kpis=el('div',undefined,'diagnostic-kpis');
+  for(const [name,value] of [['Laufende Matches',info.running],['Offene Matches',info.open_matches],
+   ['Aktive Wettbewerbe',info.active_competitions],['Backups im App-Protokoll',info.successful_backups]]){
+    const chip=el('div',undefined,'diagnostic-kpi');chip.append(el('strong',String(value??'–')),el('span',name));kpis.append(chip);
+  }
+  host.append(kpis);
+  if(!Number(info.successful_backups))host.append(el('p','Keine Sicherung im internen Backup-Protokoll. Externe Sicherungen und Neon-Snapshots separat kontrollieren.','diagnostic-warning'));
+  const pending=data.pending_advancement||[];
+  if(pending.length){host.append(el('h3','Folgerunden prüfen ('+pending.length+')'));
+    for(const item of pending){const row=el('div',undefined,'diagnostic-pending');row.append(el('span',item.title+' · '+item.phase_name));
+      row.append(action('Wettbewerb öffnen',()=>openCompetition(item.id),'subtle'));host.append(row)}
+  }else host.append(el('p','Keine abgeschlossenen Vorrunden ohne erstellte Folgespiele erkannt.','helper'));
+ }catch(e){host.append(el('p','Systemstatus nicht verfügbar: '+e.message,'diagnostic-warning'))}
+}
+$('systemDiagnosticsRefresh').onclick=()=>loadSystemDiagnostics();
 const roleLabels={member:'Mitglied',tournament:'Turnieraccount',admin:'Administrator'};
 let auditOffset=0;
 function formatWhen(value){return value?new Date(value).toLocaleString('de-DE',{dateStyle:'short',timeStyle:'short'}):'Noch keine Aktivität'}
@@ -1374,7 +1394,9 @@ async function openCompetition(id){
             const d=await configure('K.O.-Fehlergebnis korrigieren',[{name:'score',label:'Korrigierter Endstand (z.B. 3:2)',required:true},{name:'reason',label:'Korrekturgrund',value:'Ungültiges Unentschieden im K.O.-Spiel',required:true}]);
             if(!d)return;const match=/^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(d.score);
             if(!match||Number(match[1])===Number(match[2]))return notice('K.O.-Spiele brauchen einen eindeutigen Sieger.',true);
-            try{await api('/matches/'+m.id+'/correct-ko',{legs1:Number(match[1]),legs2:Number(match[2]),reason:d.reason,confirm:'KORRIGIEREN'});await openCompetition(id);notice('Ergebnis korrigiert. K.O.-Runden wurden aktualisiert.')}catch(e){notice(e.message,true)}
+            try{const r=await api('/matches/'+m.id+'/correct-ko',{legs1:Number(match[1]),legs2:Number(match[2]),reason:d.reason,confirm:'KORRIGIEREN'});await openCompetition(id);
+              notice(r.advancement&&r.advancement.status!=='ok'?'Ergebnis korrigiert. '+r.advancement.message:'Ergebnis korrigiert. K.O.-Runden geprüft.',r.advancement&&r.advancement.status!=='ok')}
+            catch(e){notice(e.message,true)}
           },'danger'));
         }
         if(user.role==='admin'&&m.status==='open')actions.append(action('Altes Ergebnis',async()=>{
@@ -1382,7 +1404,8 @@ async function openCompetition(id){
           const match=/^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(raw);if(!match){notice('Format: 4:2',true);return}
           const x=Number(match[1]),y=Number(match[2]);const phase=selected.phases.find(ph=>ph.id===m.phase_id);
           if(phase?.kind==='knockout'&&x===y)return notice('In der K.O.-Runde ist ein Unentschieden nicht erlaubt.',true);
-          try{await api('/matches/'+m.id+'/manual',{legs1:x,legs2:y});await openCompetition(id)}catch(e){notice(e.message,true)}
+          try{const res=await api('/matches/'+m.id+'/manual',{legs1:x,legs2:y});await openCompetition(id);
+            if(res.advancement&&res.advancement.status!=='ok')notice('Ergebnis gespeichert. '+res.advancement.message,true)}catch(e){notice(e.message,true)}
         },'subtle'));
         const actionCell=el('td',undefined,'fixture-action-cell');actionCell.append(actions);line.append(actionCell);tbody.append(line);
       }

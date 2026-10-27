@@ -80,3 +80,5 @@ button.red,.red{background:#6e342e!important;border-color:#b37e6c!important}
 .v2-report-footer{display:flex;justify-content:flex-end;gap:12px;flex-wrap:wrap}
 .v2-final-report>.modal-close{position:sticky;justify-self:end;top:0;z-index:5;margin:0}
 @media(max-width:680px){.v2-versus{min-width:440px}.v2-versus td:first-child,.v2-versus td:last-child{font-size:14px}}
+
+.v2-advancement-warning{color:#f7dab0;border:1px solid #b88d4d;background:#47372a;border-radius:8px;padding:10px;font-weight:700}
