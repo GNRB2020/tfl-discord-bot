@@ -1077,14 +1077,7 @@ async def throw(req):
         # There is one revision per valid throw; append-only history supports proper recovery and review.
         await db.execute(f"UPDATE {SCHEMA}.match_claims SET lease_until=now()+interval '45 minutes',released_at=CASE WHEN $2 THEN now() ELSE NULL END WHERE match_id=$1",mid,g.done)
         if g.done and m['kind']=='ladder':await apply_elo(db,m,[total_one,total_two],g.sets)
-    if g.done and m['kind'] in ('training_tournament','final_tournament'):
-        try:
-            from .tournament_automation import progress
-            await progress(req,m['competition_id'])
-        except Exception:
-            import logging
-            logging.exception('Trainingsturnier: automatischer Rundenwechsel fehlgeschlagen')
-    if g.done and m['kind'] in ('training_tournament','final_tournament'):
+    if g.done and m['kind'] in ('training_tournament','final_tournament','league','cup','vm'):
         try:
             from .tournament_automation import progress
             await progress(req,m['competition_id'])
@@ -2061,7 +2054,7 @@ def register_stingrays_v2(app):
     from .free_training import register as register_free_training
     register_free_training(app)
     from .tournament_automation import setup as auto_training_setup, live_games as auto_live_games, report as auto_training_report
-    from .tournament_automation import setup as auto_training_setup, live_games as auto_live_games, report as auto_training_report
+    from .competition_wizard import create_group_plan, choose_wildcards
     routes=[
       ('POST','/dart/v2/api/training/tournament/setup',auto_training_setup),
       ('GET','/dart/v2/api/live-games',auto_live_games),
@@ -2095,6 +2088,8 @@ def register_stingrays_v2(app):
       ('GET','/dart/v2/api/boards',board_list),('POST','/dart/v2/api/boards/{bid}',edit_board),
       ('GET','/dart/v2/api/competitions',competition_list),('POST','/dart/v2/api/competitions',create_competition),
       ('GET','/dart/v2/api/competitions/{cid}',competition_detail),
+      ('POST','/dart/v2/api/competitions/{cid}/guided-setup',create_group_plan),
+      ('POST','/dart/v2/api/competitions/{cid}/wildcard-decision',choose_wildcards),
       ('POST','/dart/v2/api/competitions/{cid}/entries',add_entries),
       ('POST','/dart/v2/api/competitions/{cid}/phases',create_phase),
       ('POST','/dart/v2/api/phases/{pid}/groups',create_group),

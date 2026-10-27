@@ -488,6 +488,117 @@ async function loadLadder(){
  if(ladders.length)for(const c of ladders)host.append(tile(c.title,c.status+' · '+c.players+' Teilnehmer',()=>openCompetition(c.id)));
  if(user.role==='admin'){host.append(action('Neue Ladder-Saison anlegen',()=>{$('ladderCreate').hidden=false;$('ladderCreate').scrollIntoView({block:'start'});},'primary'))}
 }
+// Guided setup for classic Stingray competitions: one reviewed draw, one atomic save.
+async function guidedCompetitionSetup(cid,detail){
+ if(!amAdmin())return notice('Nur Administratoren dürfen einen Wettbewerb auslosen.',true);
+ const entries=(detail?.entries||[]).filter(e=>e.status!=='withdrawn');
+ if((detail?.phases||[]).length)return notice('Dieser Wettbewerb enthält bereits Phasen. Bestehende Spiele und Ergebnisse werden nicht überschrieben.',true);
+ if(entries.length<4)return notice('Für eine Gruppenrunde sind mindestens vier Teilnehmer nötig.',true);
+ const count=entries.length;
+ const start=await configure('Turnierassistent · 1/4 · Gruppenrunde',[
+  {name:'group_count',label:'Wie viele Gruppen sollen ausgelost werden?',type:'number',min:1,max:Math.min(50,Math.floor(count/2)),value:Math.min(Math.max(2,Math.ceil(count/6)),Math.floor(count/2)),required:true},
+  {name:'mode',label:'Wie wird in der Gruppe gespielt?',type:'select',options:[['legs','Best of X Legs'],['sets','Best of X Sets']]},
+  {name:'max_legs',label:'Gruppenspiele · Best of X Legs',type:'number',min:1,max:101,value:6,required:true,when:['mode','legs']},
+  {name:'best_of_sets',label:'Gruppenspiele · Best of X Sets',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']},
+  {name:'best_of_legs_per_set',label:'Legs je Set · Best of X',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']},
+  {name:'double_round',label:'Begegnungen in der Gruppe',type:'select',options:[['no','Jeder gegen jeden (1×)'],['yes','Hin- und Rückrunde (2×)']]}
+ ],'Weiter zu den Folgerunden');
+ if(!start)return;
+ const n=Number(start.group_count), minGroup=Math.floor(count/n);
+ if(!Number.isInteger(n)||n<1||n>Math.floor(count/2))return notice('Gruppenanzahl muss mindestens zwei Teilnehmer je Gruppe erlauben.',true);
+ const groupRules={start_score:501,mode:start.mode,max_legs:Number(start.max_legs||6),best_of_sets:Number(start.best_of_sets||3),best_of_legs_per_set:Number(start.best_of_legs_per_set||3)};
+ if(start.mode==='sets'&&(groupRules.best_of_sets%2===0||groupRules.best_of_legs_per_set%2===0))return notice('Bei Setmodus müssen Best-of-Sets und Best-of-Legs je Set ungerade sein.',true);
+ const more=await configure('Turnierassistent · 2/4 · Qualifikation',[
+  {name:'follow',label:'Gibt es eine weitere Spielrunde?',type:'select',options:[['yes','Ja, Hauptrunde'],['no','Nein, Gruppenrunde ist das Finale']],value:'yes'},
+  {name:'qualifiers',label:'Wie viele je Gruppe kommen sicher weiter?',type:'number',min:1,max:minGroup,value:Math.min(2,Math.max(1,minGroup-1)),required:true,when:['follow','yes']},
+  {name:'best_third_count',label:'Zusätzlich beste Nächstplatzierte (z. B. beste Dritte/Vierte)',type:'number',min:0,max:n,value:0,required:true,when:['follow','yes']},
+  {name:'follow_format',label:'Format der Hauptrunde',type:'select',options:[['single_ko','Single-K.O.'],['double_ko','Doppel-K.O.'],['groups','Erneute Gruppenphase'],['league','Liga / Jeder gegen jeden']],when:['follow','yes']},
+  {name:'consolation',label:'Trostrunde für alle nicht Qualifizierten?',type:'select',options:[['no','Nein'],['yes','Ja, alle übrigen Spieler']],value:'no',when:['follow','yes']}
+ ],'Weiter zum Spielmodus');
+ if(!more)return;
+ const follow=more.follow==='yes',qualifiers=follow?Number(more.qualifiers):0,wild=follow?Number(more.best_third_count):0;
+ if(follow&&qualifiers*n+wild<2)return notice('Mindestens zwei Spieler müssen in die Hauptrunde einziehen.',true);
+ if(follow&&wild>0&&qualifiers>=minGroup)return notice('Zusatzplätze erfordern mindestens einen nicht direkt qualifizierten Spieler je Gruppe.',true);
+ if(follow&&more.consolation==='yes'&&qualifiers*n+wild>count-2)return notice('Für die Trostrunde müssen Teilnehmer übrig bleiben.',true);
+ let following={follow_group_count:2,consolation_group_count:2,consolation_format:'single_ko'};
+ if(follow){
+  const fields=[];
+  if(['groups','league'].includes(more.follow_format))fields.push({name:'follow_group_count',label:'Gruppen der Hauptrunde',type:'number',min:1,max:Math.min(16,Math.floor((qualifiers*n+wild)/2)),value:2,required:true});
+  if(more.consolation==='yes'){
+   fields.push({name:'consolation_format',label:'Format der Trostrunde',type:'select',options:[['single_ko','Single-K.O.'],['double_ko','Doppel-K.O.'],['groups','Gruppenrunde'],['league','Liga']]});
+   // A second prompt for group count is only shown if group mode is chosen.
+  }
+  if(fields.length){const x=await configure('Turnierassistent · 3/4 · Folgerunden',fields,'Weiter');if(!x)return;Object.assign(following,x)}
+  if(more.consolation==='yes'&&['groups','league'].includes(following.consolation_format)){
+   const remaining=count-qualifiers*n-wild;
+   const x=await configure('Gruppenzahl der Trostrunde',[{name:'consolation_group_count',label:'Gruppen der Trostrunde',type:'number',min:1,max:Math.min(16,Math.floor(remaining/2)),value:Math.min(2,Math.floor(remaining/2)),required:true}],'Weiter');if(!x)return;Object.assign(following,x);
+  }
+ }
+ const anyKo=follow&&(['single_ko','double_ko'].includes(more.follow_format)||(more.consolation==='yes'&&['single_ko','double_ko'].includes(following.consolation_format)));
+ let koRules={mode:'legs',start_score:501,max_legs:5,best_of_sets:3,best_of_legs_per_set:3},lengths={};let third_place=false;
+ if(anyKo){
+  const setup=await configure('Turnierassistent · K.O.-Spiele',[
+   {name:'mode',label:'Spielmodus der K.O.-Runden',type:'select',options:[['legs','Best of X Legs'],['sets','Best of X Sets']]},
+   {name:'max_legs',label:'Standard · Best of X Legs',type:'number',min:1,max:101,step:2,value:5,required:true,when:['mode','legs']},
+   {name:'best_of_sets',label:'Standard · Best of X Sets',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']},
+   {name:'best_of_legs_per_set',label:'Legs je Set',type:'number',min:1,max:21,step:2,value:3,required:true,when:['mode','sets']},
+   {name:'third_place',label:'Spiel um Platz 3?',type:'select',options:[['no','Nein'],['yes','Ja']],value:'no'}
+  ],'Rundenlängen festlegen');if(!setup)return;
+  koRules={...koRules,mode:setup.mode,max_legs:Number(setup.max_legs||5),best_of_sets:Number(setup.best_of_sets||3),best_of_legs_per_set:Number(setup.best_of_legs_per_set||3)};
+  third_place=setup.third_place==='yes'&&qualifiers*n+wild>=4&&['single_ko','double_ko'].includes(more.follow_format);
+  if(koRules.mode==='sets'&&(koRules.best_of_sets%2===0||koRules.best_of_legs_per_set%2===0))return notice('Best-of-Sets und Legs pro Set müssen ungerade sein.',true);
+  if(koRules.mode==='legs'&&koRules.max_legs%2===0)return notice('K.O.-Matchlängen müssen ungerade sein.',true);
+  const qualified=qualifiers*n+wild;
+  const fields=[];
+  const possible=[...(qualified>32?[['first_round','Vorrunde vor 1/16-Finale']]:[]),...(qualified>16?[['round32','1/16-Finale']]:[]),...(qualified>8?[['round16','1/8-Finale']]:[]),...(qualified>4?[['quarterfinal','Viertelfinale']]:[]),...(qualified>2?[['semifinal','Halbfinale']]:[]),['final','Finale'],...(third_place?[['third_place','Spiel um Platz 3']]:[])];
+  for(const [key,label] of possible){const x=key==='semifinal'?9:key==='final'?11:key==='quarterfinal'?7:5;fields.push({name:key,label:label+' · '+(koRules.mode==='sets'?'Best of X Sets':'Best of X Legs'),type:'number',min:1,max:101,step:2,value:koRules.mode==='sets'?3:x,required:true})}
+  const vals=await configure('Turnierassistent · Matchlängen nach Runde',fields,'Auslosung ansehen');if(!vals)return;
+  lengths=Object.fromEntries(Object.entries(vals).map(([k,v])=>[k,Number(v)]));
+  if(Object.values(lengths).some(x=>x%2===0))return notice('K.O.-Matchlängen müssen ungerade sein.',true);
+ }
+ const ids=entries.map(e=>e.player_id);
+ const shuffle=()=>{const copy=[...ids];for(let i=copy.length-1;i>0;i--){const bits=new Uint32Array(1);crypto.getRandomValues(bits);const j=bits[0]%(i+1);[copy[i],copy[j]]=[copy[j],copy[i]];}return Array.from({length:n},(_,j)=>copy.filter((_,k)=>k%n===j))};
+ let groups=shuffle();
+ const shade=el('div',undefined,'sheet-shade'),panel=el('section',undefined,'config-sheet guided-draw');panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');
+ const subtitle=el('p',count+' Spieler · '+n+' Gruppen · Gruppenspiele '+(start.mode==='legs'?'Bo'+groupRules.max_legs+' Legs':'Bo'+groupRules.best_of_sets+' Sets')+' · '+(follow?qualifiers+' je Gruppe weiter'+(wild?' + '+wild+' Nachrücker':''):'nur Gruppenrunde'),'helper');
+ panel.append(popupCloseButton(()=>shade.remove()),el('h2','Turnierassistent · 4/4 · Auslosung prüfen'),subtitle,
+ el('p','Zufällig ausgelost. Zum Ändern einen Spieler auf einen anderen ziehen (Tausch), oder auf die Zielgruppe ziehen. Erst mit „Auslosung freigeben“ werden Gruppen und Begegnungen gespeichert.','helper'));
+ const preview=el('div',undefined,'guided-draw-groups'),msg=el('p','','helper');
+ const names=new Map(entries.map(x=>[x.player_id,x.display_name]));
+ let dragged=null;
+ function move(pid,to,swap){const from=groups.findIndex(a=>a.includes(pid));if(from<0||to<0)return;
+  if(swap&&swap!==pid){const source=groups[from].indexOf(pid),dest=groups[to].indexOf(swap);if(dest<0)return;groups[from][source]=swap;groups[to][dest]=pid;}
+  else if(from!==to){if(groups[from].length<=2)return;groups[from].splice(groups[from].indexOf(pid),1);groups[to].push(pid)}
+  render();
+ }
+ function render(){clear(preview);for(let j=0;j<groups.length;j++){
+  const group=el('article',undefined,'guided-draw-group');group.append(el('h3','Gruppe '+(j<26?String.fromCharCode(65+j):'A'+String.fromCharCode(65+j-26))+' · '+groups[j].length+' Spieler'));
+  group.ondragover=e=>{e.preventDefault();group.classList.add('drop-target')};group.ondragleave=e=>{if(!group.contains(e.relatedTarget))group.classList.remove('drop-target')};
+  group.ondrop=e=>{e.preventDefault();group.classList.remove('drop-target');if(dragged)move(dragged,j,null)};
+  for(const pid of groups[j]){const item=el('div',undefined,'guided-draw-player');item.draggable=true;item.append(el('span',names.get(pid)||'?'),el('span','↕','drag-grip'));
+   item.ondragstart=e=>{dragged=pid;e.dataTransfer.setData('text/plain',pid);e.dataTransfer.effectAllowed='move'};
+   item.ondragend=()=>{dragged=null};item.ondragover=e=>e.preventDefault();item.ondrop=e=>{e.stopPropagation();e.preventDefault();if(dragged)move(dragged,j,pid)};
+   const swapButton=btn('Tauschen',async()=>{const other=await configure('Spieler zwischen Gruppen tauschen',[{name:'to',label:'Spieler auswählen',type:'select',options:entries.filter(x=>x.player_id!==pid).map(x=>[x.player_id,x.display_name])}],'Tauschen');if(!other)return;const k=groups.findIndex(g=>g.includes(other.to));if(k>=0)move(pid,k,other.to)});swapButton.className='subtle swap-player';item.append(swapButton);group.append(item)}preview.append(group)}
+  const total=groups.reduce((a,g)=>a+g.length,0);msg.textContent=total+' von '+count+' Spielern eingeteilt. '+(start.double_round==='yes'?'Hin- und Rückrunde.':'Jeder gegen jeden einmal.');
+ }
+ panel.append(preview,msg);
+ const controls=el('div',undefined,'sheet-actions');controls.append(btn('Neu auslosen',()=>{groups=shuffle();render()}),btn('Abbrechen',()=>shade.remove()));
+ const finish=btn('Auslosung freigeben',async()=>{
+  if(groups.some(g=>g.length<2))return notice('Mindestens zwei Teilnehmer je Gruppe.',true);
+  const games=groups.reduce((sum,g)=>sum+g.length*(g.length-1)/2,0)*(start.double_round==='yes'?2:1);
+  if(!await approve('Auslosung endgültig freigeben',n+' Gruppen, '+count+' Spieler, '+games+' Gruppenspiele werden angelegt. Danach kann die Gruppeneinteilung nicht mehr durch diesen Assistenten geändert werden.'))return;
+  finish.disabled=true;
+  try{await api('/competitions/'+cid+'/guided-setup',{
+   group_count:n,groups,group_rules:groupRules,ko_rules:koRules,double_round:start.double_round==='yes',
+   follow,qualifiers:qualifiers||1,best_third_count:wild,follow_format:more.follow_format||'single_ko',
+   consolation:follow&&more.consolation==='yes',consolation_format:following.consolation_format||'single_ko',
+   follow_group_count:Number(following.follow_group_count||2),consolation_group_count:Number(following.consolation_group_count||2),
+   round_lengths:lengths,third_place
+  });shade.remove();await openCompetition(cid);notice('Gruppen ausgelost und Spielplan automatisch erstellt.');}
+  catch(e){finish.disabled=false;notice('Auslosung nicht gespeichert: '+e.message,true)}
+ });finish.className='primary';controls.append(finish);panel.append(controls);shade.append(panel);document.body.append(shade);render();
+}
+
 async function createCompetitionWizard(){
  if(!amAdmin())return notice('Nur Administratoren dürfen Vereinswettbewerbe anlegen.',true);
  if(!players.length)players=await api('/players');
@@ -521,7 +632,7 @@ async function createCompetitionWizard(){
   }
   const created=await api('/competitions',payload);
   if(participantIds.length)await api('/competitions/'+created.id+'/entries',{player_ids:participantIds});
-  await loadCompetitions();await openCompetition(created.id);notice('Wettbewerb angelegt. Konfiguriere jetzt Phasen und Gruppen im Tab Verwaltung.');
+  await loadCompetitions();await openCompetition(created.id);if(first.kind!=='ladder'&&participantIds.length>=4)await guidedCompetitionSetup(created.id,selected);else notice('Wettbewerb angelegt.');
  }catch(e){notice('Erstellen fehlgeschlagen: '+e.message,true)}
 }
 
@@ -830,6 +941,13 @@ async function openCompetition(id){
   for(const x of [selected.entries.length+' Teilnehmer',played+' / '+selected.matches.length+' gespielt',c.status])summary.append(el('span',x,'chip'));
   if(c.kind==='ladder'&&c.rules?.final_competition_id){h.append(action('Finalturnier öffnen',()=>openCompetition(c.rules.final_competition_id),'primary'));}
   h.append(summary);header.append(h,action('← Alle Wettbewerbe',()=>{$('competitionDetail').hidden=true;loadCompetitions()},'subtle'));host.append(header);
+  const firstPhase=selected.phases?.[0];
+  const firstMatches=(selected.matches||[]).filter(m=>m.phase_id===firstPhase?.id);
+  const pendingWildcardDecision=amAdmin()&&c.rules?.guided_setup&&c.rules?.follow&&Number(c.rules.best_third_count||0)>0&&
+    selected.phases.length===1&&firstMatches.length>0&&firstMatches.every(m=>m.status==='finished');
+  if(pendingWildcardDecision){const flag=el('div',undefined,'qualification-pending');flag.append(el('strong','Gruppenrunde beendet · Qualifikation prüfen'),
+    el('p','Die automatische Hauptrunde ist noch nicht freigegeben. Bei Gleichstand der besten Nächstplatzierten muss die Turnierleitung entscheiden.'),
+    action('Nachrücker festlegen',()=>view('management'),'primary'));host.append(flag)}
   const tabs=el('div',undefined,'competition-tabs');
   const content=el('div',undefined,'competition-content');
   host.append(tabs,content);
@@ -1300,30 +1418,53 @@ async function openCompetition(id){
         try{const r=await api('/competitions/'+id+'/withdraw',{player_id:drop.value,forfeit_legs:4});await openCompetition(id);notice(r.revalued+' Spiele neu gewertet.')}catch(e){notice(e.message,true)}
       },'danger'));
     }
-    const phases=panel('Gruppen & Spielmodus','Phasen und Gruppen werden unabhängig voneinander verwaltet.');
-    phases.append(action('Neue Phase',async()=>{
+    const phases=panel('Turnierassistent & Gruppen','Gruppen automatisch losen, Spielmodus und Folgerunden festlegen – ohne jede Gruppe einzeln anzulegen.');
+    if(!selected.phases.length&&selected.entries.length>=4){
+      const guide=action('Turnierassistent starten · Gruppen automatisch auslosen',()=>guidedCompetitionSetup(id,selected),'primary');phases.append(guide);
+      phases.append(el('p','Mit Vorschau, Drag & Drop, automatischem Spielplan, Qualifikation, Hauptrunde und Trostrunde.','helper'));
+    }
+    if(c.rules?.guided_setup){phases.append(el('p','Automatischer Modus: Gruppen und Spielplan sind bereits ausgelost. Die Hauptrunde und gegebenenfalls die Trostrunde werden nach dem letzten Gruppenspiel automatisch erzeugt. Beste gleichplatzierte Nachrücker können bei Gleichstand entschieden werden.','helper'))}
+    if(c.rules?.guided_setup && Number(c.rules.best_third_count||0)>0 && !selected.phases.some(p=>Number(p.phase_order)>1)){
+      const pre=selected.phases[0];
+      const matches=selected.matches.filter(m=>m.phase_id===pre?.id);
+      if(matches.length && matches.every(m=>m.status==='finished')){
+        phases.append(action('Gleichstand / beste Nächstplatzierte entscheiden',async()=>{
+          try{const n=Number(c.rules.qualifiers||1),candidates=[];
+            for(const group of selected.groups.filter(g=>g.phase_id===pre.id)){
+              const rows=await api('/competitions/'+id+'/standings?group_id='+group.id);
+              for(const row of rows.slice(n))candidates.push([row.player_id,group.name+' · '+row.name+' · '+row.points+' Punkte · '+row.legs_for+':'+row.legs_against]);
+            }
+            const data=await configure('Beste Nächstplatzierte wählen',[{name:'ids',label:'Genau '+c.rules.best_third_count+' weitere Qualifikanten',type:'multi',options:candidates,value:c.rules.best_third_manual_ids||[]}],'Auswahl freigeben');
+            if(!data)return;if(data.ids.length!==Number(c.rules.best_third_count))return notice('Bitte genau '+c.rules.best_third_count+' Teilnehmer wählen.',true);
+            if(!await approve('Qualifikation bestätigen','Diese Teilnehmer werden zusätzlich in die Hauptrunde übernommen.'))return;
+            await api('/competitions/'+id+'/wildcard-decision',{player_ids:data.ids});await openCompetition(id);notice('Nachrücker gesetzt.');
+          }catch(e){notice('Nachrücker konnten nicht gesetzt werden: '+e.message,true)}
+        },'primary'));
+      }
+    }
+    if(!c.rules?.guided_setup)phases.append(action('Phase manuell anlegen (Expertenmodus)',async()=>{
       const data=await configure('Neue Phase',[{name:'kind',label:'Phasenart',type:'select',options:[['groups','Gruppenphase'],['league','Liga'],['knockout','K.O.-Phase']]},{name:'name',label:'Bezeichnung',value:'Gruppenphase',required:true}]);if(!data)return;const mode=data.kind,name=data.name;
       try{await api('/competitions/'+id+'/phases',{kind:mode,name});await openCompetition(id)}catch(e){notice(e.message,true)}
     }));
     for(const ph of selected.phases){
       const group=el('details',undefined,'manage-details');const summary=el('summary',ph.name+' · '+ph.kind+' · '+ph.status);group.append(summary);
-      group.append(action('Gruppe anlegen',async()=>{const data=await configure('Gruppe hinzufügen',[{name:'name',label:'Gruppenname',value:'Gruppe A',required:true}]);if(!data)return;const name=data.name;try{await api('/phases/'+ph.id+'/groups',{name});await openCompetition(id)}catch(e){notice(e.message,true)}}));
+      if(!c.rules?.guided_setup)group.append(action('Gruppe anlegen',async()=>{const data=await configure('Gruppe hinzufügen',[{name:'name',label:'Gruppenname',value:'Gruppe A',required:true}]);if(!data)return;const name=data.name;try{await api('/phases/'+ph.id+'/groups',{name});await openCompetition(id)}catch(e){notice(e.message,true)}}));
       for(const g of selected.groups.filter(g=>g.phase_id===ph.id)){
         const sub=el('div',undefined,'group-edit');sub.append(el('strong',g.name));
         const current=selected.memberships.filter(x=>x.group_id===g.id).map(x=>selected.entries.find(e=>e.entry_id===x.entry_id)?.display_name).filter(Boolean);
         sub.append(el('small',current.join(', ')||'Keine Teilnehmer'));
-        sub.append(action('Einteilung bearbeiten',async()=>{
+        if(!c.rules?.guided_setup)sub.append(action('Einteilung bearbeiten',async()=>{
           const selectedIds=selected.memberships.filter(x=>x.group_id===g.id).map(x=>x.entry_id);
           const data=await configure('Gruppe '+g.name+' einteilen',[{name:'entries',label:'Teilnehmer',type:'multi',options:selected.entries.map(x=>[x.entry_id,x.display_name]),value:selectedIds}]);if(!data)return;
           try{await api('/groups/'+g.id+'/entries',{entry_ids:data.entries});await openCompetition(id)}catch(e){notice(e.message,true)}
         },'subtle'));
-        sub.append(action('Spielplan erzeugen',async()=>{
+        if(!c.rules?.guided_setup)sub.append(action('Spielplan erzeugen',async()=>{
           const data=await configure('Spielplan '+g.name,[{name:'rounds',label:'Spielmodus',type:'select',options:[['single','Einfach'],['double','Hin- und Rückrunde']]}],'Spielplan erzeugen');if(!data)return;
           try{await api('/groups/'+g.id+'/fixtures',{double_round:data.rounds==='double'});await openCompetition(id)}catch(e){notice(e.message,true)}
         },'subtle'));group.append(sub);
       }
-      if(ph.kind==='knockout')group.append(action('K.O. aus Teilnehmerliste',async()=>{try{await api('/phases/'+ph.id+'/bracket',{player_ids:selected.entries.map(e=>e.player_id)});await openCompetition(id)}catch(e){notice(e.message,true)}}),action('Nächste Runde',async()=>{try{await api('/phases/'+ph.id+'/advance',{});await openCompetition(id)}catch(e){notice(e.message,true)}}));
-      group.append(action('Phase schließen',async()=>{if(!await approve('Phase schließen','Die Phase abschließen?'))return;try{await api('/phases/'+ph.id+'/close',{});await openCompetition(id)}catch(e){notice(e.message,true)}},'subtle'));
+      if(ph.kind==='knockout'&&!c.rules?.guided_setup)group.append(action('K.O. aus Teilnehmerliste',async()=>{try{await api('/phases/'+ph.id+'/bracket',{player_ids:selected.entries.map(e=>e.player_id)});await openCompetition(id)}catch(e){notice(e.message,true)}}),action('Nächste Runde',async()=>{try{await api('/phases/'+ph.id+'/advance',{});await openCompetition(id)}catch(e){notice(e.message,true)}}));
+      if(!c.rules?.guided_setup)group.append(action('Phase schließen',async()=>{if(!await approve('Phase schließen','Die Phase abschließen?'))return;try{await api('/phases/'+ph.id+'/close',{});await openCompetition(id)}catch(e){notice(e.message,true)}},'subtle'));
       phases.append(group);
     }
     const general=panel('Export & Status','Offene Begegnungen exportieren und Wettbewerbsstatus verwalten.');

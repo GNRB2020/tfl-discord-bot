@@ -423,3 +423,18 @@ main>#login:not([hidden]),main>#setup:not([hidden]),main>#changePassword:not([hi
 .checklist-toolbar{display:flex;gap:8px;flex-wrap:wrap}
 .checklist-toolbar button{min-height:32px;font-size:12px;padding:5px 10px}
 .checklist-count{color:#d7c38e;font-weight:700}
+
+/* Reviewed group draws – all edits stay local until the administrator releases the draw. */
+.config-sheet.guided-draw{width:min(1120px,96vw);max-width:1120px;max-height:92dvh;overflow-y:auto}
+.guided-draw-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin:15px 0;max-height:54dvh;overflow-y:auto;padding:4px}
+.guided-draw-group{border:1px solid #806b50;background:#1c2025;border-radius:10px;padding:10px;min-width:0;min-height:90px}
+.guided-draw-group h3{font-size:15px;margin:1px 0 9px;color:#eacb8a}
+.guided-draw-group.drop-target{outline:2px dashed #eacb8a;outline-offset:-3px;background:#31332b}
+.guided-draw-player{display:flex;gap:7px;align-items:center;justify-content:space-between;background:#292b2c;margin:5px 0;padding:7px;border-radius:6px;border:1px solid #515151;cursor:grab;font-size:13px}
+.guided-draw-player span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.guided-draw-player .drag-grip{color:#e7c881;font-size:17px;user-select:none}
+.guided-draw-player .swap-player{font-size:11px;padding:4px 7px}
+.guided-draw .sheet-actions{position:sticky;bottom:0;background:#242427;padding:12px 0;border-top:1px solid #6e624e;z-index:2;display:flex;flex-wrap:wrap;gap:8px}
+@media(max-width:640px){.guided-draw-groups{grid-template-columns:1fr;max-height:57dvh}.config-sheet.guided-draw{width:98vw}}
+.qualification-pending{padding:12px 16px;margin:10px 0;border:1px solid #b69759;border-radius:9px;background:#352e20;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.qualification-pending p{margin:0;flex:1;min-width:220px;color:#e9dcc7}.qualification-pending strong{color:#f1d492}

@@ -117,7 +117,7 @@ async def setup(req):
             for i,(p1,p2) in enumerate(pairs):
                 if p1 is None or p2 is None:continue
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
-                  VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,phase,i+1,p1,p2,json.dumps({**spec['rules'],'bracket':'winner'} if spec['format']=='double_ko' else spec['rules']))
+                  VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,phase,i+1,p1,p2,json.dumps(spec['rules']))
                 created+=1
         if not created:raise web.HTTPBadRequest(text='Keine Begegnungen erzeugt')
     return response({'id':cid,'created':created,'groups':spec['group_count'],'automatic':True},201)
@@ -128,7 +128,7 @@ def winner(m):
     if s1 is None or s2 is None or s1==s2:return None
     return m['player1_id'] if s1>s2 else m['player2_id']
 
-async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=False):
+async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=False,origin_groups=None):
     if fmt in ('single_ko','double_ko'):
         match_rules={**match_rules,'allow_draw':False}
         if match_rules['mode']=='legs' and match_rules['max_legs']%2==0:
@@ -137,7 +137,7 @@ async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=Fa
     ph=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
       VALUES($1,$2,$3,$4,'open',$5::jsonb) RETURNING id''',cid,'Finalrunde' if stage=='final' else 'Trostrunde',
       'groups' if fmt in ('groups','league') else 'knockout',order,
-      json.dumps({'stage':stage,'format':fmt,'participants':[str(p) for p in ids],'match_rules':match_rules}))
+      json.dumps({'stage':stage,'format':fmt,'participants':[str(p) for p in ids],'match_rules':match_rules,'origin_groups':origin_groups or {}}))
     count=0
     if fmt in ('groups','league'):
         buckets=[[] for _ in range(max(1,min(ngroups,len(ids)//2)))]
@@ -152,14 +152,67 @@ async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=Fa
     else:
         if match_rules['mode']=='legs' and match_rules['max_legs']%2==0:
             match_rules={**match_rules,'max_legs':match_rules['max_legs']+1,'allow_draw':False}
+        if origin_groups:
+            ids=spread_groups_in_bracket(ids,origin_groups)
         pairs=bracket_pairs(ids)
         byes=[p for x,y in pairs if not(x and y) for p in (x,y) if p]
         await db.execute(f'UPDATE {SCHEMA}.phases SET rules=rules || $2::jsonb WHERE id=$1',ph,json.dumps({'bye_players':[str(p) for p in byes]}))
         for i,(p1,p2) in enumerate(pairs):
             if p1 is None or p2 is None:continue
             await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
-             VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,ph,i+1,p1,p2,json.dumps({**match_rules,'bracket':'winner'} if fmt=='double_ko' else match_rules));count+=1
+             VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,ph,i+1,p1,p2,json.dumps(match_rules));count+=1
     return count
+
+def spread_groups_in_bracket(ids, origin_groups):
+    """Prefer early cross-group games; preserve entrants and do not manufacture rematches.
+
+    Optimize standard bracket slots (first round, quarters, halves), with stronger
+    penalties for rematches in earlier stages. Only the seed order is rearranged.
+    """
+    from .rules import bracket_pairs
+    ids=list(ids)
+    if len(ids)<3 or not origin_groups:return ids
+    def cost(seq):
+        n=1<<(len(seq)-1).bit_length()
+        positions=[1,2]
+        while len(positions)<n:
+            total=2*len(positions)+1
+            positions=[x for x in positions for x in (x,total-x)]
+        slots=[seq[k-1] if k<=len(seq) else None for k in positions]
+        penalty=0
+        for size,weight in ((2,1000),(4,80),(8,15),(16,3)):
+            if size>n:continue
+            for k in range(0,n,size):
+                groups=[origin_groups.get(str(x)) for x in slots[k:k+size] if x]
+                for i,g in enumerate(groups):
+                    penalty+=sum(weight for b in groups[i+1:] if b and b==g)
+        return penalty
+    best=cost(ids)
+    # Bounded deterministic improvement, avoids randomly reshuffling after a result.
+    for _ in range(3):
+        improved=False
+        if best==0:break
+        for i in range(len(ids)):
+            for j in range(i+1,len(ids)):
+                if origin_groups.get(str(ids[i]))==origin_groups.get(str(ids[j])):continue
+                ids[i],ids[j]=ids[j],ids[i]
+                score=cost(ids)
+                if score<best:
+                    best=score;improved=True
+                else:
+                    ids[i],ids[j]=ids[j],ids[i]
+        if not improved:break
+    return ids
+
+
+def round_match_rules(rules, lengths, key):
+    result=dict(rules)
+    value=lengths.get(key)
+    if value is not None:
+        if result.get('mode')=='sets':result['best_of_sets']=int(value)
+        else:result['max_legs']=int(value)
+    return result
+
 
 def rank_wildcards(candidates):
     """Rank first eliminated player of each preliminary group fairly.
@@ -168,67 +221,10 @@ def rank_wildcards(candidates):
     Caller provides (player_id, table_row, group_sort_order).
     """
     def metrics(item):
-        _,row,order=item
+        row=item[1];order=item[2]
         n=max(1,int(row['played']))
         return (row['points']/n, (row['legs_for']-row['legs_against'])/n, row['legs_for']/n)
-    return sorted(candidates,key=lambda item:(-metrics(item)[0],-metrics(item)[1],-metrics(item)[2],item[2],str(item[0])))
-
-
-def double_ko_next_matches(participants, allrows):
-    """Return (bracket, p1, p2) for the next DOUBLE KO wave.
-
-    One loss moves a player into the lower bracket; the second eliminates.
-    The undefeated player only meets the lower-bracket winner in the grand final.
-    Each participant plays at most once per wave. Past opponents are avoided
-    until unavoidable (notably the grand final / reset).
-    """
-    losses={p:0 for p in participants}
-    met=set()
-    last_round={p:0 for p in participants}
-    newly_dropped=set()
-    for m in allrows:
-        w=winner(m)
-        if w is None:
-            raise ValueError('Unvollständiges oder unentschiedenes KO-Ergebnis')
-        p1,p2=m['player1_id'],m['player2_id']
-        if p1 not in losses or p2 not in losses:
-            raise ValueError('Unbekannter Teilnehmer im KO-Baum')
-        if losses[p1]>=2 or losses[p2]>=2:
-            raise ValueError('Ein bereits ausgeschiedener Spieler wurde erneut angesetzt')
-        l=p2 if w==p1 else p1
-        losses[l]+=1
-        if losses[l]==1 and int(m['round_number'])==int(allrows[-1]['round_number']):
-            newly_dropped.add(l)
-        met.add(frozenset((p1,p2)))
-        last_round[p1]=last_round[p2]=int(m['round_number'])
-    undefeated=[p for p in participants if losses[p]==0]
-    lower=[p for p in participants if losses[p]==1]
-    if len(undefeated)+len(lower)<=1:
-        return []
-    if len(undefeated)==1 and len(lower)==1:
-        # First meeting of finalists or reset match if the previously undefeated
-        # player lost the first grand final.
-        return [('grand_final',undefeated[0],lower[0])] if undefeated else []
-    if not undefeated and len(lower)==2:
-        # A reset final: both finalists now have exactly one loss.
-        return [('grand_final_reset',lower[0],lower[1])]
-    upcoming=[]
-    def pair_group(people,kind):
-        pool=sorted(people,key=lambda p:(last_round[p],str(p)))
-        # The fresh loser of the upper-bracket final waits until the lower
-        # bracket has produced its challenger (when there are three players).
-        if kind=='loser' and len(pool)%2 and len(pool)>=3:
-            waiting=next((p for p in pool if p in newly_dropped),None)
-            if waiting is not None:pool.remove(waiting)
-        while len(pool)>1:
-            p=pool.pop(0)
-            # Favor opponents not yet played, with the oldest last appearance.
-            q=min(pool,key=lambda x:(frozenset((p,x)) in met,last_round[x],str(x)))
-            pool.remove(q)
-            upcoming.append((kind,p,q))
-    pair_group(undefeated,'winner')
-    pair_group(lower,'loser')
-    return upcoming
+    return sorted(candidates,key=lambda item:(item[3] if len(item)>3 else 0,-metrics(item)[0],-metrics(item)[1],-metrics(item)[2],item[2],str(item[0])))
 
 
 async def progress(req,cid):
@@ -236,7 +232,7 @@ async def progress(req,cid):
     async with pool(req).acquire() as db:
       async with db.transaction():
         c=await db.fetchrow(f'''SELECT id,rules,status FROM {SCHEMA}.competitions
-          WHERE id=$1 AND kind IN ('training_tournament','final_tournament') AND deleted_at IS NULL FOR UPDATE''',cid)
+          WHERE id=$1 AND kind IN ('training_tournament','final_tournament','league','cup','vm') AND deleted_at IS NULL FOR UPDATE''',cid)
         if not c or c['status'] not in ('active','draft'):return
         cfg=as_json(c['rules']);
         if not cfg.get('auto_tournament'):return
@@ -251,17 +247,17 @@ async def progress(req,cid):
             if cfg.get('follow'):
                 groups=await db.fetch(f'SELECT id FROM {SCHEMA}.groups WHERE phase_id=$1 ORDER BY sort_order',pre['id'])
                 q=cfg.get('qualifiers','1');n=99999 if q=='all' else int(q)
-                selected=[];rest=[];wildcards=[];ranked_groups=[]
+                selected=[];rest=[];wildcards=[]
                 for order,g in enumerate(groups):
                     members=await db.fetch(f'''SELECT e.player_id FROM {SCHEMA}.group_members gm
                      JOIN {SCHEMA}.entries e ON e.id=gm.entry_id WHERE gm.group_id=$1''',g['id'])
                     ms=await db.fetch(f'''SELECT player1_id,player2_id,status,legs1,legs2,sets1,sets2 FROM {SCHEMA}.matches
                       WHERE group_id=$1''',g['id'])
                     ranks=rank_rows([dict(m) for m in ms],[p['player_id'] for p in members])
-                    ranked_groups.append([p['player_id'] for p in ranks[:n]])
                     selected.extend(p['player_id'] for p in ranks[:n])
                     rest.extend(p['player_id'] for p in ranks[n:])
-                    if len(ranks)>n:wildcards.append((ranks[n]['player_id'],ranks[n],order))
+                    for place in range(n,len(ranks)):
+                        wildcards.append((ranks[place]['player_id'],ranks[place],order,place))
                 extra=int(cfg.get('best_third_count',0) or 0)
                 if extra:
                     if extra>len(wildcards):raise web.HTTPConflict(text='Nicht genügend Drittplatzierte für die angegebene Wildcard-Anzahl')
@@ -277,39 +273,23 @@ async def progress(req,cid):
                         def key(row):
                             count=max(1,row['played'])
                             return (row['points']/count,(row['legs_for']-row['legs_against'])/count,row['legs_for']/count)
-                        if key(a)==key(b):
+                        if best[extra-1][3]==best[extra][3] and key(a)==key(b):
                             raise web.HTTPConflict(text='Gleichstand der besten Drittplatzierten an der Qualifikationsgrenze – manuelle Entscheidung erforderlich')
                     additional=set(manual) if manual else {x[0] for x in best[:extra]}
                     selected.extend(manual if manual else [x[0] for x in best[:extra]])
                     rest=[pid for pid in rest if pid not in additional]
                 if len(selected)<2:raise web.HTTPConflict(text='Weniger als zwei qualifizierte Spieler')
-                # Ladder final: the group winners receive semifinal byes when 3 per group qualify.
-                special_ladder_six=(cfg.get('ladder_final_of') and len(ranked_groups)==2 and
-                    all(len(g)==3 for g in ranked_groups) and not extra)
-                if special_ladder_six:
-                    a,b=ranked_groups
-                    # Preliminary matches A2 vs B3, B2 vs A3, with A1/B1 waiting.
-                    selected=[a[1],b[2],b[1],a[2],a[0],b[0]]
-
-                final_rules={**cfg['training_match']}
-                if final_rules.get('mode')=='legs':
-                    initial_key='final' if len(selected)<=2 else 'semifinal' if len(selected)<=4 else 'quarterfinal'
-                    final_rules['max_legs']=int(cfg.get('round_lengths',{}).get(initial_key,final_rules['max_legs']))
-                if special_ladder_six:
-                    # The first round is explicitly crossed; do not create fake bye matches.
-                    pids=selected
-                    ph=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
-                        VALUES($1,'Finalrunde','knockout',2,'open',$2::jsonb) RETURNING id''',cid,json.dumps({
-                        'stage':'final','format':'single_ko','participants':[str(x) for x in pids],
-                        'bye_players':[str(pids[4]),str(pids[5])],
-                        'ladder_six_crossed':True,'match_rules':final_rules}))
-                    for i,(p1,p2) in enumerate(((pids[0],pids[1]),(pids[2],pids[3])),1):
-                        await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
-                            VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',cid,ph,i,p1,p2,json.dumps(final_rules))
-                else:
-                    await _make_stage(db,cid,'final',selected,cfg.get('follow_format','single_ko'),final_rules,cfg.get('follow_group_count',1))
+                final_rules={**cfg.get('ko_match',cfg['training_match'])}
+                initial_key='final' if len(selected)<=2 else 'semifinal' if len(selected)<=4 else 'quarterfinal' if len(selected)<=8 else 'round16' if len(selected)<=16 else 'round32' if len(selected)<=32 else 'first_round'
+                final_rules=round_match_rules(final_rules,cfg.get('round_lengths',{}),initial_key)
+                # Keep participants from the same preliminary group apart in the bracket where possible.
+                first_group={}
+                for g in groups:
+                    mem=await db.fetch(f'''SELECT e.player_id FROM {SCHEMA}.group_members gm JOIN {SCHEMA}.entries e ON e.id=gm.entry_id WHERE gm.group_id=$1''',g['id'])
+                    for p in mem:first_group[str(p['player_id'])]=str(g['id'])
+                await _make_stage(db,cid,'final',selected,cfg.get('follow_format','single_ko'),final_rules,cfg.get('follow_group_count',1), origin_groups=first_group)
                 if cfg.get('consolation') and len(rest)>=2:
-                    await _make_stage(db,cid,'consolation',rest,cfg.get('consolation_format','single_ko'),cfg['training_match'],cfg.get('consolation_group_count',1))
+                    await _make_stage(db,cid,'consolation',rest,cfg.get('consolation_format','single_ko'),cfg.get('ko_match',cfg['training_match']),cfg.get('consolation_group_count',1),origin_groups=first_group)
             elif cfg['format'] in ('league','groups'):
                 await db.execute(f"UPDATE {SCHEMA}.competitions SET status='finished' WHERE id=$1",cid)
         # advance every KO phase, including preliminary single/double elimination
@@ -329,55 +309,33 @@ async def progress(req,cid):
             participants=[UUID(p) for p in pr.get('participants',[])]
             if fmt=='single_ko':
                 remaining=[winner(m) for m in rows]
-                if mx==1:
-                    byes=[UUID(x) for x in pr.get('bye_players',[])]
-                    if pr.get('ladder_six_crossed') and len(remaining)==2 and len(byes)==2:
-                        # Semi 1: A1 vs winner(B2/A3), semi 2: B1 vs winner(A2/B3).
-                        remaining=[byes[0],remaining[1],byes[1],remaining[0]]
-                    else:remaining+=byes
+                if mx==1:remaining+= [UUID(x) for x in pr.get('bye_players',[])]
             else:
-                try:
-                    double_pairs=double_ko_next_matches(participants,allrows)
-                except ValueError as exc:
-                    logging.error('Doppel-KO konnte nicht fortgesetzt werden: %s',exc)
-                    continue
-                if not double_pairs:
-                    await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id'])
-                    continue
-                rules={**pr.get('match_rules',cfg['training_match']),'allow_draw':False}
-                if rules.get('mode')=='legs':
-                    is_final=double_pairs[0][0].startswith('grand_final')
-                    length_key='final' if is_final else 'semifinal' if len(double_pairs)<=2 else 'quarterfinal'
-                    value=cfg.get('round_lengths',{}).get(length_key) if pr.get('stage')=='final' else None
-                    if value is not None:rules['max_legs']=int(value)
-                for i,(bracket,p1,p2) in enumerate(double_pairs):
-                    match_rules={**rules,'bracket':bracket}
-                    await db.execute(f"""INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
-                     VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)""",cid,ph['id'],mx+1,i+1,p1,p2,json.dumps(match_rules))
-                continue
+                loss={p:0 for p in participants}
+                for m in allrows:
+                    w=winner(m)
+                    if w is None:return
+                    l=m['player2_id'] if w==m['player1_id'] else m['player1_id'];loss[l]=loss.get(l,0)+1
+                remaining=[p for p in participants if loss.get(p,0)<2]
             remaining=[p for p in remaining if p is not None]
             if len(remaining)<=1:
                 await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id']);continue
             rules={**pr.get('match_rules',cfg['training_match'])}
-            if pr.get('stage')=='final' and rules.get('mode')=='legs':
-                # Two remaining = final; previous two ties = semifinals.
-                key='final' if len(remaining)==2 else 'semifinal' if len(remaining)<=4 else 'quarterfinal'
-                value=cfg.get('round_lengths',{}).get(key)
-                if value is not None:rules['max_legs']=int(value)
+            if pr.get('stage')=='final':
+                key='final' if len(remaining)==2 else 'semifinal' if len(remaining)<=4 else 'quarterfinal' if len(remaining)<=8 else 'round16' if len(remaining)<=16 else 'round32'
+                rules=round_match_rules(rules,cfg.get('round_lengths',{}),key)
             if pr.get('stage')=='final' and cfg.get('third_place') and len(rows)==2 and len(remaining)==2 and fmt=='single_ko':
                 losers=[m['player2_id'] if winner(m)==m['player1_id'] else m['player1_id'] for m in rows]
                 existing=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.phases WHERE competition_id=$1 AND rules->>'stage'='third_place'",cid)
                 if not existing and len(set(losers))==2:
-                    tp={**cfg['training_match'],'allow_draw':False}
-                    if tp.get('mode')=='legs':
-                        tp['max_legs']=int(cfg.get('round_lengths',{}).get('third_place',5))
-                        if tp['max_legs']%2==0:tp['max_legs']+=1
+                    tp={**cfg.get('ko_match',cfg['training_match']),'allow_draw':False}
+                    tp=round_match_rules(tp,cfg.get('round_lengths',{}),'third_place')
+                    if tp['mode']=='legs' and tp['max_legs']%2==0:tp['max_legs']+=1
                     pid=await db.fetchval(f"INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules) VALUES($1,'Spiel um Platz 3','knockout',4,'open',$2::jsonb) RETURNING id",cid,json.dumps({'stage':'third_place','format':'single_ko','participants':[str(x) for x in losers],'match_rules':tp}))
                     await db.execute(f"INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules) VALUES($1,$2,1,1,$3,$4,$5::jsonb)",cid,pid,losers[0],losers[1],json.dumps(tp))
-            if pr.get('ladder_six_crossed') and mx==1 and len(remaining)==4:
-                next_pairs=[(remaining[0],remaining[1]),(remaining[2],remaining[3])]
-            else:
-                next_pairs=[(x,y) for x,y in bracket_pairs(remaining) if x and y]
+            if pr.get('origin_groups'):
+                remaining=spread_groups_in_bracket(remaining,pr['origin_groups'])
+            next_pairs=[(x,y) for x,y in bracket_pairs(remaining) if x and y]
             if not next_pairs:continue
             for i,(p1,p2) in enumerate(next_pairs):
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
@@ -503,17 +461,4 @@ async def report(req):
     counts={}
     for r in ordered:counts[r['place']]=counts.get(r['place'],0)+1
     for r in ordered:r['tied']=counts[r['place']]>1
-    # A completed bronze match decides places three and four, independently of phase order.
-    bronze=[m for m in matches if stage_type.get(m['phase_id'])=='third_place' and winner(m)]
-    if bronze:
-        last_bronze=bronze[-1];bronze_win=winner(last_bronze)
-        bronze_lose=last_bronze['player2_id'] if bronze_win==last_bronze['player1_id'] else last_bronze['player1_id']
-        champion=next((r for r in ordered if r['place']==1),None)
-        runner=next((r for r in ordered if r['place']==2),None)
-        if champion and runner and champion['player_id'] not in (bronze_win,bronze_lose) and runner['player_id'] not in (bronze_win,bronze_lose):
-            front=[champion,runner,records[bronze_win],records[bronze_lose]]
-            ordered=front+[r for r in ordered if r['player_id'] not in {x['player_id'] for x in front}]
-            for i,r in enumerate(ordered,1):
-                if i<=4:r['place']=i;r['tied']=False
-                elif r['place']<=4:r['place']=i
     return response({'title':c['title'],'finished':c['status']=='finished','placements':ordered,'provisional':c['status']!='finished'})
