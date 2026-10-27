@@ -934,6 +934,7 @@ function action(text,fn,style=''){const b=btn(text,fn);if(style)b.className=styl
 function picker(items,selectedValue,callback){const select=el('select');for(const [v,t] of items)select.append(new Option(t,v));select.value=selectedValue;select.onchange=()=>callback(select.value);return select}
 function labelFor(m,names){return (names.get(m.player1_id)||'Offen')+' – '+(names.get(m.player2_id)||'Offen')}
 const groupSelections=new Map();
+const koPhaseSelections=new Map();
 async function openCompetition(id){
   selected=await api('/competitions/'+id);if(!players.length||amAdmin()||trainingOwner()){players=await api('/players');setAvatarMetadata(players)}section('competitions');$('competitionsList').hidden=true;
   const c=selected.competition,host=$('competitionDetail');
@@ -978,11 +979,93 @@ async function openCompetition(id){
     const scoreOf=m=>(Number(m.sets1||0)||Number(m.sets2||0))?[m.sets1,m.sets2]:[m.legs1,m.legs2];
     const won=m=>{if(m.status!=='finished')return null;const [x,y]=scoreOf(m).map(Number);return x===y?null:String(x>y?m.player1_id:m.player2_id)};
     const other=(m,p)=>String(m.player1_id)===p?String(m.player2_id):String(m.player1_id);
+    // Bracket editing is deliberately limited to the still-unplayed draw.
+    // Use the same first-round match IDs and the original list of byes, so
+    // no game, player or bracket position is ever silently deleted.
+    function bracketEditor(phase,rules,matches){
+      const first=matches.filter(m=>Number(m.round_number||1)===1);
+      const untouched=first.length===matches.length && matches.every(m=>m.status==='open'&&!m.started_at&&!m.finished_at&&
+        (m.legs1===null||m.legs1===undefined)&&(m.legs2===null||m.legs2===undefined)&&
+        (m.sets1===null||m.sets1===undefined)&&(m.sets2===null||m.sets2===undefined));
+      const released=rules.bracket_released===true;
+      if(!first.length)return;
+      const panel=el('section',undefined,'ko-draw-editor');
+      const heading=el('div',undefined,'ko-draw-head');
+      heading.append(el('h3',released?'K.O.-Auslosung freigegeben':'K.O.-Auslosung · Vorschau'));
+      panel.append(heading);
+      if(released){panel.append(el('p','Die Setzliste ist freigegeben und kann nicht mehr verändert werden.','helper'));stage.append(panel);return}
+      if(!untouched){panel.append(el('p','Der K.O.-Baum ist nicht mehr bearbeitbar, weil bereits Begegnungen begonnen oder weitere Runden angelegt wurden.','helper'));stage.append(panel);return}
+      if(!(amAdmin()||trainingOwner())){
+        panel.append(el('p',rules.bracket_released===false?'Die Auslosung ist noch nicht freigegeben. Die Turnierleitung kann die Plätze vorher tauschen.':'Die Startplätze sind festgelegt.','helper'));
+        stage.append(panel);return;
+      }
+      const cells=[];
+      for(const m of first){cells.push({id:String(m.player1_id),match:String(m.id),side:1});cells.push({id:String(m.player2_id),match:String(m.id),side:2})}
+      for(const id of (rules.bye_players||[]))cells.push({id:String(id),bye:true});
+      const original=cells.map(x=>x.id);
+      let picked=-1,dirty=false;
+      panel.append(el('p','Vor der Freigabe Spielerplätze tauschen: per Drag & Drop oder zwei Namen nacheinander antippen. Auch Freilose können getauscht werden. Änderungen gelten erst nach „Setzliste speichern“.','helper'));
+      const board=el('div',undefined,'ko-draw-grid');panel.append(board);
+      const status=el('p','Noch keine Änderungen.','ko-draw-status');panel.append(status);
+      const controls=el('div',undefined,'ko-draw-actions');panel.append(controls);
+      const save=action('Setzliste speichern',async()=>{
+        if(!dirty)return;
+        const matchesToSave=first.map(m=>({id:String(m.id),
+          player1_id:cells.find(x=>x.match===String(m.id)&&x.side===1).id,
+          player2_id:cells.find(x=>x.match===String(m.id)&&x.side===2).id}));
+        try{await api('/phases/'+phase.id+'/bracket-layout',{matches:matchesToSave,bye_players:cells.filter(x=>x.bye).map(x=>x.id)});
+          await openCompetition(id);notice('Setzliste gespeichert. Der K.O.-Baum ist weiterhin nicht freigegeben.');}
+        catch(e){notice(e.message,true)}
+      },'primary');
+      const release=action('K.O.-Baum freigeben',async()=>{
+        if(dirty){notice('Bitte zunächst die geänderte Setzliste speichern.',true);return}
+        if(!await approve('K.O.-Auslosung freigeben','Danach sind die Begegnungen spielbar und die Startplätze nicht mehr änderbar. Wirklich freigeben?'))return;
+        try{await api('/phases/'+phase.id+'/bracket-release',{confirm:'KO FREIGEBEN'});
+          await openCompetition(id);notice('K.O.-Auslosung freigegeben. Begegnungen können jetzt gestartet werden.');}
+        catch(e){notice(e.message,true)}
+      },'primary');
+      const cancel=action('Änderungen verwerfen',()=>draw(phase),'subtle');
+      controls.append(save,cancel,release);
+      function swap(a,b){if(a===b){picked=-1;render();return}const temp=cells[a].id;cells[a].id=cells[b].id;cells[b].id=temp;picked=-1;
+        dirty=cells.some((x,i)=>x.id!==original[i]);render()}
+      function render(){clear(board);status.textContent=dirty?'Nicht gespeicherte Änderungen – vor Freigabe speichern.':'Setzliste gespeichert bzw. unverändert.';
+        // Update the visible first-round bracket instantly, before persistence.
+        for(const match of first){
+          const card=[...stage.querySelectorAll('.sting-bracket-card')].find(c=>c.dataset.matchId===String(match.id));
+          if(!card)continue;
+          const slotRows=card.querySelectorAll('.sting-bracket-player span');
+          const placed=cells.filter(x=>x.match===String(match.id));
+          for(let k=0;k<Math.min(slotRows.length,placed.length);k++)slotRows[k].textContent=namesMap.get(placed[k].id)||'Unbekannt';
+        }
+        const byes=stage.querySelector('[data-ko-byes]');
+        if(byes)byes.textContent='Freilose: '+cells.filter(x=>x.bye).map(x=>namesMap.get(x.id)||'Unbekannt').join(', ');
+        save.disabled=!dirty;release.disabled=dirty;
+        let cursor=0;
+        for(let i=0;i<first.length;i++){
+          const card=el('div',undefined,'ko-draw-pair');card.append(el('strong','Partie '+(Number(first[i].bracket_position)||i+1)));
+          for(let j=0;j<2;j++)card.append(slot(cursor++));board.append(card);
+        }
+        if(cursor<cells.length){const byes=el('div',undefined,'ko-draw-byes');byes.append(el('strong','Freilose'));
+          while(cursor<cells.length)byes.append(slot(cursor++));board.append(byes)}
+      }
+      function slot(index){const b=el('button',namesMap.get(cells[index].id)||'Unbekannter Spieler','ko-draw-player'+(picked===index?' selected':''));
+        b.type='button';b.draggable=true;b.title='Spieler antippen oder auf einen anderen Startplatz ziehen';
+        b.setAttribute('aria-pressed',String(picked===index));
+        b.onclick=()=>{if(picked<0){picked=index;render()}else swap(picked,index)};
+        b.ondragstart=e=>{e.dataTransfer.setData('text/plain',String(index));e.dataTransfer.effectAllowed='move'};
+        b.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move'};
+        b.ondrop=e=>{e.preventDefault();const from=Number(e.dataTransfer.getData('text/plain'));
+          if(Number.isInteger(from)&&from>=0&&from<cells.length)swap(from,index)};
+        return b;
+      }
+      render();stage.append(panel);
+    }
     function draw(phase){
       clear(stage);
       let rules={};try{rules=typeof phase.rules==='string'?JSON.parse(phase.rules||'{}'):(phase.rules||{})}catch{}
       const matches=selected.matches.filter(m=>String(m.phase_id)===String(phase.id)).sort((a,b)=>Number(a.round_number||1)-Number(b.round_number||1)||Number(a.bracket_position||0)-Number(b.bracket_position||0));
       if(!matches.length){stage.append(el('p','Noch keine KO-Begegnungen.','helper'));return}
+      bracketEditor(phase,rules,matches);
       const isDouble=rules.format==='double_ko';
       const loss=new Map();const groups={winner:[],loser:[],crossover:[],final:[]};
       // Die bestehende DB speichert keinen Bracket-Typ. Die Einordnung basiert auf
@@ -1011,7 +1094,7 @@ async function openCompetition(id){
           col.append(el('h4',label,'sting-bracket-round-title'));
           ms.forEach((m,index)=>{
             const top=50+(index+.5)*((height-90)/ms.length)-35;
-            const card=el('button',undefined,'sting-bracket-card '+(m.status==='finished'?'completed':m.status==='running'?'live':'open'));card.type='button';card.style.top=top+'px';card.title='Begegnung öffnen';card.onclick=()=>openScorer(m.id);card.setAttribute('aria-label','Begegnung '+(namesMap.get(String(m.player1_id))||'Offen')+' gegen '+(namesMap.get(String(m.player2_id))||'Offen'));
+            const card=el('button',undefined,'sting-bracket-card '+(m.status==='finished'?'completed':m.status==='running'?'live':'open'));card.type='button';card.style.top=top+'px';card.dataset.matchId=String(m.id);card.title=rules.bracket_released===false?'Auslosung noch nicht freigegeben':'Begegnung öffnen';card.onclick=()=>{if(rules.bracket_released===false){notice('K.O.-Baum ist noch nicht freigegeben.',true);return}openScorer(m.id)};card.setAttribute('aria-label','Begegnung '+(namesMap.get(String(m.player1_id))||'Offen')+' gegen '+(namesMap.get(String(m.player2_id))||'Offen'));
             const [v1,v2]=scoreOf(m);const winner=won(m);
             [[m.player1_id,v1],[m.player2_id,v2]].forEach(([pid,value])=>{const row=el('div',undefined,'sting-bracket-player'+(winner===String(pid)?' winner':''));row.append(el('span',namesMap.get(String(pid))||'Noch offen'),el('strong',m.status==='finished'?String(value??0):'–'));card.append(row)});
             const meta=el('div',undefined,'sting-bracket-meta');meta.append(el('span',m.status==='finished'?'Beendet':m.status==='running'?'Live':'Offen'),el('span','Spiel öffnen ›'));card.append(meta);col.append(card);nodeMap.set(String(m.id),{card,m,colIndex});
@@ -1031,10 +1114,13 @@ async function openCompetition(id){
       }
       if(isDouble){renderSection(groups.winner,'Winner-Bracket','winner');renderSection(groups.loser,'Loser-Bracket','loser');renderSection(groups.crossover,'Final- / Übergangsspiele','crossover');}
       else renderSection(matches,'K.O.-Turnierbaum','winner');
-      if(rules.bye_players?.length)stage.append(el('p','Freilose: '+rules.bye_players.map(id=>namesMap.get(String(id))||String(id)).join(', '),'helper'));
+      if(rules.bye_players?.length){const byes=el('p','Freilose: '+rules.bye_players.map(id=>namesMap.get(String(id))||String(id)).join(', '),'helper');byes.dataset.koByes='true';stage.append(byes)}
     }
-    for(const p of [...phases].sort((a,b)=>Number(a.phase_order||0)-Number(b.phase_order||0))){const b=action(p.name||'K.O.',()=>{for(const x of selector.children)x.classList.toggle('selected',x===b);draw(p)});selector.append(b)}
-    selector.firstChild?.click();
+    const saved=koPhaseSelections.get(id);
+    let initial=null;
+    for(const p of [...phases].sort((a,b)=>Number(a.phase_order||0)-Number(b.phase_order||0))){const b=action(p.name||'K.O.',()=>{koPhaseSelections.set(id,String(p.id));for(const x of selector.children)x.classList.toggle('selected',x===b);draw(p)});selector.append(b);
+      if(String(p.id)===saved)initial=b}
+    (initial||selector.firstChild)?.click();
   }
   async function showPlacements(box){
    box.append(el('h3','Endplatzierungen · '+c.title));

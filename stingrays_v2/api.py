@@ -1001,6 +1001,10 @@ async def start_match(req):
         if a['role']=='member' and a['player_id'] not in (m['player1_id'],m['player2_id']):
             raise web.HTTPForbidden(text='Nur eigene Begegnungen starten')
         if m['status'] not in ('open','running'):raise web.HTTPConflict(text='Begegnung nicht spielbar')
+        if m['phase_id']:
+            ph=await db.fetchrow(f'SELECT kind,rules FROM {SCHEMA}.phases WHERE id=$1',m['phase_id'])
+            if ph and ph['kind']=='knockout' and as_json(ph['rules']).get('bracket_released') is False:
+                raise web.HTTPConflict(text='K.O.-Auslosung noch nicht freigegeben. Bitte Turnierleitung kontaktieren.')
         if m['competition_status'] in ('archived','finished') or m['ends_at'] and datetime.now(timezone.utc)>=m['ends_at']:
             raise web.HTTPConflict(text='Wettbewerb beendet')
         if board is not None:
@@ -1147,7 +1151,9 @@ async def manual_result(req):
         if not m or m['status']!='open':raise web.HTTPConflict(text='Nur offene Matches können als Altdaten erfasst werden')
         if await db.fetchval(f"SELECT kind FROM {SCHEMA}.competitions WHERE id=$1",m['competition_id'])=='ladder':
             raise web.HTTPForbidden(text='Ladder wertet nur gescorte Matches')
-        phase=await db.fetchrow(f'SELECT kind FROM {SCHEMA}.phases WHERE id=$1',m['phase_id']) if m['phase_id'] else None
+        phase=await db.fetchrow(f'SELECT kind,rules FROM {SCHEMA}.phases WHERE id=$1',m['phase_id']) if m['phase_id'] else None
+        if phase and phase['kind']=='knockout' and as_json(phase['rules']).get('bracket_released') is False:
+            raise web.HTTPConflict(text='Die K.O.-Auslosung muss zuerst freigegeben werden')
         if phase and phase['kind']=='knockout':
             if x==y:raise web.HTTPBadRequest(text='K.O.-Spiele benötigen einen eindeutigen Sieger')
             rules=as_json(m['rules']);mode=rules.get('mode','legs')
@@ -1248,29 +1254,116 @@ async def bracket(req):
     pairs=bracket_pairs([uid(p) for p in ids]);created=0
     async with pool(req).acquire() as db:
       async with db.transaction():
-        p=await db.fetchrow(f'''SELECT p.*,c.kind FROM {SCHEMA}.phases p
+        p=await db.fetchrow(f'''SELECT p.*,c.kind AS competition_kind FROM {SCHEMA}.phases p
              JOIN {SCHEMA}.competitions c ON c.id=p.competition_id WHERE p.id=$1 FOR UPDATE OF p''',pid)
         if not p or p['kind']!='knockout':raise web.HTTPBadRequest(text='Keine K.O.-Phase')
         await require_manager(db,a,p['competition_id'])
         if await db.fetchval(f'SELECT count(*) FROM {SCHEMA}.matches WHERE phase_id=$1',pid):raise web.HTTPConflict(text='K.O.-Phase enthält schon Begegnungen')
         valid={r['player_id'] for r in await db.fetch(f'SELECT player_id FROM {SCHEMA}.entries WHERE competition_id=$1',p['competition_id'])}
         if len(set(ids))!=len(ids) or any(v not in valid for v in [uid(x) for x in ids]):raise web.HTTPBadRequest(text='Ungültige Setzliste')
-        rules=mode_rules(p['kind'],'knockout',overrides=d.get('rules') or {})
+        rules=mode_rules(p['competition_kind'],'knockout',overrides=d.get('rules') or {})
         for i,(x,y) in enumerate(pairs):
             if x and y:
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
                    VALUES($1,$2,1,$3,$4,$5,$6::jsonb)''',p['competition_id'],pid,i+1,x,y,json.dumps(rules));created+=1
             # Byes are represented in the bracket preview, not fake games.
+        current=as_json(p['rules'])
+        byes=[str(player) for x,y in pairs for player in (x,y) if player and not(x and y)]
+        current.update({'bracket_released':False,'bye_players':byes,
+                        'participants':[str(uid(x)) for x in ids]})
+        current.setdefault('format','single_ko')
+        await db.execute(f'UPDATE {SCHEMA}.phases SET rules=$2::jsonb WHERE id=$1',pid,json.dumps(current))
     return response({'created':created,'byes':sum(1 for x,y in pairs if x is None or y is None),'pairs':pairs})
+
+
+
+def _verify_bracket_layout(existing, byes, proposed, proposed_byes):
+    # Only permute first-round slots; do not change match IDs, roster or bye count.
+    from collections import Counter
+    if not isinstance(proposed,list) or not isinstance(proposed_byes,list):
+        raise web.HTTPBadRequest(text='Ungültige K.O.-Setzliste')
+    if len(proposed)!=len(existing) or len(proposed_byes)!=len(byes):
+        raise web.HTTPBadRequest(text='Die Anzahl der Spiele und Freilose darf nicht verändert werden')
+    mapping={str(m['id']):m for m in existing}
+    try:
+        order=[str(uid(m['id'])) for m in proposed]
+        arranged=[(uid(m['player1_id']),uid(m['player2_id'])) for m in proposed]
+        bye_ids=[uid(p) for p in proposed_byes]
+    except (ValueError,TypeError,KeyError):
+        raise web.HTTPBadRequest(text='Ungültige Spielerzuordnung')
+    if len(set(order))!=len(order) or set(order)!=set(mapping):
+        raise web.HTTPBadRequest(text='Nur vorhandene K.O.-Begegnungen bearbeiten')
+    original=[p for m in existing for p in (m['player1_id'],m['player2_id'])]+list(byes)
+    updated=[p for pair in arranged for p in pair]+bye_ids
+    if len(set(updated))!=len(updated) or Counter(original)!=Counter(updated):
+        raise web.HTTPBadRequest(text='Alle qualifizierten Spieler müssen genau einmal gesetzt sein')
+    return {k:v for k,v in zip(order,arranged)},bye_ids
+
+
+async def edit_bracket_layout(req):
+    a=await actor(req);d=await body(req);pid=uid(req.match_info['pid'])
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        ph=await db.fetchrow(f'SELECT * FROM {SCHEMA}.phases WHERE id=$1 FOR UPDATE',pid)
+        if not ph or ph['kind']!='knockout':raise web.HTTPNotFound(text='K.O.-Phase nicht gefunden')
+        await require_manager(db,a,ph['competition_id'])
+        rules=as_json(ph['rules'])
+        if ph['status']=='closed' or rules.get('bracket_released') is True:
+            raise web.HTTPConflict(text='Diese Auslosung ist bereits freigegeben oder abgeschlossen')
+        matches=await db.fetch(f'''SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1
+                                  ORDER BY round_number,bracket_position,id FOR UPDATE''',pid)
+        if not matches:raise web.HTTPConflict(text='Noch keine K.O.-Setzliste vorhanden')
+        if any(m['status']!='open' or m['round_number']!=1 or m['started_at'] is not None
+               or m['finished_at'] is not None or as_json(m['state'])
+               or m['legs1'] is not None or m['legs2'] is not None
+               or m['sets1'] is not None or m['sets2'] is not None for m in matches):
+            raise web.HTTPConflict(text='Eine Begegnung wurde bereits begonnen oder gewertet; Auslosung gesperrt')
+        byes=[uid(x) for x in rules.get('bye_players',[])]
+        pairs,new_byes=_verify_bracket_layout(matches,byes,d.get('matches'),d.get('bye_players'))
+        for m in matches:
+            x,y=pairs[str(m['id'])]
+            await db.execute(f'''UPDATE {SCHEMA}.matches SET player1_id=$2,player2_id=$3
+                                  WHERE id=$1''',m['id'],x,y)
+        rules['bye_players']=[str(x) for x in new_byes]
+        ordered=[p for m in matches for p in pairs[str(m['id'])]]+new_byes
+        rules['participants']=[str(x) for x in ordered]
+        rules['bracket_released']=False
+        await db.execute(f'UPDATE {SCHEMA}.phases SET rules=$2::jsonb WHERE id=$1',pid,json.dumps(rules))
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+             VALUES($1,'bracket_layout_updated','phase',$2,$3::jsonb)''',a['id'],str(pid),json.dumps({'participants':len(ordered)}))
+    return response({'ok':True,'released':False})
+
+
+async def release_bracket(req):
+    a=await actor(req);d=await body(req);pid=uid(req.match_info['pid'])
+    if d.get('confirm')!='KO FREIGEBEN':raise web.HTTPBadRequest(text='Freigabebestätigung fehlt')
+    async with pool(req).acquire() as db:
+      async with db.transaction():
+        ph=await db.fetchrow(f'SELECT * FROM {SCHEMA}.phases WHERE id=$1 FOR UPDATE',pid)
+        if not ph or ph['kind']!='knockout':raise web.HTTPNotFound()
+        await require_manager(db,a,ph['competition_id'])
+        rules=as_json(ph['rules'])
+        if ph['status']=='closed':raise web.HTTPConflict(text='Phase bereits abgeschlossen')
+        if rules.get('bracket_released') is True:raise web.HTTPConflict(text='K.O.-Baum wurde bereits freigegeben')
+        matches=await db.fetch(f'SELECT status,round_number,started_at,finished_at FROM {SCHEMA}.matches WHERE phase_id=$1 FOR UPDATE',pid)
+        if not matches or any(m['status']!='open' or m['round_number']!=1 or m['started_at'] is not None or m['finished_at'] is not None for m in matches):
+            raise web.HTTPConflict(text='Freigabe nur vor dem ersten Spiel möglich')
+        rules['bracket_released']=True
+        await db.execute(f'UPDATE {SCHEMA}.phases SET rules=$2::jsonb WHERE id=$1',pid,json.dumps(rules))
+        await db.execute(f'''INSERT INTO {SCHEMA}.audit_log(actor_id,action,target_type,target_id,details)
+             VALUES($1,'bracket_released','phase',$2,$3::jsonb)''',a['id'],str(pid),json.dumps({'matches':len(matches)}))
+    return response({'ok':True,'released':True})
 
 async def advance_knockout(req):
     a=await actor(req);d=await body(req);pid=uid(req.match_info['pid'])
     async with pool(req).acquire() as db:
       async with db.transaction():
-        p=await db.fetchrow(f'''SELECT p.*,c.kind FROM {SCHEMA}.phases p JOIN {SCHEMA}.competitions c
+        p=await db.fetchrow(f'''SELECT p.*,c.kind AS competition_kind FROM {SCHEMA}.phases p JOIN {SCHEMA}.competitions c
             ON c.id=p.competition_id WHERE p.id=$1 FOR UPDATE OF p''',pid)
         if not p or p['kind']!='knockout':raise web.HTTPBadRequest(text='Keine K.O.-Phase')
         await require_manager(db,a,p['competition_id'])
+        if as_json(p['rules']).get('bracket_released') is False:
+            raise web.HTTPConflict(text='Die K.O.-Auslosung ist noch nicht freigegeben')
         mx=await db.fetchval(f'SELECT max(round_number) FROM {SCHEMA}.matches WHERE phase_id=$1',pid)
         if mx is None:raise web.HTTPConflict(text='Setzliste fehlt')
         rows=await db.fetch(f'SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1 AND round_number=$2 ORDER BY bracket_position',pid,mx)
@@ -1283,7 +1376,7 @@ async def advance_knockout(req):
             winners.append(m['player1_id'] if aa>bb else m['player2_id'])
         if len(winners)%2:raise web.HTTPConflict(text='Ungerade Siegerzahl: Freiloszuordnung erforderlich')
         for i in range(0,len(winners),2):
-            rules=mode_rules(p['kind'],'knockout',final=len(winners)==2,overrides=d.get('rules') or {})
+            rules=mode_rules(p['competition_kind'],'knockout',final=len(winners)==2,overrides=d.get('rules') or {})
             await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,
                   player1_id,player2_id,rules) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',
                   p['competition_id'],pid,mx+1,i//2+1,winners[i],winners[i+1],json.dumps(rules))
@@ -2115,6 +2208,8 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/competitions/{cid}/withdraw',withdraw),
       ('POST','/dart/v2/api/phases/{pid}/close',close_phase),
       ('POST','/dart/v2/api/phases/{pid}/bracket',bracket),
+      ('POST','/dart/v2/api/phases/{pid}/bracket-layout',edit_bracket_layout),
+      ('POST','/dart/v2/api/phases/{pid}/bracket-release',release_bracket),
       ('POST','/dart/v2/api/phases/{pid}/advance',advance_knockout),
       ('POST','/dart/v2/api/competitions/{cid}/end-ladder',end_ladder),
       ('POST','/dart/v2/api/competitions/{cid}/reset-ladder-final-test',reset_ladder_final_test),

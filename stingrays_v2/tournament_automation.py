@@ -88,7 +88,8 @@ async def setup(req):
             await db.execute(f'INSERT INTO {SCHEMA}.entries(competition_id,player_id) VALUES($1,$2)',cid,pid)
         kind='groups' if spec['format']=='groups' else 'league' if spec['format']=='league' else 'knockout'
         phase=await db.fetchval(f'''INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules)
-            VALUES($1,'Vorrunde',$2,1,'open',$3::jsonb) RETURNING id''',cid,kind,json.dumps({'stage':'preliminary','format':spec['format'],'participants':[str(x) for x in spec['ids']],'match_rules':spec['rules']}))
+            VALUES($1,'Vorrunde',$2,1,'open',$3::jsonb) RETURNING id''',cid,kind,json.dumps({'stage':'preliminary','format':spec['format'],'participants':[str(x) for x in spec['ids']],'match_rules':spec['rules'],
+                        **({'bracket_released':False} if kind=='knockout' else {})}))
         created=0
         if spec['rules']['mode']=='legs' and spec['round_lengths'].get('group'):
             spec['rules']={**spec['rules'],'max_legs':spec['round_lengths']['group'],'allow_draw':spec['round_lengths']['group']%2==0}
@@ -136,7 +137,8 @@ async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=Fa
     order=2 if stage=='final' else 3
     stage_kind='groups' if fmt in ('groups','league') else 'knockout'
     stage_rules={'stage':stage,'format':fmt,'participants':[str(p) for p in ids],
-                 'match_rules':match_rules,'origin_groups':origin_groups or {}}
+                 'match_rules':match_rules,'origin_groups':origin_groups or {},
+                 **({'bracket_released':False} if stage_kind=='knockout' else {})}
     # Admins sometimes created an empty K.O. placeholder after the group draw.
     # Reuse it instead of silently assuming the next round already exists.
     placeholder=await db.fetchrow(f'''SELECT id,kind,rules FROM {SCHEMA}.phases
@@ -362,7 +364,7 @@ async def progress(req,cid):
                     tp={**cfg.get('ko_match',cfg['training_match']),'allow_draw':False}
                     tp=round_match_rules(tp,cfg.get('round_lengths',{}),'third_place')
                     if tp['mode']=='legs' and tp['max_legs']%2==0:tp['max_legs']+=1
-                    pid=await db.fetchval(f"INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules) VALUES($1,'Spiel um Platz 3','knockout',4,'open',$2::jsonb) RETURNING id",cid,json.dumps({'stage':'third_place','format':'single_ko','participants':[str(x) for x in losers],'match_rules':tp}))
+                    pid=await db.fetchval(f"INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules) VALUES($1,'Spiel um Platz 3','knockout',4,'open',$2::jsonb) RETURNING id",cid,json.dumps({'stage':'third_place','format':'single_ko','participants':[str(x) for x in losers],'match_rules':tp,'bracket_released':False}))
                     await db.execute(f"INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules) VALUES($1,$2,1,1,$3,$4,$5::jsonb)",cid,pid,losers[0],losers[1],json.dumps(tp))
             if pr.get('origin_groups'):
                 remaining=spread_groups_in_bracket(remaining,pr['origin_groups'])
