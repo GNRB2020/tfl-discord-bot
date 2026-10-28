@@ -2192,6 +2192,7 @@ def register_stingrays_v2(app):
     register_free_training(app)
     from .tournament_automation import setup as auto_training_setup, live_games as auto_live_games, report as auto_training_report
     from .competition_wizard import create_group_plan, choose_wildcards
+    from .tournament_center import overview as tournament_center_overview, simulation as tournament_center_simulation
     from .tournament_automation import wildcard_overview, retry_progress
     routes=[
       ('POST','/dart/v2/api/training/tournament/setup',auto_training_setup),
@@ -2222,6 +2223,8 @@ def register_stingrays_v2(app):
       ('POST','/dart/v2/api/admin/stat-sources',admin_stat_source_update),
       ('POST','/dart/v2/api/admin/stats-reset',admin_stats_reset),
       ('GET','/dart/v2/api/boards',board_list),('POST','/dart/v2/api/boards/{bid}',edit_board),
+      ('GET','/dart/v2/api/tournament-center',tournament_center_overview),
+      ('POST','/dart/v2/api/admin/tournament-simulation',tournament_center_simulation),
       ('GET','/dart/v2/api/competitions',competition_list),('POST','/dart/v2/api/competitions',create_competition),
       ('GET','/dart/v2/api/competitions/{cid}',competition_detail),
       ('POST','/dart/v2/api/competitions/{cid}/guided-setup',create_group_plan),

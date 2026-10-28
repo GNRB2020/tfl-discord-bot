@@ -458,3 +458,30 @@ main>#login:not([hidden]),main>#setup:not([hidden]),main>#changePassword:not([hi
 .diagnostic-kpi strong{font-size:22px;color:#ead0a5}.diagnostic-kpi span{font-size:12px;color:#d0c5b5}
 .diagnostic-pending{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;border-bottom:1px solid #514e47;padding:9px 0}
 .diagnostic-warning{color:#f6d6a5;background:#493829;border:1px solid #8d6a44;border-radius:7px;padding:10px}
+
+/* Paket III: tournament control center and dry-run simulator */
+#boardsList.center-mode{display:block;max-width:100%;overflow:visible}
+.tournament-center{display:grid;gap:16px;max-width:100%}
+.tournament-center-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.tournament-center-head h2{margin:0}
+.center-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.center-kpi{background:var(--surface,#21252a);border:1px solid #51565b;border-radius:12px;padding:12px;display:grid;gap:5px}
+.center-kpi strong{font-size:1.65rem;font-variant-numeric:tabular-nums}
+.center-kpi small{opacity:.8}
+.center-panel{background:var(--surface,#202428);border:1px solid #4c5156;border-radius:12px;padding:14px;min-width:0;display:grid;gap:10px}
+.center-panel h3{margin:0}
+.center-board-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:8px}
+.center-board{border:1px solid #58616a;border-radius:9px;padding:10px;display:grid;gap:8px;align-content:start;min-width:0}
+.center-board small{overflow-wrap:anywhere}
+.center-board.free{border-color:#468e70}
+.center-board.busy{border-color:#b98a43}
+.center-board.inactive{opacity:.5}
+.center-ready{max-width:100%;min-width:0}
+.center-ready .scroll{max-height:340px;overflow:auto}
+.center-panel input[type="search"]{max-width:420px}
+.simulation-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));align-items:end;gap:10px}
+.simulation-form label{display:grid;gap:5px;min-width:0}
+.simulation-form button{min-height:40px}
+.simulation-result{display:grid;gap:8px}
+.simulation-result h4,.simulation-result p{margin:0}
+@media(max-width:650px){.center-board-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.center-panel{padding:10px}.simulation-form{grid-template-columns:repeat(2,minmax(0,1fr))}}
