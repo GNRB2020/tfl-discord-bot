@@ -1008,8 +1008,13 @@ async def start_match(req):
         if m['competition_status'] in ('archived','finished') or m['ends_at'] and datetime.now(timezone.utc)>=m['ends_at']:
             raise web.HTTPConflict(text='Wettbewerb beendet')
         if board is not None:
-            ok=await db.fetchval(f'SELECT enabled FROM {SCHEMA}.boards WHERE id=$1',board)
-            if not ok:raise web.HTTPConflict(text='Board deaktiviert')
+            # Serialize starts targeting the SAME board, even for different matches.
+            # The unique partial DB index is a final backstop, not the UX error path:
+            # without this lock two concurrent starts could both pass the initial
+            # SELECT and the second would raise an uncaught unique-violation (500).
+            board_row=await db.fetchrow(f'SELECT enabled FROM {SCHEMA}.boards WHERE id=$1 FOR UPDATE',board)
+            if not board_row or not board_row['enabled']:
+                raise web.HTTPConflict(text='Board deaktiviert')
             conflict=await db.fetchval(f"SELECT id FROM {SCHEMA}.matches WHERE board_id=$1 AND status='running' AND id<>$2",board,mid)
             if conflict:raise web.HTTPConflict(text='Board bereits belegt')
         claim=await db.fetchrow(f'SELECT account_id,token_hash,lease_until FROM {SCHEMA}.match_claims WHERE match_id=$1 FOR UPDATE',mid)
