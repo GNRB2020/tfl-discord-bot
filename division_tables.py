@@ -230,7 +230,10 @@ def build_cup_web_items():
         when=schedule.normalize_text(row[4] if len(row)>4 else '')
         if not home or not away: continue
         mode=schedule.get_mode_from_round(rnd)
-        finished=bool(schedule.is_finished_result(score,mode))
+        # Cup results may be written as 1:0 / 2:1 or 1-0 / 2-1.
+        # The legacy schedule.is_finished_result() only accepts hyphens.
+        canonical = re.sub(r'\s+', '', score).replace('：', ':').replace(':', '-')
+        finished=bool(schedule.is_finished_result(canonical,mode))
         items.append({'round':schedule.get_round_label(rnd),'mode':mode or '',
             'home':home,'away':away,'score':score if finished else '',
             'date':when,'link':'','status':'finished' if finished else 'open'})
