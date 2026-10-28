@@ -250,21 +250,84 @@ def publish_web_competitions(data):
     except Exception:
         LOG.exception('TFL Cup/Coop-Webdaten konnten nicht übertragen werden')
 
+
+
+def _table_message_key(message):
+    """Identify previously published table embeds by their persistent footer markers."""
+    for embed in getattr(message, 'embeds', []) or []:
+        footer = getattr(getattr(embed, 'footer', None), 'text', '') or ''
+        if footer.startswith(MARKER):
+            number = footer[len(MARKER):].split(' |', 1)[0].strip()
+            if number in {'1', '2', '3', '4', '5', '6'}:
+                return f'division-{number}'
+        if footer.startswith(COOP_MARKER):
+            group = footer[len(COOP_MARKER):].split(' |', 1)[0].strip()
+            if group in COOP_GROUPS:
+                return f'coop-{group[-1].lower()}'
+    return None
+
+
+async def _load_existing_table_messages(channel, bot_id):
+    """One channel-history pass for all eight tables instead of eight separate passes."""
+    existing = {}
+    async for message in channel.history(limit=250):
+        if getattr(getattr(message, 'author', None), 'id', None) != bot_id:
+            continue
+        key = _table_message_key(message)
+        if key:
+            existing.setdefault(key, message)  # newest matching post wins
+    return existing
+
+
+def _same_table_content(current, expected):
+    """Ignore changing footer timestamps; compare the actual table content."""
+    try:
+        current_payload = current.to_dict()
+        expected_payload = expected.to_dict()
+        current_payload.pop('footer', None)
+        expected_payload.pop('footer', None)
+        return current_payload == expected_payload
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+async def _publish_table_if_changed(channel, existing, key, embed):
+    """Return True only after a real Discord write."""
+    message = existing.get(key)
+    if message is not None:
+        old_embeds = getattr(message, 'embeds', []) or []
+        if len(old_embeds) == 1 and _same_table_content(old_embeds[0], embed):
+            return False
+        await message.edit(embed=embed)
+    else:
+        existing[key] = await channel.send(embed=embed)
+    # Smooth legitimate bursts (e.g. new season / first bot start).
+    await asyncio.sleep(1.0)
+    return True
+
+
 async def refresh(client, workbook):
     web_competitions = {}
     tables_for_web = {}
     now_web = datetime.now(ZoneInfo('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')
     channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+    try:
+        existing_tables = await _load_existing_table_messages(channel, client.user.id)
+    except Exception:
+        LOG.exception('Discord-Tabellen: Bestehende Nachrichten konnten nicht geladen werden')
+        existing_tables = None  # never risk creating duplicates after an API error
+    writes = 0
+    unchanged = 0
     for div in range(1, 7):
         try:
             rows = await asyncio.to_thread(get_all_values_cached, lambda d=div: workbook.worksheet(f'{d}.DIV'), sheet_name=f'{div}.DIV', ttl_seconds=840)
             tables_for_web[f'division-{div}'] = {'title': f'Division {div}', 'items': calculate(rows), 'updated_at': now_web}
             embed = render(div, rows)
-            msg = await find_message(channel, client.user.id, div)
-            if msg:
-                await msg.edit(embed=embed)
-            else:
-                await channel.send(embed=embed)
+            if existing_tables is not None:
+                if await _publish_table_if_changed(channel, existing_tables, f'division-{div}', embed):
+                    writes += 1
+                else:
+                    unchanged += 1
         except Exception:
             LOG.exception('Fehler bei Division %s', div)
     for group in COOP_GROUPS:
@@ -273,13 +336,14 @@ async def refresh(client, workbook):
             tables_for_web[f'coop-{group[-1].lower()}'] = {'title': f'Coop League – Gruppe {group[-1]}', 'items': calculate_coop(rows), 'updated_at': now_web}
             web_competitions[f'coop-{group[-1].lower()}'] = {'items':build_coop_web_items(group, rows), 'updated_at':now_web}
             embed = render_coop(group, rows)
-            msg = await find_coop_message(channel, client.user.id, group)
-            if msg:
-                await msg.edit(embed=embed)
-            else:
-                await channel.send(embed=embed)
+            if existing_tables is not None:
+                if await _publish_table_if_changed(channel, existing_tables, f'coop-{group[-1].lower()}', embed):
+                    writes += 1
+                else:
+                    unchanged += 1
         except Exception:
             LOG.exception('Fehler bei Coop-Gruppe %s', group)
+    LOG.info('[TABELLEN] Discord: %d aktualisiert, %d unverändert', writes, unchanged)
     if tables_for_web:
         await asyncio.to_thread(publish_web_standings, tables_for_web)
     try:
