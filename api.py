@@ -512,8 +512,43 @@ async def update_web_news(request):
     save_cache()
     return web.json_response({'status':'ok','count':len(safe)})
 
+
+# TFL Cup and Coop results (read-only public snapshots).
+WEB_COMPETITIONS = {}
+
+async def get_web_competitions(request):
+    key = request.query.get('competition', '').strip()
+    if key not in ('cup','coop-a','coop-b'):
+        return web.json_response({'error':'unknown competition'},status=400)
+    return web.json_response(WEB_COMPETITIONS.get(key,{'items':[], 'competition':key, 'status':'waiting'}))
+
+async def update_web_competitions(request):
+    import hmac
+    token = os.getenv('TFL_WEB_TOKEN', '')
+    provided = request.headers.get('Authorization', '').removeprefix('Bearer ').strip()
+    if not token or not hmac.compare_digest(token,provided):
+        return web.json_response({'error':'unauthorized'},status=401)
+    data = await request.json()
+    if not isinstance(data,dict) or not isinstance(data.get('competitions'),dict):
+        return web.json_response({'error':'invalid payload'},status=400)
+    updated=[]
+    for key,value in data['competitions'].items():
+        if key not in ('cup','coop-a','coop-b') or not isinstance(value,dict): continue
+        items=value.get('items')
+        if not isinstance(items,list) or len(items)>500: continue
+        safe=[]
+        for item in items:
+            if not isinstance(item,dict): continue
+            safe.append({k:str(item.get(k,'') or '')[:500] for k in ('round','mode','home','away','score','date','link','group','status')})
+        WEB_COMPETITIONS[key]={'items':safe,'competition':key,'updated_at':str(value.get('updated_at',''))[:50]}
+        updated.append(key)
+    CACHE['web_competitions']=WEB_COMPETITIONS.copy()
+    save_cache()
+    return web.json_response({'status':'ok','updated':updated})
+
 async def start():
     load_cache()
+    WEB_COMPETITIONS.update(CACHE.get("web_competitions", {}))
     WEB_STANDINGS.update(CACHE.get("web_standings", {}))
     WEB_NEWS.extend(CACHE.get("web_news", []))
 
@@ -535,6 +570,8 @@ async def start():
     # Public GET Routes
     app.router.add_get("/health", health)
     app.router.add_get("/api/web/standings", get_web_standings)
+    app.router.add_get("/api/web/competitions", get_web_competitions)
+    app.router.add_post("/api/update/web/competitions", update_web_competitions)
     app.router.add_get("/api/web/news", get_web_news)
     app.router.add_post("/api/update/web/news", update_web_news)
     app.router.add_post("/api/update/web/standings", update_web_standings)

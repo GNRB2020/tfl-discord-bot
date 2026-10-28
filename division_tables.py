@@ -197,7 +197,61 @@ async def publish_tfl_news(client):
     try: await asyncio.to_thread(send)
     except Exception: LOG.exception('TFL News konnten nicht übertragen werden')
 
+
+
+def build_coop_web_items(group, rows):
+    """Use same B:H columns as the player Coop UI, no second sheet read."""
+    items=[]
+    for row in rows[1:]:
+        home=(row[3] if len(row)>3 else '').strip()
+        away=(row[5] if len(row)>5 else '').strip()
+        if not home or not away or home.lower() in ('heim','heimteam'): continue
+        score=(row[4] if len(row)>4 else '').strip()
+        is_finished=bool(re.fullmatch(r'\s*[012]\s*[:\-]\s*[012]\s*',score)) and sum(int(x) for x in re.findall(r'\d',score))==2
+        items.append({'group':group,'round':'Gruppenphase','home':home,'away':away,'score':score if is_finished else '',
+                      'date':(row[1] if len(row)>1 else '').strip(),
+                      'mode':(row[2] if len(row)>2 else '').strip(),
+                      'link':(row[6] if len(row)>6 else '').strip(),
+                      'status':'finished' if is_finished else 'open'})
+    return items
+
+
+def build_cup_web_items():
+    """Read same Cup worksheet as schedule.py (gid=47251903), from sheet_guard cache."""
+    import schedule
+    ws=schedule.get_cup_worksheet()
+    rows=get_all_values_cached(lambda:ws,sheet_name=schedule.get_schedule_sheet_cache_name(ws),ttl_seconds=840)
+    items=[]
+    for row in rows[1:]:
+        rnd=schedule.normalize_text(row[0] if len(row)>0 else '')
+        home=schedule.normalize_text(row[1] if len(row)>1 else '')
+        score=schedule.normalize_text(row[2] if len(row)>2 else '')
+        away=schedule.normalize_text(row[3] if len(row)>3 else '')
+        when=schedule.normalize_text(row[4] if len(row)>4 else '')
+        if not home or not away: continue
+        mode=schedule.get_mode_from_round(rnd)
+        finished=bool(schedule.is_finished_result(score,mode))
+        items.append({'round':schedule.get_round_label(rnd),'mode':mode or '',
+            'home':home,'away':away,'score':score if finished else '',
+            'date':when,'link':'','status':'finished' if finished else 'open'})
+    return items
+
+
+def publish_web_competitions(data):
+    base=os.getenv('TFL_API_URL','').rstrip('/')
+    token=os.getenv('TFL_WEB_TOKEN','')
+    if not base.startswith('https://') or not token: return
+    try:
+        raw=json.dumps({'competitions':data},ensure_ascii=False).encode('utf-8')
+        req=urllib.request.Request(base+'/api/update/web/competitions',data=raw,
+           headers={'Content-Type':'application/json','Authorization':'Bearer '+token},method='POST')
+        with urllib.request.urlopen(req,timeout=12) as resp:
+            LOG.info('TFL Cup/Coop-Webdaten übertragen: %s',resp.status)
+    except Exception:
+        LOG.exception('TFL Cup/Coop-Webdaten konnten nicht übertragen werden')
+
 async def refresh(client, workbook):
+    web_competitions = {}
     tables_for_web = {}
     now_web = datetime.now(ZoneInfo('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')
     channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
@@ -217,6 +271,7 @@ async def refresh(client, workbook):
         try:
             rows = await asyncio.to_thread(get_all_values_cached, lambda g=group: workbook.worksheet(g), sheet_name=group, ttl_seconds=840)
             tables_for_web[f'coop-{group[-1].lower()}'] = {'title': f'Coop League – Gruppe {group[-1]}', 'items': calculate_coop(rows), 'updated_at': now_web}
+            web_competitions[f'coop-{group[-1].lower()}'] = {'items':build_coop_web_items(group, rows), 'updated_at':now_web}
             embed = render_coop(group, rows)
             msg = await find_coop_message(channel, client.user.id, group)
             if msg:
@@ -227,6 +282,13 @@ async def refresh(client, workbook):
             LOG.exception('Fehler bei Coop-Gruppe %s', group)
     if tables_for_web:
         await asyncio.to_thread(publish_web_standings, tables_for_web)
+    try:
+        cup_rows=await asyncio.to_thread(build_cup_web_items)
+        web_competitions['cup']={'items':cup_rows,'updated_at':now_web}
+    except Exception:
+        LOG.exception('TFL Cup-Webdaten konnten nicht gelesen werden')
+    if web_competitions:
+        await asyncio.to_thread(publish_web_competitions,web_competitions)
     await publish_tfl_news(client)
 
 
