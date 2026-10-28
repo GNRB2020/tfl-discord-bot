@@ -51,3 +51,5 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Desktop and mobile UI smoke tests
         run: python tests_browser/smoke.py
+      - name: Tournament center and simulation UI smoke tests
+        run: python tests_browser/tournament_center_smoke.py
