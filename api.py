@@ -487,9 +487,35 @@ async def update_web_standings(request):
     save_cache()
     return web.json_response({'status': 'ok', 'count': len(WEB_STANDINGS)})
 
+# TFL news snapshot: server-side copy, no Discord credentials exposed to Joomla.
+WEB_NEWS = []
+async def get_web_news(request):
+    try: limit=max(1,min(30,int(request.query.get('limit','8'))))
+    except ValueError: limit=8
+    return web.json_response({'items': WEB_NEWS[:limit]})
+
+async def update_web_news(request):
+    import hmac
+    expected=os.getenv('TFL_WEB_TOKEN','')
+    provided=request.headers.get('Authorization','').removeprefix('Bearer ').strip()
+    if not expected or not hmac.compare_digest(expected,provided):
+        return web.json_response({'error':'unauthorized'},status=401)
+    data=await request.json()
+    if not isinstance(data,dict) or not isinstance(data.get('items'),list):
+        return web.json_response({'error':'invalid payload'},status=400)
+    safe=[]
+    for item in data['items'][:60]:
+        if not isinstance(item,dict): continue
+        safe.append({k:str(item.get(k,'') or '')[:3000] for k in ('id','channel','title','content','date','url')})
+    WEB_NEWS[:] = safe
+    CACHE['web_news'] = safe
+    save_cache()
+    return web.json_response({'status':'ok','count':len(safe)})
+
 async def start():
     load_cache()
     WEB_STANDINGS.update(CACHE.get("web_standings", {}))
+    WEB_NEWS.extend(CACHE.get("web_news", []))
 
     # CORS MIDDLEWARE
     @web.middleware
@@ -509,6 +535,8 @@ async def start():
     # Public GET Routes
     app.router.add_get("/health", health)
     app.router.add_get("/api/web/standings", get_web_standings)
+    app.router.add_get("/api/web/news", get_web_news)
+    app.router.add_post("/api/update/web/news", update_web_news)
     app.router.add_post("/api/update/web/standings", update_web_standings)
     app.router.add_get("/api/upcoming", get_upcoming)
     app.router.add_get("/api/results", get_results)

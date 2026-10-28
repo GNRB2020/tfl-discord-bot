@@ -161,6 +161,42 @@ def publish_web_standings(tables):
     except Exception:
         LOG.exception('TFL Website-Snapshot konnte nicht übertragen werden')
 
+
+NEWS_CHANNEL_IDS = (1544630487002259476, 1515987400097009694, 1275077454712668320)
+async def publish_tfl_news(client):
+    """Read-only Discord history, limited to 3 channels, published alongside standings."""
+    import urllib.request
+    import json
+    import os
+    base=os.getenv('TFL_API_URL','').rstrip('/')
+    token=os.getenv('TFL_WEB_TOKEN','')
+    if not base.startswith('https://') or not token:
+        return
+    items=[]
+    for channel_id in NEWS_CHANNEL_IDS:
+        try:
+            channel=client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+            async for msg in channel.history(limit=12):
+                if not msg.content and not msg.embeds: continue
+                body=msg.content or (msg.embeds[0].description or msg.embeds[0].title or '')
+                title=(msg.embeds[0].title if msg.embeds and msg.embeds[0].title else '') or (body.splitlines()[0] if body else 'TFL News')
+                items.append({'id':str(msg.id),'channel':channel.name,'title':title[:150],
+                    'content':body[:2800],'date':msg.created_at.isoformat(),
+                    'url':msg.jump_url})
+        except Exception:
+            LOG.exception('News-Kanal %s konnte nicht gelesen werden',channel_id)
+    if not items: return
+    unique={v['id']:v for v in items}
+    sorted_items=sorted(unique.values(),key=lambda v:v['date'],reverse=True)[:36]
+    def send():
+        data=json.dumps({'items':sorted_items},ensure_ascii=False).encode('utf-8')
+        req=urllib.request.Request(base+'/api/update/web/news',data=data,
+           headers={'Content-Type':'application/json','Authorization':'Bearer '+token},method='POST')
+        with urllib.request.urlopen(req,timeout=10) as resp:
+            LOG.info('TFL News übertragen: %s (Einträge %s)',resp.status,len(sorted_items))
+    try: await asyncio.to_thread(send)
+    except Exception: LOG.exception('TFL News konnten nicht übertragen werden')
+
 async def refresh(client, workbook):
     tables_for_web = {}
     now_web = datetime.now(ZoneInfo('Europe/Berlin')).strftime('%d.%m.%Y %H:%M')
@@ -191,6 +227,7 @@ async def refresh(client, workbook):
             LOG.exception('Fehler bei Coop-Gruppe %s', group)
     if tables_for_web:
         await asyncio.to_thread(publish_web_standings, tables_for_web)
+    await publish_tfl_news(client)
 
 
 async def division_table_loop(client, workbook):
