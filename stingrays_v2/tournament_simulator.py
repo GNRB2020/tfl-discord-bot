@@ -1,9 +1,7 @@
-"""Deterministic, database-free tournament dry-run for administrators.
+"""Deterministic in-memory tournament dry-run for administrators.
 
-The simulator is intentionally an *independent invariant checker* rather than a
-shortcut that writes synthetic results into the real competition tables.
-A double-elimination preview is simulated with two losses and a reset final,
-not advertised as an exact fixture-by-fixture preview of production scheduling.
+K.O. rounds use the very same planning function as the live progression.
+No production data is read or changed.
 """
 from __future__ import annotations
 from collections import Counter
@@ -37,64 +35,52 @@ def _match(rng, a, b, best_of, phase, round_no):
 
 
 def _knockout(rng, players, best_of, kind='single_ko', origin=None):
-    """Model win/loss invariants, byes and two-loss elimination independently."""
+    """Play exactly the same round-by-round plan as the production engine."""
+    from .ko_progression import plan_next_ko_round
     if kind not in ('single_ko', 'double_ko'):
         raise ValueError('Unbekannte K.-o.-Art')
     if len(players) < 2 or len(set(players)) != len(players):
         raise ValueError('K.-o.-Startliste muss mindestens zwei unterschiedliche Spieler enthalten')
-    losses = Counter({p: 0 for p in players})
-    active = list(players)
+    roster = list(players)
+    first = bracket_pairs(roster)
+    initial_byes = [p for a,b in first for p in (a,b) if p is not None and (a is None or b is None)]
+    pairs = [(a,b) for a,b in first if a is not None and b is not None]
     games = []
-    byes = 0
-    repeated_group_openers = 0
-    round_no = 0
-    while len(active) > 1:
-        round_no += 1
-        if round_no > 30:
+    byes = len(initial_byes)
+    rematches = 0
+    reset_final = False
+    round_no = 1
+    while True:
+        if round_no > 32:
             raise RuntimeError('K.-o.-Simulation konnte nicht beendet werden')
-        if kind == 'single_ko':
-            pairs = bracket_pairs(active)
-        else:
-            # Pair equal-loss brackets wherever possible. This is a dry-run
-            # model of double elimination, NOT the persisted fixture generator.
-            by_loss = [sorted([p for p in active if losses[p] == n]) for n in (0, 1)]
-            pairs = []
-            carry = []
-            for bracket in by_loss:
-                rng.shuffle(bracket)
-                if len(bracket) % 2:
-                    carry.append(bracket.pop())
-                pairs.extend((bracket[i], bracket[i + 1]) for i in range(0, len(bracket), 2))
-            pairs.extend((p, None) for p in carry)
-            if not any(x is not None and y is not None for x, y in pairs):
-                # Only two active players, one from each loss bracket.
-                pairs = [(active[0], active[1])]
-        survivors = []
-        for a, b in pairs:
-            if a is None or b is None:
-                byes += 1
-                survivors.append(a if a is not None else b)
-                continue
+        for pos,(a,b) in enumerate(pairs,1):
             if origin and round_no == 1 and origin.get(a) == origin.get(b):
-                repeated_group_openers += 1
-            game = _match(rng, a, b, best_of, kind, round_no)
-            games.append(game)
-            loser = b if game['winner'] == a else a
-            losses[loser] += 1
-            survivors.append(game['winner'])
-            if kind == 'double_ko' and losses[loser] < 2:
-                survivors.append(loser)
-        active = list(dict.fromkeys(survivors))
-    champion = active[0]
-    if kind == 'single_ko' and len(games) != len(players) - 1:
+                rematches += 1
+            match = _match(rng, a, b, best_of, kind, round_no)
+            match['round_number'] = round_no
+            match['bracket_position'] = pos
+            match['sets1'] = None
+            match['sets2'] = None
+            games.append(match)
+        plan = plan_next_ko_round(kind,roster,games,initial_byes)
+        if plan['completed']:
+            champion=plan['champion']
+            break
+        byes += len(plan['byes'])
+        reset_final = reset_final or plan['reset_final']
+        pairs = plan['pairs']
+        round_no = plan['round']
+    losses=Counter({p:0 for p in roster})
+    for m in games:
+        loser=m['player2_id'] if m['winner']==m['player1_id'] else m['player1_id']
+        losses[loser]+=1
+    if kind == 'single_ko' and len(games) != len(roster)-1:
         raise RuntimeError('Single-K.O. hat eine unvollständige Begegnungszahl')
-    if kind == 'double_ko' and any(losses[p] < 2 for p in players if p != champion):
-        raise RuntimeError('Doppel-K.O. hat Spieler ohne zweite Niederlage ausgeschieden')
-    return {'format': kind, 'participants': len(players), 'matches': len(games),
-            'rounds': round_no, 'byes': byes, 'champion': champion,
-            'same_group_first_round': repeated_group_openers,
-            'reset_final': kind == 'double_ko' and losses[champion] == 1,
-            'games': games}
+    if kind == 'double_ko' and any(losses[p] != 2 for p in roster if p != champion):
+        raise RuntimeError('Doppel-K.O.: Spieler mit weniger als zwei Niederlagen ausgeschieden')
+    return {'format':kind,'participants':len(roster),'matches':len(games),
+            'rounds':round_no,'byes':byes,'champion':champion,
+            'same_group_first_round':rematches,'reset_final':reset_final,'games':games}
 
 
 def simulate(spec):

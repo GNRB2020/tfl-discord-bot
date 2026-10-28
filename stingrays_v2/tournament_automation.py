@@ -126,9 +126,9 @@ async def setup(req):
 
 
 def winner(m):
-    s1,s2=(m['sets1'],m['sets2']) if (m['sets1'] or m['sets2']) else (m['legs1'],m['legs2'])
-    if s1 is None or s2 is None or s1==s2:return None
-    return m['player1_id'] if s1>s2 else m['player2_id']
+    # A single interpretation of set- and leg-based results everywhere.
+    from .ko_progression import match_winner
+    return match_winner(dict(m))
 
 async def _make_stage(db,cid,stage,ids,fmt,match_rules,ngroups=1,double_round=False,origin_groups=None):
     if fmt in ('single_ko','double_ko'):
@@ -326,39 +326,36 @@ async def progress(req,cid):
                     await _make_stage(db,cid,'consolation',rest,cfg.get('consolation_format','single_ko'),cfg.get('ko_match',cfg['training_match']),cfg.get('consolation_group_count',1),origin_groups=first_group)
             elif cfg['format'] in ('league','groups'):
                 await db.execute(f"UPDATE {SCHEMA}.competitions SET status='finished' WHERE id=$1",cid)
-        # advance every KO phase, including preliminary single/double elimination
+        # All knockouts use the same validated planner as the simulator and
+        # the manual /phases/{pid}/advance endpoint. No re-pairing of already
+        # eliminated players and no premature Double-K.O. champion.
+        from .ko_progression import plan_next_ko_round, BracketStateError
         phases=await db.fetch(f'SELECT id,phase_order,kind,rules,status FROM {SCHEMA}.phases WHERE competition_id=$1 ORDER BY phase_order',cid)
         for ph in phases:
             pr=as_json(ph['rules']);fmt=pr.get('format')
             if fmt not in ('single_ko','double_ko') or ph['status']=='closed':continue
+            # Nothing must change while the draw is still awaiting approval.
+            if pr.get('bracket_released') is False:continue
             mx=await db.fetchval(f'SELECT max(round_number) FROM {SCHEMA}.matches WHERE phase_id=$1',ph['id'])
             if mx is None:continue
             rows=await db.fetch(f'SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1 AND round_number=$2 ORDER BY bracket_position',ph['id'],mx)
             if not rows or any(m['status']!='finished' for m in rows):continue
-            if any(m['legs1']==m['legs2'] and not (m['sets1'] or m['sets2']) for m in rows):
-                import logging
-                logging.error('K.O.-Runde mit Unentschieden kann nicht fortgeschrieben werden: phase=%s round=%s',ph['id'],mx)
-                continue
             allrows=await db.fetch(f'SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1 ORDER BY round_number,bracket_position',ph['id'])
-            participants=[UUID(p) for p in pr.get('participants',[])]
-            if fmt=='single_ko':
-                remaining=[winner(m) for m in rows]
-                if mx==1:remaining+= [UUID(x) for x in pr.get('bye_players',[])]
-            else:
-                loss={p:0 for p in participants}
-                for m in allrows:
-                    w=winner(m)
-                    if w is None:return
-                    l=m['player2_id'] if w==m['player1_id'] else m['player1_id'];loss[l]=loss.get(l,0)+1
-                remaining=[p for p in participants if loss.get(p,0)<2]
-            remaining=[p for p in remaining if p is not None]
-            if len(remaining)<=1:
-                await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id']);continue
+            try:
+                planned=plan_next_ko_round(fmt,[UUID(str(x)) for x in pr.get('participants',[])],
+                    [dict(m) for m in allrows], [UUID(str(x)) for x in pr.get('bye_players',[])])
+            except (BracketStateError,ValueError,TypeError) as exc:
+                raise web.HTTPConflict(text='K.O.-Fortschreibung angehalten: '+str(exc)) from exc
+            if planned['completed']:
+                await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",ph['id'])
+                continue
+            pairs=planned['pairs']
             rules={**pr.get('match_rules',cfg['training_match'])}
             if pr.get('stage')=='final':
-                key='final' if len(remaining)==2 else 'semifinal' if len(remaining)<=4 else 'quarterfinal' if len(remaining)<=8 else 'round16' if len(remaining)<=16 else 'round32'
+                remaining=len(pairs)*2+len(planned['byes'])
+                key='final' if remaining<=2 else 'semifinal' if remaining<=4 else 'quarterfinal' if remaining<=8 else 'round16' if remaining<=16 else 'round32'
                 rules=round_match_rules(rules,cfg.get('round_lengths',{}),key)
-            if pr.get('stage')=='final' and cfg.get('third_place') and len(rows)==2 and len(remaining)==2 and fmt=='single_ko':
+            if pr.get('stage')=='final' and cfg.get('third_place') and len(rows)==2 and len(pairs)==1 and fmt=='single_ko':
                 losers=[m['player2_id'] if winner(m)==m['player1_id'] else m['player1_id'] for m in rows]
                 existing=await db.fetchval(f"SELECT count(*) FROM {SCHEMA}.phases WHERE competition_id=$1 AND rules->>'stage'='third_place'",cid)
                 if not existing and len(set(losers))==2:
@@ -367,13 +364,9 @@ async def progress(req,cid):
                     if tp['mode']=='legs' and tp['max_legs']%2==0:tp['max_legs']+=1
                     pid=await db.fetchval(f"INSERT INTO {SCHEMA}.phases(competition_id,name,kind,phase_order,status,rules) VALUES($1,'Spiel um Platz 3','knockout',4,'open',$2::jsonb) RETURNING id",cid,json.dumps({'stage':'third_place','format':'single_ko','participants':[str(x) for x in losers],'match_rules':tp,'bracket_released':False}))
                     await db.execute(f"INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules) VALUES($1,$2,1,1,$3,$4,$5::jsonb)",cid,pid,losers[0],losers[1],json.dumps(tp))
-            if pr.get('origin_groups'):
-                remaining=spread_groups_in_bracket(remaining,pr['origin_groups'])
-            next_pairs=[(x,y) for x,y in bracket_pairs(remaining) if x and y]
-            if not next_pairs:continue
-            for i,(p1,p2) in enumerate(next_pairs):
+            for i,(p1,p2) in enumerate(pairs):
                 await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,player1_id,player2_id,rules)
-                VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',cid,ph['id'],mx+1,i+1,p1,p2,json.dumps(rules))
+                VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',cid,ph['id'],planned['round'],i+1,p1,p2,json.dumps(rules))
         # Close once all phases end; group follow-on phases finish when all games finish.
         phase_rows=await db.fetch(f'SELECT id,kind,status FROM {SCHEMA}.phases WHERE competition_id=$1',cid)
         for ph in phase_rows:

@@ -1367,32 +1367,64 @@ async def release_bracket(req):
     return response({'ok':True,'released':True})
 
 async def advance_knockout(req):
+    """Manual advance uses the same two-loss/bye-aware planner as automatic events."""
     a=await actor(req);d=await body(req);pid=uid(req.match_info['pid'])
+    from .ko_progression import plan_next_ko_round, BracketStateError
     async with pool(req).acquire() as db:
       async with db.transaction():
-        p=await db.fetchrow(f'''SELECT p.*,c.kind AS competition_kind FROM {SCHEMA}.phases p JOIN {SCHEMA}.competitions c
-            ON c.id=p.competition_id WHERE p.id=$1 FOR UPDATE OF p''',pid)
+        p=await db.fetchrow(f'''SELECT p.*,c.kind AS competition_kind,c.rules AS competition_rules FROM {SCHEMA}.phases p
+            JOIN {SCHEMA}.competitions c ON c.id=p.competition_id WHERE p.id=$1 FOR UPDATE OF c,p''',pid)
         if not p or p['kind']!='knockout':raise web.HTTPBadRequest(text='Keine K.O.-Phase')
         await require_manager(db,a,p['competition_id'])
-        if as_json(p['rules']).get('bracket_released') is False:
+        if p['status']=='closed':raise web.HTTPConflict(text='Diese K.-o.-Runde ist bereits abgeschlossen')
+        current=as_json(p['rules'])
+        if current.get('bracket_released') is False:
             raise web.HTTPConflict(text='Die K.O.-Auslosung ist noch nicht freigegeben')
-        mx=await db.fetchval(f'SELECT max(round_number) FROM {SCHEMA}.matches WHERE phase_id=$1',pid)
-        if mx is None:raise web.HTTPConflict(text='Setzliste fehlt')
-        rows=await db.fetch(f'SELECT * FROM {SCHEMA}.matches WHERE phase_id=$1 AND round_number=$2 ORDER BY bracket_position',pid,mx)
-        if any(m['status']!='finished' for m in rows):raise web.HTTPConflict(text='Runde noch nicht abgeschlossen')
-        if len(rows)<2:raise web.HTTPConflict(text='Finale erreicht')
-        winners=[]
-        for m in rows:
-            aa,bb=(m['sets1'],m['sets2']) if (m['sets1'] or m['sets2']) else (m['legs1'],m['legs2'])
-            if aa==bb:raise web.HTTPConflict(text='K.O.-Unentschieden nicht zulässig')
-            winners.append(m['player1_id'] if aa>bb else m['player2_id'])
-        if len(winners)%2:raise web.HTTPConflict(text='Ungerade Siegerzahl: Freiloszuordnung erforderlich')
-        for i in range(0,len(winners),2):
-            rules=mode_rules(p['competition_kind'],'knockout',final=len(winners)==2,overrides=d.get('rules') or {})
+        allrows=await db.fetch(f'''SELECT * FROM {SCHEMA}.matches
+            WHERE phase_id=$1 ORDER BY round_number,bracket_position FOR UPDATE''',pid)
+        if not allrows:raise web.HTTPConflict(text='Setzliste fehlt')
+        mx=max(int(m['round_number'] or 1) for m in allrows)
+        last=[m for m in allrows if int(m['round_number'] or 1)==mx]
+        if any(m['status']!='finished' for m in last):raise web.HTTPConflict(text='Runde noch nicht abgeschlossen')
+        try:
+            planned=plan_next_ko_round(current.get('format','single_ko'),
+               [uid(x) for x in current.get('participants',[])],[dict(m) for m in allrows],
+               [uid(x) for x in current.get('bye_players',[])])
+        except (BracketStateError,ValueError,TypeError) as exc:
+            raise web.HTTPConflict(text='K.O.-Fortschreibung angehalten: '+str(exc)) from exc
+        if planned['completed']:
+            await db.execute(f"UPDATE {SCHEMA}.phases SET status='closed',closed_at=now() WHERE id=$1",pid)
+            return response({'completed':True,'champion_id':str(planned['champion']),'created':0})
+        # Keep a phase's explicit rules, including special cup requirements.
+        base=as_json(last[0]['rules'])
+        override=d.get('rules') or {}
+        if not isinstance(override,dict):
+            raise web.HTTPBadRequest(text='K.-o.-Regeln müssen ein Objekt sein')
+        if p['competition_kind']=='cup':
+            from .competition_wizard import CUP_FIXED
+            rules=dict(CUP_FIXED)
+        else:
+            try:
+                rules=mode_rules(p['competition_kind'],'knockout',final=len(planned['pairs'])==1,
+                    overrides={**base,**override})
+            except (TypeError,ValueError) as exc:
+                raise web.HTTPBadRequest(text='Ungültige K.-o.-Regeln: '+str(exc)) from exc
+            if rules['mode']=='legs' and int(rules['max_legs'])%2==0:
+                raise web.HTTPBadRequest(text='K.-o.-Matchlängen müssen ungerade sein')
+            rules['allow_draw']=False
+            cfg=as_json(p['competition_rules'])
+            from .tournament_automation import round_match_rules
+            remaining=len(planned['pairs'])*2+len(planned['byes'])
+            key='final' if remaining<=2 else 'semifinal' if remaining<=4 else 'quarterfinal' if remaining<=8 else 'round16' if remaining<=16 else 'round32'
+            if cfg.get('round_lengths'):
+                rules=round_match_rules(rules,cfg.get('round_lengths',{}),key)
+        for i,(p1,p2) in enumerate(planned['pairs']):
             await db.execute(f'''INSERT INTO {SCHEMA}.matches(competition_id,phase_id,round_number,bracket_position,
                   player1_id,player2_id,rules) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)''',
-                  p['competition_id'],pid,mx+1,i//2+1,winners[i],winners[i+1],json.dumps(rules))
-    return response({'created':len(winners)//2,'round':mx+1})
+                  p['competition_id'],pid,planned['round'],i+1,p1,p2,json.dumps(rules))
+    return response({'created':len(planned['pairs']),'round':planned['round'],
+        'format':current.get('format','single_ko'),
+        'byes':len(planned['byes']),'reset_final':planned['reset_final']})
 
 async def end_ladder(req):
     # Freeze ladder and build ELO-neutral final event.
