@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from contextlib import suppress
 import json
 import os
 import secrets
@@ -18,7 +19,6 @@ import sys
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 import aiohttp
 import asyncpg
@@ -30,7 +30,11 @@ from stingrays_v2 import api
 from stingrays_v2.security import hash_password
 
 BOARD_COUNT = 22
-THROWS_PER_BOARD = 35
+# GitHub Actions inputs can select quick (15) vs full (35) and DB pool 3 vs 10.
+# Never silently accept arbitrary CI values or unintentionally increase load.
+THROWS_PER_BOARD = int(os.environ.get('STINGRAYS_HTTP_THROWS_PER_BOARD', '15'))
+POOL_SIZE = int(os.environ.get('STINGRAYS_HTTP_POOL_MAX', '3'))
+TIMEOUT_SECONDS = 720
 EXPECTED_SENTINEL = '__INT_TEST_22BOARDS_20261028'
 PREFIX = '__CI_22BOARD_' + secrets.token_hex(6)
 RULES = {'mode':'legs','start_score':501,'max_legs':5,'allow_draw':False,'double_out':True}
@@ -38,19 +42,25 @@ RULES = {'mode':'legs','start_score':501,'max_legs':5,'allow_draw':False,'double
 
 def percentile(values, frac):
     values = sorted(values)
+    if not values:
+        return None
     pos = (len(values)-1)*frac
     ix = int(pos)
     return round(values[ix]+(values[min(ix+1,len(values)-1)]-values[ix])*(pos-ix),2)
 
 
 async def main():
+    if THROWS_PER_BOARD not in (15, 35):
+        raise SystemExit('Nur 15 oder 35 Aufnahmen pro Board erlaubt.')
+    if POOL_SIZE not in (3, 10):
+        raise SystemExit('Nur Poolgrößen 3 oder 10 erlaubt.')
     url = os.environ.get('STINGRAYS_TEST_DATABASE_URL','').strip()
     if not url:
         raise SystemExit('STINGRAYS_TEST_DATABASE_URL fehlt. Kein Test gestartet.')
     host = (urlsplit(url).hostname or '').lower()
     if not host.endswith('.neon.tech'):
         raise SystemExit('Nur eine Neon-Datenbank ist für diesen Test erlaubt.')
-    pool = await asyncpg.create_pool(dsn=url, min_size=0, max_size=3, command_timeout=30)
+    pool = await asyncpg.create_pool(dsn=url, min_size=0, max_size=POOL_SIZE, command_timeout=30)
     app = None
     server = None
     matches = []
@@ -61,6 +71,7 @@ async def main():
     timings = []
     status_counts = Counter()
     errors = []
+    per_board_counts = [0] * BOARD_COUNT
     try:
         # Guard is evaluated BEFORE writing anything. The marker exists solely
         # on the already-created, isolated test branch, not on production.
@@ -154,8 +165,39 @@ async def main():
                     resp,_=await post(session,f'/dart/v2/api/matches/{matches[i]}/throw',
                            {'points':10,'darts':3,'version':version},headers=h)
                     version=resp.get('version')
+                    if version is not None:
+                        per_board_counts[i] += 1
 
-        await asyncio.wait_for(asyncio.gather(*(board_job_no_race(i) for i in range(BOARD_COUNT))),timeout=240)
+        print(json.dumps({'phase':'http_load_start','boards':BOARD_COUNT,
+              'visits_per_board':THROWS_PER_BOARD,'pool_size':POOL_SIZE,
+              'timeout_seconds':TIMEOUT_SECONDS},ensure_ascii=False),flush=True)
+        async def watch_progress():
+            while True:
+                await asyncio.sleep(30)
+                print(json.dumps({'phase':'http_load_progress',
+                    'elapsed_seconds':round(time.perf_counter()-run_start,1),
+                    'saved_via_http':sum(per_board_counts),
+                    'target':BOARD_COUNT*THROWS_PER_BOARD,
+                    'minimum_board_visits':min(per_board_counts),
+                    'maximum_board_visits':max(per_board_counts),
+                    'unexpected_statuses':len(errors)},ensure_ascii=False),flush=True)
+
+        monitor = asyncio.create_task(watch_progress())
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(board_job_no_race(i) for i in range(BOARD_COUNT))),
+                timeout=TIMEOUT_SECONDS)
+        except TimeoutError:
+            print(json.dumps({'phase':'http_load_timeout',
+                'completed_visits':sum(per_board_counts),
+                'target_visits':BOARD_COUNT*THROWS_PER_BOARD,
+                'per_board':per_board_counts,
+                'http_status_counts':dict(status_counts)},ensure_ascii=False),flush=True)
+            raise
+        finally:
+            monitor.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor
 
         h={'Cookie':f'{api.COOKIE}={board_job_no_race.token}'}
         async with aiohttp.ClientSession(trust_env=False) as session:
@@ -197,6 +239,9 @@ async def main():
                 'testbranch_guard':EXPECTED_SENTINEL,
                 'run_prefix':PREFIX,
                 'boards':BOARD_COUNT,
+                'visits_per_board':THROWS_PER_BOARD,
+                'test_pool_max':POOL_SIZE,
+                'per_board_visits':per_board_counts,
                 'throw_requests':BOARD_COUNT*THROWS_PER_BOARD+2,
                 'requests_total':sum(status_counts.values()),
                 'status_counts':dict(status_counts),
@@ -207,7 +252,7 @@ async def main():
                 'assertions':assertions,
                 'failures':errors[:5],
                 'note':'lokaler GitHub-Testjob gegen echten Neon-Testbranch; kein öffentlich erreichbarer Dienst'}
-        print(json.dumps(report,indent=2,ensure_ascii=False))
+        print(json.dumps(report,indent=2,ensure_ascii=False),flush=True)
         if not all(assertions.values()):raise SystemExit(1)
     finally:
         if server is not None:await server.close()
