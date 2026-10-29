@@ -988,7 +988,12 @@ def pack_game(g):
 
 async def start_match(req):
     a=await actor(req);d=await body(req);mid=uid(req.match_info['mid']);board=d.get('board_id')
-    if board is not None:board=int(board)
+    if board is not None:
+        try:
+            if isinstance(board, (bool,float)):raise ValueError('invalid board number type')
+            board=int(board)
+        except (TypeError,ValueError,OverflowError):
+            raise web.HTTPBadRequest(text='Boardnummer muss eine ganze Zahl zwischen 1 und 22 sein')
     if board is not None and not 1<=board<=22:raise web.HTTPBadRequest(text='Board 1–22')
     device=str(d.get('device_id',''))[:100] or token_digest(req.cookies.get(COOKIE,''))[:18]
     async with pool(req).acquire() as db:
@@ -1026,7 +1031,12 @@ async def start_match(req):
           claimed_at=now(),lease_until=EXCLUDED.lease_until,released_at=NULL''',mid,a['id'],device,token_digest(req.cookies.get(COOKIE,'')))
         state=pack_game(unpack_game(m))
         if not as_json(m['state']):
-            starter=int(d.get('starter',0))
+            try:
+                raw_starter=d.get('starter',0)
+                if isinstance(raw_starter,(bool,float)):raise ValueError('invalid player index type')
+                starter=int(raw_starter)
+            except (TypeError,ValueError,OverflowError):
+                raise web.HTTPBadRequest(text='Startspieler 0 oder 1')
             if starter not in (0,1):raise web.HTTPBadRequest(text='Startspieler 0 oder 1')
             state['current']=starter
             state['first_throw']=starter
@@ -1037,6 +1047,12 @@ async def start_match(req):
 
 async def throw(req):
     a=await actor(req);d=await body(req);mid=uid(req.match_info['mid'])
+    try:
+        raw_version=d.get('version',-1)
+        if isinstance(raw_version,(bool,float)):raise ValueError('invalid version type')
+        expected_version=int(raw_version)
+    except (TypeError,ValueError,OverflowError):
+        raise web.HTTPBadRequest(text='Ungültige Spielstandversion')
     async with pool(req).acquire() as db:
       async with db.transaction():
         m=await db.fetchrow(f'''SELECT m.*,p1.display_name AS player1,p2.display_name AS player2,c.kind,c.ends_at
@@ -1049,7 +1065,7 @@ async def throw(req):
         c=await db.fetchrow(f'SELECT account_id,token_hash,lease_until FROM {SCHEMA}.match_claims WHERE match_id=$1',mid)
         if not c or c['account_id']!=a['id'] or c['token_hash']!=token_digest(req.cookies.get(COOKIE,'')) or c['lease_until']<=datetime.now(timezone.utc):
             raise web.HTTPConflict(text='Match nicht auf diesem Gerät beansprucht; bitte neu starten')
-        if m['state_version']!=int(d.get('version',-1)):raise web.HTTPConflict(text='Score wurde inzwischen geändert – bitte neu laden')
+        if m['state_version']!=expected_version:raise web.HTTPConflict(text='Score wurde inzwischen geändert – bitte neu laden')
         g=unpack_game(m);previous=pack_game(g)
         before=g.remaining[g.current];player=g.current;leg_number=g.leg_number
         try:
