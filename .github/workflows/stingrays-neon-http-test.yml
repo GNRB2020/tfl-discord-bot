@@ -2,6 +2,23 @@ name: Stingray 22 Boards – Neon-Testbranch HTTP-Lasttest
 
 on:
   workflow_dispatch:
+    inputs:
+      visits_per_board:
+        description: 'Aufnahmen je Board: 15 = Kurztest, 35 = Langtest'
+        type: choice
+        required: true
+        default: '15'
+        options:
+          - '15'
+          - '35'
+      connection_pool:
+        description: 'Test-DB-Pool: 3 = wie Produktion, 10 = Vergleich'
+        type: choice
+        required: true
+        default: '3'
+        options:
+          - '3'
+          - '10'
 
 permissions:
   contents: read
@@ -12,6 +29,8 @@ jobs:
     timeout-minutes: 15
     env:
       STINGRAYS_TEST_DATABASE_URL: ${{ secrets.STINGRAYS_TEST_DATABASE_URL }}
+      STINGRAYS_HTTP_THROWS_PER_BOARD: ${{ inputs.visits_per_board }}
+      STINGRAYS_HTTP_POOL_MAX: ${{ inputs.connection_pool }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
