@@ -1,0 +1,29 @@
+name: Stingray 22 Boards – Neon-Testbranch HTTP-Lasttest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-http-load:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      STINGRAYS_TEST_DATABASE_URL: ${{ secrets.STINGRAYS_TEST_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install API and database test dependencies
+        run: python -m pip install 'aiohttp>=3.9,<4' 'asyncpg>=0.30,<1'
+      - name: Verify dedicated test connection is configured
+        run: |
+          if [ -z "$STINGRAYS_TEST_DATABASE_URL" ]; then
+            echo 'GitHub Secret STINGRAYS_TEST_DATABASE_URL is missing. No test was started.'
+            exit 1
+          fi
+      - name: Real HTTP load test against isolated Neon test branch
+        run: python tests_load/stingray_neon_22board_http.py
