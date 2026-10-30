@@ -70,9 +70,19 @@ def calculate_coop(rows):
         name = name.strip()
         if name and name.casefold() not in ('team', 'teamname', 'heim', 'gast', 'heimteam', 'gastteam', 'coop-gruppe a', 'coop-gruppe b'):
             teams.setdefault(name.casefold(), dict(name=name, sp=0, s=0, u=0, n=0, won=0, lost=0, pts=0))
+    # Coop roster: L = Spieler 1, M = Spieler 2, N = Teamname.
+    # These fields are exported with the website standings snapshot;
+    # Discord table text itself remains unchanged.
     for row in rows[1:]:
         if len(row) > 13:
-            add(row[13])
+            team_name = (row[13] or '').strip()
+            add(team_name)
+            rec = teams.get(team_name.casefold())
+            if rec is not None:
+                for field, idx in (('player1', 11), ('player2', 12)):
+                    member = (row[idx] or '').strip() if len(row) > idx else ''
+                    if member and member.casefold() not in ('racer 1', 'racer 2', 'spieler 1', 'spieler 2'):
+                        rec[field] = member
     for row in rows[1:]:
         home = row[3].strip() if len(row) > 3 else ''
         away = row[5].strip() if len(row) > 5 else ''
